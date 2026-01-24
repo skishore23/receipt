@@ -104,22 +104,6 @@ const verify = (chain) => chain.every((r, i) => i === 0 || r.prev === chain[i-1]
 
 Everything else is wiring.
 
----
-
-## Comparison
-
-| Approach           | How it differs                                                  |
-| ------------------ | --------------------------------------------------------------- |
-| **CRUD**           | mutable state; history is optional/partial                      |
-| **Redux**          | time travel is dev-only; actions aren’t durable                 |
-| **Event Sourcing** | often heavy infra + projection complexity                       |
-| **Blockchain**     | consensus overhead + latency                                    |
-| **Receipt**        | local-first, append-only, hash-linked, derived state via `fold` |
-
-Receipt borrows the *useful* part of blockchains (hash-linked history) without the consensus cost, and the *useful* part of event sourcing (events as truth) without requiring a whole platform.
-
----
-
 ## Run
 
 ```bash
