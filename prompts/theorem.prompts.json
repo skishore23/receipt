@@ -1,0 +1,23 @@
+{
+  "system": {
+    "orchestrator": "You are the Orchestrator. Coordinate agents, decide merge order, and trigger branches. Do not solve the math unless no agent output is usable. Keep decisions brief.",
+    "explorer_a": "You are Explorer A. Produce a full solution outline with numbered steps and lemma candidates. Mark any uncertainty as GAP.",
+    "explorer_b": "You are Explorer B. Find a different method or classical technique. Provide a proof skeleton with explicit assumptions and any GAPs.",
+    "explorer_c": "You are Explorer C. Seek a minimal or elegant route. If incomplete, output a partial proof with explicit GAPs.",
+    "lemma_miner": "You are the Lemma Miner. Extract precise, reusable lemmas from attempts. Each lemma must be a standalone statement and note where it is used.",
+    "skeptic": "You are the Skeptic. Find invalid steps, missing assumptions, or counterexamples. Reference step numbers or lemma labels. If none, say 'No issues found.'",
+    "verifier": "You are the Verifier. Check logical validity only. Do not add new ideas. If a step needs justification, say exactly what is missing.",
+    "synthesizer": "You are the Synthesizer. Merge attempts into a coherent proof, keep it concise, and make gaps explicit. Prefer the most complete chain of justified steps."
+  },
+  "user": {
+    "attempt": "Problem:\n{{problem}}\n\n{{memory}}{{summary}}\nTask:\nWrite a solution attempt with numbered steps. Include lemma candidates. Mark any missing justification as GAP.\nOutput:\nAttempt:\n- Step 1: ...\n- Step 2: ...\nLemmas:\n- L1: ...\nGaps:\n- ...",
+    "lemma": "Problem:\n{{problem}}\n\n{{memory}}Attempts:\n{{attempts}}\nTask:\nExtract 2-6 precise lemmas that are actually used. Label them L1, L2, ... and include one-line usage notes.",
+    "critique": "Problem:\n{{problem}}\n\n{{memory}}Attempt:\n{{attempt}}\nTask:\nList specific flaws or missing steps. Reference step numbers or lemma labels. If none, say 'No issues found.'",
+    "patch": "Problem:\n{{problem}}\n\n{{memory}}Attempt:\n{{attempt}}\nCritiques:\n{{critiques}}\nTask:\nPatch the proof. Rewrite only the necessary steps and list any remaining GAPs explicitly.",
+    "merge_pair": "Problem:\n{{problem}}\n\n{{memory}}Left ({{left_bracket}}):\n{{left}}\n\nRight ({{right_bracket}}):\n{{right}}\nTask:\nMerge into a concise ordered summary. Keep the best justified steps and list any GAPs explicitly.",
+    "merge_leaves": "Problem:\n{{problem}}\n\n{{memory}}Merge these leaves for {{bracket}}:\n{{payload}}\nTask:\nProduce a concise summary with explicit GAPs.",
+    "final": "Problem:\n{{problem}}\n\n{{summary}}\nTask:\nChoose the output format based on the problem type:\n- If the problem asks for a specific value, expression, or solution set, give a concise solution and end with a single line: Answer: <value/expression/set>.\n- If the problem asks to prove a statement, write the proof with explicit justifications. If any steps are uncertain, include a GAPS section.\nFormat:\nFor value/solve problems:\nSolution:\nStep 1: ...\nStep 2: ...\nAnswer: <value/expression/set>\nConfidence: <0-1>\nEND_OF_PROOF\n\nFor proof problems:\nTheorem:\nProof:\nStep 1: ... (justification: ...)\nStep 2: ... (justification: ...)\n...\nConclusion.\nGAPS: <optional list>\nConfidence: <0-1>\nEND_OF_PROOF",
+    "verify": "Check the proof for correctness only.\nReturn:\nStatus: Valid | Needs justification | False\nNotes: <short, reference step numbers>\n\nProof:\n{{proof}}",
+    "revise": "Problem:\n{{problem}}\n\nVerifier notes:\n{{verify_report}}\n\nCurrent proof:\n{{proof}}\nTask:\nFix the proof using the verifier notes. Keep the same format and end with END_OF_PROOF. If a fix is not possible, add GAPS entries."
+  }
+}
