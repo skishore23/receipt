@@ -158,10 +158,8 @@ Open: [http://localhost:8787](http://localhost:8787)
 ```text
 src/
 ├── core/                 # The kernel (axioms)
-│   ├── types.ts          # Receipt, Chain, Reducer, View, Decide
-│   ├── chain.ts          # append, fold, take, verify, computeHash
-│   ├── checkpoint.ts     # optional fold checkpoints
-│   ├── run.ts            # run lifecycle + resume helpers
+│   ├── types.ts          # Receipt, Chain, Branch, Reducer, Decide
+│   ├── chain.ts          # receipt, fold, verify, computeHash
 │   ├── store.ts          # Store interface
 │   └── runtime.ts        # Composition: store + decide + reduce → Runtime
 │
@@ -176,8 +174,7 @@ src/
 │       ├── workflow.ts   # queued emitters + lifecycle runner
 │       ├── receipt-runtime.ts # defineReceiptAgent + runReceiptAgent
 │       ├── planner.ts    # typed needs/provides planner
-│       ├── plan-validate.ts # cycle/missing provider validation
-│       └── policies.ts   # memory/branch/merge policy types
+│       └── plan-validate.ts # cycle/missing provider validation
 │
 ├── agents/               # Concrete agent workflows
 │   ├── theorem.ts        # theorem guild workflow

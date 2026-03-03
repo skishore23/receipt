@@ -10,21 +10,8 @@
 // 6. Supports branching (forking chains at any point)
 // ============================================================================
 
-import type { Chain, Decide, Reducer, View, Branch } from "./types.js";
-import type { Store, BranchStore } from "./store.js";
+import type { Chain, Decide, Reducer, Branch, Store, BranchStore } from "./types.js";
 import { receipt, fold, verify } from "./chain.js";
-import { foldWithCheckpoint, memoryCheckpointStore, type CheckpointStore } from "./checkpoint.js";
-
-export type RuntimeStateOptions = {
-  readonly fromCheckpoint?: boolean;
-};
-
-export type RuntimeCreateOptions<State> = {
-  readonly checkpoints?: {
-    readonly interval?: number;
-    readonly store?: CheckpointStore<State>;
-  };
-};
 
 // ============================================================================
 // Runtime Type
@@ -35,19 +22,16 @@ export type Runtime<Cmd, Event, State> = {
   readonly execute: (stream: string, cmd: Cmd) => Promise<Event[]>;
   
   // Get current state (full replay)
-  readonly state: (stream: string, options?: RuntimeStateOptions) => Promise<State>;
+  readonly state: (stream: string) => Promise<State>;
   
   // Get state at a specific point (time travel)
-  readonly stateAt: (stream: string, n: number, options?: RuntimeStateOptions) => Promise<State>;
+  readonly stateAt: (stream: string, n: number) => Promise<State>;
   
   // Get the chain
   readonly chain: (stream: string) => Promise<Chain<Event>>;
   
   // Get chain prefix (time travel)
   readonly chainAt: (stream: string, n: number) => Promise<Chain<Event>>;
-  
-  // Apply a view to the chain
-  readonly view: <O>(stream: string, v: View<Event, O>) => Promise<O>;
   
   // Verify chain integrity
   readonly verify: (stream: string) => Promise<ReturnType<typeof verify>>;
@@ -74,8 +58,7 @@ export const createRuntime = <Cmd, Event, State>(
   branchStore: BranchStore,
   decide: Decide<Cmd, Event>,
   reducer: Reducer<State, Event>,
-  initial: State,
-  options: RuntimeCreateOptions<State> = {}
+  initial: State
 ): Runtime<Cmd, Event, State> => {
   type EmitLikeCommand = {
     readonly eventId?: string;
@@ -84,8 +67,6 @@ export const createRuntime = <Cmd, Event, State>(
 
   const getChain = (stream: string) => store.read(stream);
   const getChainAt = (stream: string, n: number) => store.take(stream, n);
-  const checkpointStore = options.checkpoints?.store ?? memoryCheckpointStore<State>();
-  const checkpointInterval = Math.max(1, options.checkpoints?.interval ?? 1000);
   const streamLocks = new Map<string, Promise<void>>();
 
   const enqueueStream = async <T>(stream: string, op: () => Promise<T>): Promise<T> => {
@@ -119,26 +100,14 @@ export const createRuntime = <Cmd, Event, State>(
     return runLocked(0);
   };
 
-  const getState = async (stream: string, _options?: RuntimeStateOptions) => {
+  const getState = async (stream: string) => {
     const chain = await getChain(stream);
-    if (_options?.fromCheckpoint) {
-      return foldWithCheckpoint(stream, chain, reducer, initial, {
-        interval: checkpointInterval,
-        checkpoint: checkpointStore,
-      });
-    }
     return fold(chain, reducer, initial);
   };
 
-  const getStateAt = async (stream: string, n: number, _options?: RuntimeStateOptions) => {
+  const getStateAt = async (stream: string, n: number) => {
     if (n === 0) return initial;
     const chain = await getChainAt(stream, n);
-    if (_options?.fromCheckpoint) {
-      return foldWithCheckpoint(stream, chain, reducer, initial, {
-        interval: checkpointInterval,
-        checkpoint: checkpointStore,
-      });
-    }
     return fold(chain, reducer, initial);
   };
 
@@ -229,7 +198,6 @@ export const createRuntime = <Cmd, Event, State>(
     stateAt: getStateAt,
     chain: getChain,
     chainAt: getChainAt,
-    view: async (stream, v) => v(await getChain(stream)),
     verify: async (stream) => verify(await getChain(stream)),
     fork,
     branch: (stream) => branchStore.get(stream),

@@ -3,12 +3,11 @@
 // ============================================================================
 
 import type { Runtime } from "../core/runtime.js";
-import type { RunLifecycle } from "../core/run.js";
 import type { TheoremCmd, TheoremEvent, TheoremState } from "../modules/theorem.js";
 import { reduce as reduceTheorem, initial as initialTheorem } from "../modules/theorem.js";
 import { renderPrompt, type TheoremPromptConfig } from "../prompts/theorem.js";
 
-import { createQueuedEmitter, type EmitFn, type WorkflowSpec } from "../engine/runtime/workflow.js";
+import { createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
 import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
 import {
   THEOREM_WORKFLOW_ID,
@@ -1039,16 +1038,7 @@ const THEOREM_RECEIPT_RUNTIME = defineReceiptAgent<
     resume: THEOREM_LIFECYCLE.resume,
     shouldIndex: THEOREM_LIFECYCLE.shouldIndex,
   },
-  plan: {
-    id: THEOREM_WORKFLOW_ID,
-    version: THEOREM_WORKFLOW_VERSION,
-    capabilities: [],
-    goals: [],
-  },
   run: THEOREM_WORKFLOW.run,
-  command: {
-    wrap: (event, meta) => ({ type: "emit", event, eventId: meta.eventId } as TheoremCmd),
-  },
 });
 
 // ============================================================================

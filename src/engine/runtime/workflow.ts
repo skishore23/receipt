@@ -5,8 +5,58 @@
 // ============================================================================
 
 import type { Runtime } from "../../core/runtime.js";
-import type { RunEvent, RunLifecycle, RunState } from "../../core/run.js";
-import { defaultShouldIndex, deriveRunState, resumeFromChain } from "../../core/run.js";
+import { fold } from "../../core/chain.js";
+import type { Chain, Reducer } from "../../core/types.js";
+
+type RunStatus = "idle" | "running" | "failed" | "completed";
+
+export type RunEvent = {
+  readonly type: string;
+  readonly runId?: string;
+};
+
+export type RunState = {
+  readonly runId?: string;
+  readonly status?: RunStatus;
+};
+
+export type RunLifecycle<Ctx, Event extends RunEvent, State extends RunState, Config> = {
+  readonly reducer: Reducer<State, Event>;
+  readonly initial: State;
+  readonly init: (ctx: Ctx, runId: string, config: Config) => Event[];
+  readonly resume?: (ctx: Ctx, runId: string, state: State, config: Config) => Event[];
+  readonly shouldIndex?: (event: Event) => boolean;
+};
+
+const defaultShouldIndex = <Event extends RunEvent>(event: Event): boolean => {
+  switch (event.type) {
+    case "problem.set":
+    case "run.configured":
+    case "solution.finalized":
+      return true;
+    case "run.status":
+      return (event as { status?: RunStatus }).status !== "running";
+    default:
+      return false;
+  }
+};
+
+const deriveRunState = <Event extends RunEvent, State extends RunState>(
+  chain: Chain<Event>,
+  reducer: Reducer<State, Event>,
+  initial: State
+): State => fold(chain, reducer, initial);
+
+const resumeFromChain = <Event extends RunEvent, State extends RunState>(
+  chain: Chain<Event>,
+  reducer: Reducer<State, Event>,
+  initial: State,
+  runId: string
+): { readonly state: State; readonly resume: boolean } => {
+  const state = deriveRunState(chain, reducer, initial);
+  const resume = chain.length > 0 && (!state.runId || state.runId === runId);
+  return { state, resume };
+};
 
 export type EmitFn<Event> = (event: Event) => Promise<void>;
 

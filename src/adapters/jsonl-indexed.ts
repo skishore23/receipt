@@ -6,8 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 
-import type { Chain, Receipt } from "../core/types.js";
-import type { Store } from "../core/store.js";
+import type { Chain, Receipt, Store } from "../core/types.js";
 import { createStreamLocator } from "./jsonl.js";
 
 export type IndexedStoreOptions = {

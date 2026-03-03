@@ -5,13 +5,13 @@
 // ============================================================================
 
 import { createHash } from "node:crypto";
-import type { Receipt, Chain, Hash, Reducer, View } from "./types.js";
+import type { Receipt, Chain, Reducer } from "./types.js";
 
 // ============================================================================
 // Hashing (content-addressable)
 // ============================================================================
 
-const sha256 = (s: string): Hash => createHash("sha256").update(s).digest("hex");
+const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
 
 // Recursively sort object keys for deterministic JSON
 const sortKeys = (x: unknown): unknown => {
@@ -27,7 +27,7 @@ const sortKeys = (x: unknown): unknown => {
 const canonicalize = (x: unknown): string => JSON.stringify(sortKeys(x));
 
 // Hints are non-authoritative, not included in hash
-export const computeHash = <B>(r: Omit<Receipt<B>, "hash">): Hash =>
+export const computeHash = <B>(r: Omit<Receipt<B>, "hash">): string =>
   sha256(canonicalize({ 
     id: r.id, 
     ts: r.ts, 
@@ -44,7 +44,7 @@ const makeId = (ts: number): string => `${ts.toString(36)}-${Math.random().toStr
 
 export const receipt = <B>(
   stream: string,
-  prev: Hash | undefined,
+  prev: string | undefined,
   body: B,
   ts = Date.now(),
   hints?: Record<string, unknown>
@@ -53,26 +53,6 @@ export const receipt = <B>(
   const base = { id, ts, stream, prev, body };
   return { ...base, hash: computeHash(base), hints };
 };
-
-// ============================================================================
-// Chain Operations (pure)
-// ============================================================================
-
-// Empty chain
-export const empty = <B>(): Chain<B> => [];
-
-// Append a body to the chain, returns new chain + new receipt
-export const append = <B>(chain: Chain<B>, stream: string, body: B): [Chain<B>, Receipt<B>] => {
-  const prev = chain.length > 0 ? chain[chain.length - 1].hash : undefined;
-  const r = receipt(stream, prev, body);
-  return [[...chain, r], r];
-};
-
-// Take first n receipts (time travel)
-export const take = <B>(chain: Chain<B>, n: number): Chain<B> => chain.slice(0, n);
-
-// Get the head (last receipt)
-export const head = <B>(chain: Chain<B>): Receipt<B> | undefined => chain[chain.length - 1];
 
 // ============================================================================
 // Fold (catamorphism) — derive state from chain
@@ -90,12 +70,12 @@ export const fold = <S, B>(chain: Chain<B>, reducer: Reducer<S, B>, initial: S):
 // Verification — check chain integrity
 // ============================================================================
 
-export type VerifyResult =
-  | { ok: true; count: number; head?: Hash }
+type VerifyResult =
+  | { ok: true; count: number; head?: string }
   | { ok: false; at: number; reason: string };
 
 export const verify = <B>(chain: Chain<B>): VerifyResult => {
-  let prev: Hash | undefined;
+  let prev: string | undefined;
   for (let i = 0; i < chain.length; i++) {
     const r = chain[i];
     if (r.prev !== prev) return { ok: false, at: i, reason: "broken prev" };
@@ -104,19 +84,3 @@ export const verify = <B>(chain: Chain<B>): VerifyResult => {
   }
   return { ok: true, count: chain.length, head: prev };
 };
-
-// ============================================================================
-// View Combinators — compose views
-// ============================================================================
-
-// Map over view output
-export const mapView = <B, O, O2>(view: View<B, O>, f: (o: O) => O2): View<B, O2> =>
-  (chain) => f(view(chain));
-
-// Compose views (run both, combine outputs)
-export const combineViews = <B, O1, O2>(v1: View<B, O1>, v2: View<B, O2>): View<B, [O1, O2]> =>
-  (chain) => [v1(chain), v2(chain)];
-
-// Create a view from a reducer (state is a view)
-export const stateView = <S, B>(reducer: Reducer<S, B>, initial: S): View<B, S> =>
-  (chain) => fold(chain, reducer, initial);

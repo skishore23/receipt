@@ -41,8 +41,7 @@ Command -> decide -> Event -> append -> Chain
 ## Framework Surface (Minimal API)
 
 ### Core kernel (do not change)
-- `src/core/chain.ts` - append/fold/verify
-- `src/core/run.ts` - run lifecycle + resume helpers
+- `src/core/chain.ts` - receipt/fold/verify
 - `src/core/runtime.ts` - runtime composition: store + decide + reducer
 - `src/core/types.ts` - receipt + chain types
 - `src/adapters/jsonl.ts` - persistence
@@ -51,13 +50,12 @@ Command -> decide -> Event -> append -> Chain
 - `src/engine/runtime/receipt-runtime.ts` - `defineReceiptAgent` + `runReceiptAgent`
 - `src/engine/runtime/planner.ts` - typed planner runner (`needs` / `provides`)
 - `src/engine/runtime/plan-validate.ts` - cycle and dependency validation
-- `src/engine/runtime/policies.ts` - memory / branch / merge policy contracts
-- `src/engine/runtime/workflow.ts` - queued emitters + lifecycle runner (durable by default)
+- `src/engine/runtime/workflow.ts` - queued emitters + run lifecycle runner (durable by default)
 
 ### Theorem agent (reference implementation)
 - `src/agents/theorem.ts` - workflow entry + public API
 - `src/agents/theorem.constants.ts` - team, examples, ids
-- `src/agents/theorem.streams.ts` - stream layout helpers (index/run/branch)
+- `src/agents/theorem.streams.ts` - stream layout helpers (run/branch)
 - `src/agents/theorem.memory.ts` - memory selection policy
 - `src/agents/theorem.rebracket.ts` - rebracketing engine
 - `src/agents/theorem.runs.ts` - run slicing + view helpers
@@ -208,7 +206,7 @@ If you do not need branching, omit `BranchPolicy` entirely or set `shouldFork` t
 // src/agents/my-agent.ts
 import { runWorkflow } from "./workflow.js";
 import type { Runtime } from "../core/runtime.js";
-import type { RunLifecycle } from "../core/run.js";
+import type { RunLifecycle } from "./workflow.js";
 import { reduce, initial, type MyCmd, type MyEvent, type MyState } from "../modules/my-agent.js";
 
 export const MY_AGENT_ID = "my-agent";
@@ -371,7 +369,7 @@ Time-travel UX rules (framework default):
 Streaming semantics (why it is not ChatGPT-like token streaming by default):
 - Current framework demos stream at **receipt granularity** (after each completed agent step/receipt).
 - Token-level streaming is off because most workflows call `llmText` and only emit receipts once the step finishes.
-- To enable token streaming, switch to `llmTextStream` (or provider stream) and emit incremental receipts (`output.delta` + final `output.completed`) that the UI appends live.
+- To enable token streaming, switch to a provider streaming API and emit incremental receipts (`output.delta` + final `output.completed`) that the UI appends live.
 
 ---
 

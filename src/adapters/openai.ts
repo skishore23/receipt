@@ -106,39 +106,3 @@ export const llmText = async (opts: LlmTextOptions): Promise<string> => {
     return response.output_text?.trim() ?? "";
   });
 };
-
-// ============================================================================
-// Text Generation (streamed)
-// ============================================================================
-
-type LlmTextStreamOptions = {
-  readonly system?: string;
-  readonly user: string;
-  readonly onDelta?: (delta: string) => void | Promise<void>;
-};
-
-export const llmTextStream = async (opts: LlmTextStreamOptions): Promise<string> => {
-  const openai = getClient();
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    ...(opts.system ? [{ role: "system" as const, content: opts.system }] : []),
-    { role: "user" as const, content: opts.user },
-  ];
-
-  return withRateLimitRetry(async () => {
-    const stream = await openai.chat.completions.create({
-      model,
-      messages,
-      stream: true,
-    });
-
-    let full = "";
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (!delta) continue;
-      full += delta;
-      if (opts.onDelta) await opts.onDelta(delta);
-    }
-
-    return full.trim();
-  });
-};

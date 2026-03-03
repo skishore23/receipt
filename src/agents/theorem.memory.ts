@@ -2,7 +2,7 @@
 // Theorem Guild memory selection (bracket-aware, core-context powered)
 // ============================================================================
 
-import { buildRankedContext } from "../core/memory.js";
+import { buildRankedContext } from "../lib/memory.js";
 import type { Chain } from "../core/types.js";
 import type { TheoremEvent } from "../modules/theorem.js";
 import { collectLeaves, podByAgent, podProximity, treeForBracket } from "./theorem.rebracket.js";

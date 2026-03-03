@@ -5,10 +5,9 @@
 // Views compose. The UI is just a composition of views.
 // ============================================================================
 
-import type { Chain, View, Branch } from "../core/types.js";
+import type { Chain, Branch } from "../core/types.js";
 import type { TodoEvent, TodoState } from "../modules/todo.js";
-import { fold, verify, stateView } from "../core/chain.js";
-import { reduce, initial } from "../modules/todo.js";
+import { verify } from "../core/chain.js";
 
 // ============================================================================
 // Escape (security)
@@ -158,7 +157,7 @@ export const branchSelectorHtml = (
   current: Branch | undefined,
   at: number | null
 ): string => {
-  const hasBranches = allBranches.length > 0;
+  void allBranches;
   const showFork = at !== null && at > 0;
 
   // Branch tree: show parent if we have one, then current, then children

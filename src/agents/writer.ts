@@ -3,10 +3,9 @@
 // ============================================================================
 
 import type { Runtime } from "../core/runtime.js";
-import type { RunLifecycle } from "../core/run.js";
 import type { WriterCmd, WriterEvent, WriterState } from "../modules/writer.js";
 import { renderPrompt, type WriterPromptConfig } from "../prompts/writer.js";
-import { createQueuedEmitter, type EmitFn, type WorkflowSpec } from "../engine/runtime/workflow.js";
+import { createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
 import { runReceiptPlanner, type CapabilitySpec, type PlanSpec } from "../engine/runtime/planner.js";
 import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
 import { WRITER_WORKFLOW_ID, WRITER_WORKFLOW_VERSION, WRITER_TEAM, WRITER_EXAMPLES } from "./writer.constants.js";
@@ -438,19 +437,7 @@ const WRITER_RECEIPT_RUNTIME = defineReceiptAgent<
     resume: WRITER_LIFECYCLE.resume,
     shouldIndex: WRITER_LIFECYCLE.shouldIndex,
   },
-  plan: {
-    id: WRITER_WORKFLOW_ID,
-    version: WRITER_WORKFLOW_VERSION,
-    capabilities: [],
-    goals: ["final"],
-  },
   run: WRITER_WORKFLOW.run,
-  planner: {
-    plannerState: (state) => state.planner,
-  },
-  command: {
-    wrap: (event, meta) => ({ type: "emit", event, eventId: meta.eventId } as WriterCmd),
-  },
 });
 
 // ============================================================================

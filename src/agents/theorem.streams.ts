@@ -4,8 +4,6 @@
 // Runs live in their own stream for clean receipts; the base stream is the index.
 // ============================================================================
 
-export const theoremIndexStream = (base: string): string => base;
-
 export const theoremRunStream = (base: string, runId: string): string =>
   `${base}/runs/${runId}`;
 

@@ -2,8 +2,6 @@
 // Writer Guild stream naming helpers
 // ============================================================================
 
-export const writerIndexStream = (base: string): string => base;
-
 export const writerRunStream = (base: string, runId: string): string =>
   `${base}/runs/${runId}`;
 

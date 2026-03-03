@@ -3,7 +3,6 @@
 // ============================================================================
 
 import type { Chain } from "../core/types.js";
-import { getLatestRunId } from "../core/run.js";
 import { fold } from "../core/chain.js";
 import type { TheoremEvent } from "../modules/theorem.js";
 import { reduce as reduceTheorem, initial as initialTheorem } from "../modules/theorem.js";
@@ -14,6 +13,17 @@ export type TheoremRunSummary = {
   readonly status: "running" | "done" | "failed";
   readonly startedAt?: number;
   readonly count: number;
+};
+
+const getLatestRunId = <Event extends { readonly type: string; readonly runId?: string }>(
+  chain: Chain<Event>,
+  startType = "problem.set"
+): string | undefined => {
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const event = chain[i].body;
+    if (event.type === startType && event.runId) return event.runId;
+  }
+  return undefined;
 };
 
 export const getLatestTheoremRunId = (chain: Chain<TheoremEvent>): string | undefined =>

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildRankedContext } from "../../src/core/memory.ts";
+import { buildRankedContext } from "../../src/lib/memory.ts";
 import { buildMemorySlice } from "../../src/agents/theorem.memory.ts";
 import type { TheoremEvent } from "../../src/modules/theorem.ts";
 import type { Chain } from "../../src/core/types.ts";
 
-test("core memory: ranked context keeps pinned entries and top scored items", () => {
+test("memory utils: ranked context keeps pinned entries and top scored items", () => {
   const items = [
     { id: "a", ts: 1, score: 0.1, text: "alpha" },
     { id: "b", ts: 2, score: 2.0, text: "beta" },
@@ -28,7 +28,7 @@ test("core memory: ranked context keeps pinned entries and top scored items", ()
   assert.equal(result.truncated, false);
 });
 
-test("core memory: context compaction truncates over budget", () => {
+test("memory utils: context compaction truncates over budget", () => {
   const items = [
     { id: "x", ts: 1, score: 1, text: "1234567890" },
     { id: "y", ts: 2, score: 0, text: "abcdefghij" },

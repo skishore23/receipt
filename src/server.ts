@@ -13,7 +13,7 @@ import { jsonlStore, jsonBranchStore } from "./adapters/jsonl.js";
 import { jsonlIndexedStore } from "./adapters/jsonl-indexed.js";
 import { createRuntime } from "./core/runtime.js";
 
-import type { TodoCmd, TodoEvent, TodoState } from "./modules/todo.js";
+import type { TodoCmd, TodoEvent } from "./modules/todo.js";
 import { decide, reduce, initial } from "./modules/todo.js";
 import type { InspectorEvent, InspectorMode } from "./modules/inspector.js";
 import { decide as decideInspector, reduce as reduceInspector, initial as initialInspector } from "./modules/inspector.js";
@@ -63,7 +63,6 @@ import {
   normalizeTheoremConfig,
   parseTheoremConfig,
   runTheoremGuild,
-  sliceTheoremChain,
   sliceTheoremChainByStep,
 } from "./agents/theorem.js";
 import { theoremRunStream } from "./agents/theorem.streams.js";
@@ -212,13 +211,11 @@ const mapInspectorAgentId = (agentId?: string, mode?: InspectorMode, runId?: str
   return runId ?? "inspector";
 };
 
-const INSPECTOR_ORDER = new Map(INSPECTOR_TEAM.map((agent, idx) => [agent.id, idx]));
 const INSPECTOR_KIND = new Map(INSPECTOR_TEAM.map((agent) => [agent.id, agent.kind]));
 
 const loadTheoremRunChain = async (
   baseStream: string,
   runId: string,
-  indexChain?: Awaited<ReturnType<typeof theoremRuntime.chain>>,
   branchStream?: string | null
 ) => {
   const runStream = theoremRunStream(baseStream, runId);
@@ -243,7 +240,6 @@ const loadTheoremRunChain = async (
 const loadWriterRunChain = async (
   baseStream: string,
   runId: string,
-  indexChain?: Awaited<ReturnType<typeof writerRuntime.chain>>,
   branchStream?: string | null
 ) => {
   const runStream = writerRunStream(baseStream, runId);
@@ -309,13 +305,13 @@ const buildTheoremDisplayChain = async (
 const buildTheoremRunReceiptCount = async (
   baseStream: string,
   runId: string,
+  runChainLength: number,
   fallback: number
 ): Promise<number> => {
   const runStream = theoremRunStream(baseStream, runId);
-  const runChain = await theoremRuntime.chain(runStream);
   const descendants = await loadTheoremDescendantChains(runStream);
   const deltaCount = descendants.reduce((sum, desc) => sum + desc.chain.slice(desc.forkAt).length, 0);
-  return Math.max(fallback, runChain.length + deltaCount);
+  return Math.max(fallback, runChainLength + deltaCount);
 };
 
 const loadWriterDescendantChains = async (rootStream: string) => {
@@ -348,15 +344,15 @@ const isResumeBranch = (branchName: string): boolean => {
 const buildWriterRunReceiptCount = async (
   baseStream: string,
   runId: string,
+  runChainLength: number,
   fallback: number
 ): Promise<number> => {
   const runStream = writerRunStream(baseStream, runId);
-  const runChain = await writerRuntime.chain(runStream);
   const descendants = await loadWriterDescendantChains(runStream);
   const resumeDeltaCount = descendants
     .filter((desc) => isResumeBranch(desc.name))
     .reduce((sum, desc) => sum + desc.chain.slice(desc.forkAt).length, 0);
-  return Math.max(fallback, runChain.length + resumeDeltaCount);
+  return Math.max(fallback, runChainLength + resumeDeltaCount);
 };
 
 const buildInspectorSnapshot = (
@@ -927,7 +923,7 @@ const routes: Route[] = [
     const runsWithCounts = await Promise.all(runs.map(async (run) => {
       const runStream = theoremRunStream(stream, run.runId);
       const runChain = await theoremRuntime.chain(runStream);
-      const count = await buildTheoremRunReceiptCount(stream, run.runId, run.count);
+      const count = await buildTheoremRunReceiptCount(stream, run.runId, runChain.length, run.count);
       const startedAt = runChain.length > 0 ? runChain[0]?.ts : run.startedAt;
       return { ...run, count, startedAt };
     }));
@@ -948,7 +944,7 @@ const routes: Route[] = [
     if (!activeRun) {
       return html(theoremTravelHtml({ stream, at: null, total: 0 }));
     }
-    const runData = await loadTheoremRunChain(stream, activeRun, indexChain, branchParam);
+    const runData = await loadTheoremRunChain(stream, activeRun, branchParam);
     const displayChain = !runData.isBranch
       ? await buildTheoremDisplayChain(stream, activeRun)
       : runData.chain;
@@ -981,12 +977,12 @@ const routes: Route[] = [
     const runsWithCounts = await Promise.all(runs.map(async (run) => {
       const runStream = theoremRunStream(stream, run.runId);
       const runChain = await theoremRuntime.chain(runStream);
-      const count = await buildTheoremRunReceiptCount(stream, run.runId, run.count);
+      const count = await buildTheoremRunReceiptCount(stream, run.runId, runChain.length, run.count);
       const startedAt = runChain.length > 0 ? runChain[0]?.ts : run.startedAt;
       return { ...run, count, startedAt };
     }));
 
-    const runData = await loadTheoremRunChain(stream, activeRun, indexChain, branchParam);
+    const runData = await loadTheoremRunChain(stream, activeRun, branchParam);
     const displayChain = !runData.isBranch
       ? await buildTheoremDisplayChain(stream, activeRun)
       : runData.chain;
@@ -1053,7 +1049,7 @@ const routes: Route[] = [
     const latest = getLatestTheoremRunId(indexChain);
     const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
     const runData = (!wantsEmpty && activeRun)
-      ? await loadTheoremRunChain(stream, activeRun, indexChain, branchParam)
+      ? await loadTheoremRunChain(stream, activeRun, branchParam)
       : { chain: [], chainStream: stream, isBranch: false };
     const displayChain = (!wantsEmpty && activeRun && !runData.isBranch)
       ? await buildTheoremDisplayChain(stream, activeRun)
@@ -1074,7 +1070,7 @@ const routes: Route[] = [
     const latest = getLatestTheoremRunId(indexChain);
     const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
     const runData = (!wantsEmpty && activeRun)
-      ? await loadTheoremRunChain(stream, activeRun, indexChain, branchParam)
+      ? await loadTheoremRunChain(stream, activeRun, branchParam)
       : { chain: [], chainStream: stream, isBranch: false };
     const displayChain = (!wantsEmpty && activeRun && !runData.isBranch)
       ? await buildTheoremDisplayChain(stream, activeRun)
@@ -1236,7 +1232,7 @@ const routes: Route[] = [
     const runsWithCounts = await Promise.all(runs.map(async (run) => {
       const runStream = writerRunStream(stream, run.runId);
       const runChain = await writerRuntime.chain(runStream);
-      const count = await buildWriterRunReceiptCount(stream, run.runId, run.count);
+      const count = await buildWriterRunReceiptCount(stream, run.runId, runChain.length, run.count);
       const startedAt = runChain.length > 0 ? runChain[0]?.ts : run.startedAt;
       return { ...run, count, startedAt };
     }));
@@ -1257,7 +1253,7 @@ const routes: Route[] = [
     if (!activeRun) {
       return html(writerTravelHtml({ stream, at: null, total: 0 }));
     }
-    const runData = await loadWriterRunChain(stream, activeRun, indexChain, branchParam);
+    const runData = await loadWriterRunChain(stream, activeRun, branchParam);
     const steps = buildWriterSteps(runData.chain);
     const totalSteps = Math.max(steps.length, runData.chain.length);
     return html(writerTravelHtml({
@@ -1287,12 +1283,12 @@ const routes: Route[] = [
     const runsWithCounts = await Promise.all(runs.map(async (run) => {
       const runStream = writerRunStream(stream, run.runId);
       const runChain = await writerRuntime.chain(runStream);
-      const count = await buildWriterRunReceiptCount(stream, run.runId, run.count);
+      const count = await buildWriterRunReceiptCount(stream, run.runId, runChain.length, run.count);
       const startedAt = runChain.length > 0 ? runChain[0]?.ts : run.startedAt;
       return { ...run, count, startedAt };
     }));
 
-    const runData = await loadWriterRunChain(stream, activeRun, indexChain, branchParam);
+    const runData = await loadWriterRunChain(stream, activeRun, branchParam);
     const steps = buildWriterSteps(runData.chain);
     const totalSteps = Math.max(steps.length, runData.chain.length);
     const normalizedAt = at === null ? null : Math.max(0, Math.min(at, totalSteps));
@@ -1349,7 +1345,7 @@ const routes: Route[] = [
     const latest = getLatestWriterRunId(indexChain);
     const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
     const runData = (!wantsEmpty && activeRun)
-      ? await loadWriterRunChain(stream, activeRun, indexChain, branchParam)
+      ? await loadWriterRunChain(stream, activeRun, branchParam)
       : { chain: [], chainStream: stream, isBranch: false };
     const viewChain = at === null ? runData.chain : sliceWriterChainByStep(runData.chain, at);
     return html(writerChatHtml(viewChain));
@@ -1367,7 +1363,7 @@ const routes: Route[] = [
     const latest = getLatestWriterRunId(indexChain);
     const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
     const runData = (!wantsEmpty && activeRun)
-      ? await loadWriterRunChain(stream, activeRun, indexChain, branchParam)
+      ? await loadWriterRunChain(stream, activeRun, branchParam)
       : { chain: [], chainStream: stream, isBranch: false };
     const viewChain = at === null ? runData.chain : sliceWriterChainByStep(runData.chain, at);
     const state = fold(viewChain, reduceWriter, initialWriter);

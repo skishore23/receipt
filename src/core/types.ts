@@ -4,17 +4,14 @@
 // Everything else is built from these primitives.
 // ============================================================================
 
-// A Hash is a content-addressable identifier
-export type Hash = string;
-
 // A Receipt is immutable evidence of something that happened
 export type Receipt<Body = unknown> = {
   readonly id: string;
   readonly ts: number;
   readonly stream: string;
-  readonly prev?: Hash;
+  readonly prev?: string;
   readonly body: Body;
-  readonly hash: Hash;
+  readonly hash: string;
   readonly hints?: Record<string, unknown>;  // optional metadata (non-authoritative)
 };
 
@@ -29,16 +26,25 @@ export type Branch = {
   readonly createdAt: number;   // timestamp
 };
 
-// Result type for operations that can fail
-export type Result<T, E = string> =
-  | { ok: true; value: T }
-  | { ok: false; error: E };
-
 // A Reducer folds a receipt into state
 export type Reducer<S, B> = (state: S, body: B, ts: number) => S;
 
-// A View transforms a chain into some output
-export type View<B, O> = (chain: Chain<B>) => O;
-
 // A Decide transforms a command into events (pure)
 export type Decide<Cmd, Event> = (cmd: Cmd) => Event[];
+
+// Store operations as a record of functions
+export type Store<B> = {
+  readonly append: (r: Receipt<B>) => Promise<void>;
+  readonly read: (stream: string) => Promise<Chain<B>>;
+  readonly take: (stream: string, n: number) => Promise<Chain<B>>;
+  readonly count: (stream: string) => Promise<number>;
+  readonly head: (stream: string) => Promise<Receipt<B> | undefined>;
+};
+
+// Branch metadata store
+export type BranchStore = {
+  readonly save: (b: Branch) => Promise<void>;
+  readonly get: (name: string) => Promise<Branch | undefined>;
+  readonly list: () => Promise<Branch[]>;
+  readonly children: (parent: string) => Promise<Branch[]>;
+};

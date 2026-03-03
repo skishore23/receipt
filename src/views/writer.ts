@@ -4,7 +4,7 @@
 
 import type { Branch, Chain } from "../core/types.js";
 import { verify, computeHash } from "../core/chain.js";
-import { formatLensMemory } from "../core/memory.js";
+import { formatLensMemory } from "../lib/memory.js";
 import type { WriterEvent, WriterState } from "../modules/writer.js";
 import { reduce as reduceWriter, initial as initialWriter } from "../modules/writer.js";
 import { fold } from "../core/chain.js";
@@ -923,7 +923,7 @@ export const writerSideHtml = (
   state: WriterState,
   chain: Chain<WriterEvent>,
   at: number | null | undefined,
-  total: number,
+  _total: number,
   indexStream: string,
   runId?: string,
   team: ReadonlyArray<{ id: string; name: string }> = [],
@@ -933,8 +933,6 @@ export const writerSideHtml = (
   activityChain?: Chain<WriterEvent>
 ): string => {
   const activitySource = activityChain ?? chain;
-  const maxAt = Math.max(total, chain.length);
-  const currentAt = at === null || at === undefined ? maxAt : Math.max(0, Math.min(at, maxAt));
   const steps = state.planner.plan ?? [];
   const runStream = runId ? `${indexStream}/runs/${runId}` : indexStream;
   const branchPrefix = `${runStream}/branches/`;

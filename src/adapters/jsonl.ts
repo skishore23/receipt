@@ -7,8 +7,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-import type { Branch, Chain, Receipt } from "../core/types.js";
-import { createStore, type BranchStore, type Store } from "../core/store.js";
+import type { Branch, BranchStore, Chain, Receipt, Store } from "../core/types.js";
 import { fold, receipt } from "../core/chain.js";
 import {
   initial as initialBranchMeta,
@@ -158,10 +157,16 @@ export const createStreamLocator = (dir: string): StreamLocator => {
 /** One .jsonl file per stream key under dir; stream names map via _streams.json */
 export const jsonlStore = <B>(dir: string): Store<B> => {
   const locator = createStreamLocator(dir);
-  return createStore<B>(
-    async (stream) => readJsonl(await locator.fileFor(stream)),
-    async (r) => appendJsonl(await locator.fileFor(r.stream), r)
-  );
+  return {
+    append: async (r) => appendJsonl(await locator.fileFor(r.stream), r),
+    read: async (stream) => readJsonl<B>(await locator.fileFor(stream)),
+    take: async (stream, n) => (await readJsonl<B>(await locator.fileFor(stream))).slice(0, n),
+    count: async (stream) => (await readJsonl<B>(await locator.fileFor(stream))).length,
+    head: async (stream) => {
+      const chain = await readJsonl<B>(await locator.fileFor(stream));
+      return chain.length > 0 ? chain[chain.length - 1] : undefined;
+    },
+  };
 };
 
 /** Branch metadata is receipt-native in stream "__meta/branches". */

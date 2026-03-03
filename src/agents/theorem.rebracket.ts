@@ -25,8 +25,6 @@ export const MERGE_LENSES: ReadonlyArray<MergeLens> = [
   { bracket: "(A o (B o (C o D)))", tree: ["A", ["B", ["C", "D"]]] },
 ];
 
-export const BRACKETS = MERGE_LENSES;
-
 export const podByAgent = new Map<string, string>(
   THEOREM_PODS.flatMap((pod) => pod.agents.map((agent) => [agent, pod.id] as const))
 );

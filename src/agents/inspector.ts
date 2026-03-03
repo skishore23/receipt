@@ -3,7 +3,6 @@
 // ============================================================================
 
 import type { Runtime } from "../core/runtime.js";
-import type { RunLifecycle } from "../core/run.js";
 import type {
   InspectorCmd,
   InspectorEvent,
@@ -14,7 +13,7 @@ import type {
 import { reduce as reduceInspector, initial as initialInspector } from "../modules/inspector.js";
 import type { ReceiptRecord } from "../adapters/receipt-tools.js";
 import { renderPrompt, type InspectorPromptConfig } from "../prompts/inspector.js";
-import type { WorkflowSpec } from "../engine/runtime/workflow.js";
+import type { RunLifecycle, WorkflowSpec } from "../engine/runtime/workflow.js";
 import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
 
 // ============================================================================
@@ -280,16 +279,7 @@ const INSPECTOR_RECEIPT_RUNTIME = defineReceiptAgent<
     resume: INSPECTOR_LIFECYCLE.resume,
     shouldIndex: INSPECTOR_LIFECYCLE.shouldIndex,
   },
-  plan: {
-    id: INSPECTOR_WORKFLOW.id,
-    version: INSPECTOR_WORKFLOW.version,
-    capabilities: [],
-    goals: [],
-  },
   run: INSPECTOR_WORKFLOW.run,
-  command: {
-    wrap: (event, meta) => ({ type: "emit", event, eventId: meta.eventId } as InspectorCmd),
-  },
 });
 
 // ============================================================================

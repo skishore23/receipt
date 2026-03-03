@@ -3,7 +3,6 @@
 // ============================================================================
 
 import type { Chain } from "../core/types.js";
-import { getLatestRunId } from "../core/run.js";
 import { fold } from "../core/chain.js";
 import type { WriterEvent } from "../modules/writer.js";
 import { reduce as reduceWriter, initial as initialWriter } from "../modules/writer.js";
@@ -14,6 +13,17 @@ export type WriterRunSummary = {
   readonly status: "running" | "done" | "failed";
   readonly startedAt?: number;
   readonly count: number;
+};
+
+const getLatestRunId = <Event extends { readonly type: string; readonly runId?: string }>(
+  chain: Chain<Event>,
+  startType = "problem.set"
+): string | undefined => {
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const event = chain[i].body;
+    if (event.type === startType && event.runId) return event.runId;
+  }
+  return undefined;
 };
 
 export const getLatestWriterRunId = (chain: Chain<WriterEvent>): string | undefined =>

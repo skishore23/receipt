@@ -1281,78 +1281,6 @@ const activityRows = (
   return (rows + extras) || `<div class="empty">No agents yet.</div>`;
 };
 
-const collabFeedHtml = (
-  chain: Chain<TheoremEvent>,
-  team: ReadonlyArray<TeamMember>
-): string => {
-  const nameFor = (agentId?: string): string => {
-    if (!agentId) return "System";
-    const member = team.find((t) => t.id === agentId);
-    return member?.name ?? prettyAgent(agentId);
-  };
-
-  type FeedItem = { ts: number; agent: string; kind: string; body: string; stream: string };
-  const items: FeedItem[] = [];
-
-  for (const r of chain) {
-    const e = r.body;
-    switch (e.type) {
-      case "problem.set":
-        items.push({ ts: r.ts, agent: "Orchestrator", kind: "Brief", body: e.problem, stream: r.stream });
-        break;
-      case "problem.appended":
-        items.push({ ts: r.ts, agent: "Orchestrator", kind: "Context", body: e.append, stream: r.stream });
-        break;
-      case "attempt.proposed":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Attempt", body: e.content, stream: r.stream });
-        break;
-      case "lemma.proposed":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Lemma", body: e.content, stream: r.stream });
-        break;
-      case "critique.raised":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Critique", body: e.content, stream: r.stream });
-        break;
-      case "patch.applied":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Patch", body: e.content, stream: r.stream });
-        break;
-      case "summary.made":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Summary", body: e.content, stream: r.stream });
-        break;
-      case "verification.report":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Verify", body: e.content, stream: r.stream });
-        break;
-      case "solution.finalized":
-        items.push({ ts: r.ts, agent: nameFor(e.agentId), kind: "Final", body: e.content, stream: r.stream });
-        break;
-      default:
-        break;
-    }
-  }
-
-  const recent = items.slice(-8).reverse();
-  if (recent.length === 0) return `<div class="empty">No collaboration yet.</div>`;
-
-  return recent.map((item, idx) => {
-    const isBranch = item.stream.includes("/branches/");
-    const body = truncate(item.body.trim(), 220);
-    return `<div class="feed-item${idx === 0 ? " latest" : ""}">
-      <div class="feed-meta">
-        <div class="feed-agent">${esc(item.agent)}</div>
-        <div class="feed-tags">
-          <span class="feed-kind">${esc(item.kind)}</span>
-          ${isBranch ? `<span class="feed-branch">branch</span>` : ""}
-        </div>
-      </div>
-      <div class="feed-body">${esc(body || "…")}</div>
-    </div>`;
-  }).join("");
-};
-
-const isTheoremPromptContext = (
-  event: TheoremEvent
-): event is Extract<TheoremEvent, { type: "prompt.context" }> =>
-  event.type === "prompt.context";
-
 const contextWindowRows = (chain: Chain<TheoremEvent>): ReadonlyArray<FrameworkContextRow> => {
   const claimOwner = new Map<string, string>();
   chain.forEach((r) => {
@@ -1419,7 +1347,7 @@ export const theoremSideHtml = (
   state: TheoremState,
   chain: Chain<TheoremEvent>,
   at: number | null | undefined,
-  total: number,
+  _total: number,
   indexStream: string,
   runId?: string,
   team: ReadonlyArray<TeamMember> = [],
@@ -1460,8 +1388,6 @@ export const theoremSideHtml = (
     </div>`;
   }).join("");
 
-  const maxAt = total;
-  const currentAt = at === null || at === undefined ? maxAt : Math.max(0, Math.min(at, maxAt));
   const effectiveRun = runId ?? state.runId ?? "";
   const isBranch = Boolean(branchStream);
   const activeChainStream = chainStream ?? runStream;
@@ -1592,55 +1518,6 @@ export const theoremSideHtml = (
     .side-stack { display: grid; gap: 16px; }
     .side-card { background: rgba(16,18,24,0.85); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 14px; min-width: 0; }
     .side-card h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: rgba(255,255,255,0.55); }
-    .feed-list { display: grid; gap: 10px; }
-    .feed-item {
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: linear-gradient(140deg, rgba(20,24,36,0.85), rgba(16,18,24,0.6));
-      padding: 10px 12px;
-      display: grid;
-      gap: 6px;
-      position: relative;
-      animation: feedIn 0.4s ease;
-    }
-    .feed-item.latest { box-shadow: 0 0 0 1px rgba(107,220,255,0.25), 0 0 24px rgba(107,220,255,0.1); }
-    .feed-item.latest::after {
-      content: "";
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: rgba(107,220,255,0.9);
-      box-shadow: 0 0 10px rgba(107,220,255,0.6);
-      animation: pulse 1.6s ease-in-out infinite;
-    }
-    .feed-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .feed-agent { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.9); }
-    .feed-tags { display: inline-flex; gap: 6px; }
-    .feed-kind, .feed-branch {
-      font-size: 9px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      padding: 2px 6px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.18);
-      color: rgba(255,255,255,0.65);
-    }
-    .feed-branch {
-      border-color: rgba(255,211,106,0.4);
-      color: rgba(255,211,106,0.9);
-    }
-    .feed-body {
-      font-size: 12px;
-      color: rgba(255,255,255,0.82);
-      line-height: 1.4;
-      display: -webkit-box;
-      -webkit-line-clamp: 4;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
     .memory-panel { display: grid; gap: 8px; }
     .memory-meta { font-size: 11px; color: rgba(255,255,255,0.65); }
     .memory-grid { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1717,14 +1594,5 @@ export const theoremSideHtml = (
     .json-item pre { margin: 0; font-size: 10px; color: rgba(255,255,255,0.65); white-space: pre-wrap; }
     .time-meta { font-size: 11px; color: rgba(255,255,255,0.6); margin-bottom: 8px; }
     input[type="range"] { width: 100%; }
-    @keyframes feedIn {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes pulse {
-      0% { transform: scale(1); opacity: 0.6; }
-      50% { transform: scale(1.6); opacity: 1; }
-      100% { transform: scale(1); opacity: 0.6; }
-    }
   </style>`;
 };
