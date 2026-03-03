@@ -91,18 +91,32 @@ function getClient(): OpenAI {
 // Text Generation
 // ============================================================================
 
-type LlmTextOptions = {
+export type LlmTextOptions = {
   readonly system?: string;
   readonly user: string;
+  readonly onDelta?: (delta: string) => void | Promise<void>;
 };
 
 export const llmText = async (opts: LlmTextOptions): Promise<string> => {
   return withRateLimitRetry(async () => {
-    const response = await getClient().responses.create({
+    const stream = getClient().responses.stream({
       model,
       instructions: opts.system,
       input: opts.user,
     });
-    return response.output_text?.trim() ?? "";
+
+    let text = "";
+    for await (const event of stream) {
+      if (event.type === "response.output_text.delta") {
+        if (!event.delta) continue;
+        text += event.delta;
+        if (opts.onDelta) await opts.onDelta(event.delta);
+      } else if (event.type === "response.output_text.done") {
+        text = event.text;
+      }
+    }
+
+    const response = await stream.finalResponse();
+    return response.output_text?.trim() ?? text.trim();
   });
 };

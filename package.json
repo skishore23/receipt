@@ -14,9 +14,13 @@
     "verify": "npm run build && npm run check:no-any && npm run test:smoke"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "@hono/zod-validator": "^0.7.6",
     "@oblivionocean/minigfm": "^1.0.7",
     "dotenv": "^17.2.3",
-    "openai": "^6.16.0"
+    "hono": "^4.12.3",
+    "openai": "^6.16.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
