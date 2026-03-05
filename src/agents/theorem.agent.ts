@@ -28,13 +28,13 @@ import {
 } from "../views/theorem.js";
 import { html, makeEventId, parseAt, parseBranch, text, toFormRecord } from "../framework/http.js";
 import { theoremRunFormSchema } from "../framework/schemas.js";
-import type { RunAgentManifest } from "../framework/manifest.js";
+import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import type { RuntimeOp } from "../framework/translators.js";
 import { executeRuntimeOps } from "../framework/translators.js";
 import { SseHub } from "../framework/sse-hub.js";
 import type { EnqueueJobInput } from "../adapters/jsonl-queue.js";
 
-type TheoremManifestDeps = {
+type TheoremRouteDeps = {
   readonly runtime: Runtime<TheoremCmd, TheoremEvent, TheoremState>;
   readonly llmText: (opts: LlmTextOptions) => Promise<string>;
   readonly prompts: Parameters<typeof runTheoremGuild>[0]["prompts"];
@@ -146,8 +146,8 @@ export const translateTheoremRunStartIntent = (
   return ops;
 };
 
-export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManifest => {
-  const { runtime, enqueueJob, llmText, prompts, promptHash, promptPath, model, sse } = deps;
+export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => {
+  const { runtime, enqueueJob, sse } = deps;
 
   const loadTheoremRunChain = async (
     baseStream: string,
@@ -218,6 +218,11 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
     return Math.max(fallback, runChainLength + deltaCount);
   };
 
+  const buildTravelStepTotal = (displayChain: Awaited<ReturnType<typeof runtime.chain>>): number => {
+    const steps = buildTheoremSteps(displayChain);
+    return steps.length > 0 ? steps.length : displayChain.length;
+  };
+
   return {
     id: "theorem",
     kind: "run",
@@ -233,7 +238,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
     },
     register: (app: Hono) => {
       app.get("/theorem", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -245,7 +250,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       });
 
       app.get("/theorem/island/folds", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
         const at = parseAt(c.req.query("at"));
@@ -264,7 +269,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       });
 
       app.get("/theorem/island/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -278,8 +283,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
         const displayChain = !runData.isBranch
           ? await buildTheoremDisplayChain(stream, activeRun)
           : runData.chain;
-        const steps = buildTheoremSteps(displayChain);
-        const totalSteps = Math.max(steps.length, displayChain.length);
+        const totalSteps = buildTravelStepTotal(displayChain);
         return html(theoremTravelHtml({
           stream,
           runId: activeRun,
@@ -290,7 +294,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       });
 
       app.get("/theorem/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -314,8 +318,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
         const displayChain = !runData.isBranch
           ? await buildTheoremDisplayChain(stream, activeRun)
           : runData.chain;
-        const steps = buildTheoremSteps(displayChain);
-        const totalSteps = Math.max(steps.length, displayChain.length);
+        const totalSteps = buildTravelStepTotal(displayChain);
         const normalizedAt = at === null ? null : Math.max(0, Math.min(at, totalSteps));
         const viewAt = normalizedAt !== null && normalizedAt < totalSteps ? normalizedAt : null;
         const viewChain = viewAt === null ? displayChain : sliceTheoremChainByStep(displayChain, viewAt);
@@ -366,7 +369,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       });
 
       app.get("/theorem/island/chat", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -385,7 +388,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       });
 
       app.get("/theorem/island/side", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -414,7 +417,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
         const stateResolved = await state;
         const team = THEOREM_TEAM.map((agent) => ({ id: agent.id, name: agent.name }));
         const steps = buildTheoremSteps(displayChain);
-        const totalSteps = Math.max(steps.length, displayChain.length);
+        const totalSteps = steps.length > 0 ? steps.length : displayChain.length;
         return html(theoremSideHtml(
           stateResolved,
           viewChain,
@@ -435,7 +438,7 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
           if (!result.success) return text(400, "problem required");
         }),
         async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -469,9 +472,6 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
             branchThreshold: existingState.config.branchThreshold,
           });
         }
-
-        const apiReady = Boolean(process.env.OPENAI_API_KEY);
-        const apiNote = apiReady ? undefined : "OPENAI_API_KEY not set";
 
         const ops = translateTheoremRunStartIntent({
           stream,
@@ -510,9 +510,23 @@ export const createTheoremManifest = (deps: TheoremManifestDeps): RunAgentManife
       );
 
       app.get("/theorem/stream", async (c) => {
-        const stream = c.req.query("stream") ?? "theorem";
+        const stream = c.req.query("stream") ?? "agents/theorem";
         return sse.subscribe("theorem", stream, c.req.raw.signal);
       });
     },
   };
 };
+
+const factory: AgentModuleFactory = (ctx: AgentLoaderContext): AgentRouteModule =>
+  createTheoremRoute({
+    runtime: ctx.runtimes.theorem as Runtime<TheoremCmd, TheoremEvent, TheoremState>,
+    llmText: ctx.llmText,
+    prompts: ctx.prompts.theorem as Parameters<typeof runTheoremGuild>[0]["prompts"],
+    promptHash: ctx.promptHashes.theorem ?? "",
+    promptPath: ctx.promptPaths.theorem ?? "prompts/theorem.prompts.json",
+    model: ctx.models.theorem ?? "gpt-5.2",
+    sse: ctx.sse,
+    enqueueJob: ctx.enqueueJob,
+  });
+
+export default factory;

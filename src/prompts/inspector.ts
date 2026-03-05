@@ -10,13 +10,9 @@ export type InspectorPromptConfig = {
   readonly modes: Record<string, string>;
 };
 
-const emptyPrompts: InspectorPromptConfig = { system: "", modes: {} };
-
 export const loadInspectorPrompts = (): InspectorPromptConfig =>
   loadPromptConfig<InspectorPromptConfig>({
     name: "inspector",
-    overridePath: process.env.INSPECTOR_PROMPTS_PATH,
-    empty: emptyPrompts,
     tag: "inspector",
   });
 

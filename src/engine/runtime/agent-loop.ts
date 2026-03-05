@@ -1,0 +1,231 @@
+import type { Runtime } from "../../core/runtime.js";
+import type { Chain } from "../../core/types.js";
+import type { AgentAction } from "../../sdk/actions.js";
+import type { MergePolicy } from "../../sdk/merge.js";
+import type { ReceiptBody, ReceiptDeclaration } from "../../sdk/receipt.js";
+import { runMergePolicy } from "../merge/policy.js";
+import { CONTROL_POLICY_VERSION, type ControlReceipt } from "./control-receipts.js";
+import { SCHEDULER_POLICY_VERSION, selectDeterministicActions } from "./scheduler-policy.js";
+
+type AnyEvent = {
+  readonly type: string;
+  readonly [key: string]: unknown;
+};
+
+type ReceiptMap = Readonly<Record<string, ReceiptDeclaration<unknown>>>;
+
+type DomainEvent<Receipts extends ReceiptMap> = {
+  [K in keyof Receipts & string]: { readonly type: K } & ReceiptBody<Receipts[K]>;
+}[keyof Receipts & string];
+
+type ViewHelpers<Receipts extends ReceiptMap> = {
+  readonly on: <K extends keyof Receipts & string>(type: K) => {
+    readonly all: () => ReadonlyArray<DomainEvent<Receipts> & { readonly type: K }>;
+    readonly last: () => (DomainEvent<Receipts> & { readonly type: K }) | undefined;
+    readonly exists: () => boolean;
+  };
+};
+
+export type ModernAgentSpec<
+  Receipts extends ReceiptMap,
+  View,
+  Deps extends Record<string, unknown> = Record<string, unknown>
+> = {
+  readonly id: string;
+  readonly version: string;
+  readonly receipts: Receipts;
+  readonly view: (helpers: ViewHelpers<Receipts>) => View;
+  readonly actions: (deps: Deps) => ReadonlyArray<AgentAction<View, <K extends keyof Receipts & string>(type: K, body: ReceiptBody<Receipts[K]>) => void>>;
+  readonly goal: (ctx: { readonly view: View }) => boolean;
+  readonly mergePolicy?: MergePolicy<{ readonly view: View; readonly chain: Chain<AnyEvent>; readonly runId: string }>;
+  readonly runtimePolicyVersion?: string;
+  readonly maxIterations?: number;
+  readonly maxConcurrency?: number;
+};
+
+export type AgentLoopInput<
+  Cmd,
+  Event extends AnyEvent,
+  State,
+  Receipts extends ReceiptMap,
+  View,
+  Deps extends Record<string, unknown>
+> = {
+  readonly spec: ModernAgentSpec<Receipts, View, Deps>;
+  readonly runtime: Runtime<Cmd, Event, State>;
+  readonly stream: string;
+  readonly runId: string;
+  readonly wrap: (event: Event, meta: { readonly eventId: string; readonly expectedPrev?: string }) => Cmd;
+  readonly deps: Deps;
+  readonly now?: () => number;
+};
+
+const toErrorMessage = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
+
+const isEventType = (event: AnyEvent, type: string): boolean => event.type === type;
+
+const buildView = <Receipts extends ReceiptMap, View>(
+  chain: Chain<AnyEvent>,
+  spec: ModernAgentSpec<Receipts, View, Record<string, unknown>>
+): View => {
+  const helpers: ViewHelpers<Receipts> = {
+    on: (type) => ({
+      all: () => chain
+        .map((receipt) => receipt.body)
+        .filter((body): body is DomainEvent<Receipts> & { readonly type: typeof type } => isEventType(body, type)),
+      last: () => {
+        for (let i = chain.length - 1; i >= 0; i -= 1) {
+          const body = chain[i]?.body;
+          if (body && isEventType(body, type)) {
+            return body as DomainEvent<Receipts> & { readonly type: typeof type };
+          }
+        }
+        return undefined;
+      },
+      exists: () => chain.some((receipt) => isEventType(receipt.body, type)),
+    }),
+  };
+
+  return spec.view(helpers);
+};
+
+export const runAgentLoop = async <
+  Cmd,
+  Event extends AnyEvent,
+  State,
+  Receipts extends ReceiptMap,
+  View,
+  Deps extends Record<string, unknown>
+>(
+  input: AgentLoopInput<Cmd, Event, State, Receipts, View, Deps>
+): Promise<void> => {
+  const now = input.now ?? Date.now;
+  let seq = 0;
+
+  const nextEventId = (): string => {
+    seq += 1;
+    return `${input.stream}:${now().toString(36)}:${seq.toString(36)}`;
+  };
+
+  const emit = async (event: Event | ControlReceipt): Promise<void> => {
+    await input.runtime.execute(
+      input.stream,
+      input.wrap(event as Event, { eventId: nextEventId() })
+    );
+  };
+
+  const spec = input.spec;
+  const policyVersion = spec.runtimePolicyVersion ?? CONTROL_POLICY_VERSION;
+
+  await emit({
+    type: "run.started",
+    runId: input.runId,
+    agentId: spec.id,
+    agentVersion: spec.version,
+    runtimePolicyVersion: policyVersion,
+    mergePolicyVersion: spec.mergePolicy?.version,
+  });
+
+  const maxIterations = Math.max(1, spec.maxIterations ?? 200);
+
+  for (let iter = 0; iter < maxIterations; iter += 1) {
+    const chain = await input.runtime.chain(input.stream) as Chain<AnyEvent>;
+    const view = buildView(chain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
+
+    if (spec.goal({ view })) {
+      await emit({ type: "goal.completed", runId: input.runId });
+      await emit({ type: "run.completed", runId: input.runId });
+      return;
+    }
+
+    const actionList = [...spec.actions(input.deps)];
+    const runnable = actionList.filter((candidate) => (candidate.when ? candidate.when({ view }) : true));
+    const selection = selectDeterministicActions(runnable, spec.maxConcurrency ?? 1);
+
+    await emit({
+      type: "action.selected",
+      runId: input.runId,
+      actionIds: selection.selected.map((action) => action.id),
+      reason: `${selection.reason} (${SCHEDULER_POLICY_VERSION})`,
+      policyVersion: SCHEDULER_POLICY_VERSION,
+    });
+
+    if (selection.selected.length === 0) {
+      await emit({ type: "run.completed", runId: input.runId, note: "settled: no runnable actions" });
+      return;
+    }
+
+    for (const current of selection.selected) {
+      await emit({ type: "action.started", runId: input.runId, actionId: current.id, kind: current.kind });
+      if (current.kind === "human") {
+        await emit({ type: "human.requested", runId: input.runId, actionId: current.id });
+      }
+
+      try {
+        const localEmits: AnyEvent[] = [];
+        const emitDomain = <K extends keyof Receipts & string>(
+          type: K,
+          body: ReceiptBody<Receipts[K]>
+        ): void => {
+          localEmits.push({ type, ...(body as Record<string, unknown>) });
+        };
+
+        await current.run({
+          ...(input.deps as Record<string, unknown>),
+          view,
+          emit: emitDomain,
+        } as Deps & { readonly view: View; readonly emit: typeof emitDomain });
+
+        for (const domainEvent of localEmits) {
+          await emit(domainEvent as Event);
+        }
+
+        if (current.kind === "human") {
+          await emit({ type: "human.responded", runId: input.runId, actionId: current.id });
+        }
+        await emit({ type: "action.completed", runId: input.runId, actionId: current.id, kind: current.kind });
+      } catch (err) {
+        const error = toErrorMessage(err);
+        await emit({ type: "action.failed", runId: input.runId, actionId: current.id, kind: current.kind, error });
+        await emit({ type: "run.failed", runId: input.runId, error });
+        throw err;
+      }
+    }
+
+    if (spec.mergePolicy && (spec.mergePolicy.shouldRecompute?.({ view, chain, runId: input.runId }) ?? true)) {
+      const mergeResult = runMergePolicy(spec.mergePolicy, { view, chain, runId: input.runId });
+      await emit({
+        type: "merge.evidence.computed",
+        runId: input.runId,
+        mergePolicyId: spec.mergePolicy.id,
+        mergePolicyVersion: spec.mergePolicy.version,
+      });
+
+      for (const candidate of mergeResult.scored) {
+        await emit({
+          type: "merge.candidate.scored",
+          runId: input.runId,
+          mergePolicyId: spec.mergePolicy.id,
+          candidateId: candidate.candidate.id,
+          score: candidate.score,
+        });
+      }
+
+      await emit({
+        type: "merge.applied",
+        runId: input.runId,
+        mergePolicyId: spec.mergePolicy.id,
+        mergePolicyVersion: spec.mergePolicy.version,
+        candidateId: mergeResult.decision.candidateId,
+        reason: mergeResult.decision.reason,
+      });
+    }
+  }
+
+  await emit({
+    type: "run.failed",
+    runId: input.runId,
+    error: `max iterations reached (${input.spec.maxIterations ?? 200})`,
+  });
+};

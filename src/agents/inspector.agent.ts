@@ -1,10 +1,8 @@
 import type { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 
-import type { LlmTextOptions } from "../adapters/openai.js";
 import type { Runtime } from "../core/runtime.js";
 import type { InspectorCmd, InspectorEvent, InspectorMode, InspectorState } from "../modules/inspector.js";
-import { runReceiptInspector } from "./inspector.js";
 import { INSPECTOR_TEAM } from "./inspector.constants.js";
 import {
   receiptShell,
@@ -18,26 +16,22 @@ import {
   listReceiptFiles,
   readReceiptFile,
   sliceReceiptRecords,
-  buildReceiptContext,
   buildReceiptTimeline,
 } from "../adapters/receipt-tools.js";
 import { html, parseInspectorDepth, parseLimit, parseOrder, text, toFormRecord } from "../framework/http.js";
 import { receiptInspectFormSchema } from "../framework/schemas.js";
-import type { InspectorAgentManifest } from "../framework/manifest.js";
+import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import { SseHub } from "../framework/sse-hub.js";
 import type { EnqueueJobInput } from "../adapters/jsonl-queue.js";
 
-type InspectorManifestDeps = {
+type InspectorRouteDeps = {
   readonly runtime: Runtime<InspectorCmd, InspectorEvent, InspectorState>;
   readonly dataDir: string;
-  readonly llmText: (opts: LlmTextOptions) => Promise<string>;
-  readonly prompts: Parameters<typeof runReceiptInspector>[0]["prompts"];
-  readonly promptHash: string;
-  readonly promptPath: string;
-  readonly model: string;
   readonly sse: SseHub;
   readonly enqueueJob: (job: EnqueueJobInput) => Promise<void>;
 };
+
+const INSPECTOR_STREAM = "agents/inspector";
 
 const formatInspectorAgentName = (agentName?: string, mode?: InspectorMode): string => {
   if (agentName?.trim()) return agentName.trim();
@@ -262,8 +256,8 @@ const buildReceiptChatItems = (
   return items;
 };
 
-export const createInspectorManifest = (deps: InspectorManifestDeps): InspectorAgentManifest => {
-  const { runtime, dataDir, llmText, prompts, promptHash, promptPath, model, sse, enqueueJob } = deps;
+export const createInspectorRoute = (deps: InspectorRouteDeps): AgentRouteModule => {
+  const { runtime, dataDir, sse, enqueueJob } = deps;
 
   return {
     id: "receipt-inspector",
@@ -299,7 +293,7 @@ export const createInspectorManifest = (deps: InspectorManifestDeps): InspectorA
       app.get("/receipt/island/chat", async (c) => {
         const file = c.req.query("file") ?? "";
         if (!file) return html(receiptChatHtml({ selected: undefined, items: [] }));
-        const inspectorChain = await runtime.chain("inspector");
+        const inspectorChain = await runtime.chain(INSPECTOR_STREAM);
         const items = buildReceiptChatItems(inspectorChain, file);
         return html(receiptChatHtml({ selected: file, items }));
       });
@@ -332,7 +326,7 @@ export const createInspectorManifest = (deps: InspectorManifestDeps): InspectorA
         try {
           const records = await readReceiptFile(dataDir, selected.name);
           const slice = sliceReceiptRecords(records, order, limit);
-          const inspectorChain = await runtime.chain("inspector");
+          const inspectorChain = await runtime.chain(INSPECTOR_STREAM);
           const snapshot = buildInspectorSnapshot(inspectorChain, selected.name);
           const timeline = buildReceiptTimeline(records, depth);
           const context = snapshot.context ?? {
@@ -405,7 +399,7 @@ export const createInspectorManifest = (deps: InspectorManifestDeps): InspectorA
             maxAttempts: 2,
             payload: {
               kind: "inspector.run",
-              stream: "inspector",
+              stream: INSPECTOR_STREAM,
               runId,
               groupId,
               agentId: agent.id,
@@ -433,3 +427,13 @@ export const createInspectorManifest = (deps: InspectorManifestDeps): InspectorA
     },
   };
 };
+
+const factory: AgentModuleFactory = (ctx: AgentLoaderContext): AgentRouteModule =>
+  createInspectorRoute({
+    runtime: ctx.runtimes.inspector as Runtime<InspectorCmd, InspectorEvent, InspectorState>,
+    dataDir: ctx.dataDir,
+    sse: ctx.sse,
+    enqueueJob: ctx.enqueueJob,
+  });
+
+export default factory;

@@ -55,17 +55,18 @@ import { theoremRunStream } from "./agents/theorem.streams.js";
 import { writerRunStream } from "./agents/writer.streams.js";
 import { agentRunStream } from "./agents/agent.streams.js";
 import { runReceiptInspector } from "./agents/inspector.js";
-import { listReceiptFiles, readReceiptFile, sliceReceiptRecords, buildReceiptContext, buildReceiptTimeline } from "./adapters/receipt-tools.js";
-import { createAgentRegistry } from "./framework/registry.js";
-import { compileRoutes } from "./framework/route-compiler.js";
+import {
+  assertReceiptFileName,
+  listReceiptFiles,
+  readReceiptFile,
+  sliceReceiptRecords,
+  buildReceiptContext,
+  buildReceiptTimeline,
+} from "./adapters/receipt-tools.js";
+import { loadAgentRoutes } from "./framework/agent-loader.js";
 import { SseHub } from "./framework/sse-hub.js";
 import { makeEventId, text } from "./framework/http.js";
-import { createTodoManifest } from "./agents/todo.manifest.js";
-import { createTheoremManifest } from "./agents/theorem.manifest.js";
-import { createWriterManifest } from "./agents/writer.manifest.js";
-import { createInspectorManifest } from "./agents/inspector.manifest.js";
-import { createAgentManifest } from "./agents/agent.manifest.js";
-import { JobWorker, type JobHandler, type JobExecutionContext } from "./engine/runtime/job-worker.js";
+import { JobWorker, type JobHandler } from "./engine/runtime/job-worker.js";
 import { evaluateImprovementProposal } from "./engine/runtime/improvement-harness.js";
 
 // ============================================================================
@@ -156,26 +157,27 @@ const memoryRuntime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
 
 const THEOREM_PROMPTS = loadTheoremPrompts();
 const THEOREM_PROMPTS_HASH = hashTheoremPrompts(THEOREM_PROMPTS);
-const THEOREM_PROMPTS_PATH = process.env.THEOREM_PROMPTS_PATH ?? "prompts/theorem.prompts.json";
+const THEOREM_PROMPTS_PATH = "prompts/theorem.prompts.json";
 const THEOREM_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
 const WRITER_PROMPTS = loadWriterPrompts();
 const WRITER_PROMPTS_HASH = hashWriterPrompts(WRITER_PROMPTS);
-const WRITER_PROMPTS_PATH = process.env.WRITER_PROMPTS_PATH ?? "prompts/writer.prompts.json";
+const WRITER_PROMPTS_PATH = "prompts/writer.prompts.json";
 const WRITER_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
 const INSPECTOR_PROMPTS = loadInspectorPrompts();
 const INSPECTOR_PROMPTS_HASH = hashInspectorPrompts(INSPECTOR_PROMPTS);
-const INSPECTOR_PROMPTS_PATH = process.env.INSPECTOR_PROMPTS_PATH ?? "prompts/inspector.prompts.json";
+const INSPECTOR_PROMPTS_PATH = "prompts/inspector.prompts.json";
 const INSPECTOR_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
 const AGENT_PROMPTS = loadAgentPrompts();
 const AGENT_PROMPTS_HASH = hashAgentPrompts(AGENT_PROMPTS);
-const AGENT_PROMPTS_PATH = process.env.AGENT_PROMPTS_PATH ?? "prompts/agent.prompts.json";
+const AGENT_PROMPTS_PATH = "prompts/agent.prompts.json";
 const AGENT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
 const JOB_STREAM = "jobs";
 const IMPROVEMENT_STREAM = "improvement";
+const INSPECTOR_STREAM = "agents/inspector";
 const jobWorkerId = process.env.JOB_WORKER_ID ?? `worker_${process.pid}`;
 const jobPollMs = Number(process.env.JOB_POLL_MS ?? 250);
 const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 30_000);
@@ -301,7 +303,7 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
   };
 
 const theoremRunner = createAgentRunner({
-  defaultStream: "theorem", sseTopic: "theorem", sseTokenEvent: "theorem-token",
+  defaultStream: "agents/theorem", sseTopic: "theorem", sseTokenEvent: "theorem-token",
   normalizeConfig: normalizeTheoremConfig, runtime: theoremRuntime,
   prompts: THEOREM_PROMPTS, model: THEOREM_MODEL,
   promptHash: THEOREM_PROMPTS_HASH, promptPath: THEOREM_PROMPTS_PATH,
@@ -309,7 +311,7 @@ const theoremRunner = createAgentRunner({
 });
 
 const writerRunner = createAgentRunner({
-  defaultStream: "writer", sseTopic: "writer", sseTokenEvent: "writer-token",
+  defaultStream: "agents/writer", sseTopic: "writer", sseTokenEvent: "writer-token",
   normalizeConfig: normalizeWriterConfig, runtime: writerRuntime,
   prompts: WRITER_PROMPTS, model: WRITER_MODEL,
   promptHash: WRITER_PROMPTS_HASH, promptPath: WRITER_PROMPTS_PATH,
@@ -342,7 +344,7 @@ const delegationTools = createDelegationTools({
 });
 
 const agentRunner = createAgentRunner({
-  defaultStream: "agent", sseTopic: "agent", sseTokenEvent: "agent-token",
+  defaultStream: "agents/agent", sseTopic: "agent", sseTokenEvent: "agent-token",
   normalizeConfig: normalizeAgentConfig, runtime: agentRuntime,
   prompts: AGENT_PROMPTS, model: AGENT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
@@ -375,14 +377,15 @@ const inspectorRunner = async (payload: Record<string, unknown>): Promise<void> 
   const apiReady = typeof payload.apiReady === "boolean" ? payload.apiReady : Boolean(process.env.OPENAI_API_KEY);
   const apiNote = typeof payload.apiNote === "string" ? payload.apiNote : (apiReady ? undefined : "OPENAI_API_KEY not set");
   if (!sourceName) throw new Error("inspector source file required");
+  const safeSourceName = await ensureInspectorSourceExists(sourceName);
 
   await runReceiptInspector({
-    stream: "inspector",
+    stream: INSPECTOR_STREAM,
     runId,
     groupId,
     agentId,
     agentName,
-    source: { kind: "file", name: sourceName },
+    source: { kind: "file", name: safeSourceName },
     dataDir: DATA_DIR,
     order,
     limit,
@@ -399,7 +402,7 @@ const inspectorRunner = async (payload: Record<string, unknown>): Promise<void> 
           "receipt",
           undefined,
           "receipt-token",
-          JSON.stringify({ groupId, runId, agentId, file: sourceName, delta })
+          JSON.stringify({ groupId, runId, agentId, file: safeSourceName, delta })
         );
       },
     }),
@@ -591,25 +594,25 @@ const worker = new JobWorker({
   concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 2)),
   handlers: {
     theorem: createWorkerHandler({
-      defaultStream: "theorem", defaultAgentId: "theorem", kind: "theorem.run",
+      defaultStream: "agents/theorem", defaultAgentId: "theorem", kind: "theorem.run",
       defaultSubConfig: { rounds: 1, maxDepth: 1, memoryWindow: 40, branchThreshold: 2 },
       runtime: theoremRuntime, runStreamFn: theoremRunStream, runner: theoremRunner,
     }),
     writer: createWorkerHandler({
-      defaultStream: "writer", defaultAgentId: "writer", kind: "writer.run",
+      defaultStream: "agents/writer", defaultAgentId: "writer", kind: "writer.run",
       defaultSubConfig: { maxParallel: 1 },
       runtime: writerRuntime, runStreamFn: writerRunStream, runner: writerRunner,
       mergeEventExtras: { stepId: "delegate_task" },
     }),
     agent: createWorkerHandler({
-      defaultStream: "agent", defaultAgentId: "agent", kind: "agent.run",
+      defaultStream: "agents/agent", defaultAgentId: "agent", kind: "agent.run",
       defaultSubConfig: { maxIterations: 3, maxToolOutputChars: 2500, memoryScope: "agent", workspace: "." },
       runtime: agentRuntime, runStreamFn: agentRunStream, runner: agentRunner,
     }),
     inspector: async (job, ctx) => {
       await ctx.pullCommands(["steer", "follow_up"]);
       await inspectorRunner(job.payload);
-      return { ok: true, result: { runId: job.payload.runId as string | undefined, stream: "inspector" } };
+      return { ok: true, result: { runId: job.payload.runId as string | undefined, stream: INSPECTOR_STREAM } };
     },
   },
 });
@@ -655,54 +658,6 @@ const heartbeats = parseHeartbeatSpecs().map((spec) =>
 );
 for (const hb of heartbeats) hb.start();
 
-// ============================================================================
-// Manifest Registry + Routes
-// ============================================================================
-
-const registry = createAgentRegistry([
-  createTodoManifest({ runtime, sse }),
-  createTheoremManifest({
-    runtime: theoremRuntime,
-    llmText,
-    prompts: THEOREM_PROMPTS,
-    promptHash: THEOREM_PROMPTS_HASH,
-    promptPath: THEOREM_PROMPTS_PATH,
-    model: THEOREM_MODEL,
-    sse,
-    enqueueJob,
-  }),
-  createWriterManifest({
-    runtime: writerRuntime,
-    llmText,
-    prompts: WRITER_PROMPTS,
-    promptHash: WRITER_PROMPTS_HASH,
-    promptPath: WRITER_PROMPTS_PATH,
-    model: WRITER_MODEL,
-    sse,
-    enqueueJob,
-  }),
-  createAgentManifest({
-    runtime: agentRuntime,
-    sse,
-    enqueueJob,
-    listJobs: queue.listJobs,
-    getJob: queue.getJob,
-    queueCommand: queue.queueCommand,
-    memoryTools,
-  }),
-  createInspectorManifest({
-    runtime: inspectorRuntime,
-    dataDir: DATA_DIR,
-    llmText,
-    prompts: INSPECTOR_PROMPTS,
-    promptHash: INSPECTOR_PROMPTS_HASH,
-    promptPath: INSPECTOR_PROMPTS_PATH,
-    model: INSPECTOR_MODEL,
-    sse,
-    enqueueJob,
-  }),
-]);
-
 const app = new Hono();
 
 app.onError((err) => {
@@ -711,7 +666,53 @@ app.onError((err) => {
   return text(500, "Server error");
 });
 
-compileRoutes(app, registry);
+const routes = await loadAgentRoutes({
+  dataDir: DATA_DIR,
+  sse,
+  llmText,
+  enqueueJob,
+  queue,
+  jobRuntime,
+  runtimes: {
+    todo: runtime,
+    theorem: theoremRuntime,
+    writer: writerRuntime,
+    agent: agentRuntime,
+    inspector: inspectorRuntime,
+    selfImprovement: selfImprovementRuntime,
+    memory: memoryRuntime,
+  },
+  prompts: {
+    theorem: THEOREM_PROMPTS,
+    writer: WRITER_PROMPTS,
+    inspector: INSPECTOR_PROMPTS,
+    agent: AGENT_PROMPTS,
+  },
+  promptHashes: {
+    theorem: THEOREM_PROMPTS_HASH,
+    writer: WRITER_PROMPTS_HASH,
+    inspector: INSPECTOR_PROMPTS_HASH,
+    agent: AGENT_PROMPTS_HASH,
+  },
+  promptPaths: {
+    theorem: THEOREM_PROMPTS_PATH,
+    writer: WRITER_PROMPTS_PATH,
+    inspector: INSPECTOR_PROMPTS_PATH,
+    agent: AGENT_PROMPTS_PATH,
+  },
+  models: {
+    theorem: THEOREM_MODEL,
+    writer: WRITER_MODEL,
+    inspector: INSPECTOR_MODEL,
+    agent: AGENT_MODEL,
+  },
+  helpers: {
+    memoryTools,
+    delegationTools,
+  },
+});
+
+routes.forEach((route) => route.register(app));
 
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), {
@@ -739,10 +740,26 @@ const readJsonBody = async (req: Request): Promise<Record<string, unknown>> => {
   return parsed as Record<string, unknown>;
 };
 
+const extractInspectorSourceName = (payload: Record<string, unknown>): string => {
+  const source = payload.source;
+  if (!source || typeof source !== "object") return "";
+  const name = (source as Record<string, unknown>).name;
+  return typeof name === "string" ? name : "";
+};
+
+const ensureInspectorSourceExists = async (rawSourceName: string): Promise<string> => {
+  const sourceName = assertReceiptFileName(rawSourceName);
+  const files = await listReceiptFiles(DATA_DIR);
+  if (!files.some((file) => file.name === sourceName)) {
+    throw new Error("inspector source file not found");
+  }
+  return sourceName;
+};
+
 app.post("/agents/:id/jobs", async (c) => {
   const agentId = c.req.param("id");
   const body = await readJsonBody(c.req.raw);
-  const payload = (typeof body.payload === "object" && body.payload)
+  let payload = (typeof body.payload === "object" && body.payload)
     ? body.payload as Record<string, unknown>
     : body;
   const lane = body.lane === "steer" || body.lane === "follow_up" || body.lane === "collect"
@@ -763,6 +780,26 @@ app.post("/agents/:id/jobs", async (c) => {
     : (singleton?.mode === "allow" || singleton?.mode === "cancel" || singleton?.mode === "steer"
       ? singleton.mode
       : "allow");
+
+  const payloadKind = typeof payload.kind === "string" ? payload.kind : "";
+  const isInspector = agentId === "inspector" || payloadKind === "inspector.run";
+  if (isInspector) {
+    const sourceName = extractInspectorSourceName(payload);
+    if (!sourceName) return text(400, "inspector source file required");
+    let safeSourceName: string;
+    try {
+      safeSourceName = await ensureInspectorSourceExists(sourceName);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("not found")) return text(404, "inspector source file not found");
+      return text(400, message);
+    }
+    payload = {
+      ...payload,
+      stream: INSPECTOR_STREAM,
+      source: { kind: "file", name: safeSourceName },
+    };
+  }
 
   const job = await queue.enqueue({
     jobId,

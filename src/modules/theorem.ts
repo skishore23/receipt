@@ -216,6 +216,31 @@ export type TheoremEvent =
       readonly note?: string;
     }
   | {
+      readonly type: "merge.evidence.computed";
+      readonly runId: string;
+      readonly agentId?: AgentId;
+      readonly mergePolicyId: string;
+      readonly mergePolicyVersion: string;
+      readonly note?: string;
+    }
+  | {
+      readonly type: "merge.candidate.scored";
+      readonly runId: string;
+      readonly agentId?: AgentId;
+      readonly mergePolicyId: string;
+      readonly candidateId: string;
+      readonly score: Readonly<Record<string, number>>;
+    }
+  | {
+      readonly type: "merge.applied";
+      readonly runId: string;
+      readonly agentId?: AgentId;
+      readonly mergePolicyId: string;
+      readonly mergePolicyVersion: string;
+      readonly candidateId: string;
+      readonly reason?: string;
+    }
+  | {
       readonly type: "solution.finalized";
       readonly runId: string;
       readonly agentId: AgentId;
@@ -432,6 +457,19 @@ export const reduce: Reducer<TheoremState, TheoremEvent> = (state, event, ts) =>
           bracket: event.bracket,
           score: event.score,
           note: event.note,
+          updatedAt: ts,
+        },
+      };
+    case "merge.evidence.computed":
+    case "merge.candidate.scored":
+      return state;
+    case "merge.applied":
+      return {
+        ...state,
+        rebracket: {
+          bracket: event.candidateId,
+          score: state.rebracket?.score ?? 0,
+          note: event.reason ?? state.rebracket?.note,
           updatedAt: ts,
         },
       };

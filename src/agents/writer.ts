@@ -5,9 +5,9 @@
 import type { Runtime } from "../core/runtime.js";
 import type { WriterCmd, WriterEvent, WriterState } from "../modules/writer.js";
 import { renderPrompt, type WriterPromptConfig } from "../prompts/writer.js";
-import { clampNumber, parseFormNum, type AgentRunCommand, type AgentRunControl, createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
+import { clampNumber, parseFormNum, type AgentRunControl, createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
 import { runReceiptPlanner, type CapabilitySpec, type PlanSpec } from "../engine/runtime/planner.js";
-import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
+import { defineAgent, runDefinedAgent } from "../sdk/agent.js";
 import { WRITER_WORKFLOW_ID, WRITER_WORKFLOW_VERSION, WRITER_TEAM, WRITER_EXAMPLES } from "./writer.constants.js";
 import { writerBranchStream, writerRunStream } from "./writer.streams.js";
 import { reduce as reduceWriter, initial as initialWriter } from "../modules/writer.js";
@@ -20,7 +20,6 @@ export type WriterRunConfig = {
   readonly maxParallel: number;
 };
 
-export type WriterRunCommand = AgentRunCommand;
 export type WriterRunControl = AgentRunControl;
 
 export const WRITER_DEFAULT_CONFIG: WriterRunConfig = {
@@ -637,7 +636,7 @@ const WRITER_WORKFLOW: WorkflowSpec<WriterWorkflowDeps, WriterWorkflowConfig, Wr
   },
 };
 
-const WRITER_RECEIPT_RUNTIME = defineReceiptAgent<
+const WRITER_RECEIPT_RUNTIME = defineAgent<
   WriterCmd,
   WriterWorkflowDeps,
   WriterEvent,
@@ -680,7 +679,7 @@ export const runWriterGuild = async (input: WriterRunInput): Promise<void> => {
   });
 
   try {
-    await runReceiptAgent({
+    await runDefinedAgent({
       spec: WRITER_RECEIPT_RUNTIME,
       ctx: {
         stream: runStream,

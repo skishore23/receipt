@@ -7,7 +7,7 @@ import type { AgentCmd, AgentEvent, AgentState } from "../modules/agent.js";
 import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent.js";
 import { html, text, toFormRecord } from "../framework/http.js";
 import { agentRunFormSchema } from "../framework/schemas.js";
-import type { RunAgentManifest } from "../framework/manifest.js";
+import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import type { RuntimeOp } from "../framework/translators.js";
 import { executeRuntimeOps } from "../framework/translators.js";
 import { SseHub } from "../framework/sse-hub.js";
@@ -17,7 +17,7 @@ import { esc as escapeHtml, truncate } from "../views/agent-framework.js";
 import { agentRunStream } from "./agent.streams.js";
 import { getLatestAgentRunId, parseAgentConfig } from "./agent.js";
 
-type AgentManifestDeps = {
+type MonitorRouteDeps = {
   readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly sse: SseHub;
   readonly enqueueJob: (job: EnqueueJobInput) => Promise<void>;
@@ -138,7 +138,6 @@ const redirectResponse = (
 const AGENT_IDS = ["theorem", "writer", "agent", "inspector"] as const;
 
 const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): string => {
-  const stream = escapeHtml(opts.stream);
   return `<!doctype html>
 <html>
 <head>
@@ -1149,7 +1148,7 @@ export const translateAgentRunStartIntent = (
   ];
 };
 
-export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest => {
+export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => {
   const { runtime, sse, enqueueJob, listJobs, getJob, queueCommand } = deps;
 
   return {
@@ -1171,7 +1170,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
     },
     register: (app: Hono) => {
       const shellHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const runParam = c.req.query("run");
         const jobParam = c.req.query("job");
         const chain = await runtime.chain(stream);
@@ -1182,7 +1181,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const logIslandHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const runParam = c.req.query("run");
         const indexChain = await runtime.chain(stream);
         const latest = getLatestAgentRunId(indexChain);
@@ -1290,7 +1289,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const jobIslandHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const run = c.req.query("run")?.trim();
         const requested = c.req.query("job")?.trim();
         const uiBase = "/monitor";
@@ -1405,7 +1404,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const activityIslandHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const chain = await runtime.chain(stream);
         const recent = chain.slice(-40).reverse();
         if (recent.length === 0) {
@@ -1424,7 +1423,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const memoryIslandHandler = async (c: Context) => {
-        const scope = c.req.query("scope") ?? "agent";
+        const scope = c.req.query("scope") ?? "agents/agent";
         const query = c.req.query("query")?.trim();
         const memory = deps.memoryTools;
         if (!memory) {
@@ -1451,7 +1450,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const runHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const formRaw = toFormRecord(await c.req.parseBody());
         const problem = formRaw.problem?.trim() ?? "";
         if (!problem) return text(400, "problem required");
@@ -1486,7 +1485,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const steerHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const run = c.req.query("run")?.trim();
         const viaFetch = c.req.header("X-Requested-With") === "fetch";
         const form = toFormRecord(await c.req.parseBody());
@@ -1502,6 +1501,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
         if (Object.keys(payload).length === 0) return text(400, "provide problem and/or config");
 
         const jobId = c.req.param("id");
+        if (!jobId) return text(400, "job id required");
         const queued = await queueCommand({
           jobId,
           command: "steer",
@@ -1517,13 +1517,14 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const followUpHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const run = c.req.query("run")?.trim();
         const viaFetch = c.req.header("X-Requested-With") === "fetch";
         const form = toFormRecord(await c.req.parseBody());
         const note = form.note?.trim();
         if (!note) return text(400, "note required");
         const jobId = c.req.param("id");
+        if (!jobId) return text(400, "job id required");
         const queued = await queueCommand({
           jobId,
           command: "follow_up",
@@ -1539,12 +1540,13 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const abortHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         const run = c.req.query("run")?.trim();
         const viaFetch = c.req.header("X-Requested-With") === "fetch";
         const form = toFormRecord(await c.req.parseBody());
         const reason = form.reason?.trim() || "abort requested";
         const jobId = c.req.param("id");
+        if (!jobId) return text(400, "job id required");
         const queued = await queueCommand({
           jobId,
           command: "abort",
@@ -1560,7 +1562,7 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
       };
 
       const streamHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agent";
+        const stream = c.req.query("stream") ?? "agents/agent";
         return sse.subscribe("agent", stream, c.req.raw.signal);
       };
 
@@ -1585,3 +1587,16 @@ export const createAgentManifest = (deps: AgentManifestDeps): RunAgentManifest =
     },
   };
 };
+
+const factory: AgentModuleFactory = (ctx: AgentLoaderContext): AgentRouteModule =>
+  createMonitorRoute({
+    runtime: ctx.runtimes.agent as Runtime<AgentCmd, AgentEvent, AgentState>,
+    sse: ctx.sse,
+    enqueueJob: ctx.enqueueJob,
+    listJobs: ctx.queue.listJobs,
+    getJob: ctx.queue.getJob,
+    queueCommand: ctx.queue.queueCommand,
+    memoryTools: ctx.helpers?.memoryTools as MemoryTools | undefined,
+  });
+
+export default factory;

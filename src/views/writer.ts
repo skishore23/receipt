@@ -254,6 +254,7 @@ export const writerShell = (
     .run-area { margin-top: 16px; display: grid; gap: 16px; }
     .travel-island {
       margin-top: 16px;
+      margin-bottom: 20px;
       min-height: 90px;
       border-radius: 14px;
       border: 1px solid rgba(255,204,128,0.3);

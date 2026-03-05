@@ -13,7 +13,30 @@ export type ReceiptFileInfo = {
 
 export type ReceiptRecord = {
   readonly raw: string;
-  readonly data?: any;
+  readonly data?: Record<string, unknown>;
+};
+
+const hasPathSeparator = (name: string): boolean =>
+  name.includes("/") || name.includes("\\");
+
+export const assertReceiptFileName = (name: string): string => {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("receipt file name required");
+  if (path.isAbsolute(trimmed)) throw new Error("absolute receipt file paths are not allowed");
+  if (trimmed.includes("..")) throw new Error("parent traversal is not allowed for receipt file names");
+  if (hasPathSeparator(trimmed)) throw new Error("receipt file name must not include path separators");
+  if (!trimmed.endsWith(".jsonl")) throw new Error("receipt file must end with .jsonl");
+  return trimmed;
+};
+
+const resolveReceiptFilePath = (dir: string, name: string): string => {
+  const safeName = assertReceiptFileName(name);
+  const baseDir = path.resolve(dir);
+  const file = path.resolve(baseDir, safeName);
+  if (!file.startsWith(`${baseDir}${path.sep}`)) {
+    throw new Error("receipt file path escapes data directory");
+  }
+  return file;
 };
 
 export const listReceiptFiles = async (dir: string): Promise<ReceiptFileInfo[]> => {
@@ -31,11 +54,15 @@ export const listReceiptFiles = async (dir: string): Promise<ReceiptFileInfo[]> 
 };
 
 export const readReceiptFile = async (dir: string, name: string): Promise<ReceiptRecord[]> => {
-  const file = path.join(dir, name);
+  const file = resolveReceiptFilePath(dir, name);
   const raw = await fs.promises.readFile(file, "utf-8");
   return raw.split("\n").filter(Boolean).map((line) => {
     try {
-      return { raw: line, data: JSON.parse(line) };
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { raw: line, data: parsed as Record<string, unknown> };
+      }
+      return { raw: line };
     } catch {
       return { raw: line };
     }
@@ -71,7 +98,10 @@ export const buildReceiptTimeline = (
   const buckets: Array<{ label: string; count: number }> = [];
   const index = new Map<string, number>();
   for (const r of records) {
-    const body = r.data?.body;
+    const rawBody = r.data?.body;
+    const body = (rawBody && typeof rawBody === "object" && !Array.isArray(rawBody))
+      ? rawBody as Record<string, unknown>
+      : undefined;
     const type = typeof body?.type === "string" ? body.type : "receipt";
     const prefix = type.split(".")[0] || type;
     const agentId = typeof body?.agentId === "string"

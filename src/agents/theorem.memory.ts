@@ -104,6 +104,9 @@ const TYPE_SCORE: Readonly<Record<TheoremEvent["type"], number>> = {
   "agent.status": 0,
   "verification.report": 2.2,
   "rebracket.applied": 0,
+  "merge.evidence.computed": 0,
+  "merge.candidate.scored": 0,
+  "merge.applied": 0,
   "solution.finalized": 0,
 };
 

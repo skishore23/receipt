@@ -7,8 +7,8 @@ import type { TheoremCmd, TheoremEvent, TheoremState } from "../modules/theorem.
 import { reduce as reduceTheorem, initial as initialTheorem } from "../modules/theorem.js";
 import { renderPrompt, type TheoremPromptConfig } from "../prompts/theorem.js";
 
-import { clampNumber, parseFormNum, type AgentRunCommand, type AgentRunControl, createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
-import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
+import { clampNumber, parseFormNum, type AgentRunControl, createQueuedEmitter, type EmitFn, type RunLifecycle, type WorkflowSpec } from "../engine/runtime/workflow.js";
+import { defineAgent, runDefinedAgent } from "../sdk/agent.js";
 import {
   THEOREM_WORKFLOW_ID,
   THEOREM_WORKFLOW_VERSION,
@@ -52,6 +52,7 @@ import {
 } from "./theorem.structured.js";
 import { buildMemorySlice, memoryBudget, type MemoryPhase } from "./theorem.memory.js";
 import { theoremBranchStream, theoremRunStream } from "./theorem.streams.js";
+import { theoremMergePolicy } from "../engine/merge/theorem-policy.js";
 
 // ============================================================================
 // Types
@@ -64,7 +65,6 @@ export type TheoremRunConfig = {
   readonly branchThreshold: number;
 };
 
-export type TheoremRunCommand = AgentRunCommand;
 export type TheoremRunControl = AgentRunControl;
 
 export const THEOREM_DEFAULT_CONFIG: TheoremRunConfig = {
@@ -982,10 +982,44 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
 
       const chainAfterRound = await loadCombinedChain();
       const runSlice = sliceTheoremChain(chainAfterRound, runId);
+      const mergeCtx = {
+        chain: runSlice,
+        round,
+        branchThreshold,
+        currentBracket,
+      } as const;
+      const mergeEvidence = theoremMergePolicy.evidence(mergeCtx);
+      await emit({
+        type: "merge.evidence.computed",
+        runId,
+        agentId: "orchestrator",
+        mergePolicyId: theoremMergePolicy.id,
+        mergePolicyVersion: theoremMergePolicy.version,
+        note: mergeEvidence.note,
+      });
+      const mergeScored = theoremMergePolicy
+        .candidates(mergeCtx)
+        .map((candidate) => ({
+          candidate,
+          score: theoremMergePolicy.score(candidate, mergeEvidence, mergeCtx),
+        }));
+      for (const scored of mergeScored) {
+        await emit({
+          type: "merge.candidate.scored",
+          runId,
+          agentId: "orchestrator",
+          mergePolicyId: theoremMergePolicy.id,
+          candidateId: scored.candidate.id,
+          score: scored.score,
+        });
+      }
+
       const evidence = evaluateRoundRebracketEvidence(runSlice, round, branchThreshold);
+      let mergeReason = "rotation skipped";
       if (evidence.shouldRebracket) {
         const rotation = pickBestBracket(runSlice, currentBracket);
         currentBracket = rotation.bracket;
+        mergeReason = rotation.note;
         await emit({
           type: "rebracket.applied",
           runId,
@@ -1004,6 +1038,15 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
           note: `Rotation skipped (${evidence.note}${memoryTruncated ? "; memory truncated" : "; memory stable"})`,
         });
       }
+      await emit({
+        type: "merge.applied",
+        runId,
+        agentId: "orchestrator",
+        mergePolicyId: theoremMergePolicy.id,
+        mergePolicyVersion: theoremMergePolicy.version,
+        candidateId: currentBracket,
+        reason: mergeReason,
+      });
 
       if (stopAfterRound) break;
     }
@@ -1175,7 +1218,7 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
   },
 };
 
-const THEOREM_RECEIPT_RUNTIME = defineReceiptAgent<
+const THEOREM_RECEIPT_RUNTIME = defineAgent<
   TheoremCmd,
   TheoremWorkflowDeps,
   TheoremEvent,
@@ -1217,7 +1260,7 @@ export const runTheoremGuild = async (input: TheoremRunInput): Promise<void> => 
   });
 
   try {
-    await runReceiptAgent({
+    await runDefinedAgent({
       spec: THEOREM_RECEIPT_RUNTIME,
       ctx: {
         stream: runStream,

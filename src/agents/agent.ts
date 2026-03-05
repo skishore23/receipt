@@ -8,10 +8,9 @@ import { spawn } from "node:child_process";
 
 import type { Chain } from "../core/types.js";
 import type { Runtime } from "../core/runtime.js";
-import { clampNumber, parseFormNum, type AgentRunCommand, type AgentRunControl, createQueuedEmitter, getLatestRunId } from "../engine/runtime/workflow.js";
+import { clampNumber, parseFormNum, type AgentRunControl, createQueuedEmitter, getLatestRunId } from "../engine/runtime/workflow.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
 import type { AgentCmd, AgentEvent, AgentState, AgentToolName } from "../modules/agent.js";
-import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent.js";
 import { agentRunStream } from "./agent.streams.js";
 import type { DelegationTools } from "../adapters/delegation.js";
 import type { AgentPromptConfig } from "../prompts/agent.js";
@@ -33,12 +32,6 @@ export const AGENT_DEFAULT_CONFIG: AgentRunConfig = {
   memoryScope: "agent",
   workspace: ".",
 };
-
-export const AGENT_EXAMPLES: ReadonlyArray<string> = [
-  "Find TODO items in this repo and propose a prioritized fix plan.",
-  "Inspect src/server.ts and summarize queue APIs, then suggest two improvements.",
-  "Run smoke tests and explain any failures with concrete next actions.",
-];
 
 export const normalizeAgentConfig = (input: Partial<AgentRunConfig>): AgentRunConfig => ({
   maxIterations: clampNumber(
@@ -482,8 +475,13 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
   const model = input.model;
   const prompts = input.prompts;
   const control = input.control;
+  const resolvedWorkspaceRoot = path.resolve(
+    path.isAbsolute(input.config.workspace)
+      ? input.config.workspace
+      : path.join(input.workspaceRoot, input.config.workspace)
+  );
   const tools = createTools({
-    workspaceRoot: input.workspaceRoot,
+    workspaceRoot: resolvedWorkspaceRoot,
     defaultMemoryScope: input.config.memoryScope,
     maxToolOutputChars: input.config.maxToolOutputChars,
     memoryTools: input.memoryTools,
@@ -529,18 +527,13 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
     let memoryScope = input.config.memoryScope;
     let finalized = false;
 
-    const workspaceRoot = path.resolve(
-      path.isAbsolute(input.config.workspace)
-        ? input.config.workspace
-        : path.join(input.workspaceRoot, input.config.workspace)
-    );
-    if (!fs.existsSync(workspaceRoot)) {
+    if (!fs.existsSync(resolvedWorkspaceRoot)) {
       await emit({
         type: "run.status",
         runId: input.runId,
         status: "failed",
         agentId: "orchestrator",
-        note: `workspace does not exist: ${workspaceRoot}`,
+        note: `workspace does not exist: ${resolvedWorkspaceRoot}`,
       }, true);
       return;
     }
@@ -774,7 +767,7 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
         problem,
         iteration: String(iteration),
         maxIterations: String(maxIterations),
-        workspace: workspaceRoot,
+        workspace: resolvedWorkspaceRoot,
         transcript: transcriptText || "(no prior steps)",
         memory: memorySummary.summary || "(empty)",
       });

@@ -10,13 +10,9 @@ export type TheoremPromptConfig = {
   readonly user: Record<string, string>;
 };
 
-const emptyPrompts: TheoremPromptConfig = { system: {}, user: {} };
-
 export const loadTheoremPrompts = (): TheoremPromptConfig =>
   loadPromptConfig<TheoremPromptConfig>({
     name: "theorem",
-    overridePath: process.env.THEOREM_PROMPTS_PATH,
-    empty: emptyPrompts,
     tag: "theorem",
   });
 

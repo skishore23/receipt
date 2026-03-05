@@ -30,13 +30,13 @@ import {
 } from "../views/writer.js";
 import { html, makeEventId, parseAt, parseBranch, text, toFormRecord } from "../framework/http.js";
 import { writerRunFormSchema } from "../framework/schemas.js";
-import type { RunAgentManifest } from "../framework/manifest.js";
+import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import type { RuntimeOp } from "../framework/translators.js";
 import { executeRuntimeOps } from "../framework/translators.js";
 import { SseHub } from "../framework/sse-hub.js";
 import type { EnqueueJobInput } from "../adapters/jsonl-queue.js";
 
-type WriterManifestDeps = {
+type WriterRouteDeps = {
   readonly runtime: Runtime<WriterCmd, WriterEvent, WriterState>;
   readonly llmText: (opts: LlmTextOptions) => Promise<string>;
   readonly prompts: Parameters<typeof runWriterGuild>[0]["prompts"];
@@ -124,8 +124,8 @@ export const translateWriterRunStartIntent = (
   return ops;
 };
 
-export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest => {
-  const { runtime, enqueueJob, llmText, prompts, promptHash, promptPath, model, sse } = deps;
+export const createWriterRoute = (deps: WriterRouteDeps): AgentRouteModule => {
+  const { runtime, enqueueJob, sse } = deps;
 
   const loadWriterRunChain = async (
     baseStream: string,
@@ -187,6 +187,11 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
     return Math.max(fallback, runChainLength + resumeDeltaCount);
   };
 
+  const buildTravelStepTotal = (chain: Awaited<ReturnType<typeof runtime.chain>>): number => {
+    const steps = buildWriterSteps(chain);
+    return steps.length > 0 ? steps.length : chain.length;
+  };
+
   return {
     id: "writer",
     kind: "run",
@@ -202,7 +207,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
     },
     register: (app: Hono) => {
       app.get("/writer", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -214,7 +219,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       });
 
       app.get("/writer/island/folds", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
         const at = parseAt(c.req.query("at"));
@@ -233,7 +238,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       });
 
       app.get("/writer/island/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -243,8 +248,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
         const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
         if (!activeRun) return html(writerTravelHtml({ stream, at: null, total: 0 }));
         const runData = await loadWriterRunChain(stream, activeRun, branchParam);
-        const steps = buildWriterSteps(runData.chain);
-        const totalSteps = Math.max(steps.length, runData.chain.length);
+        const totalSteps = buildTravelStepTotal(runData.chain);
         return html(writerTravelHtml({
           stream,
           runId: activeRun,
@@ -255,7 +259,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       });
 
       app.get("/writer/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -276,8 +280,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
         }));
 
         const runData = await loadWriterRunChain(stream, activeRun, branchParam);
-        const steps = buildWriterSteps(runData.chain);
-        const totalSteps = Math.max(steps.length, runData.chain.length);
+        const totalSteps = buildTravelStepTotal(runData.chain);
         const normalizedAt = at === null ? null : Math.max(0, Math.min(at, totalSteps));
         const viewAt = normalizedAt !== null && normalizedAt < totalSteps ? normalizedAt : null;
         const viewChain = viewAt === null ? runData.chain : sliceWriterChainByStep(runData.chain, viewAt);
@@ -321,7 +324,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       });
 
       app.get("/writer/island/chat", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -337,7 +340,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       });
 
       app.get("/writer/island/side", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -351,8 +354,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
         const viewChain = at === null ? runData.chain : sliceWriterChainByStep(runData.chain, at);
         const state = fold(viewChain, reduceWriter, initialWriter);
         const team = WRITER_TEAM.map((agent) => ({ id: agent.id, name: agent.name }));
-        const steps = buildWriterSteps(runData.chain);
-        const totalSteps = Math.max(steps.length, runData.chain.length);
+        const totalSteps = buildTravelStepTotal(runData.chain);
         const branches = await runtime.branches();
         const activityChain = viewChain;
         return html(writerSideHtml(
@@ -376,7 +378,7 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
           if (!result.success) return text(400, "problem required");
         }),
         async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -404,9 +406,6 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
         if (!hasConfigInput && existingState?.config) {
           config = normalizeWriterConfig({ maxParallel: existingState.config.maxParallel });
         }
-
-        const apiReady = Boolean(process.env.OPENAI_API_KEY);
-        const apiNote = apiReady ? undefined : "OPENAI_API_KEY not set";
 
         const ops = translateWriterRunStartIntent({
           stream,
@@ -445,9 +444,23 @@ export const createWriterManifest = (deps: WriterManifestDeps): RunAgentManifest
       );
 
       app.get("/writer/stream", async (c) => {
-        const stream = c.req.query("stream") ?? "writer";
+        const stream = c.req.query("stream") ?? "agents/writer";
         return sse.subscribe("writer", stream, c.req.raw.signal);
       });
     },
   };
 };
+
+const factory: AgentModuleFactory = (ctx: AgentLoaderContext): AgentRouteModule =>
+  createWriterRoute({
+    runtime: ctx.runtimes.writer as Runtime<WriterCmd, WriterEvent, WriterState>,
+    llmText: ctx.llmText,
+    prompts: ctx.prompts.writer as Parameters<typeof runWriterGuild>[0]["prompts"],
+    promptHash: ctx.promptHashes.writer ?? "",
+    promptPath: ctx.promptPaths.writer ?? "prompts/writer.prompts.json",
+    model: ctx.models.writer ?? "gpt-5.2",
+    sse: ctx.sse,
+    enqueueJob: ctx.enqueueJob,
+  });
+
+export default factory;

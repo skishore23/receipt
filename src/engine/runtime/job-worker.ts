@@ -44,7 +44,6 @@ export class JobWorker {
   private readonly onError?: (error: Error) => void;
   private readonly active = new Map<string, Promise<void>>();
   private running = false;
-  private loopPromise?: Promise<void>;
 
   constructor(opts: JobWorkerOptions) {
     this.queue = opts.queue;
@@ -60,7 +59,7 @@ export class JobWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.loopPromise = this.loop().catch((err) => {
+    void this.loop().catch((err) => {
       this.running = false;
       const error = err instanceof Error ? err : new Error(String(err));
       this.onError?.(error);
@@ -148,4 +147,3 @@ export class JobWorker {
     }
   }
 }
-

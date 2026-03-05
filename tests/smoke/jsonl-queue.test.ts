@@ -28,6 +28,8 @@ test("jsonl queue: lease/retry/wait lifecycle", async () => {
       payload: { kind: "writer.run", runId: "r1" },
       maxAttempts: 2,
     });
+    const jobChain = await runtime.chain(`jobs/${job.id}`);
+    assert.equal(jobChain.length > 0, true, "per-job stream should contain lifecycle receipts");
 
     const lease1 = await queue.leaseNext({ workerId: "w1", leaseMs: 5_000 });
     assert.ok(lease1, "expected first lease");
@@ -151,6 +153,38 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
     assert.equal(steered.id, steerTarget.id);
     const commands = await queue.consumeCommands(steerTarget.id, ["steer"]);
     assert.equal(commands.length, 1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => {
+  const dir = await mkTmp("receipt-queue-authoritative");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    await runtime.execute("jobs", {
+      type: "emit",
+      eventId: "legacy-index-only",
+      event: {
+        type: "job.enqueued",
+        jobId: "legacy_only",
+        agentId: "writer",
+        lane: "collect",
+        payload: { kind: "writer.run" },
+        maxAttempts: 1,
+      },
+    });
+
+    const fromAuthoritative = await queue.getJob("legacy_only");
+    assert.equal(fromAuthoritative, undefined);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

@@ -1,213 +1,182 @@
 # Receipt Architecture
 
-This document explains how the repo is structured and how requests move through the system.
+Receipt is event-native:
 
-## 1. High-level system
+**receipts are the source of truth; state, traces, queues, and merge decisions are derived from receipts**
+
+## 1. What Receipt is
+
+Receipt is a framework for long-lived agent systems where:
+
+- facts are immutable, hash-linked, durable receipts
+- views are pure folds over receipt streams
+- actions/tools/assistants/humans emit receipts
+- control-plane decisions are receipts
+- replay reconstructs both domain state and control flow
+
+## 2. Core public model
+
+The public model is intentionally small:
+
+- define typed receipts
+- define a pure view over receipts
+- define actions that emit receipts
+- let the runtime record coordination decisions
+- replay explains everything
+
+Default SDK:
+
+- `defineAgent(...)`
+- `receipt<T>()`
+- `action(...)`
+- `assistant(...)`
+- `tool(...)`
+- `human(...)`
+- `goal(...)`
+- `merge(...)` / `rebracket(...)`
+
+## 3. System overview
 
 ```mermaid
 flowchart LR
-  U["Browser / API Client"] --> H["Hono HTTP Server"]
-  H --> R["Route Compiler + Agent Manifests"]
-  H --> J["Job Queue (receipt-native)"]
-  H --> M["SSE Hub"]
-  J --> W["Job Worker (lease poll)"]
-  W --> A["Agent Runners (theorem / writer / agent / inspector / self-improvement)"]
-  A --> MEM["Memory Tools (scoped receipt streams)"]
-  A --> DEL["Delegation Tools (agent-to-agent RPC)"]
-  DEL --> J
-  A --> RT["Receipt Runtime"]
-  RT --> S["JSONL Receipt Store"]
-  S --> V["Views / Projections"]
-  M --> U
-  HB["Heartbeat (interval enqueuer)"] --> J
+  U[CLI / HTTP / UI] --> L[Agent Loader]
+  L --> Q[Run Queue]
+  L --> RT[Agent Runtime]
+  Q --> W[Workers]
+  W --> RT
+  RT --> S[Receipt Store]
+  S --> P[Views / Projections / Trace]
+  P --> U
+  RT --> M[Memory Streams]
+  RT --> D[Delegation / Sub-runs]
+  D --> Q
 ```
 
-## 2. Core model
+## 4. Runtime semantics
 
-The architecture is receipt-native: every state change is an immutable, hash-linked record.
+Run loop:
 
-- Commands go into runtime `execute`.
-- Domain `decide` maps commands to events.
-- Events are appended as immutable, hash-linked receipts.
-- Reducers fold receipts into current state.
-- UI and APIs read from folded state and raw chains.
+1. Read run chain.
+2. Fold to current view.
+3. Evaluate action predicates.
+4. Select runnable actions deterministically.
+5. Emit control receipts.
+6. Execute action.
+7. Append domain receipts.
+8. Recompute view.
+9. Apply goal/merge policy.
+10. Repeat until settled, paused, failed, or completed.
 
-```mermaid
-flowchart TD
-  C["Command"] --> D["decide(cmd) -> events"]
-  D --> W["runtime.execute(stream, cmd)"]
-  W --> RC["receipt(stream, prevHash, event, ts)"]
-  RC --> APP["append JSONL record"]
-  APP --> F["fold(chain, reducer, initial)"]
-  F --> ST["Derived state"]
-  APP --> CH["Raw chain for replay / audit"]
+Determinism input:
+
+- receipt chain
+- agent version
+- runtime policy version
+- merge policy version
+
+## 5. Queue architecture
+
+Queue remains receipt-native.
+
+Key rule:
+
+**the queue manages runs, not every internal action**
+
+Stream families:
+
+- `jobs` (index/projection receipts)
+- `jobs/<jobId>` (authoritative job lifecycle stream)
+
+Lifecycle receipts:
+
+- `job.enqueued`
+- `job.leased`
+- `job.heartbeat`
+- `job.completed`
+- `job.failed`
+- `job.canceled`
+- `queue.command`
+- `queue.command.consumed`
+- `job.lease_expired`
+
+Lanes:
+
+- `steer`
+- `collect`
+- `follow_up`
+
+Singleton modes:
+
+- `allow`
+- `cancel`
+- `steer`
+
+## 6. Merge / rebracketing
+
+Merge policies are framework-level and optional.
+
+Policy shape:
+
+```ts
+type MergePolicy = {
+  id: string;
+  version: string;
+  shouldRecompute: (ctx: MergeCtx) => boolean;
+  candidates: (ctx: MergeCtx) => BracketCandidate[];
+  evidence: (ctx: MergeCtx) => Evidence;
+  score: (candidate: BracketCandidate, evidence: Evidence, ctx: MergeCtx) => ScoreVector;
+  choose: (scored: ScoredCandidate[]) => BracketDecision;
+};
 ```
 
-## 3. Queue model
+Merge receipts:
 
-The job queue is itself receipt-native — all queue state is derived by replaying `JobEvent`s through `src/modules/job.ts`. There is no separate queue database; the JSONL file **is** the queue.
+- `merge.evidence.computed`
+- `merge.candidate.scored`
+- `merge.applied`
 
-### Job status lifecycle
+## 7. Stream families
 
-```mermaid
-stateDiagram-v2
-  [*] --> queued: job.enqueued
-  queued --> leased: job.leased (worker claims)
-  leased --> running: job.heartbeat (first beat)
-  running --> running: job.heartbeat (extend lease)
-  running --> completed: job.completed
-  running --> queued: job.failed (willRetry=true)
-  running --> failed: job.failed (willRetry=false)
-  leased --> queued: job.lease_expired (retryable)
-  leased --> failed: job.lease_expired (not retryable)
-  queued --> canceled: job.canceled
-  running --> canceled: abort command consumed
-```
+Agent:
 
-A failed job re-enters `queued` if `attempt < maxAttempts` (max 8). Once in a terminal state (`completed | failed | canceled`) no further events are accepted — operations on terminal jobs are no-ops.
+- `agents/<agentId>`
+- `agents/<agentId>/runs/<runId>`
+- `agents/<agentId>/runs/<runId>/branches/<branchId>`
+- `agents/<agentId>/runs/<runId>/sub/<subRunId>`
 
-### Lanes and scheduling priority
+Queue:
 
-Every job has a lane. `leaseNext` sorts candidates by lane priority before timestamp:
+- `jobs`
+- `jobs/<jobId>`
 
-| Lane | Priority | Used for |
-|---|---|---|
-| `steer` | 0 (highest) | Urgent redirects sent by `singletonMode:"steer"` or `queueCommand("steer")` |
-| `collect` | 1 (normal) | Standard agent jobs (default) |
-| `follow_up` | 2 (lowest) | Continuation jobs queued after a primary finishes |
+Memory:
 
-### Singleton modes
+- `memory/<scope>`
 
-When a job is enqueued with a `sessionKey`, `singletonMode` controls what happens to existing active jobs on the same key:
+## 8. Storage and integrity
 
-| Mode | Behaviour |
-|---|---|
-| `allow` (default) | New job is always created alongside any existing jobs |
-| `cancel` | All active jobs on the session key are aborted; new job is created |
-| `steer` | The most-recent active job receives a `steer` command with the new payload; no new job is created |
+Default store: JSONL.
 
-### Lease and heartbeat mechanics
+Integrity guarantees:
 
-1. `leaseNext` atomically claims the top candidate, setting `leaseUntil = now + leaseMs` (default 30 s) and status `leased`.
-2. The worker sends the first `heartbeat` immediately, which transitions the job to `running` and resets `leaseUntil`.
-3. A `setInterval` fires every `leaseMs / 2` to keep renewing the lease while the agent runs.
-4. On the next `leaseNext` call, `handleExpiredLeases` scans all `leased`/`running` jobs — any whose `leaseUntil` has passed emits `job.lease_expired`, returning the job to `queued` for retry (or `failed` if exhausted).
+- canonical hashing
+- previous-hash linking
+- chain verification
+- idempotent event IDs
+- expected-previous-hash guards
 
-All of this is serialised through a `withLock` promise-chain so concurrent calls cannot interleave partial state.
+Projections are disposable caches.
 
-### In-flight command system
+## 9. CLI contract
 
-While a job is running, external callers can push commands onto it via `queueCommand`:
+Core commands:
 
-| Command | Lane | Effect |
-|---|---|---|
-| `steer` | `steer` | Appended to `job.commands`; agent consumes via `pullCommands` and can redirect its problem |
-| `follow_up` | `follow_up` | Appended to `job.commands`; agent picks it up as a continuation prompt |
-| `abort` | `steer` | If job is `queued`, immediately cancels. If running, sets `abortRequested`; worker checks pre/post execution and cancels |
-
-Commands are consumed (marked with `consumedAt`) atomically via `consumeCommands` so they are processed exactly once.
-
-### Execution flow (worker perspective)
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Queue
-  participant Worker
-  participant Agent
-  participant SSE
-
-  Client->>Queue: enqueue(agentId, payload, lane, sessionKey)
-  Queue->>Queue: emit job.enqueued receipt
-
-  loop every pollMs (250 ms)
-    Worker->>Queue: leaseNext()
-    Queue->>Queue: handleExpiredLeases()
-    Queue->>Queue: emit job.leased receipt
-    Worker->>Queue: heartbeat() → job.running
-    Worker->>Agent: handler(job, { pullCommands })
-    Agent->>Queue: consumeCommands() on each iteration
-    Agent-->>SSE: publish receipt events (agent-refresh)
-    Worker->>Queue: heartbeat every leaseMs/2
-    Agent->>Worker: JobExecutionResult { ok, result | error }
-    Worker->>Queue: complete() or fail() → receipt
-    Queue-->>SSE: job-refresh
-  end
-```
-
-## 4. Stream topology
-
-Each workflow keeps a small index stream plus per-run stream(s):
-
-```mermaid
-flowchart TD
-  IDX["Base stream (example: theorem)"] --> RUN["Run stream (theorem/runs/<runId>)"]
-  RUN --> BR1["Branch stream (..../branches/<branchId>)"]
-  RUN --> BR2["Branch stream (..../branches/<branchId>)"]
-  RUN --> SUB["Sub-agent stream (..../sub/<subRunId>)"]
-```
-
-- Index stream stores run-level status and discovery receipts.
-- Run stream stores run-local timeline.
-- Branch streams store forked timelines for replay and compare.
-- Sub-agent streams isolate delegated work and merge summaries back.
-
-## 5. Agent orchestration patterns
-
-### Theorem
-- Round-based workflow with attempt, critique, patch, merge, verify phases.
-- Branch-aware memory slicing (`src/agents/theorem.memory.ts`).
-- Rebracketing logic chooses merge shape (`src/agents/theorem.rebracket.ts`).
-
-### Writer
-- Planner-driven dependency graph (`src/engine/runtime/planner.ts`).
-- Step outputs are projected via state patches and final synthesis.
-
-### Agent (generic ReAct)
-- General-purpose Think/Act/Observe loop.
-- Up to `maxIterations` cycles: pull live commands (`steer` / `follow_up`), build transcript from chain, call LLM, parse `{thought, action}` JSON, dispatch tool.
-- Tool set: `ls`, `read`, `write`, `bash`, `grep`, memory tools, delegation tools, `skill.read`.
-- Context management: soft trim (14 k chars), hard prune (50 k), compaction (20 k), overflow retry.
-- Served through the `/monitor` Command Center SPA: job table, agent cards, activity feed, memory browser — all HTMX islands over SSE.
-
-### Inspector
-- Receipt analysis agent reading local JSONL artifacts and producing analysis receipts.
-
-### Self-Improvement
-- Proposal lifecycle: `created → validated → approved → applied` (or `reverted` from any state).
-- Improvement harness gates `proposal.validated` via static checks (non-empty, size ≤ 120 k chars, path safety, JSON parse if applicable) then a subprocess (`IMPROVEMENT_HARNESS_CMD` / `IMPROVEMENT_VALIDATE_CMD`, 3 min timeout). Fails fast — subprocess is skipped if any static check fails.
-- Heartbeat adapter autonomously enqueues scan jobs on `IMPROVEMENT_HEARTBEAT_MS`.
-- REST API: `GET/POST /self-improvement/proposals`, `approve`, `apply`, `revert` per proposal.
-- Artifact types: `"prompt_patch" | "policy_patch" | "harness_patch"`.
-
-## 6. Cross-cutting infrastructure
-
-### Memory tools
-- Persistent, receipt-native scoped memory backed by `memory/<scope>` streams.
-- Operations: `read`, `search` (keyword always; cosine-similarity semantic search when `embed` fn provided), `commit`, `summarize`, `diff`, `reindex`.
-- Embeddings cached to disk as `.embeddings.json` per scope; reindex rebuilds the cache.
-- Injected into every agent run; agents commit conclusions and retrieve relevant context each iteration.
-
-### Delegation tools
-- Async agent-to-agent RPC: `agent.delegate`, `agent.status`, `agent.inspect`.
-- `agent.delegate` enqueues a job for any known agent and blocks (`waitForJob`) until it settles, returning the result text (clipped to 4 000 chars).
-- `agent.status` polls `getJob(jobId)` for current status/result.
-- `agent.inspect` reads a receipt chain file to let the caller observe another agent's event history.
-- Delegated sub-jobs run in separate worker slots (async join) to prevent worker-slot deadlocks.
-
-### Heartbeat
-- `createHeartbeat(spec, deps)` returns `{ start, stop }`.
-- Fires `deps.enqueue(...)` on `setInterval` at `spec.intervalMs`.
-- On enqueue failure the interval is cleared immediately (fail-fast, no silent retry).
-
-## 7. Reliability controls
-
-- Stream-level locks in runtime prevent write races on the same stream.
-- Event IDs support idempotent emit retries.
-- Queue leases + heartbeats recover abandoned jobs — expired leases are detected on the next `leaseNext` call and the job re-enters `queued`.
-- `withLock` in the queue serialises all mutations; state is always re-read from the receipt chain after each emit.
-- Commands (`steer`, `follow_up`, `abort`) allow in-flight control of running agents without polling.
-- Prompt/context compaction receipts capture overflow handling.
-- Delegated sub-jobs use async join behavior to avoid worker-slot deadlocks.
-- Memory tools are receipt-native — memory state is always derivable by replaying the chain; no separate DB needed.
-- Improvement harness enforces a fail-fast gate before any proposal is marked `validated`; no fallback path bypasses it.
+- `receipt new <agent-id>`
+- `receipt dev`
+- `receipt run <agent-id>`
+- `receipt trace <run-id>`
+- `receipt replay <run-id>`
+- `receipt fork <run-id> --at N`
+- `receipt inspect <stream-or-run-id>`
+- `receipt jobs`
+- `receipt abort <job-id>`

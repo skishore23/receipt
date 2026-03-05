@@ -10,13 +10,9 @@ export type WriterPromptConfig = {
   readonly user: Record<string, string>;
 };
 
-const emptyPrompts: WriterPromptConfig = { system: {}, user: {} };
-
 export const loadWriterPrompts = (): WriterPromptConfig =>
   loadPromptConfig<WriterPromptConfig>({
     name: "writer",
-    overridePath: process.env.WRITER_PROMPTS_PATH,
-    empty: emptyPrompts,
     tag: "writer",
   });
 

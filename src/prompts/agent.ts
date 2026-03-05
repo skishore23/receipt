@@ -12,18 +12,9 @@ export type AgentPromptConfig = {
   };
 };
 
-const emptyPrompts: AgentPromptConfig = {
-  system: "",
-  user: {
-    loop: "",
-  },
-};
-
 export const loadAgentPrompts = (): AgentPromptConfig =>
   loadPromptConfig<AgentPromptConfig>({
     name: "agent",
-    overridePath: process.env.AGENT_PROMPTS_PATH,
-    empty: emptyPrompts,
     tag: "agent",
   });
 

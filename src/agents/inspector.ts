@@ -14,7 +14,7 @@ import { reduce as reduceInspector, initial as initialInspector } from "../modul
 import type { ReceiptRecord } from "../adapters/receipt-tools.js";
 import { renderPrompt, type InspectorPromptConfig } from "../prompts/inspector.js";
 import type { RunLifecycle, WorkflowSpec } from "../engine/runtime/workflow.js";
-import { defineReceiptAgent, runReceiptAgent } from "../engine/runtime/receipt-runtime.js";
+import { defineAgent, runDefinedAgent } from "../sdk/agent.js";
 
 // ============================================================================
 // Types
@@ -263,7 +263,7 @@ const INSPECTOR_WORKFLOW: WorkflowSpec<InspectorWorkflowDeps, InspectorWorkflowC
   },
 };
 
-const INSPECTOR_RECEIPT_RUNTIME = defineReceiptAgent<
+const INSPECTOR_RECEIPT_RUNTIME = defineAgent<
   InspectorCmd,
   InspectorWorkflowDeps,
   InspectorEvent,
@@ -318,7 +318,7 @@ export const runReceiptInspector = async (input: InspectorRunInput): Promise<voi
     if (broadcast) broadcast();
   };
 
-  await runReceiptAgent({
+  await runDefinedAgent({
     spec: INSPECTOR_RECEIPT_RUNTIME,
     ctx: {
       stream,

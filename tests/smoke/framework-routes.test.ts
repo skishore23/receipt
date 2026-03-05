@@ -96,6 +96,19 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
   try {
     const base = `http://127.0.0.1:${port}`;
     await waitForHttpOk(`${base}/`, 30_000);
+    const inspectorFixture = "fixture-inspector.jsonl";
+    await fs.writeFile(
+      path.join(dataDir, inspectorFixture),
+      `${JSON.stringify({
+        id: "r1",
+        ts: Date.now(),
+        stream: "agents/theorem/runs/demo",
+        prev: null,
+        hash: "h1",
+        body: { type: "problem.set", runId: "demo", problem: "hello", agentId: "orchestrator" },
+      })}\n`,
+      "utf-8"
+    );
 
     const notFound = await fetch(`${base}/not-real`);
     assert.equal(notFound.status, 404);
@@ -124,6 +137,57 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
     });
     assert.equal(inspectUnknownFile.status, 404);
     assert.equal(await inspectUnknownFile.text(), "file not found");
+
+    const inspectPathTraversal = await fetch(`${base}/agents/inspector/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        payload: {
+          kind: "inspector.run",
+          source: { kind: "file", name: "../secret.jsonl" },
+        },
+      }),
+    });
+    assert.equal(inspectPathTraversal.status, 400);
+
+    const inspectRunId = `inspect_${Date.now()}`;
+    const inspectEnqueue = await fetch(`${base}/agents/inspector/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        payload: {
+          kind: "inspector.run",
+          stream: "agents/inspector",
+          runId: inspectRunId,
+          groupId: inspectRunId,
+          agentId: "analyst",
+          agentName: "Analyst",
+          source: { kind: "file", name: inspectorFixture },
+          order: "desc",
+          limit: 200,
+          depth: 2,
+          question: "Inspector integration check",
+          mode: "analyze",
+          apiReady: true,
+        },
+      }),
+    });
+    assert.equal(inspectEnqueue.status, 202);
+    const inspectQueued = await inspectEnqueue.json() as { job?: { id?: string } };
+    assert.ok(inspectQueued.job?.id, "expected inspector job id");
+
+    const inspectSettled = await fetch(`${base}/jobs/${encodeURIComponent(inspectQueued.job.id!)}/wait?timeoutMs=30000`);
+    assert.equal(inspectSettled.status, 200);
+
+    const inspectorDeadline = Date.now() + 10_000;
+    let inspectorChat = "";
+    while (Date.now() < inspectorDeadline) {
+      const chatRes = await fetch(`${base}/receipt/island/chat?file=${encodeURIComponent(inspectorFixture)}`);
+      inspectorChat = await chatRes.text();
+      if (inspectorChat.includes("Inspector integration check")) break;
+      await sleep(250);
+    }
+    assert.equal(inspectorChat.includes("Inspector integration check"), true, "expected inspector chat to reflect queued inspector run");
 
     const theoremBad = await fetch(`${base}/theorem/run?stream=theorem`, {
       method: "POST",

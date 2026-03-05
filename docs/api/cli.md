@@ -1,0 +1,117 @@
+# CLI API (`receipt`)
+
+Binary entrypoint: `receipt` (maps to `dist/cli.js`).
+
+If not installed globally, run through npm scripts:
+```bash
+npm run cli -- <command> [args]
+```
+
+## Commands
+
+### receipt new <agent-id>
+- Purpose: scaffold `src/agents/<agent-id>.agent.ts`.
+- Flags:
+  - `--template basic|assistant-tool|human-loop|merge` (default `basic`).
+- Validation:
+  - `agent-id` must match kebab-case: `^[a-z][a-z0-9-]*$`.
+  - fails if target file already exists.
+- Output: `created src/agents/<agent-id>.agent.ts`.
+- Example:
+```bash
+receipt new release-notes --template assistant-tool
+```
+
+### receipt dev
+- Purpose: run `tsx watch src/server.ts`.
+- Flags: none.
+- Output: streams server logs to stdout/stderr.
+- Example:
+```bash
+receipt dev
+```
+
+### receipt run <agent-id> --problem <text>
+- Purpose: run agent inline (for `defineAgent` specs) or enqueue background job.
+- Flags:
+  - `--problem <text>` (required; alias: `--prompt`).
+  - `--stream <stream>` (default `agents/<agent-id>`).
+  - `--run-id <runId>` (default generated).
+  - `--run-stream <stream>` (optional override).
+- Output (JSON):
+  - inline mode: `{ ok, mode: "inline", runId, stream, runStream }`
+  - queued mode: `{ ok, mode: "queued", jobId, runId, stream, runStream }`
+- Example:
+```bash
+receipt run writer --problem "Draft launch thread" --stream agents/writer
+```
+
+### receipt trace <run-id|stream>
+- Purpose: print a compact line-per-receipt timeline.
+- Flags: none.
+- Output: `<idx> <ISO timestamp> <event-type>` lines.
+- Example:
+```bash
+receipt trace run_abcd1234
+```
+
+### receipt replay <run-id|stream>
+- Purpose: dump all receipt bodies for the resolved stream.
+- Flags: none.
+- Output (JSON): `{ stream, receipts: [...] }`.
+- Example:
+```bash
+receipt replay agents/writer/runs/run_abcd1234
+```
+
+### receipt inspect <run-id|stream>
+- Purpose: show stream head summary.
+- Flags: none.
+- Output (JSON): `{ stream, count, head }`.
+- Example:
+```bash
+receipt inspect run_abcd1234
+```
+
+### receipt fork <run-id|stream> --at <index>
+- Purpose: fork a stream at receipt index into a branch stream.
+- Flags:
+  - `--at <non-negative integer>` (required).
+  - `--name <branch-name>` (optional; default generated).
+- Output (JSON): `{ ok, stream, at, branch }`.
+- Example:
+```bash
+receipt fork run_abcd1234 --at 12 --name agents/writer/runs/run_abcd1234/branches/hotfix
+```
+
+### receipt jobs
+- Purpose: list jobs from queue index.
+- Flags:
+  - `--status queued|leased|running|completed|failed|canceled`.
+  - `--limit <n>` (default 50, clamped to `1..500`).
+- Output (JSON): `{ jobs: [...] }`.
+- Example:
+```bash
+receipt jobs --status running --limit 20
+```
+
+### receipt abort <job-id>
+- Purpose: enqueue abort command for a job.
+- Flags:
+  - `--reason <text>` (default `abort requested`).
+- Output (JSON): `{ ok: true, jobId, commandId }`.
+- Example:
+```bash
+receipt abort job_abcd1234 --reason "cancel stale run"
+```
+
+## Resolution Rules
+- `run-id|stream` arguments:
+  - if value contains `/`, treated as stream directly.
+  - otherwise resolved by `_streams.json` mapping and `/runs/<runId>` suffix lookup.
+- Data directory:
+  - uses `DATA_DIR` env var or defaults to `<cwd>/data`.
+
+## Exit Behavior
+- Success: exit code `0`.
+- Errors: prints `error: <message>` and exits non-zero.

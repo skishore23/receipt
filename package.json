@@ -3,22 +3,31 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
+  "bin": {
+    "receipt": "dist/cli.js"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "cli": "tsx src/cli.ts",
+    "video:capture": "npm --prefix video run capture:ui",
+    "video:preview": "npm --prefix video run preview",
+    "video:render": "npm --prefix video run render",
+    "video:render:vertical": "npm --prefix video run render:vertical",
     "start": "node dist/server.js",
-    "build": "tsc -p tsconfig.json",
-    "new:agent": "node scripts/new-agent.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "new:agent": "tsx src/cli.ts new",
     "test:smoke": "tsx --test --test-concurrency=1 tests/smoke/*.test.ts",
     "test:perf": "tsx --test --test-concurrency=1 tests/perf/*.bench.ts",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src/core src/engine src/agents tests; then echo \"explicit any found\"; exit 1; fi",
     "verify": "npm run build && npm run check:no-any && npm run test:smoke"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.9",
+    "@hono/node-server": "^1.19.10",
     "@hono/zod-validator": "^0.7.6",
     "@oblivionocean/minigfm": "^1.0.7",
     "dotenv": "^17.2.3",
-    "hono": "^4.12.3",
+    "hono": "^4.12.4",
     "openai": "^6.16.0",
     "zod": "^4.3.6"
   },

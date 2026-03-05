@@ -3,7 +3,7 @@
 // ============================================================================
 
 import type { Chain } from "../core/types.js";
-import { verify } from "../core/chain.js";
+import { computeHash, verify } from "../core/chain.js";
 import type { TheoremEvent, TheoremState } from "../modules/theorem.js";
 import type { TheoremRunSummary } from "../agents/theorem.js";
 import {
@@ -377,6 +377,7 @@ export const theoremShell = (
     }
     .travel-island {
       margin-top: 16px;
+      margin-bottom: 20px;
       min-height: 90px;
       border-radius: 14px;
       border: 1px solid rgba(107,220,255,0.3);
@@ -1315,6 +1316,36 @@ const contextWindowRows = (chain: Chain<TheoremEvent>): ReadonlyArray<FrameworkC
   });
 };
 
+type IntegritySummary = {
+  readonly ok: boolean;
+  readonly sliced?: boolean;
+  readonly reason?: string;
+};
+
+const verifyDisplaySlice = (slice: Chain<TheoremEvent>): IntegritySummary => {
+  if (slice.length === 0) return { ok: true };
+  const strict = verify(slice);
+  if (strict.ok) return { ok: true };
+  if (strict.reason !== "broken prev" || strict.at !== 0) {
+    return { ok: false, reason: strict.reason };
+  }
+
+  // Branch deltas are intentionally rendered as suffix slices where the first
+  // receipt points to an omitted predecessor in the source stream.
+  const first = slice[0];
+  if (first.hash !== computeHash(first)) return { ok: false, reason: "hash mismatch" };
+
+  let prev = first.hash;
+  for (let i = 1; i < slice.length; i += 1) {
+    const receipt = slice[i];
+    if (receipt.hash !== computeHash(receipt)) return { ok: false, reason: "hash mismatch" };
+    if (receipt.prev !== prev) return { ok: false, reason: "broken prev" };
+    prev = receipt.hash;
+  }
+
+  return { ok: true, sliced: true };
+};
+
 const memoryPulseHtml = (chain: Chain<TheoremEvent>): string => {
   const memoryEvent = [...chain].reverse().find((r) => r.body.type === "memory.slice") as
     | { body: Extract<TheoremEvent, { type: "memory.slice" }> }
@@ -1394,21 +1425,24 @@ export const theoremSideHtml = (
   const rebrackets = chain.filter((r) => r.body.type === "rebracket.applied") as Array<{ body: Extract<TheoremEvent, { type: "rebracket.applied" }> }>;
   const appliedRotations = rebrackets.filter((r) => /rotation applied/i.test(r.body.note ?? "")).length;
   const streamNames = [...new Set(chain.map((r) => r.stream))];
-  const verifyPerStream = (slice: Chain<TheoremEvent>): { ok: boolean; reason?: string } => {
+  const verifyPerStream = (slice: Chain<TheoremEvent>): IntegritySummary => {
     if (slice.length === 0) return { ok: true };
+    let sliced = false;
     for (const stream of streamNames) {
       const streamSlice = slice.filter((r) => r.stream === stream);
       if (streamSlice.length === 0) continue;
-      const result = verify(streamSlice);
-      if (!result.ok) return { ok: false, reason: `${stream}: ${result.reason}` };
+      const result = verifyDisplaySlice(streamSlice);
+      if (!result.ok) return { ok: false, reason: `${stream}: ${result.reason ?? "invalid"}` };
+      sliced = sliced || Boolean(result.sliced);
     }
-    return { ok: true };
+    return { ok: true, sliced };
   };
-  const integrity = streamNames.length <= 1 ? verify(chain) : verifyPerStream(chain);
+  const integrity = streamNames.length <= 1 ? verifyDisplaySlice(chain) : verifyPerStream(chain);
   const integrityLabel = integrity.ok
     ? streamNames.length <= 1
-      ? "ok"
+      ? (integrity.sliced ? "ok (slice)" : "ok")
       : `ok (${streamNames.length} streams)`
+        + (integrity.sliced ? ", sliced" : "")
     : streamNames.length <= 1
       ? "broken"
       : `broken (${integrity.reason ?? "invalid"})`;

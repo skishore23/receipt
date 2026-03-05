@@ -17,13 +17,19 @@ export type QueueCommandRecord = {
   readonly consumedAt?: number;
 };
 
+export type JobPayload = Readonly<Record<string, unknown>> & {
+  readonly runId?: string;
+  readonly runStream?: string;
+  readonly stream?: string;
+};
+
 export type QueueJob = {
   readonly id: string;
   readonly agentId: string;
   readonly lane: JobLane;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
-  readonly payload: Record<string, unknown>;
+  readonly payload: JobPayload;
   readonly status: JobStatus;
   readonly attempt: number;
   readonly maxAttempts: number;
@@ -44,7 +50,7 @@ export type EnqueueJobInput = {
   readonly lane?: JobLane;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
-  readonly payload: Record<string, unknown>;
+  readonly payload: JobPayload;
   readonly maxAttempts?: number;
 };
 
@@ -110,7 +116,8 @@ const eventId = (): string => `jobevt_${Date.now().toString(36)}_${randomUUID().
 
 export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   const nowTs = opts.now ?? Date.now;
-  let state: JobState | undefined;
+  let indexState: JobState | undefined;
+  const jobStateCache = new Map<string, JobState>();
   let lock = Promise.resolve();
 
   const withLock = async <T>(op: () => Promise<T>): Promise<T> => {
@@ -119,25 +126,42 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     return next;
   };
 
-  const emitEvent = async (event: JobEvent): Promise<void> => {
-    await opts.runtime.execute(opts.stream, {
+  const jobStream = (jobId: string): string => `${opts.stream}/${jobId}`;
+
+  const emitToStream = async (stream: string, event: JobEvent, hint?: string): Promise<void> => {
+    await opts.runtime.execute(stream, {
       type: "emit",
       event,
-      eventId: eventId(),
+      eventId: hint ?? eventId(),
     });
-    state = await opts.runtime.state(opts.stream);
+  };
+
+  const emitEvent = async (event: JobEvent): Promise<void> => {
+    const marker = eventId();
     if ("jobId" in event) {
-      await opts.onJobChange?.([event.jobId]);
+      await emitToStream(jobStream(event.jobId), event, `${marker}:job`);
+      jobStateCache.set(event.jobId, await opts.runtime.state(jobStream(event.jobId)));
     }
+    await emitToStream(opts.stream, event, `${marker}:index`);
+    indexState = await opts.runtime.state(opts.stream);
+    if ("jobId" in event) await opts.onJobChange?.([event.jobId]);
   };
 
-  const ensureState = async (): Promise<JobState> => {
-    if (state) return state;
-    state = await opts.runtime.state(opts.stream);
-    return state;
+  const ensureIndexState = async (): Promise<JobState> => {
+    if (indexState) return indexState;
+    indexState = await opts.runtime.state(opts.stream);
+    return indexState;
   };
 
-  const jobsMap = async (): Promise<Readonly<Record<string, JobRecord>>> => (await ensureState()).jobs;
+  const ensureJobState = async (jobId: string): Promise<JobState> => {
+    const cached = jobStateCache.get(jobId);
+    if (cached) return cached;
+    const loaded = await opts.runtime.state(jobStream(jobId));
+    jobStateCache.set(jobId, loaded);
+    return loaded;
+  };
+
+  const jobsMap = async (): Promise<Readonly<Record<string, JobRecord>>> => (await ensureIndexState()).jobs;
 
   const toCommandRecord = (command: JobCommandRecord): QueueCommandRecord => ({
     id: command.id,
@@ -171,7 +195,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   });
 
   const getQueueJob = async (jobId: string): Promise<QueueJob | undefined> => {
-    const record = (await jobsMap())[jobId];
+    const record = (await ensureJobState(jobId)).jobs[jobId];
     return record ? toQueueJob(record) : undefined;
   };
 

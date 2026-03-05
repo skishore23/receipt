@@ -2,7 +2,7 @@
 // Delegation Tools - framework-level agent-to-agent delegation primitives
 // ============================================================================
 
-import { readReceiptFile, buildReceiptContext, listReceiptFiles } from "./receipt-tools.js";
+import { readReceiptFile, buildReceiptContext } from "./receipt-tools.js";
 
 export type DelegationDeps = {
   readonly enqueue: (opts: {

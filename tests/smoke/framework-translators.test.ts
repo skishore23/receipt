@@ -12,10 +12,10 @@ import { initial as writerInitial } from "../../src/modules/writer.ts";
 import { THEOREM_DEFAULT_CONFIG } from "../../src/agents/theorem.ts";
 import { WRITER_DEFAULT_CONFIG } from "../../src/agents/writer.ts";
 import { AGENT_DEFAULT_CONFIG } from "../../src/agents/agent.ts";
-import { translateTodoCmdIntent } from "../../src/agents/todo.manifest.ts";
-import { translateTheoremRunStartIntent } from "../../src/agents/theorem.manifest.ts";
-import { translateWriterRunStartIntent } from "../../src/agents/writer.manifest.ts";
-import { translateAgentRunStartIntent } from "../../src/agents/agent.manifest.ts";
+import { translateTodoCmdIntent } from "../../src/agents/todo.agent.ts";
+import { translateTheoremRunStartIntent } from "../../src/agents/theorem.agent.ts";
+import { translateWriterRunStartIntent } from "../../src/agents/writer.agent.ts";
+import { translateAgentRunStartIntent } from "../../src/agents/monitor.agent.ts";
 
 const stubBranch = (name = "b"): Branch => ({ name, createdAt: Date.now() });
 

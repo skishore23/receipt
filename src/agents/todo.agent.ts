@@ -8,10 +8,10 @@ import { html, parseAt, parseDepth, clampDepth, text } from "../framework/http.j
 import { todoCmdFormSchema } from "../framework/schemas.js";
 import type { RuntimeOp } from "../framework/translators.js";
 import { executeRuntimeOps } from "../framework/translators.js";
-import type { TodoAgentManifest } from "../framework/manifest.js";
+import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import { SseHub } from "../framework/sse-hub.js";
 
-type TodoManifestDeps = {
+type TodoRouteDeps = {
   readonly runtime: Runtime<TodoCmd, TodoEvent, TodoState>;
   readonly sse: SseHub;
 };
@@ -33,7 +33,7 @@ export const translateTodoCmdIntent = (intent: TodoCmdIntent): ReadonlyArray<Run
   { type: "broadcast", topic: "receipt" },
 ];
 
-export const createTodoManifest = (deps: TodoManifestDeps): TodoAgentManifest => ({
+export const createTodoRoute = (deps: TodoRouteDeps): AgentRouteModule => ({
   id: "todo",
   kind: "todo",
   paths: {
@@ -140,3 +140,11 @@ export const createTodoManifest = (deps: TodoManifestDeps): TodoAgentManifest =>
     );
   },
 });
+
+const factory: AgentModuleFactory = (ctx: AgentLoaderContext): AgentRouteModule =>
+  createTodoRoute({
+    runtime: ctx.runtimes.todo as Runtime<TodoCmd, TodoEvent, TodoState>,
+    sse: ctx.sse,
+  });
+
+export default factory;
