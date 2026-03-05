@@ -1,6 +1,6 @@
 # Receipt
 
-Receipt is a receipt-native framework for long-lived agents.
+Receipt is a framework for long-lived agents.
 
 - facts are immutable, hash-linked receipts
 - state is derived by folding receipts
