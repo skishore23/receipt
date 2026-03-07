@@ -1,11 +1,15 @@
 # Receipt
 
 Receipt is a framework for long-lived agents.
+Receipt is version control for agent runs.
+Receipt is Git for agent memory and execution history.
+Receipt gives agents commits, branches, replay, and audit trails.
 
 - facts are immutable, hash-linked receipts
 - state is derived by folding receipts
 - queue and control flow are receipt-derived
 - replay reconstructs what happened and why
+
 
 ## Install
 
