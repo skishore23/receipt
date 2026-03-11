@@ -3,22 +3,21 @@
 // ============================================================================
 
 import type { Decide, Reducer } from "../core/types.js";
+import type { FailureRecord, FailureStateRecord } from "./failure.js";
+import { cloneFailureRecord } from "./failure.js";
 
-export type AgentToolName =
-  | "ls"
-  | "read"
-  | "write"
-  | "bash"
-  | "grep"
-  | "memory.read"
-  | "memory.search"
-  | "memory.summarize"
-  | "memory.commit"
-  | "memory.diff"
-  | "agent.delegate"
-  | "agent.status"
-  | "agent.inspect"
-  | "skill.read";
+export type AgentToolName = string;
+
+export type AgentValidationEvidence = {
+  readonly tool?: string;
+  readonly environment?: string;
+  readonly candidateHash?: string;
+  readonly formalStatementHash?: string;
+  readonly failedDeclarations?: ReadonlyArray<string>;
+  readonly timings?: Readonly<Record<string, number>>;
+  readonly candidateContent?: string;
+  readonly formalStatement?: string;
+};
 
 export type AgentEvent =
   | {
@@ -37,6 +36,7 @@ export type AgentEvent =
         readonly maxToolOutputChars: number;
         readonly memoryScope: string;
         readonly workspace: string;
+        readonly extra?: Readonly<Record<string, unknown>>;
       };
       readonly model: string;
       readonly promptHash?: string;
@@ -57,6 +57,12 @@ export type AgentEvent =
       readonly status: "running" | "failed" | "completed";
       readonly agentId?: string;
       readonly note?: string;
+    }
+  | {
+      readonly type: "failure.report";
+      readonly runId: string;
+      readonly agentId?: string;
+      readonly failure: FailureRecord;
     }
   | {
       readonly type: "iteration.started";
@@ -110,6 +116,18 @@ export type AgentEvent =
       readonly chars: number;
       readonly itemCount: number;
       readonly truncated: boolean;
+    }
+  | {
+      readonly type: "validation.report";
+      readonly runId: string;
+      readonly iteration: number;
+      readonly agentId?: string;
+      readonly gate: string;
+      readonly ok: boolean;
+      readonly summary: string;
+      readonly target?: string;
+      readonly details?: string;
+      readonly evidence?: AgentValidationEvidence;
     }
   | {
       readonly type: "response.finalized";
@@ -192,11 +210,13 @@ export type AgentState = {
     readonly error?: string;
     readonly updatedAt: number;
   };
+  readonly failure?: FailureStateRecord;
   readonly config?: {
     readonly maxIterations: number;
     readonly maxToolOutputChars: number;
     readonly memoryScope: string;
     readonly workspace: string;
+    readonly extra?: Readonly<Record<string, unknown>>;
     readonly model: string;
     readonly promptHash?: string;
     readonly promptPath?: string;
@@ -231,6 +251,7 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
           maxToolOutputChars: event.config.maxToolOutputChars,
           memoryScope: event.config.memoryScope,
           workspace: event.config.workspace,
+          extra: event.config.extra,
           model: event.model,
           promptHash: event.promptHash,
           promptPath: event.promptPath,
@@ -258,6 +279,14 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
         ...state,
         status: event.status,
         statusNote: event.note ?? state.statusNote,
+      };
+    case "failure.report":
+      return {
+        ...state,
+        failure: {
+          ...cloneFailureRecord(event.failure),
+          updatedAt: ts,
+        },
       };
     case "iteration.started":
       return {
@@ -288,6 +317,7 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     case "action.planned":
     case "tool.observed":
     case "memory.slice":
+    case "validation.report":
     case "context.pruned":
     case "context.compacted":
     case "overflow.recovered":
@@ -301,4 +331,3 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     }
   }
 };
-

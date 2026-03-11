@@ -402,6 +402,80 @@ curl -sS 'http://localhost:8787/island/verify?stream=todo'
 curl -sS 'http://localhost:8787/island/branches?stream=todo'
 ```
 
+## Axiom Simple Routes
+
+### GET /axiom-simple
+- Purpose: Axiom Simple shell page.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### POST /axiom-simple/run
+- Purpose: Start a new deterministic Axiom Simple orchestration run.
+- Query params: `stream` (default `agents/axiom-simple`).
+- Body schema (form): `problem` (required), `workerCount` (`2|3`), `repairMode` (`auto|off`).
+- Success: `200` empty HTML with `HX-Redirect` to the run shell.
+- Errors: `400 problem required`.
+- Side effects: enqueues `axiom-simple.run`, publishes `jobs` + `receipt`.
+
+### GET /axiom-simple/island/folds
+- Purpose: Axiom Simple left folds panel.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### GET /axiom-simple/island/travel
+- Purpose: Axiom Simple parent travel island.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### GET /axiom-simple/travel
+- Purpose: Axiom Simple OOB refresh route for parent travel, chat, side, and folds islands.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### GET /axiom-simple/island/chat
+- Purpose: Axiom Simple orchestration dashboard island.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### GET /axiom-simple/island/side
+- Purpose: Axiom Simple evidence and linked-run side panel island.
+- Query params: `stream`, `run`, `at`.
+- Body: none.
+- Success: `200` HTML.
+- Errors: none expected.
+- Side effects: none.
+
+### GET /axiom-simple/stream
+- Purpose: SSE subscription for parent orchestration refreshes and child worker drill-down refreshes.
+- Query params: `stream` (default `agents/axiom-simple`), `topic` (`theorem` default, or `agent|writer|receipt|jobs`).
+- Body: none.
+- Success: `200` SSE stream.
+- Errors: none expected.
+- Side effects: opens a subscription.
+
+### GET /axiom-simple/worker
+- Purpose: Full child Axiom run drill-down page with independent receipt scrubbing.
+- Query params: `stream` (default `agents/axiom`), `run` (required), `at`, `partial` (internal HTMX refresh flag).
+- Body: none.
+- Success: `200` HTML.
+- Errors: `400 run required`.
+- Side effects: none.
+
 ## Writer Routes
 
 ### GET /writer

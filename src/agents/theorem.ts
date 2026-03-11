@@ -2,8 +2,10 @@
 // Theorem Guild workflow - Receipt-native mini framework
 // ============================================================================
 
+import { createHash } from "node:crypto";
+
 import type { Runtime } from "../core/runtime.js";
-import type { TheoremCmd, TheoremEvent, TheoremState } from "../modules/theorem.js";
+import type { TheoremAxiomEvidence, TheoremCmd, TheoremEvent, TheoremState } from "../modules/theorem.js";
 import { reduce as reduceTheorem, initial as initialTheorem } from "../modules/theorem.js";
 import { renderPrompt, type TheoremPromptConfig } from "../prompts/theorem.js";
 
@@ -48,11 +50,14 @@ import {
   parsePatchPayload,
   parseProofPayload,
   parseVerifyPayload,
+  type AxiomDelegatePayload,
   type ParsedOrchestratorDecision,
 } from "./theorem.structured.js";
+import type { AxiomTaskHints } from "./axiom/config.js";
 import { buildMemorySlice, memoryBudget, type MemoryPhase } from "./theorem.memory.js";
 import { theoremBranchStream, theoremRunStream } from "./theorem.streams.js";
 import { theoremMergePolicy } from "../engine/merge/theorem-policy.js";
+import { buildTheoremRunResult, classifyTheoremFailure, type TheoremFailureClass, type TheoremRunResult } from "./theorem.result.js";
 
 // ============================================================================
 // Types
@@ -66,6 +71,22 @@ export type TheoremRunConfig = {
 };
 
 export type TheoremRunControl = AgentRunControl;
+export type TheoremAxiomPolicy = "optional" | "required";
+
+export type TheoremAxiomDelegateResult = {
+  readonly status: string;
+  readonly summary: string;
+  readonly jobId?: string;
+  readonly runId?: string;
+  readonly stream?: string;
+  readonly outcome?: string;
+  readonly evidence?: ReadonlyArray<Omit<TheoremAxiomEvidence, "phase">>;
+  readonly verifiedCandidateContent?: string;
+  readonly verifiedCandidateHash?: string;
+  readonly verifiedFormalStatementHash?: string;
+};
+
+export type { TheoremFailureClass, TheoremRunResult } from "./theorem.result.js";
 
 export const THEOREM_DEFAULT_CONFIG: TheoremRunConfig = {
   rounds: 2,
@@ -97,6 +118,153 @@ export const normalizeTheoremConfig = (input: Partial<TheoremRunConfig>): Theore
   ),
 });
 
+const hashText = (input: string): string =>
+  createHash("sha256").update(input, "utf-8").digest("hex");
+
+const extractPrimaryDeclarationName = (content: string): string | undefined => {
+  const match = content.match(/\b(?:theorem|lemma)\s+([A-Za-z0-9_'.]+)/);
+  return match?.[1];
+};
+
+const softTrim = (text: string, headChars: number, tailChars: number): string => {
+  if (text.length <= headChars + tailChars + 16) return text;
+  return `${text.slice(0, headChars)}\n\n[... trimmed ...]\n\n${text.slice(-tailChars)}`;
+};
+
+const isPromptSectionHeader = (line: string): boolean =>
+  /^(Problem|Memory|Latest summary \(if any\)|Summary|Attempts|Attempt|Critiques|Verifier notes|Current proof|Proof|Task|Return JSON only in this schema|Left \(.*\)|Right \(.*\)|Merge these leaves for .+):$/.test(line.trim());
+
+const trimPromptSectionBody = (body: string, limit: number): string => {
+  const trimmed = body.trim();
+  if (trimmed.length <= limit) return trimmed;
+  const headChars = Math.max(120, Math.floor(limit * 0.55));
+  const tailChars = Math.max(80, Math.floor(limit * 0.25));
+  return softTrim(trimmed, headChars, tailChars);
+};
+
+export const compactTheoremPrompt = (text: string, targetChars: number): string => {
+  if (text.length <= targetChars) return text;
+
+  const lines = text.split("\n");
+  const sections: Array<{ header: string; body: string }> = [];
+  let currentHeader: string | undefined;
+  let currentBody: string[] = [];
+
+  const flushSection = () => {
+    if (!currentHeader) return;
+    sections.push({
+      header: currentHeader,
+      body: currentBody.join("\n").trim(),
+    });
+  };
+
+  for (const line of lines) {
+    if (isPromptSectionHeader(line)) {
+      flushSection();
+      currentHeader = line.trim();
+      currentBody = [];
+      continue;
+    }
+    currentBody.push(line);
+  }
+  flushSection();
+
+  if (sections.length <= 1) {
+    const compactLines = lines.filter((line) => line.trim().length > 0);
+    const head = compactLines.slice(0, 24).join("\n");
+    const tail = compactLines.slice(-16).join("\n");
+    const merged = `${head}\n\n[... compacted context ...]\n\n${tail}`.trim();
+    if (merged.length <= targetChars) return merged;
+    return softTrim(merged, Math.floor(targetChars * 0.6), Math.floor(targetChars * 0.3));
+  }
+
+  const sectionWeight = (header: string): number => {
+    if (/^Problem:$/.test(header)) return 3;
+    if (/^Task:$/.test(header)) return 2;
+    if (/^Return JSON only in this schema:$/.test(header)) return 2;
+    if (/^(Left \(.*\)|Right \(.*\)|Summary:|Proof:|Current proof:|Verifier notes:|Attempts:|Attempt:|Merge these leaves for .+:)$/.test(header)) {
+      return 2;
+    }
+    return 1;
+  };
+
+  const fixedChars = sections.reduce((total, section) => total + section.header.length + 2, 0) + Math.max(0, (sections.length - 1) * 2);
+  const minBodyBudget = 120;
+  const minRequired = fixedChars + (sections.length * minBodyBudget);
+  if (minRequired > targetChars) {
+    return softTrim(text, Math.floor(targetChars * 0.6), Math.floor(targetChars * 0.3));
+  }
+
+  const totalWeight = sections.reduce((total, section) => total + sectionWeight(section.header), 0);
+  let remaining = targetChars - fixedChars;
+  let remainingWeight = totalWeight;
+  const rendered = sections.map((section, index) => {
+    const weight = sectionWeight(section.header);
+    const sectionsLeft = sections.length - index;
+    const minReservedForRest = (sectionsLeft - 1) * minBodyBudget;
+    const proportional = Math.floor((remaining * weight) / Math.max(1, remainingWeight));
+    const budget = Math.max(minBodyBudget, Math.min(section.body.length, remaining - minReservedForRest, proportional || minBodyBudget));
+    remaining -= budget;
+    remainingWeight -= weight;
+    return `${section.header}\n${trimPromptSectionBody(section.body, budget)}`.trim();
+  }).join("\n\n");
+
+  if (rendered.length <= targetChars) return rendered;
+  return softTrim(rendered, Math.floor(targetChars * 0.65), Math.floor(targetChars * 0.25));
+};
+
+const mergeTaskHints = (
+  base: AxiomTaskHints | undefined,
+  extra: AxiomTaskHints | undefined
+): AxiomTaskHints | undefined => {
+  if (!base && !extra) return undefined;
+  const preferredTools = [...new Set([...(extra?.preferredTools ?? []), ...(base?.preferredTools ?? [])])];
+  return {
+    ...(preferredTools.length > 0 ? { preferredTools } : {}),
+    reason: extra?.reason ?? base?.reason,
+    targetPath: extra?.targetPath ?? base?.targetPath,
+    formalStatementPath: extra?.formalStatementPath ?? base?.formalStatementPath,
+    declarationName: extra?.declarationName ?? base?.declarationName,
+  };
+};
+
+const inferAxiomTaskHints = (opts: {
+  readonly phase: "attempt" | "verify";
+  readonly content: string;
+  readonly notes?: ReadonlyArray<string>;
+  readonly formalStatementPath?: string;
+}): AxiomTaskHints | undefined => {
+  const noteText = opts.notes?.join("\n") ?? "";
+  const haystack = `${opts.content}\n${noteText}`;
+  const declarationName = extractPrimaryDeclarationName(opts.content);
+  const nameConflict = /already declared|has already been declared|name conflict|collid|namespace|rename/i.test(haystack);
+  const haveObligation = /\bhave\b/.test(opts.content) || /have statement|callsite|extract have/i.test(noteText);
+  const decompose = opts.content.length > 1_600 || /monolithic|decompose|split into lemmas|intermediate lemma/i.test(noteText);
+
+  const preferredTools = [
+    ...(nameConflict ? ["lean.rename"] : []),
+    ...(haveObligation ? ["lean.have2lemma", "lean.have2sorry"] : []),
+    ...(decompose && !haveObligation ? ["lean.theorem2lemma"] : []),
+    ...(opts.phase === "verify" ? ["lean.theorem2sorry", "lean.verify"] : ["lean.check", "lean.repair"]),
+  ];
+
+  const reason = nameConflict
+    ? "name_conflict"
+    : haveObligation
+      ? "extract_have_obligation"
+      : decompose
+        ? "decompose_theorem"
+        : undefined;
+
+  if (preferredTools.length === 0 && !reason && !opts.formalStatementPath && !declarationName) return undefined;
+  return {
+    ...(preferredTools.length > 0 ? { preferredTools } : {}),
+    ...(reason ? { reason } : {}),
+    ...(opts.formalStatementPath ? { formalStatementPath: opts.formalStatementPath } : {}),
+    ...(declarationName ? { declarationName } : {}),
+  };
+};
+
 export const parseTheoremConfig = (form: Record<string, string>): TheoremRunConfig =>
   normalizeTheoremConfig({
     rounds: parseFormNum(form.rounds),
@@ -120,6 +288,13 @@ type TheoremWorkflowDeps = {
   readonly apiNote?: string;
   readonly emitIndex: (event: TheoremEvent) => Promise<void>;
   readonly control?: TheoremRunControl;
+  readonly axiomDelegate?: (input: {
+    readonly task: string;
+    readonly config?: Readonly<Record<string, unknown>>;
+    readonly timeoutMs?: number;
+  }) => Promise<TheoremAxiomDelegateResult>;
+  readonly axiomPolicy?: TheoremAxiomPolicy;
+  readonly axiomConfig?: Readonly<Record<string, unknown>>;
 };
 
 export type TheoremRunInput = {
@@ -139,6 +314,9 @@ export type TheoremRunInput = {
   readonly broadcast?: () => void;
   readonly now?: () => number;
   readonly control?: TheoremRunControl;
+  readonly axiomDelegate?: TheoremWorkflowDeps["axiomDelegate"];
+  readonly axiomPolicy?: TheoremAxiomPolicy;
+  readonly axiomConfig?: TheoremWorkflowDeps["axiomConfig"];
 };
 
 // ============================================================================
@@ -171,6 +349,8 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
     const { runtime, prompts, llmText: llmRaw, apiReady, apiNote, control } = ctx;
     const { rounds, maxDepth, memoryWindow, branchThreshold, problem: inputProblem } = config;
     const runId = ctx.runId;
+    const axiomPolicy = ctx.axiomPolicy ?? "optional";
+    const axiomConfig = ctx.axiomConfig;
 
     const agentBranchEmitters = new Map<string, EmitFn<TheoremEvent>>();
     const agentBranchStreams = new Map<string, string>();
@@ -246,34 +426,27 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
       }
     };
 
+    const emitFailure = async (failure: NonNullable<Extract<TheoremEvent, { type: "failure.report" }>["failure"]>) => {
+      await emit({
+        type: "failure.report",
+        runId,
+        agentId: "orchestrator",
+        failure,
+      });
+    };
+
     const isContextOverflow = (err: unknown): boolean => {
       const message = err instanceof Error ? err.message : String(err);
       return /context|token|maximum context|input too large|prompt too long/i.test(message);
     };
 
-    const softTrim = (text: string, headChars: number, tailChars: number): string => {
-      if (text.length <= headChars + tailChars + 16) return text;
-      return `${text.slice(0, headChars)}\n\n[... trimmed ...]\n\n${text.slice(-tailChars)}`;
-    };
-
-    const compactPrompt = (text: string, targetChars: number): string => {
-      if (text.length <= targetChars) return text;
-      const lines = text.split("\n").filter((line) => line.trim().length > 0);
-      const head = lines.slice(0, 24).join("\n");
-      const tail = lines.slice(-16).join("\n");
-      const merged = `${head}\n\n[... compacted context ...]\n\n${tail}`.trim();
-      if (merged.length <= targetChars) return merged;
-      return softTrim(merged, Math.floor(targetChars * 0.6), Math.floor(targetChars * 0.3));
-    };
-
     const applyContextPolicy = async (stage: string, user: string): Promise<string> => {
       const HARD_THRESHOLD = 50_000;
       const SOFT_THRESHOLD = 12_000;
-      const COMPACT_THRESHOLD = 18_000;
       let next = user;
       if (next.length > HARD_THRESHOLD) {
         const before = next.length;
-        next = "[Context pruned due to size. Use concise reasoning and finish with best effort.]";
+        next = compactTheoremPrompt(next, 12_000);
         await emit({
           type: "context.pruned",
           runId,
@@ -282,11 +455,11 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
           mode: "hard",
           before,
           after: next.length,
-          note: "hard clear applied",
+          note: "hard section-preserving trim applied",
         });
       } else if (next.length > SOFT_THRESHOLD) {
         const before = next.length;
-        next = softTrim(next, 4_000, 3_000);
+        next = compactTheoremPrompt(next, 7_000);
         await emit({
           type: "context.pruned",
           runId,
@@ -295,21 +468,7 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
           mode: "soft",
           before,
           after: next.length,
-          note: "soft trim applied",
-        });
-      }
-      if (next.length > COMPACT_THRESHOLD) {
-        const before = next.length;
-        next = compactPrompt(next, 10_000);
-        await emit({
-          type: "context.compacted",
-          runId,
-          agentId: "orchestrator",
-          stage,
-          reason: "threshold",
-          before,
-          after: next.length,
-          note: "pre-call compaction",
+          note: "soft section-preserving trim applied",
         });
       }
       return next;
@@ -329,7 +488,7 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
         return out;
       } catch (err) {
         if (!isContextOverflow(err)) throw err;
-        const compacted = compactPrompt(pruned, 7_000);
+        const compacted = compactTheoremPrompt(pruned, 7_000);
         await emit({
           type: "context.compacted",
           runId,
@@ -463,6 +622,209 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
     type PromptContextEvent = Extract<TheoremEvent, { type: "prompt.context" }>;
     const emitPromptContext = async (payload: Omit<PromptContextEvent, "type" | "runId">) => {
       await emit({ type: "prompt.context", runId, ...payload });
+    };
+
+    const runAxiomDelegate = async (opts: {
+      readonly request?: AxiomDelegatePayload;
+      readonly agentId: string;
+      readonly round: number;
+      readonly phase: "attempt" | "verify";
+      readonly targetClaimId?: string;
+    }): Promise<{
+      readonly summary: string;
+      readonly outcome?: string;
+      readonly evidence: ReadonlyArray<TheoremAxiomEvidence>;
+      readonly verifiedCandidateContent?: string;
+      readonly verifiedCandidateHash?: string;
+      readonly verifiedFormalStatementHash?: string;
+    }> => {
+      const request = opts.request;
+      if (!request?.task?.trim()) {
+        return { summary: "", evidence: [] };
+      }
+
+      const input = {
+        task: request.task,
+        config: request.config,
+        hints: request.hints,
+        phase: opts.phase,
+        round: opts.round,
+        ...(opts.targetClaimId ? { targetClaimId: opts.targetClaimId } : {}),
+      } as Record<string, unknown>;
+      const started = Date.now();
+
+      if (!ctx.axiomDelegate) {
+        await emit({
+          type: "tool.called",
+          runId,
+          agentId: opts.agentId,
+          tool: "axiom.delegate",
+          input,
+          summary: "failed",
+          durationMs: Date.now() - started,
+          error: "axiom delegate unavailable",
+        });
+        return { summary: "Axiom worker unavailable.", outcome: "delegate_unavailable", evidence: [] };
+      }
+
+      try {
+        const result = await ctx.axiomDelegate({
+          task: request.task,
+          config: request.config,
+          timeoutMs: 180_000,
+        });
+        const evidence = (result.evidence ?? []).map((item) => ({
+          ...item,
+          phase: opts.phase,
+          subJobId: result.jobId ?? item.subJobId,
+          subRunId: result.runId ?? item.subRunId,
+        }));
+        await emit({
+          type: "tool.called",
+          runId,
+          agentId: opts.agentId,
+          tool: "axiom.delegate",
+          input,
+          summary: `status=${result.status}${result.outcome ? `; outcome=${result.outcome}` : ""}${result.runId ? `; run=${result.runId}` : ""}`,
+          durationMs: Date.now() - started,
+        });
+        await emit({
+          type: "subagent.merged",
+          runId,
+          agentId: opts.agentId,
+          subJobId: result.jobId ?? `axiom_${opts.round}_${Date.now().toString(36)}`,
+          subRunId: result.runId ?? `axiom_${opts.round}_${Date.now().toString(36)}`,
+          task: request.task,
+          summary: result.summary,
+          outcome: result.outcome,
+          evidence,
+        });
+        return {
+          summary: result.summary.trim(),
+          outcome: result.outcome,
+          evidence,
+          verifiedCandidateContent: result.verifiedCandidateContent,
+          verifiedCandidateHash: result.verifiedCandidateHash,
+          verifiedFormalStatementHash: result.verifiedFormalStatementHash,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await emit({
+          type: "tool.called",
+          runId,
+          agentId: opts.agentId,
+          tool: "axiom.delegate",
+          input,
+          summary: "failed",
+          durationMs: Date.now() - started,
+          error: message,
+        });
+        return { summary: `Axiom worker failed: ${message}`, outcome: "delegate_failed", evidence: [] };
+      }
+    };
+
+    const withAxiomDefaults = (request?: AxiomDelegatePayload, opts?: {
+      readonly phase: "attempt" | "verify";
+      readonly content: string;
+      readonly notes?: ReadonlyArray<string>;
+    }): AxiomDelegatePayload | undefined => {
+      if (!request?.task?.trim()) return undefined;
+      const formalStatementPath = typeof axiomConfig?.formalStatementPath === "string"
+        ? axiomConfig.formalStatementPath
+        : undefined;
+      const taskHints = mergeTaskHints(
+        inferAxiomTaskHints({
+          phase: opts?.phase ?? "attempt",
+          content: opts?.content ?? request.task,
+          notes: opts?.notes,
+          formalStatementPath,
+        }),
+        request.hints
+      );
+      const mergedConfig = {
+        ...(axiomConfig ?? {}),
+        ...(request.config ?? {}),
+        ...(taskHints ? { taskHints } : {}),
+        ...(opts?.phase === "verify" && axiomPolicy === "required"
+          ? {
+              requiredValidation: {
+                kind: "axle-verify" as const,
+                ...(formalStatementPath ? { formalStatementPath } : {}),
+              },
+            }
+          : {}),
+      };
+      return {
+        task: request.task.trim(),
+        config: Object.keys(mergedConfig).length > 0 ? mergedConfig : undefined,
+        hints: taskHints,
+      };
+    };
+
+    const buildForcedAxiomTask = (opts: {
+      readonly phase: "attempt" | "verify";
+      readonly agentId: string;
+      readonly round: number;
+      readonly content: string;
+      readonly notes?: ReadonlyArray<string>;
+    }): AxiomDelegatePayload => {
+      const formalStatementPath = typeof axiomConfig?.formalStatementPath === "string"
+        ? axiomConfig.formalStatementPath
+        : undefined;
+      const taskHints = inferAxiomTaskHints({
+        phase: opts.phase,
+        content: opts.content,
+        notes: opts.notes,
+        formalStatementPath,
+      });
+      const intro = opts.phase === "verify"
+        ? "Use AXLE as the required ground-truth verifier for this theorem guild run."
+        : "Use AXLE to formalize or stress-test this theorem branch.";
+      const label = opts.phase === "verify" ? "Candidate proof" : "Branch attempt";
+      const requirements = opts.phase === "verify"
+        ? [
+            "- work in Lean 4 with Mathlib",
+            "- produce or load the exact sorried formal statement for the candidate using `lean.theorem2sorry` or `lean.theorem2sorry_file`",
+            "- run `lean.verify` or `lean.verify_file` against that exact formal statement as the final gate",
+            "- if a theorem name conflicts with Mathlib, wrap the candidate in a unique namespace or rename the declaration before verification",
+            "- if verification passes, keep the verified candidate unchanged and report the exact AXLE verification result",
+            "- if verification fails, report the failure diagnostics and do not claim success",
+          ]
+        : [
+            "- work in Lean 4 with Mathlib when formalization is needed",
+            "- use AXLE check, verify, repair, simplification, or disproval tools as appropriate",
+            "- explain whether the branch is valid, needs repair, or is false",
+            "- if a Lean artifact is produced, keep it minimal and executable",
+          ];
+      return {
+        task: [
+          intro,
+          `Problem:`,
+          problemText,
+          ...(opts.phase === "verify" && formalStatementPath
+            ? ["", "Formal statement artifact:", formalStatementPath]
+            : []),
+          "",
+          `${label}:`,
+          opts.content,
+          "",
+          "Requirements:",
+          ...requirements,
+        ].join("\n").trim(),
+        config: {
+          ...(axiomConfig ?? {}),
+          ...(taskHints ? { taskHints } : {}),
+          ...(opts.phase === "verify" && axiomPolicy === "required"
+            ? {
+                requiredValidation: {
+                  kind: "axle-verify" as const,
+                  ...(formalStatementPath ? { formalStatementPath } : {}),
+                },
+              }
+            : {}),
+        },
+        hints: taskHints,
+      };
     };
 
     const structuredRetries = 2;
@@ -638,7 +1000,21 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
           parse: parseAttemptPayload,
           retries: structuredRetries,
         });
-        const content = formatAttemptPayload(attemptResult.value);
+        let content = formatAttemptPayload(attemptResult.value);
+        const axiomRequest = withAxiomDefaults(attemptResult.value.axiom, {
+          phase: "attempt",
+          content,
+        });
+        const axiomResult = await runAxiomDelegate({
+          request: axiomRequest,
+          agentId: agent.id,
+          round,
+          phase: "attempt",
+          targetClaimId: attemptId,
+        });
+        if (axiomResult.summary) {
+          content = `${content}\n\nAXIOM Worker:\n${axiomResult.summary}`.trim();
+        }
         const attemptEvent: TheoremEvent = {
           type: "attempt.proposed",
           runId,
@@ -1072,7 +1448,12 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
       return { content: trimmed, gaps, confidence };
     };
 
-    const verifyProof = async (proof: string) => {
+    const verifyProof = async (proof: string): Promise<{
+      readonly status: "valid" | "needs" | "false";
+      readonly report: string;
+      readonly evidence?: TheoremAxiomEvidence;
+      readonly verifiedContent?: string;
+    }> => {
       await agentStatus("verifier", "running", "verify", rounds);
       const verifyPrompt = renderPrompt(prompts.user.verify ?? "", { proof });
       await emitPromptContext({
@@ -1089,17 +1470,75 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
         parse: parseVerifyPayload,
         retries: structuredRetries,
       });
-      const verifyOutput = formatVerifyPayload(verifyResult.value);
+      let verifyOutput = formatVerifyPayload(verifyResult.value);
+      const verifyAxiomRequest = withAxiomDefaults(verifyResult.value.axiom, {
+        phase: "verify",
+        content: proof,
+        notes: verifyResult.value.notes,
+      })
+        ?? (axiomPolicy === "required"
+          ? buildForcedAxiomTask({
+              phase: "verify",
+              agentId: "verifier",
+              round: rounds,
+              content: proof,
+              notes: verifyResult.value.notes,
+            })
+          : undefined);
+      const axiomResult = await runAxiomDelegate({
+        request: verifyAxiomRequest,
+        agentId: "verifier",
+        round: rounds,
+        phase: "verify",
+        targetClaimId: finalId,
+      });
+      if (axiomResult.summary) {
+        verifyOutput = `${verifyOutput}\n\nAXIOM Worker:\n${axiomResult.summary}`.trim();
+      }
       await agentStatus("verifier", "done", "verify", rounds);
-      const status = verifyResult.value.status;
+      const finalVerifyEvidence = [...axiomResult.evidence].reverse().find((item) =>
+        item.phase === "verify" && (item.tool === "lean.verify" || item.tool === "lean.verify_file")
+      );
+      let verifiedContent = axiomResult.verifiedCandidateContent;
+      let status = verifyResult.value.status;
+
+      if (axiomPolicy === "required") {
+        if (!finalVerifyEvidence) {
+          status = "needs";
+          verifyOutput = `${verifyOutput}\n\nAXIOM verification evidence missing: final queued subrun did not emit successful lean.verify evidence.`.trim();
+        } else if (!finalVerifyEvidence.ok) {
+          status = verifyResult.value.status === "false" ? "false" : "needs";
+        } else if (
+          !verifiedContent
+          || !axiomResult.verifiedCandidateHash
+          || hashText(verifiedContent) !== axiomResult.verifiedCandidateHash
+          || finalVerifyEvidence.candidateHash !== axiomResult.verifiedCandidateHash
+          || finalVerifyEvidence.formalStatementHash !== axiomResult.verifiedFormalStatementHash
+        ) {
+          status = "needs";
+          verifiedContent = undefined;
+          verifyOutput = `${verifyOutput}\n\nAXIOM artifact mismatch: verified candidate hash or formal-statement hash did not match the merged theorem artifact.`.trim();
+        } else {
+          status = "valid";
+        }
+      } else if (finalVerifyEvidence?.ok && verifiedContent && axiomResult.verifiedCandidateHash === hashText(verifiedContent)) {
+        status = "valid";
+      }
+
       await emit({
         type: "verification.report",
         runId,
         agentId: "verifier",
         status,
         content: verifyOutput.trim(),
+        evidence: finalVerifyEvidence,
       });
-      return { status, report: verifyOutput.trim() };
+      return {
+        status,
+        report: verifyOutput.trim(),
+        evidence: finalVerifyEvidence,
+        verifiedContent,
+      };
     };
 
     const passKRaw = Number.parseInt(process.env.THEOREM_PASS_K ?? "2", 10);
@@ -1114,7 +1553,12 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
       content: string;
       gaps: string[];
       confidence: number;
-      verify: { status: "valid" | "needs" | "false"; report: string };
+      verify: {
+        status: "valid" | "needs" | "false";
+        report: string;
+        evidence?: TheoremAxiomEvidence;
+        verifiedContent?: string;
+      };
     }> = [];
     const statusScore = (status: "valid" | "needs" | "false"): number =>
       status === "valid" ? 2 : status === "needs" ? 1 : 0;
@@ -1141,7 +1585,7 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
       const trimmed = trimProof(proofText);
       const verify = await verifyProof(trimmed.content);
       candidateRuns.push({
-        content: trimmed.content,
+        content: verify.verifiedContent ?? trimmed.content,
         gaps: trimmed.gaps,
         confidence: trimmed.confidence,
         verify,
@@ -1197,6 +1641,9 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
         content,
       });
       verify = await verifyProof(content);
+      if (verify.verifiedContent) {
+        content = verify.verifiedContent;
+      }
     }
 
     const mergedGaps = verify.status === "valid"
@@ -1211,10 +1658,34 @@ const THEOREM_WORKFLOW: WorkflowSpec<TheoremWorkflowDeps, TheoremWorkflowConfig,
       gaps: mergedGaps,
     });
     const noteLine = verify.report.split("\n").find((line) => line.toLowerCase().startsWith("notes:"));
+    const failureDetail = noteLine ? noteLine.replace(/notes:/i, "").trim() : `Verifier status: ${verify.status}`;
     const note = verify.status === "valid"
       ? undefined
-      : (noteLine ? noteLine.replace(/notes:/i, "").trim() : `Verifier status: ${verify.status}`);
-    await emit({ type: "run.status", runId, status: "completed", agentId: "orchestrator", note });
+      : `Final verification failed: ${failureDetail}`;
+    const terminalVerificationFailure = axiomPolicy === "required" && verify.status !== "valid";
+    if (terminalVerificationFailure) {
+      const failureClass = classifyTheoremFailure({
+        status: verify.status,
+        content: verify.report,
+        evidence: verify.evidence,
+        updatedAt: ctx.now(),
+      }, axiomPolicy === "required") ?? "verification_failed";
+      await emitFailure({
+        stage: "verification",
+        failureClass,
+        message: note ?? `Final verification failed: ${verify.status}`,
+        details: verify.report,
+        retryable: true,
+        evidence: verify.evidence ? { ...verify.evidence } : undefined,
+      });
+    }
+    await emit({
+      type: "run.status",
+      runId,
+      status: terminalVerificationFailure ? "failed" : "completed",
+      agentId: "orchestrator",
+      note,
+    });
   },
 };
 
@@ -1241,7 +1712,7 @@ const THEOREM_RECEIPT_RUNTIME = defineAgent<
 // Public run entry
 // ============================================================================
 
-export const runTheoremGuild = async (input: TheoremRunInput): Promise<void> => {
+export const runTheoremGuild = async (input: TheoremRunInput): Promise<TheoremRunResult> => {
   const now = input.now ?? Date.now;
   const baseStream = input.stream;
   const runStream = input.runStream ?? theoremRunStream(baseStream, input.runId);
@@ -1277,22 +1748,46 @@ export const runTheoremGuild = async (input: TheoremRunInput): Promise<void> => 
         apiNote: input.apiNote,
         emitIndex,
         control: input.control,
+        axiomDelegate: input.axiomDelegate,
+        axiomPolicy: input.axiomPolicy,
+        axiomConfig: input.axiomConfig,
       },
       config: { ...input.config, problem: input.problem },
     });
   } catch (err) {
     console.error(err);
     const message = err instanceof Error ? err.message : String(err);
-    const failureEvent: TheoremEvent = {
+    const failureReportEvent: TheoremEvent = {
+      type: "failure.report",
+      runId: input.runId,
+      agentId: "orchestrator",
+      failure: {
+        stage: "runtime",
+        failureClass: "runtime_error",
+        message,
+        retryable: true,
+      },
+    };
+    await emitRun(failureReportEvent);
+    await emitIndex(failureReportEvent);
+    const statusEvent: TheoremEvent = {
       type: "run.status",
       runId: input.runId,
       status: "failed",
       agentId: "orchestrator",
       note: message,
     };
-    await emitRun(failureEvent);
-    await emitIndex(failureEvent);
+    await emitRun(statusEvent);
+    await emitIndex(statusEvent);
   }
+  const state = await input.runtime.state(runStream);
+  return buildTheoremRunResult({
+    runId: input.runId,
+    stream: baseStream,
+    runStream,
+    state,
+    requiresFinalAxiomVerify: input.axiomPolicy === "required",
+  });
 };
 
 // ============================================================================

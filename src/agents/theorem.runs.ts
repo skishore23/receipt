@@ -60,6 +60,8 @@ export const buildTheoremSteps = (chain: Chain<TheoremEvent>): Array<{ step: num
         return `problem:${event.runId}`;
       case "run.configured":
         return `config:${event.runId}`;
+      case "failure.report":
+        return `failure:${event.failure.failureClass}:${event.failure.stage}`;
       case "run.status":
         return `status:${event.status}`;
       case "branch.created":

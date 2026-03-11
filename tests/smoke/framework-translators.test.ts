@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { Runtime } from "../../src/core/runtime.ts";
 import type { Branch, Chain } from "../../src/core/types.ts";
+import { receipt } from "../../src/core/chain.ts";
 import type { TodoCmd, TodoEvent, TodoState } from "../../src/modules/todo.ts";
 import type { TheoremCmd, TheoremEvent, TheoremState } from "../../src/modules/theorem.ts";
 import type { WriterCmd, WriterEvent, WriterState } from "../../src/modules/writer.ts";
@@ -13,7 +14,7 @@ import { THEOREM_DEFAULT_CONFIG } from "../../src/agents/theorem.ts";
 import { WRITER_DEFAULT_CONFIG } from "../../src/agents/writer.ts";
 import { AGENT_DEFAULT_CONFIG } from "../../src/agents/agent.ts";
 import { translateTodoCmdIntent } from "../../src/agents/todo.agent.ts";
-import { translateTheoremRunStartIntent } from "../../src/agents/theorem.agent.ts";
+import { resolveTheoremResumeAnchor, translateTheoremRunStartIntent } from "../../src/agents/theorem.agent.ts";
 import { translateWriterRunStartIntent } from "../../src/agents/writer.agent.ts";
 import { translateAgentRunStartIntent } from "../../src/agents/monitor.agent.ts";
 
@@ -113,6 +114,60 @@ test("framework translators: theorem fresh run omits fork and append", () => {
 
   const kinds = ops.map((op) => op.type);
   assert.deepEqual(kinds, ["enqueue_job", "redirect"]);
+});
+
+test("framework translators: theorem resume anchor follows the visible branch receipt", () => {
+  const runStream = "theorem/runs/run_1";
+  const branchStream = `${runStream}/branches/resume_demo_3`;
+  let rootPrev: string | undefined;
+  let branchPrev: string | undefined;
+
+  const rootReceipt = (body: TheoremEvent, ts: number): Chain<TheoremEvent>[number] => {
+    const next = receipt(runStream, rootPrev, body, ts);
+    rootPrev = next.hash;
+    return next;
+  };
+  const branchReceipt = (body: TheoremEvent, ts: number): Chain<TheoremEvent>[number] => {
+    const next = receipt(branchStream, branchPrev, body, ts);
+    branchPrev = next.hash;
+    return next;
+  };
+
+  const displayChain: Chain<TheoremEvent> = [
+    rootReceipt({ type: "problem.set", runId: "run_1", problem: "p" }, 1),
+    rootReceipt({
+      type: "attempt.proposed",
+      runId: "run_1",
+      claimId: "claim_root",
+      agentId: "explorer_a",
+      content: "root attempt",
+    }, 2),
+    rootReceipt({
+      type: "branch.created",
+      runId: "run_1",
+      branchId: branchStream,
+      forkAt: 2,
+    }, 3),
+    branchReceipt({
+      type: "attempt.proposed",
+      runId: "run_1",
+      claimId: "claim_branch",
+      agentId: "explorer_b",
+      content: "branch attempt",
+    }, 4),
+    branchReceipt({
+      type: "summary.made",
+      runId: "run_1",
+      claimId: "summary_branch",
+      agentId: "synthesizer",
+      bracket: "((A o B) o (C o D))",
+      content: "branch summary",
+    }, 5),
+  ];
+
+  const anchor = resolveTheoremResumeAnchor(displayChain, runStream, 5);
+  assert.equal(anchor?.stream, branchStream);
+  assert.equal(anchor?.hash, displayChain[4]?.hash);
 });
 
 test("framework translators: agent run intent emits enqueue + redirect", () => {

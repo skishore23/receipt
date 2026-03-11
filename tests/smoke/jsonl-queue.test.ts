@@ -100,6 +100,49 @@ test("jsonl queue: steer/follow-up/abort command lanes", async () => {
   }
 });
 
+test("jsonl queue: failed jobs retain terminal result metadata", async () => {
+  const dir = await mkTmp("receipt-queue-failed-result");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const job = await queue.enqueue({
+      agentId: "axiom-guild",
+      payload: { kind: "axiom-guild.run", runId: "r_failed" },
+      maxAttempts: 1,
+    });
+
+    await queue.leaseNext({ workerId: "w1", leaseMs: 5_000 });
+    await queue.fail(job.id, "w1", "final verify failed", true, {
+      runId: "r_failed",
+      status: "failed",
+      followUpJobId: "job_retry_1",
+      followUpRunId: "run_retry_1",
+      failureClass: "axle_verify_failed",
+      failure: {
+        stage: "verification",
+        failureClass: "axle_verify_failed",
+        message: "Final verification failed.",
+        retryable: true,
+      },
+    });
+
+    const failed = await queue.getJob(job.id);
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed?.result?.followUpJobId, "job_retry_1");
+    assert.equal(failed?.result?.followUpRunId, "run_retry_1");
+    assert.equal(failed?.result?.failureClass, "axle_verify_failed");
+    assert.equal((failed?.result?.failure as Record<string, unknown> | undefined)?.failureClass, "axle_verify_failed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: session singleton cancel and steer modes", async () => {
   const dir = await mkTmp("receipt-queue-singleton");
   try {

@@ -72,7 +72,13 @@ export type JsonlQueue = {
   readonly leaseNext: (opts: LeaseOptions) => Promise<QueueJob | undefined>;
   readonly heartbeat: (jobId: string, workerId: string, leaseMs: number) => Promise<QueueJob | undefined>;
   readonly complete: (jobId: string, workerId: string, result?: Record<string, unknown>) => Promise<QueueJob | undefined>;
-  readonly fail: (jobId: string, workerId: string, error: string, noRetry?: boolean) => Promise<QueueJob | undefined>;
+  readonly fail: (
+    jobId: string,
+    workerId: string,
+    error: string,
+    noRetry?: boolean,
+    result?: Record<string, unknown>
+  ) => Promise<QueueJob | undefined>;
   readonly cancel: (jobId: string, reason?: string, by?: string) => Promise<QueueJob | undefined>;
   readonly queueCommand: (input: QueueCommandInput) => Promise<QueueCommandRecord | undefined>;
   readonly consumeCommands: (
@@ -384,7 +390,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       return getQueueJob(jobId);
     }),
 
-    fail: async (jobId, workerId, error, noRetry) => withLock(async () => {
+    fail: async (jobId, workerId, error, noRetry, result) => withLock(async () => {
       const current = await getQueueJob(jobId);
       if (!current) return undefined;
       if (TERMINAL.has(current.status)) return cloneJob(current);
@@ -398,6 +404,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         error,
         retryable,
         willRetry: retryable,
+        result: retryable ? undefined : result,
       });
       return getQueueJob(jobId);
     }),

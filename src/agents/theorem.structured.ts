@@ -2,6 +2,8 @@
 // Theorem Guild structured LLM parsing + retry helpers
 // ============================================================================
 
+import type { AxiomTaskHints } from "./axiom/config.js";
+
 type LlmTextFn = (opts: { system?: string; user: string }) => Promise<string>;
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
@@ -107,10 +109,17 @@ export type ParsedOrchestratorDecision = {
   readonly focus?: Record<string, string>;
 };
 
+export type AxiomDelegatePayload = {
+  readonly task: string;
+  readonly config?: Readonly<Record<string, unknown>>;
+  readonly hints?: AxiomTaskHints;
+};
+
 export type AttemptPayload = {
   readonly attempt: string;
   readonly lemmas: ReadonlyArray<string>;
   readonly gaps: ReadonlyArray<string>;
+  readonly axiom?: AxiomDelegatePayload;
 };
 
 export type LemmaPayload = {
@@ -135,6 +144,7 @@ export type MergePayload = {
 export type VerifyPayload = {
   readonly status: "valid" | "needs" | "false";
   readonly notes: ReadonlyArray<string>;
+  readonly axiom?: AxiomDelegatePayload;
 };
 
 export type ProofPayload = {
@@ -142,6 +152,37 @@ export type ProofPayload = {
   readonly confidence?: number;
   readonly gaps: ReadonlyArray<string>;
   readonly answer?: string;
+};
+
+const parseAxiomDelegate = (obj: Record<string, unknown>): AxiomDelegatePayload | undefined => {
+  const task = asString(obj.axiom_task ?? obj.axiomTask);
+  if (!task) return undefined;
+  const config = asRecord(obj.axiom_config ?? obj.axiomConfig);
+  const hintRecord = asRecord(obj.axiom_hints ?? obj.axiomHints);
+  const preferredTools = asStringArray(hintRecord?.preferred_tools ?? hintRecord?.preferredTools);
+  const reason: AxiomTaskHints["reason"] = (() => {
+    const raw = asString(hintRecord?.reason);
+    return raw === "name_conflict" || raw === "decompose_theorem" || raw === "extract_have_obligation"
+      ? raw
+      : undefined;
+  })();
+  const targetPath = asString(hintRecord?.target_path ?? hintRecord?.targetPath);
+  const formalStatementPath = asString(hintRecord?.formal_statement_path ?? hintRecord?.formalStatementPath);
+  const declarationName = asString(hintRecord?.declaration_name ?? hintRecord?.declarationName);
+  const hints = preferredTools.length > 0 || reason || targetPath || formalStatementPath || declarationName
+    ? {
+        ...(preferredTools.length > 0 ? { preferredTools } : {}),
+        ...(reason ? { reason } : {}),
+        ...(targetPath ? { targetPath } : {}),
+        ...(formalStatementPath ? { formalStatementPath } : {}),
+        ...(declarationName ? { declarationName } : {}),
+      }
+    : undefined;
+  return {
+    task,
+    config: config ? { ...config } : undefined,
+    hints,
+  };
 };
 
 export type StructuredCallResult<T> = {
@@ -192,6 +233,7 @@ export const parseAttemptPayload = (raw: string): AttemptPayload | undefined => 
     attempt,
     lemmas: asStringArray(obj.lemmas),
     gaps: asStringArray(obj.gaps),
+    axiom: parseAxiomDelegate(obj),
   };
 };
 
@@ -314,7 +356,7 @@ export const parseVerifyPayload = (raw: string): VerifyPayload | undefined => {
   const status = normalizeStatus(asString(obj.status));
   if (!status) return undefined;
   const notes = asStringArray(obj.notes);
-  return { status, notes };
+  return { status, notes, axiom: parseAxiomDelegate(obj) };
 };
 
 export const formatVerifyPayload = (payload: VerifyPayload): string => [

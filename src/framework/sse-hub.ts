@@ -1,4 +1,8 @@
 export type Topic = "theorem" | "writer" | "agent" | "receipt" | "jobs";
+export type SseSubscription = {
+  readonly topic: Topic;
+  readonly stream?: string;
+};
 
 type SseClient = {
   readonly send: (event: string, data: string) => void;
@@ -13,8 +17,16 @@ const topicEvent: Record<Topic, string> = {
   jobs: "job-refresh",
 };
 
+const globalTopicKey = (topic: Topic): string | undefined => (
+  topic === "receipt"
+    ? "receipt:*"
+    : topic === "jobs"
+      ? "jobs:*"
+      : undefined
+);
+
 const topicKey = (topic: Topic, stream?: string): string =>
-  topic === "receipt" ? "receipt:*" : `${topic}:${stream ?? ""}`;
+  stream === undefined ? (globalTopicKey(topic) ?? `${topic}:`) : `${topic}:${stream}`;
 
 export class SseHub {
   private readonly channels = new Map<string, Set<SseClient>>();
@@ -33,9 +45,21 @@ export class SseHub {
   }
 
   subscribe(topic: Topic, stream: string | undefined, signal?: AbortSignal): Response {
-    const key = topicKey(topic, stream);
-    if (!this.channels.has(key)) this.channels.set(key, new Set());
-    const bucket = this.channels.get(key)!;
+    return this.subscribeMany([{ topic, stream }], signal);
+  }
+
+  subscribeMany(subscriptions: ReadonlyArray<SseSubscription>, signal?: AbortSignal): Response {
+    const unique = new Map<string, SseSubscription>();
+    for (const subscription of subscriptions) {
+      unique.set(topicKey(subscription.topic, subscription.stream), subscription);
+    }
+    const targets = [...unique.entries()].map(([key, subscription]) => {
+      if (!this.channels.has(key)) this.channels.set(key, new Set());
+      return {
+        topic: subscription.topic,
+        bucket: this.channels.get(key)!,
+      };
+    });
     const encoder = new TextEncoder();
 
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
@@ -55,7 +79,7 @@ export class SseHub {
       if (closed) return;
       closed = true;
       if (ping) clearInterval(ping);
-      bucket.delete(client);
+      for (const target of targets) target.bucket.delete(client);
       try {
         controller?.close();
       } catch {
@@ -64,12 +88,12 @@ export class SseHub {
     };
 
     const client: SseClient = { send, close };
-    bucket.add(client);
+    for (const target of targets) target.bucket.add(client);
 
     const body = new ReadableStream<Uint8Array>({
       start(ctrl) {
         controller = ctrl;
-        send(topicEvent[topic], "init");
+        for (const target of targets) send(topicEvent[target.topic], "init");
         ping = setInterval(() => {
           send("ping", "keepalive");
         }, 15000);
@@ -92,7 +116,14 @@ export class SseHub {
   }
 
   publish(topic: Topic, stream?: string): void {
-    this.sendToKey(topicKey(topic, stream), topicEvent[topic], String(Date.now()));
+    const event = topicEvent[topic];
+    const data = String(Date.now());
+    const key = topicKey(topic, stream);
+    this.sendToKey(key, event, data);
+    const globalKey = globalTopicKey(topic);
+    if (globalKey && globalKey !== key) {
+      this.sendToKey(globalKey, event, data);
+    }
   }
 
   publishData(topic: Topic, stream: string | undefined, event: string, data: string): void {

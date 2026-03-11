@@ -3,6 +3,8 @@
 // ============================================================================
 
 import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
+import { z } from "zod";
 
 const model = process.env.OPENAI_MODEL ?? "gpt-5.2";
 let client: OpenAI | null = null;
@@ -111,6 +113,18 @@ export type LlmTextOptions = {
   readonly onDelta?: (delta: string) => void | Promise<void>;
 };
 
+export type LlmStructuredOptions<Schema extends z.ZodTypeAny> = {
+  readonly system?: string;
+  readonly user: string;
+  readonly schema: Schema;
+  readonly schemaName: string;
+};
+
+export type LlmStructuredResult<T> = {
+  readonly parsed: T;
+  readonly raw: string;
+};
+
 export const llmText = async (opts: LlmTextOptions): Promise<string> => {
   return withRateLimitRetry(async () => {
     const stream = getClient().responses.stream({
@@ -132,5 +146,30 @@ export const llmText = async (opts: LlmTextOptions): Promise<string> => {
 
     const response = await stream.finalResponse();
     return response.output_text?.trim() ?? text.trim();
+  });
+};
+
+export const llmStructured = async <Schema extends z.ZodTypeAny>(
+  opts: LlmStructuredOptions<Schema>
+): Promise<LlmStructuredResult<z.infer<Schema>>> => {
+  return withRateLimitRetry(async () => {
+    const response = await getClient().responses.parse({
+      model,
+      instructions: opts.system,
+      input: opts.user,
+      text: {
+        format: zodTextFormat(opts.schema, opts.schemaName),
+      },
+    });
+
+    const raw = response.output_text?.trim() ?? "";
+    if (response.output_parsed === null) {
+      throw new Error(raw ? `Model returned no structured output: ${raw}` : "Model returned no structured output");
+    }
+
+    return {
+      parsed: response.output_parsed,
+      raw,
+    };
   });
 };

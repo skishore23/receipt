@@ -11,6 +11,7 @@ const ROUTE_FILES = [
   "src/agents/todo.agent.ts",
   "src/agents/writer.agent.ts",
   "src/agents/theorem.agent.ts",
+  "src/agents/axiom-simple.agent.ts",
   "src/agents/monitor.agent.ts",
   "src/agents/inspector.agent.ts",
 ] as const;

@@ -18,6 +18,7 @@ export type JobExecutionResult = {
   readonly ok: boolean;
   readonly result?: Record<string, unknown>;
   readonly error?: string;
+  readonly noRetry?: boolean;
 };
 
 export type JobHandler = (job: QueueJob, ctx: JobExecutionContext) => Promise<JobExecutionResult>;
@@ -137,7 +138,7 @@ export class JobWorker {
       if (result.ok) {
         await this.queue.complete(job.id, this.workerId, result.result);
       } else {
-        await this.queue.fail(job.id, this.workerId, result.error ?? "job failed");
+        await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

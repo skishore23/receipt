@@ -6,15 +6,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import { z } from "zod";
+
 import type { Chain } from "../core/types.js";
 import type { Runtime } from "../core/runtime.js";
 import { clampNumber, parseFormNum, type AgentRunControl, createQueuedEmitter, getLatestRunId } from "../engine/runtime/workflow.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
 import type { AgentCmd, AgentEvent, AgentState, AgentToolName } from "../modules/agent.js";
+import type { FailureRecord } from "../modules/failure.js";
 import { agentRunStream } from "./agent.streams.js";
 import type { DelegationTools } from "../adapters/delegation.js";
 import type { AgentPromptConfig } from "../prompts/agent.js";
 import { renderPrompt } from "../prompts/agent.js";
+import { buildAgentRunResult, type AgentRunResult } from "./agent.result.js";
 
 export const AGENT_WORKFLOW_ID = "agent-v1";
 export const AGENT_WORKFLOW_VERSION = "1.0.0";
@@ -63,6 +67,8 @@ export const parseAgentConfig = (form: Record<string, string>): AgentRunConfig =
 export const getLatestAgentRunId = (chain: Chain<AgentEvent>): string | undefined =>
   getLatestRunId(chain, "problem.set");
 
+export type { AgentRunResult } from "./agent.result.js";
+
 export type AgentRunInput = {
   readonly stream: string;
   readonly runId: string;
@@ -72,6 +78,12 @@ export type AgentRunInput = {
   readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly prompts: AgentPromptConfig;
   readonly llmText: (opts: { system?: string; user: string }) => Promise<string>;
+  readonly llmStructured: <Schema extends z.ZodTypeAny>(opts: {
+    readonly system?: string;
+    readonly user: string;
+    readonly schema: Schema;
+    readonly schemaName: string;
+  }) => Promise<{ readonly parsed: z.infer<Schema>; readonly raw: string }>;
   readonly model: string;
   readonly promptHash?: string;
   readonly promptPath?: string;
@@ -83,12 +95,39 @@ export type AgentRunInput = {
   readonly broadcast?: () => void;
   readonly now?: () => number;
   readonly control?: AgentRunControl;
+  readonly workflowId?: string;
+  readonly workflowVersion?: string;
+  readonly extraConfig?: Readonly<Record<string, unknown>>;
+  readonly extraToolSpecs?: Readonly<Record<string, string>>;
+  readonly extraTools?: Readonly<Record<string, AgentToolExecutor>>;
+  readonly finalizer?: AgentFinalizer;
 };
 
-type ToolResult = {
+export type AgentToolResult = {
   readonly output: string;
   readonly summary: string;
+  readonly reports?: ReadonlyArray<Omit<Extract<AgentEvent, { type: "validation.report" }>, "type" | "runId" | "iteration" | "agentId">>;
 };
+
+export type AgentToolExecutor = (input: Record<string, unknown>) => Promise<AgentToolResult>;
+
+export type AgentFinalizerResult = {
+  readonly accept: boolean;
+  readonly text?: string;
+  readonly note?: string;
+};
+
+export type AgentFinalizer = (input: {
+  readonly runId: string;
+  readonly runStream: string;
+  readonly iteration: number;
+  readonly text: string;
+  readonly problem: string;
+  readonly workspaceRoot: string;
+  readonly emit: (event: AgentEvent, index?: boolean) => Promise<void>;
+  readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
+  readonly now: () => number;
+}) => Promise<AgentFinalizerResult>;
 
 const truncateText = (input: string, limit: number): { readonly text: string; readonly truncated: boolean } => {
   if (input.length <= limit) return { text: input, truncated: false };
@@ -128,30 +167,6 @@ const resolveWorkspacePath = (root: string, rawPath: string): string => {
   return resolved;
 };
 
-const extractJsonObject = (text: string): string | undefined => {
-  const direct = text.trim();
-  if (direct.startsWith("{") && direct.endsWith("}")) return direct;
-
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1]
-    ?? text.match(/```\s*([\s\S]*?)```/)?.[1];
-  if (fenced) return fenced.trim();
-
-  let start = text.indexOf("{");
-  while (start >= 0) {
-    let depth = 0;
-    for (let i = start; i < text.length; i += 1) {
-      const ch = text[i];
-      if (ch === "{") depth += 1;
-      if (ch === "}") {
-        depth -= 1;
-        if (depth === 0) return text.slice(start, i + 1);
-      }
-    }
-    start = text.indexOf("{", start + 1);
-  }
-  return undefined;
-};
-
 type ParsedAction =
   | {
       readonly thought: string;
@@ -164,6 +179,60 @@ type ParsedAction =
       readonly name: string;
       readonly input: Record<string, unknown>;
     };
+
+const structuredAgentActionSchema = z.object({
+  thought: z.string(),
+  action: z.object({
+    type: z.enum(["tool", "final"]),
+    name: z.string().nullable(),
+    input: z.string(),
+    text: z.string().nullable(),
+  }).strict(),
+}).strict();
+
+type StructuredAgentAction = z.infer<typeof structuredAgentActionSchema>;
+
+const normalizeStructuredInput = (raw: unknown): Record<string, unknown> => {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw !== "string") {
+    throw new Error("Model tool action input must be a JSON object string");
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error("Model tool action input is not valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Model tool action input must decode to a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+};
+
+const normalizeStructuredAction = (value: StructuredAgentAction): ParsedAction => {
+  const thought = value.thought.trim() || "No thought provided.";
+  if (value.action.type === "final") {
+    const text = value.action.text?.trim();
+    if (!text) throw new Error("Model final action missing text");
+    return {
+      thought,
+      actionType: "final",
+      text,
+    };
+  }
+  const name = value.action.name?.trim();
+  if (!name) throw new Error("Model tool action missing name");
+  return {
+    thought,
+    actionType: "tool",
+    name,
+    input: normalizeStructuredInput((value.action as { input: unknown }).input),
+  };
+};
 
 const safeJson = (value: unknown): string => {
   try {
@@ -194,6 +263,9 @@ const deriveTranscriptLines = (chain: Chain<AgentEvent>, limit: number): Readonl
           lines.push(`Tool ${event.tool} failed: ${event.error}`);
         }
         break;
+      case "validation.report":
+        lines.push(`Validation ${event.gate}: ${event.ok ? "passed" : "failed"}${event.target ? ` (${event.target})` : ""} - ${event.summary}`);
+        break;
       default:
         break;
     }
@@ -202,55 +274,18 @@ const deriveTranscriptLines = (chain: Chain<AgentEvent>, limit: number): Readonl
   return lines.slice(lines.length - limit);
 };
 
-const parseModelAction = (raw: string): ParsedAction => {
-  const candidate = extractJsonObject(raw);
-  if (!candidate) {
-    throw new Error("Model returned unstructured output");
-  }
+const compactRawModelOutput = (raw: string): string =>
+  raw.trim().replace(/\s+/g, " ").slice(0, 800);
 
-  try {
-    const parsed = JSON.parse(candidate) as Record<string, unknown>;
-    const thought = typeof parsed.thought === "string"
-      ? parsed.thought.trim()
-      : "No thought provided.";
-    const action = typeof parsed.action === "object" && parsed.action
-      ? parsed.action as Record<string, unknown>
-      : {};
-    const actionType = action.type === "tool" || action.type === "final" ? action.type : undefined;
-    if (!actionType) {
-      throw new Error("Model action.type must be 'tool' or 'final'");
-    }
-    if (actionType === "final") {
-      const text = typeof action.text === "string"
-        ? action.text
-        : typeof parsed.final === "string"
-          ? parsed.final
-          : undefined;
-      if (!text || !text.trim()) {
-        throw new Error("Model final action missing text");
-      }
-      return {
-        thought,
-        actionType: "final",
-        text: text.trim(),
-      };
-    }
-    const name = typeof action.name === "string" ? action.name.trim() : "";
-    const input = typeof action.input === "object" && action.input && !Array.isArray(action.input)
-      ? action.input as Record<string, unknown>
-      : {};
-    if (!name) throw new Error("Model tool action missing name");
-    return {
-      thought,
-      actionType: "tool",
-      name,
-      input,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to parse model JSON output: ${message}`);
+class TerminalAgentFailure extends Error {
+  readonly failure: FailureRecord;
+
+  constructor(failure: FailureRecord) {
+    super(failure.message);
+    this.name = "TerminalAgentFailure";
+    this.failure = failure;
   }
-};
+}
 
 const runShell = async (
   cmd: string,
@@ -285,7 +320,7 @@ const runShell = async (
     });
   });
 
-const TOOL_SPECS: Record<AgentToolName, string> = {
+const BASE_TOOL_SPECS: Readonly<Record<string, string>> = {
   ls: '{"path"?: string} — List directory contents. Defaults to workspace root.',
   read: '{"path": string, "startLine"?: number, "endLine"?: number, "maxChars"?: number} — Read file contents with optional line range.',
   write: '{"path": string, "content": string, "append"?: boolean} — Write or append to a file.',
@@ -296,7 +331,7 @@ const TOOL_SPECS: Record<AgentToolName, string> = {
   "memory.summarize": '{"scope"?: string, "query"?: string, "limit"?: number, "maxChars"?: number} — Summarize memory entries, optionally filtered by query.',
   "memory.commit": '{"scope"?: string, "text": string, "tags"?: string[]} — Persist a new memory entry.',
   "memory.diff": '{"scope"?: string, "fromTs": number, "toTs"?: number} — List memory entries within a timestamp range.',
-  "agent.delegate": '{"agentId": string, "task": string, "config"?: object, "timeoutMs"?: number} — Delegate a sub-task to a specialized agent (theorem, writer, agent, inspector). Blocks until complete or timeout.',
+  "agent.delegate": '{"agentId": string, "task": string, "config"?: object, "timeoutMs"?: number} — Delegate a sub-task to a specialized agent (theorem, writer, agent, axiom, inspector). Blocks until complete or timeout.',
   "agent.status": '{"jobId": string} — Check status and result of a previously delegated job.',
   "agent.inspect": '{"file": string, "maxChars"?: number} — Read a receipt chain file to inspect another agent\'s event history.',
   "skill.read": '{"name": string} — Get the full parameter spec for any tool by name.',
@@ -308,18 +343,24 @@ const createTools = (opts: {
   readonly maxToolOutputChars: number;
   readonly memoryTools: MemoryTools;
   readonly delegationTools: DelegationTools;
-}): Record<AgentToolName, (input: Record<string, unknown>) => Promise<ToolResult>> => {
+  readonly extraToolSpecs?: Readonly<Record<string, string>>;
+  readonly extraTools?: Readonly<Record<string, AgentToolExecutor>>;
+}): { readonly toolSpecs: Readonly<Record<string, string>>; readonly tools: Readonly<Record<string, AgentToolExecutor>> } => {
   const workspaceRoot = path.resolve(opts.workspaceRoot);
   const defaultScope = opts.defaultMemoryScope;
   const maxChars = opts.maxToolOutputChars;
   const memory = opts.memoryTools;
+  const toolSpecs = {
+    ...BASE_TOOL_SPECS,
+    ...(opts.extraToolSpecs ?? {}),
+  } as const;
 
   const normalizeScope = (input: Record<string, unknown>): string => {
     if (typeof input.scope === "string" && input.scope.trim().length > 0) return input.scope.trim();
     return defaultScope;
   };
 
-  const summarize = (value: unknown): ToolResult => {
+  const summarize = (value: unknown): AgentToolResult => {
     const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
     const clipped = truncateText(text, maxChars);
     const summaryLine = clipped.text.split("\n")[0] ?? "";
@@ -329,7 +370,7 @@ const createTools = (opts: {
     };
   };
 
-  return {
+  const builtins: Record<string, AgentToolExecutor> = {
     ls: async (input) => {
       const rel = typeof input.path === "string" && input.path.trim().length > 0 ? input.path.trim() : ".";
       const abs = resolveWorkspacePath(workspaceRoot, rel);
@@ -459,16 +500,24 @@ const createTools = (opts: {
     "skill.read": async (input) => {
       const name = typeof input.name === "string" ? input.name.trim() : "";
       if (!name) throw new Error("skill.read.name is required");
-      const spec = TOOL_SPECS[name as AgentToolName];
+      const spec = toolSpecs[name];
       if (!spec) throw new Error(`unknown tool '${name}'`);
       return summarize(`${name}: ${spec}`);
     },
 
     ...opts.delegationTools,
   };
+
+  return {
+    toolSpecs,
+    tools: {
+      ...builtins,
+      ...(opts.extraTools ?? {}),
+    },
+  };
 };
 
-export const runAgent = async (input: AgentRunInput): Promise<void> => {
+export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> => {
   const now = input.now ?? Date.now;
   const baseStream = input.stream;
   const runStream = input.runStream ?? agentRunStream(baseStream, input.runId);
@@ -480,13 +529,19 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
       ? input.config.workspace
       : path.join(input.workspaceRoot, input.config.workspace)
   );
-  const tools = createTools({
+  const { tools, toolSpecs } = createTools({
     workspaceRoot: resolvedWorkspaceRoot,
     defaultMemoryScope: input.config.memoryScope,
     maxToolOutputChars: input.config.maxToolOutputChars,
     memoryTools: input.memoryTools,
     delegationTools: input.delegationTools,
+    extraToolSpecs: input.extraToolSpecs,
+    extraTools: input.extraTools,
   });
+  const workflowId = input.workflowId ?? AGENT_WORKFLOW_ID;
+  const workflowVersion = input.workflowVersion ?? AGENT_WORKFLOW_VERSION;
+  const availableTools = Object.keys(toolSpecs).sort();
+  const toolHelp = availableTools.map((name) => `- ${name}: ${toolSpecs[name]}`).join("\n");
 
   const emitRun = createQueuedEmitter({
     runtime: input.runtime,
@@ -507,10 +562,35 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
     if (index) await emitIndex(event);
   };
 
+  const emitFailure = async (failure: FailureRecord, index = true): Promise<void> => {
+    await emit({
+      type: "failure.report",
+      runId: input.runId,
+      agentId: "orchestrator",
+      failure,
+    }, index);
+  };
+
+  const finalizeResult = async (): Promise<AgentRunResult> => {
+    const state = await input.runtime.state(runStream);
+    return buildAgentRunResult({
+      runId: input.runId,
+      stream: baseStream,
+      runStream,
+      state,
+    });
+  };
+
   const checkAbort = async (stage: string): Promise<boolean> => {
     if (!control?.checkAbort) return false;
     const aborted = await control.checkAbort();
     if (!aborted) return false;
+    await emitFailure({
+      stage: "runtime",
+      failureClass: "canceled",
+      message: `canceled at ${stage}`,
+      retryable: true,
+    });
     await emit({
       type: "run.status",
       runId: input.runId,
@@ -528,6 +608,12 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
     let finalized = false;
 
     if (!fs.existsSync(resolvedWorkspaceRoot)) {
+      await emitFailure({
+        stage: "runtime",
+        failureClass: "workspace_missing",
+        message: `workspace does not exist: ${resolvedWorkspaceRoot}`,
+        retryable: false,
+      });
       await emit({
         type: "run.status",
         runId: input.runId,
@@ -535,7 +621,7 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
         agentId: "orchestrator",
         note: `workspace does not exist: ${resolvedWorkspaceRoot}`,
       }, true);
-      return;
+      return finalizeResult();
     }
 
     await emit({
@@ -548,12 +634,13 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
       type: "run.configured",
       runId: input.runId,
       agentId: "orchestrator",
-      workflow: { id: AGENT_WORKFLOW_ID, version: AGENT_WORKFLOW_VERSION },
+      workflow: { id: workflowId, version: workflowVersion },
       config: {
         maxIterations: input.config.maxIterations,
         maxToolOutputChars: input.config.maxToolOutputChars,
         memoryScope: input.config.memoryScope,
         workspace: input.config.workspace,
+        extra: input.extraConfig,
       },
       model,
       promptHash: input.promptHash,
@@ -561,6 +648,12 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
     }, true);
 
     if (!input.apiReady) {
+      await emitFailure({
+        stage: "runtime",
+        failureClass: "api_unavailable",
+        message: input.apiNote ?? "OPENAI_API_KEY not set",
+        retryable: false,
+      });
       await emit({
         type: "run.status",
         runId: input.runId,
@@ -568,7 +661,7 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
         agentId: "orchestrator",
         note: input.apiNote ?? "OPENAI_API_KEY not set",
       }, true);
-      return;
+      return finalizeResult();
     }
 
     await emit({
@@ -693,17 +786,30 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
       return next;
     };
 
-    const llmCall = async (iteration: number, user: string): Promise<string> => {
+    const llmStructuredCall = async (
+      iteration: number,
+      user: string
+    ): Promise<{ readonly parsed: ParsedAction; readonly raw: string }> => {
       if (await checkAbort(`iteration-${iteration}.before_llm`)) {
         throw new Error(`canceled at iteration-${iteration}.before_llm`);
       }
       const promptText = await applyContextPolicy(iteration, user);
+      const invoke = (promptUser: string) => input.llmStructured({
+        system: prompts.system,
+        user: promptUser,
+        schema: structuredAgentActionSchema,
+        schemaName: "agent_action",
+      });
+
       try {
-        const out = await input.llmText({ system: prompts.system, user: promptText });
+        const result = await invoke(promptText);
         if (await checkAbort(`iteration-${iteration}.after_llm`)) {
           throw new Error(`canceled at iteration-${iteration}.after_llm`);
         }
-        return out;
+        return {
+          parsed: normalizeStructuredAction(result.parsed),
+          raw: result.raw,
+        };
       } catch (err) {
         if (!isContextOverflow(err)) throw err;
         const compacted = compactPrompt(promptText, 8_000);
@@ -724,17 +830,20 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
           agentId: "orchestrator",
           note: "recovered by compacting prompt and retrying once",
         });
-        const out = await input.llmText({ system: prompts.system, user: compacted });
+        const result = await invoke(compacted);
         if (await checkAbort(`iteration-${iteration}.after_overflow_retry`)) {
           throw new Error(`canceled at iteration-${iteration}.after_overflow_retry`);
         }
-        return out;
+        return {
+          parsed: normalizeStructuredAction(result.parsed),
+          raw: result.raw,
+        };
       }
     };
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       await applyControlCommands();
-      if (await checkAbort(`iteration-${iteration}.start`)) return;
+      if (await checkAbort(`iteration-${iteration}.start`)) return finalizeResult();
 
       await emit({
         type: "iteration.started",
@@ -770,10 +879,48 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
         workspace: resolvedWorkspaceRoot,
         transcript: transcriptText || "(no prior steps)",
         memory: memorySummary.summary || "(empty)",
+        available_tools: availableTools.join(", "),
+        tool_help: toolHelp || "(no tools available)",
       });
 
-      const raw = await llmCall(iteration, prompt);
-      const parsed = parseModelAction(raw);
+      let raw = "";
+      let parsed: ParsedAction | undefined;
+      let parseError = "";
+      try {
+        const structured = await llmStructuredCall(iteration, prompt);
+        raw = structured.raw;
+        parsed = structured.parsed;
+        await emit({
+          type: "validation.report",
+          runId: input.runId,
+          iteration,
+          agentId: "orchestrator",
+          gate: "model_json",
+          ok: true,
+          summary: "native structured action parsed",
+        });
+      } catch (err) {
+        parseError = err instanceof Error ? err.message : String(err);
+        await emit({
+          type: "validation.report",
+          runId: input.runId,
+          iteration,
+          agentId: "orchestrator",
+          gate: "model_json",
+          ok: false,
+          summary: `native structured action failed: ${parseError}`,
+        });
+      }
+      if (!parsed) {
+        throw new TerminalAgentFailure({
+          stage: "model_json",
+          failureClass: "model_json_parse",
+          message: parseError || "Failed to parse model structured output",
+          details: compactRawModelOutput(raw),
+          retryable: true,
+          iteration,
+        });
+      }
 
       await emit({
         type: "thought.logged",
@@ -784,7 +931,6 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
       });
 
       if (parsed.actionType === "final") {
-        const finalText = parsed.text.trim() || "Completed.";
         await emit({
           type: "action.planned",
           runId: input.runId,
@@ -792,6 +938,37 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
           agentId: "orchestrator",
           actionType: "final",
         });
+
+        let finalText = parsed.text.trim() || "Completed.";
+        if (input.finalizer) {
+          const result = await input.finalizer({
+            runId: input.runId,
+            runStream,
+            iteration,
+            text: finalText,
+            problem,
+            workspaceRoot: resolvedWorkspaceRoot,
+            emit,
+            runtime: input.runtime,
+            now,
+          });
+          if (result.text?.trim()) {
+            finalText = result.text.trim();
+          }
+          if (!result.accept) {
+            await emit({
+              type: "validation.report",
+              runId: input.runId,
+              iteration,
+              agentId: "orchestrator",
+              gate: "finalizer",
+              ok: false,
+              summary: result.note?.trim() || "finalization rejected",
+            });
+            continue;
+          }
+        }
+
         await emit({
           type: "response.finalized",
           runId: input.runId,
@@ -864,6 +1041,15 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
           output: clipped.text,
           truncated: clipped.truncated,
         });
+        for (const report of result.reports ?? []) {
+          await emit({
+            type: "validation.report",
+            runId: input.runId,
+            iteration,
+            agentId: "orchestrator",
+            ...report,
+          });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await emit({
@@ -881,6 +1067,12 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
     }
 
     if (!finalized) {
+      await emitFailure({
+        stage: "budget",
+        failureClass: "iteration_budget_exhausted",
+        message: `iteration budget exhausted (${maxIterations})`,
+        retryable: true,
+      }, true);
       await emit({
         type: "run.status",
         runId: input.runId,
@@ -896,14 +1088,25 @@ export const runAgent = async (input: AgentRunInput): Promise<void> => {
       }, true);
     }
   } catch (err) {
-    console.error(err);
-    const message = err instanceof Error ? err.message : String(err);
+    if (!(err instanceof TerminalAgentFailure)) {
+      console.error(err);
+    }
+    const failure: FailureRecord = err instanceof TerminalAgentFailure
+      ? err.failure
+      : {
+          stage: "runtime",
+          failureClass: "runtime_error",
+          message: err instanceof Error ? err.message : String(err),
+          retryable: true,
+        };
+    await emitFailure(failure, true);
     await emit({
       type: "run.status",
       runId: input.runId,
       status: "failed",
       agentId: "orchestrator",
-      note: message,
+      note: failure.message,
     }, true);
   }
+  return finalizeResult();
 };

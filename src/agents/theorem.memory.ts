@@ -86,6 +86,7 @@ const TYPE_SCORE: Readonly<Record<TheoremEvent["type"], number>> = {
   "problem.appended": 0,
   "run.configured": 0,
   "run.status": 0,
+  "failure.report": 0,
   "attempt.proposed": 1.8,
   "lemma.proposed": 2.1,
   "critique.raised": 2.6,

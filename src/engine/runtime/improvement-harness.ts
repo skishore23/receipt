@@ -28,12 +28,20 @@ type CommandResult = {
   readonly durationMs: number;
 };
 
-const runCommand = async (cmd: string, cwd: string, timeoutMs: number): Promise<CommandResult> =>
+const runCommand = async (
+  cmd: string,
+  cwd: string,
+  timeoutMs: number,
+  extraEnv?: Readonly<Record<string, string>>
+): Promise<CommandResult> =>
   new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(cmd, {
       cwd,
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(extraEnv ?? {}),
+      },
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -129,7 +137,11 @@ export const evaluateImprovementProposal = async (opts: {
   const staticOk = checks.every((check) => check.ok);
   if (staticOk) {
     const cmd = defaultCommand(opts.artifactType);
-    const command = await runCommand(cmd, opts.cwd, 180_000);
+    const command = await runCommand(cmd, opts.cwd, 180_000, {
+      IMPROVEMENT_ARTIFACT_TYPE: opts.artifactType,
+      IMPROVEMENT_TARGET: opts.target,
+      IMPROVEMENT_PATCH: opts.patch,
+    });
     checks.push({
       name: "harness.command",
       ok: command.ok,
@@ -151,4 +163,3 @@ export const evaluateImprovementProposal = async (opts: {
     report,
   };
 };
-

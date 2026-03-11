@@ -46,6 +46,7 @@ export type JobEvent =
       readonly error: string;
       readonly retryable: boolean;
       readonly willRetry: boolean;
+      readonly result?: Readonly<Record<string, unknown>>;
     }
   | {
       readonly type: "job.canceled";
@@ -194,6 +195,7 @@ export const reduce: Reducer<JobState, JobEvent> = (state, event, ts) => {
         workerId: event.workerId,
         leaseUntil: undefined,
         lastError: event.error,
+        result: event.result ?? prev.result,
         updatedAt: ts,
       });
     }
@@ -256,4 +258,3 @@ export const reduce: Reducer<JobState, JobEvent> = (state, event, ts) => {
     }
   }
 };
-

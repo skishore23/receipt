@@ -3,6 +3,8 @@
 // ============================================================================
 
 import type { Decide, Reducer } from "../core/types.js";
+import type { FailureRecord, FailureStateRecord } from "./failure.js";
+import { cloneFailureRecord } from "./failure.js";
 
 export type AgentId = string;
 export type ClaimId = string;
@@ -12,6 +14,21 @@ export type MemorySliceItem = {
   readonly claimId?: ClaimId;
   readonly targetClaimId?: ClaimId;
   readonly agentId?: AgentId;
+};
+
+export type TheoremAxiomEvidence = {
+  readonly phase: "attempt" | "verify";
+  readonly tool: string;
+  readonly environment?: string;
+  readonly candidateHash?: string;
+  readonly formalStatementHash?: string;
+  readonly candidateContent?: string;
+  readonly formalStatement?: string;
+  readonly ok: boolean;
+  readonly failedDeclarations: ReadonlyArray<string>;
+  readonly timings?: Readonly<Record<string, number>>;
+  readonly subJobId?: string;
+  readonly subRunId?: string;
 };
 
 export type TheoremEvent =
@@ -48,6 +65,12 @@ export type TheoremEvent =
       readonly status: "running" | "failed" | "completed";
       readonly agentId?: AgentId;
       readonly note?: string;
+    }
+  | {
+      readonly type: "failure.report";
+      readonly runId: string;
+      readonly agentId?: AgentId;
+      readonly failure: FailureRecord;
     }
   | {
       readonly type: "attempt.proposed";
@@ -190,6 +213,8 @@ export type TheoremEvent =
       readonly subRunId: string;
       readonly task: string;
       readonly summary: string;
+      readonly outcome?: string;
+      readonly evidence?: ReadonlyArray<TheoremAxiomEvidence>;
     }
   | {
       readonly type: "agent.status";
@@ -206,6 +231,7 @@ export type TheoremEvent =
       readonly agentId: AgentId;
       readonly status: "valid" | "needs" | "false";
       readonly content: string;
+      readonly evidence?: TheoremAxiomEvidence;
     }
   | {
       readonly type: "rebracket.applied";
@@ -308,7 +334,13 @@ export type TheoremState = {
   readonly summaries: Readonly<Record<ClaimId, SummaryRecord>>;
   readonly branches: ReadonlyArray<{ id: string; forkAt: number; note?: string }>; 
   readonly agentStatus: Readonly<Record<AgentId, { status: "running" | "idle" | "done"; phase?: string; round?: number; note?: string; updatedAt: number }>>;
-  readonly verification?: { status: "valid" | "needs" | "false"; content: string; updatedAt: number };
+  readonly verification?: {
+    status: "valid" | "needs" | "false";
+    content: string;
+    evidence?: TheoremAxiomEvidence;
+    updatedAt: number;
+  };
+  readonly failure?: FailureStateRecord;
   readonly rebracket?: { bracket: string; score: number; note?: string; updatedAt: number };
   readonly solution?: SolutionRecord;
 };
@@ -417,6 +449,14 @@ export const reduce: Reducer<TheoremState, TheoremEvent> = (state, event, ts) =>
         status: event.status,
         statusNote: event.note ?? state.statusNote,
       };
+    case "failure.report":
+      return {
+        ...state,
+        failure: {
+          ...cloneFailureRecord(event.failure),
+          updatedAt: ts,
+        },
+      };
     case "attempt.proposed":
       return { ...state, attempts: upsertClaim(state.attempts, event, ts) };
     case "lemma.proposed":
@@ -447,6 +487,7 @@ export const reduce: Reducer<TheoremState, TheoremEvent> = (state, event, ts) =>
         verification: {
           status: event.status,
           content: event.content,
+          evidence: event.evidence,
           updatedAt: ts,
         },
       };

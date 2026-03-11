@@ -45,8 +45,10 @@ const ctx: AgentLoaderContext = {
   runtimes: {
     todo: dummyRuntime,
     theorem: dummyRuntime,
+    "axiom-simple": dummyRuntime,
     writer: dummyRuntime,
     agent: dummyRuntime,
+    axiom: dummyRuntime,
     inspector: dummyRuntime,
     selfImprovement: dummyRuntime,
     memory: dummyRuntime,
@@ -56,24 +58,28 @@ const ctx: AgentLoaderContext = {
     writer: {},
     inspector: {},
     agent: {},
+    axiom: {},
   },
   promptHashes: {
     theorem: "",
     writer: "",
     inspector: "",
     agent: "",
+    axiom: "",
   },
   promptPaths: {
     theorem: "",
     writer: "",
     inspector: "",
     agent: "",
+    axiom: "",
   },
   models: {
     theorem: "",
     writer: "",
     inspector: "",
     agent: "",
+    axiom: "",
   },
   helpers: {},
 };
@@ -82,6 +88,8 @@ test("agent loader auto-discovers route modules", async () => {
   const routes = await loadAgentRoutes(ctx);
   const ids = routes.map((route) => route.id).sort();
   assert.equal(ids.includes("todo"), true);
+  assert.equal(ids.includes("axiom"), true);
+  assert.equal(ids.includes("axiom-simple"), true);
   assert.equal(ids.includes("theorem"), true);
   assert.equal(ids.includes("writer"), true);
   assert.equal(ids.includes("agent"), true);

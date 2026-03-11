@@ -10,10 +10,13 @@ export type TheoremPromptConfig = {
   readonly user: Record<string, string>;
 };
 
-export const loadTheoremPrompts = (): TheoremPromptConfig =>
+export const loadTheoremPrompts = (opts?: {
+  readonly name?: string;
+  readonly tag?: string;
+}): TheoremPromptConfig =>
   loadPromptConfig<TheoremPromptConfig>({
-    name: "theorem",
-    tag: "theorem",
+    name: opts?.name ?? "theorem",
+    tag: opts?.tag ?? "theorem",
   });
 
 export const renderPrompt = (template: string, vars: Record<string, string>): string =>

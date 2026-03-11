@@ -163,7 +163,7 @@ test("smoke: theorem/writer runs boot without API key", { timeout: 120_000 }, as
   }
 });
 
-test("smoke: theorem/writer/receipt UI routes boot", { timeout: 120_000 }, async () => {
+test("smoke: theorem/writer/axiom/receipt UI routes boot", { timeout: 120_000 }, async () => {
   const port = await getFreePort();
   const dataDir = await createTempDir("receipt-smoke-ui");
   const tsxBin = path.join(
@@ -203,6 +203,13 @@ test("smoke: theorem/writer/receipt UI routes boot", { timeout: 120_000 }, async
     assert.equal(writerRes.status, 200, `GET /writer failed: ${writerRes.status}`);
     const writerHtml = await writerRes.text();
     assert.match(writerHtml, /Receipt - Writer Guild/);
+
+    const axiomRes = await fetch(`${base}/axiom`);
+    assert.equal(axiomRes.status, 200, `GET /axiom failed: ${axiomRes.status}`);
+    const axiomHtml = await axiomRes.text();
+    assert.match(axiomHtml, /Receipt - Axiom Guild/);
+    assert.match(axiomHtml, /Run Axiom Guild/);
+    assert.match(axiomHtml, /agents%2Faxiom-guild|agents\/axiom-guild/);
 
     const receiptRes = await fetch(`${base}/receipt`);
     assert.equal(receiptRes.status, 200, `GET /receipt failed: ${receiptRes.status}`);

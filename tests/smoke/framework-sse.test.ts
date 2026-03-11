@@ -69,3 +69,47 @@ test("framework sse: publishData forwards custom event payload", async () => {
   abort.abort();
   await streamReader.cancel();
 });
+
+test("framework sse: subscribeMany fans in multiple topics", async () => {
+  const hub = new SseHub();
+  const abort = new AbortController();
+  const response = hub.subscribeMany([
+    { topic: "theorem", stream: "demo" },
+    { topic: "receipt" },
+  ], abort.signal);
+  const reader = response.body?.getReader();
+  assert.ok(reader, "sse stream reader missing");
+  const streamReader = reader!;
+
+  const init = `${await readChunk(streamReader)}${await readChunk(streamReader)}`;
+  assert.match(init, /event: theorem-refresh/);
+  assert.match(init, /event: receipt-refresh/);
+
+  hub.publish("theorem", "demo");
+  hub.publish("receipt");
+  const published = `${await readChunk(streamReader)}${await readChunk(streamReader)}`;
+  assert.match(published, /event: theorem-refresh/);
+  assert.match(published, /event: receipt-refresh/);
+
+  abort.abort();
+  await streamReader.cancel();
+});
+
+test("framework sse: global jobs subscription receives job-specific publishes", async () => {
+  const hub = new SseHub();
+  const abort = new AbortController();
+  const response = hub.subscribe("jobs", undefined, abort.signal);
+  const reader = response.body?.getReader();
+  assert.ok(reader, "sse stream reader missing");
+  const streamReader = reader!;
+
+  const init = await readChunk(streamReader);
+  assert.match(init, /event: job-refresh/);
+
+  hub.publish("jobs", "job_demo");
+  const published = await readChunk(streamReader);
+  assert.match(published, /event: job-refresh/);
+
+  abort.abort();
+  await streamReader.cancel();
+});

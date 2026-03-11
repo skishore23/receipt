@@ -7,7 +7,7 @@ export const todoCmdFormSchema = z.object({
 });
 
 export const theoremRunFormSchema = z.object({
-  problem: z.string().min(1),
+  problem: z.string().optional(),
   append: z.string().optional(),
   rounds: z.string().optional(),
   depth: z.string().optional(),
@@ -16,7 +16,7 @@ export const theoremRunFormSchema = z.object({
 });
 
 export const writerRunFormSchema = z.object({
-  problem: z.string().min(1),
+  problem: z.string().optional(),
   append: z.string().optional(),
   parallel: z.string().optional(),
 });
@@ -27,6 +27,16 @@ export const agentRunFormSchema = z.object({
   maxToolOutputChars: z.string().optional(),
   memoryScope: z.string().optional(),
   workspace: z.string().optional(),
+  leanEnvironment: z.string().optional(),
+  leanTimeoutSeconds: z.string().optional(),
+  autoRepair: z.string().optional(),
+  localValidationMode: z.string().optional(),
+});
+
+export const axiomSimpleRunFormSchema = z.object({
+  problem: z.string().optional(),
+  workerCount: z.string().optional(),
+  repairMode: z.string().optional(),
 });
 
 export const receiptInspectFormSchema = z.object({

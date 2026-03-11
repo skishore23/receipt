@@ -24,6 +24,7 @@ import {
 } from "./adapters/memory-tools.js";
 import { createDelegationTools } from "./adapters/delegation.js";
 import { createHeartbeat, type HeartbeatSpec } from "./adapters/heartbeat.js";
+import { fold } from "./core/chain.js";
 import { createRuntime } from "./core/runtime.js";
 import type { TodoEvent } from "./modules/todo.js";
 import { decide, reduce, initial } from "./modules/todo.js";
@@ -43,18 +44,36 @@ import type { WriterEvent } from "./modules/writer.js";
 import { decide as decideWriter, reduce as reduceWriter, initial as initialWriter } from "./modules/writer.js";
 import type { AgentEvent } from "./modules/agent.js";
 import { decide as decideAgent, reduce as reduceAgent, initial as initialAgent } from "./modules/agent.js";
-import { llmText, embed } from "./adapters/openai.js";
+import type {
+  AxiomSimpleCmd,
+  AxiomSimpleEvent,
+  AxiomSimpleState,
+  AxiomSimpleWorkerSnapshot,
+  AxiomSimpleWorkerStatus,
+  AxiomSimpleWorkerValidation,
+} from "./modules/axiom-simple.js";
+import {
+  decide as decideAxiomSimple,
+  reduce as reduceAxiomSimple,
+  initial as initialAxiomSimple,
+} from "./modules/axiom-simple.js";
+import { llmStructured, llmText, embed } from "./adapters/openai.js";
 import { loadTheoremPrompts, hashTheoremPrompts } from "./prompts/theorem.js";
 import { loadWriterPrompts, hashWriterPrompts } from "./prompts/writer.js";
 import { loadInspectorPrompts, hashInspectorPrompts } from "./prompts/inspector.js";
 import { loadAgentPrompts, hashAgentPrompts } from "./prompts/agent.js";
+import { loadAxiomPrompts, hashAxiomPrompts } from "./prompts/axiom.js";
 import { runTheoremGuild, normalizeTheoremConfig } from "./agents/theorem.js";
 import { runWriterGuild, normalizeWriterConfig } from "./agents/writer.js";
 import { runAgent, normalizeAgentConfig } from "./agents/agent.js";
+import { runAxiom, normalizeAxiomConfig } from "./agents/axiom.js";
+import { runAxiomSimple, normalizeAxiomSimpleConfig, type AxiomSimpleWorkerLauncher } from "./agents/axiom-simple.js";
 import { theoremRunStream } from "./agents/theorem.streams.js";
 import { writerRunStream } from "./agents/writer.streams.js";
 import { agentRunStream } from "./agents/agent.streams.js";
+import { axiomSimpleRunStream } from "./agents/axiom-simple.streams.js";
 import { runReceiptInspector } from "./agents/inspector.js";
+import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-recovery.js";
 import {
   assertReceiptFileName,
   listReceiptFiles,
@@ -104,6 +123,15 @@ const writerRuntime = createRuntime(
   decideWriter,
   reduceWriter,
   initialWriter
+);
+
+const axiomSimpleStore = makeStore<AxiomSimpleEvent>();
+const axiomSimpleRuntime = createRuntime<AxiomSimpleCmd, AxiomSimpleEvent, AxiomSimpleState>(
+  axiomSimpleStore,
+  branchStore,
+  decideAxiomSimple,
+  reduceAxiomSimple,
+  initialAxiomSimple
 );
 
 const agentStore = makeStore<AgentEvent>();
@@ -160,6 +188,11 @@ const THEOREM_PROMPTS_HASH = hashTheoremPrompts(THEOREM_PROMPTS);
 const THEOREM_PROMPTS_PATH = "prompts/theorem.prompts.json";
 const THEOREM_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
+const AXIOM_GUILD_PROMPTS = loadTheoremPrompts({ name: "axiom-guild", tag: "axiom-guild" });
+const AXIOM_GUILD_PROMPTS_HASH = hashTheoremPrompts(AXIOM_GUILD_PROMPTS);
+const AXIOM_GUILD_PROMPTS_PATH = "prompts/axiom-guild.prompts.json";
+const AXIOM_GUILD_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
+
 const WRITER_PROMPTS = loadWriterPrompts();
 const WRITER_PROMPTS_HASH = hashWriterPrompts(WRITER_PROMPTS);
 const WRITER_PROMPTS_PATH = "prompts/writer.prompts.json";
@@ -174,6 +207,11 @@ const AGENT_PROMPTS = loadAgentPrompts();
 const AGENT_PROMPTS_HASH = hashAgentPrompts(AGENT_PROMPTS);
 const AGENT_PROMPTS_PATH = "prompts/agent.prompts.json";
 const AGENT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
+
+const AXIOM_PROMPTS = loadAxiomPrompts();
+const AXIOM_PROMPTS_HASH = hashAxiomPrompts(AXIOM_PROMPTS);
+const AXIOM_PROMPTS_PATH = "prompts/axiom.prompts.json";
+const AXIOM_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
 
 const JOB_STREAM = "jobs";
 const IMPROVEMENT_STREAM = "improvement";
@@ -219,6 +257,7 @@ const enqueueJob = async (job: EnqueueJobInput): Promise<void> => {
 };
 
 const createRunControl = (jobId: string) => ({
+  jobId,
   checkAbort: async (): Promise<boolean> => {
     const job = await queue.getJob(jobId);
     if (!job) return false;
@@ -242,11 +281,15 @@ const createRunControl = (jobId: string) => ({
 // ============================================================================
 
 type AgentRunControl = {
+  readonly jobId?: string;
   readonly checkAbort?: () => Promise<boolean>;
   readonly pullCommands?: () => Promise<ReadonlyArray<{ command: "steer" | "follow_up"; payload?: Record<string, unknown> }>>;
 };
 
-type AgentRunner = (payload: Record<string, unknown>, control?: AgentRunControl) => Promise<void>;
+type AgentRunner = (
+  payload: Record<string, unknown>,
+  control?: AgentRunControl
+) => Promise<Record<string, unknown> | void>;
 
 const extractRunPayload = (payload: Record<string, unknown>, defaultStream: string) => ({
   stream: typeof payload.stream === "string" && payload.stream.trim() ? payload.stream : defaultStream,
@@ -274,7 +317,7 @@ type AgentRunnerSpec = {
   readonly model: string;
   readonly promptHash: string;
   readonly promptPath: string;
-  readonly runFn: (input: Record<string, unknown>) => Promise<void>;
+  readonly runFn: (input: Record<string, unknown>) => Promise<Record<string, unknown> | void>;
   readonly extras?: Record<string, unknown>;
 };
 
@@ -285,7 +328,7 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
       ? payload.config as Record<string, unknown> : {};
     const config = spec.normalizeConfig(configInput);
     const { apiReady, apiNote } = apiStatus();
-    await spec.runFn({
+    const runnerResult = await spec.runFn({
       stream, runId, runStream, problem, config,
       runtime: spec.runtime, prompts: spec.prompts,
       llmText: (opts: Record<string, unknown>) => llmText({
@@ -300,15 +343,16 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
       broadcast: () => { sse.publish(spec.sseTopic, stream); sse.publish("receipt"); },
       ...(spec.extras ?? {}),
     });
+    return {
+      runId,
+      stream,
+      ...(runnerResult ?? {}),
+    };
   };
 
-const theoremRunner = createAgentRunner({
-  defaultStream: "agents/theorem", sseTopic: "theorem", sseTokenEvent: "theorem-token",
-  normalizeConfig: normalizeTheoremConfig, runtime: theoremRuntime,
-  prompts: THEOREM_PROMPTS, model: THEOREM_MODEL,
-  promptHash: THEOREM_PROMPTS_HASH, promptPath: THEOREM_PROMPTS_PATH,
-  runFn: runTheoremGuild as (input: Record<string, unknown>) => Promise<void>,
-});
+let theoremRunner: AgentRunner;
+let axiomGuildRunner: AgentRunner;
+let axiomSimpleRunner: AgentRunner;
 
 const writerRunner = createAgentRunner({
   defaultStream: "agents/writer", sseTopic: "writer", sseTokenEvent: "writer-token",
@@ -348,9 +392,545 @@ const agentRunner = createAgentRunner({
   normalizeConfig: normalizeAgentConfig, runtime: agentRuntime,
   prompts: AGENT_PROMPTS, model: AGENT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
-  runFn: runAgent as (input: Record<string, unknown>) => Promise<void>,
-  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd() },
+  runFn: runAgent as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd(), llmStructured },
 });
+
+const axiomRunner = createAgentRunner({
+  defaultStream: "agents/axiom", sseTopic: "agent", sseTokenEvent: "agent-token",
+  normalizeConfig: normalizeAxiomConfig, runtime: agentRuntime,
+  prompts: AXIOM_PROMPTS, model: AXIOM_MODEL,
+  promptHash: AXIOM_PROMPTS_HASH, promptPath: AXIOM_PROMPTS_PATH,
+  runFn: runAxiom as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd(), llmStructured },
+});
+
+const clipText = (value: string | undefined, max = 280): string | undefined => {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
+};
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const mapAxiomSimpleWorkerStatus = (status?: string): AxiomSimpleWorkerStatus => {
+  switch (status) {
+    case "queued":
+      return "queued";
+    case "leased":
+    case "running":
+      return "running";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "canceled":
+      return "canceled";
+    default:
+      return "missing";
+  }
+};
+
+const latestToolPath = (input: Record<string, unknown>): string | undefined => {
+  const keys = [
+    "path",
+    "outputPath",
+    "output_path",
+    "formalStatementPath",
+    "formal_statement_path",
+    "outputDir",
+    "output_dir",
+  ] as const;
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+};
+
+const reverseFind = <T,>(items: ReadonlyArray<T>, pred: (item: T) => boolean): T | undefined => {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item !== undefined && pred(item)) return item;
+  }
+  return undefined;
+};
+
+const toAxiomSimpleWorkerValidation = (
+  receipt: { readonly body: Extract<AgentEvent, { readonly type: "validation.report" }> } | undefined,
+): AxiomSimpleWorkerValidation | undefined => {
+  if (!receipt) return undefined;
+  const evidence = receipt.body.evidence;
+  return {
+    gate: receipt.body.gate,
+    ok: receipt.body.ok,
+    summary: receipt.body.summary,
+    tool: evidence?.tool,
+    candidateHash: evidence?.candidateHash,
+    formalStatementHash: evidence?.formalStatementHash,
+    candidateContent: evidence?.candidateContent,
+    formalStatement: evidence?.formalStatement,
+    failedDeclarations: evidence?.failedDeclarations ?? [],
+  };
+};
+
+const extractAxiomSimpleWorkerData = (opts: {
+  readonly runChain: Awaited<ReturnType<typeof agentRuntime.chain>>;
+  readonly childRunId: string;
+  readonly childStream: string;
+  readonly jobId: string;
+  readonly queueStatus?: string;
+  readonly queueError?: string;
+}) => {
+  const runState = fold(opts.runChain, reduceAgent, initialAgent);
+  const validations = opts.runChain.filter((receipt): receipt is typeof receipt & {
+    readonly body: Extract<AgentEvent, { readonly type: "validation.report" }>;
+  } => receipt.body.type === "validation.report");
+  const toolCalls = opts.runChain.filter((receipt): receipt is typeof receipt & {
+    readonly body: Extract<AgentEvent, { readonly type: "tool.called" }>;
+  } => receipt.body.type === "tool.called");
+  const toolObservations = opts.runChain.filter((receipt): receipt is typeof receipt & {
+    readonly body: Extract<AgentEvent, { readonly type: "tool.observed" }>;
+  } => receipt.body.type === "tool.observed");
+  const failureReports = opts.runChain.filter((receipt): receipt is typeof receipt & {
+    readonly body: Extract<AgentEvent, { readonly type: "failure.report" }>;
+  } => receipt.body.type === "failure.report");
+  const finalResponse = reverseFind(opts.runChain, (receipt) => receipt.body.type === "response.finalized") as
+    | (typeof opts.runChain[number] & { readonly body: Extract<AgentEvent, { readonly type: "response.finalized" }> })
+    | undefined;
+  const finalStatus = reverseFind(opts.runChain, (receipt) => receipt.body.type === "run.status") as
+    | (typeof opts.runChain[number] & { readonly body: Extract<AgentEvent, { readonly type: "run.status" }> })
+    | undefined;
+  const latestValidation = validations[validations.length - 1];
+  const successfulVerifyReceipt = reverseFind(validations, (receipt) => {
+    const evidence = receipt.body.evidence;
+    if (!receipt.body.ok) return false;
+    if (!evidence?.candidateHash || !evidence.formalStatementHash) return false;
+    return evidence.tool === "lean.verify" || evidence.tool === "lean.verify_file";
+  });
+  const latestObservation = toolObservations[toolObservations.length - 1];
+  const latestTool = toolCalls[toolCalls.length - 1];
+  const touchedPaths = [...new Set(toolCalls
+    .map((receipt) => latestToolPath(receipt.body.input))
+    .filter((value): value is string => Boolean(value)))];
+
+  let status = mapAxiomSimpleWorkerStatus(opts.queueStatus);
+  if ((status === "queued" || status === "running" || status === "missing") && runState.status === "completed") status = "completed";
+  if ((status === "queued" || status === "running" || status === "missing") && runState.status === "failed") status = "failed";
+
+  const validation = toAxiomSimpleWorkerValidation(latestValidation);
+  const successfulVerify = toAxiomSimpleWorkerValidation(successfulVerifyReceipt);
+  const candidateHash = successfulVerify?.candidateHash ?? validation?.candidateHash;
+  const formalStatementHash = successfulVerify?.formalStatementHash ?? validation?.formalStatementHash;
+  const failedDeclarations = successfulVerify?.failedDeclarations ?? validation?.failedDeclarations ?? [];
+  const failureMessage = failureReports[failureReports.length - 1]?.body.failure.message
+    ?? finalStatus?.body.note
+    ?? opts.queueError;
+  const failureCount = toolCalls.filter((receipt) => Boolean(receipt.body.error)).length
+    + validations.filter((receipt) => !receipt.body.ok).length
+    + failureReports.length;
+  const outputExcerpt = clipText(
+    finalResponse?.body.content
+    ?? latestValidation?.body.summary
+    ?? finalStatus?.body.note
+    ?? failureMessage,
+  );
+  const summary = [
+    status === "missing" ? `status: ${opts.queueStatus ?? "missing"}` : `status: ${status}`,
+    latestValidation?.body.summary ? `validation: ${latestValidation.body.summary}` : "",
+    finalStatus?.body.note ? `note: ${finalStatus.body.note}` : "",
+    failureMessage && failureMessage !== finalStatus?.body.note ? `failure: ${failureMessage}` : "",
+    clipText(finalResponse?.body.content, 400) ?? "",
+  ].filter(Boolean).join("\n");
+
+  const snapshot: AxiomSimpleWorkerSnapshot = {
+    childRunId: opts.childRunId,
+    jobId: opts.jobId,
+    childStream: opts.childStream,
+    status,
+    iteration: runState.iteration,
+    lastTool: latestTool?.body.tool,
+    lastToolSummary: latestTool?.body.summary ?? latestTool?.body.error,
+    validationGate: latestValidation?.body.gate,
+    validationSummary: latestValidation?.body.summary,
+    validationOk: latestValidation?.body.ok,
+    verifyTool: successfulVerify?.tool,
+    verified: successfulVerify?.ok,
+    outputExcerpt,
+    observationExcerpt: clipText(latestObservation?.body.output),
+    touchedPath: touchedPaths[touchedPaths.length - 1],
+    candidateHash,
+    formalStatementHash,
+    failedDeclarations,
+    failureCount,
+  };
+
+  return {
+    status,
+    snapshot,
+    summary: summary || `Axiom worker ${opts.childRunId} produced no receipts yet.`,
+    finalResponse: finalResponse?.body.content,
+    validation,
+    successfulVerify,
+    candidateContent: successfulVerify?.candidateContent ?? validation?.candidateContent ?? finalResponse?.body.content,
+    formalStatement: successfulVerify?.formalStatement ?? validation?.formalStatement,
+    failureMessage,
+    touchedPaths,
+    signature: JSON.stringify({
+      status,
+      iteration: runState.iteration,
+      tool: latestTool?.body.tool,
+      validation: latestValidation?.body.summary,
+      response: finalResponse?.body.content,
+      failure: failureMessage,
+      candidateHash,
+      formalStatementHash,
+      touchedPath: touchedPaths[touchedPaths.length - 1],
+    }),
+  };
+};
+
+const launchAxiomSimpleWorker: AxiomSimpleWorkerLauncher = async (input) => {
+  const childRunId = `${input.parentRunId}_${input.workerId}_${Date.now().toString(36)}`;
+  const childStream = "agents/axiom";
+  const created = await queue.enqueue({
+    agentId: "axiom",
+    lane: "follow_up",
+    sessionKey: `axiom-simple:${input.parentRunId}:${input.workerId}`,
+    singletonMode: "allow",
+    maxAttempts: 2,
+    payload: {
+      kind: "axiom.run",
+      stream: childStream,
+      runId: childRunId,
+      problem: input.task,
+      config: {
+        maxIterations: 12,
+        maxToolOutputChars: 6_000,
+        memoryScope: "axiom",
+        workspace: ".",
+        leanEnvironment: process.env.AXIOM_LEAN_ENVIRONMENT ?? "lean-4.28.0",
+        leanTimeoutSeconds: 120,
+        autoRepair: true,
+        ...(input.config ?? {}),
+      },
+      isSubAgent: true,
+    },
+  });
+  sse.publish("jobs", created.id);
+
+  await input.onStarted?.({
+    jobId: created.id,
+    childRunId,
+    childStream,
+    status: "queued",
+  });
+
+  const timeoutMs = input.timeoutMs ?? subJobJoinWaitMs;
+  const deadline = Date.now() + timeoutMs;
+  let lastSignature = "";
+
+  while (Date.now() <= deadline) {
+    const job = await queue.getJob(created.id);
+    const runChain = await agentRuntime.chain(agentRunStream(childStream, childRunId));
+    const data = extractAxiomSimpleWorkerData({
+      runChain,
+      childRunId,
+      childStream,
+      jobId: created.id,
+      queueStatus: job?.status,
+      queueError: job?.lastError,
+    });
+
+    if (data.signature !== lastSignature) {
+      lastSignature = data.signature;
+      await input.onProgress?.(data.snapshot);
+    }
+
+    if (job && (job.status === "completed" || job.status === "failed" || job.status === "canceled")) {
+      return {
+        workerId: input.workerId,
+        label: input.label,
+        strategy: input.strategy,
+        phase: input.phase,
+        sourceWorkerId: input.sourceWorkerId,
+        status: data.status,
+        jobId: created.id,
+        childRunId,
+        childStream,
+        snapshot: data.snapshot,
+        summary: data.summary,
+        finalResponse: data.finalResponse,
+        validation: data.validation,
+        successfulVerify: data.successfulVerify,
+        candidateContent: data.candidateContent,
+        formalStatement: data.formalStatement,
+        failureMessage: data.failureMessage,
+        touchedPaths: data.touchedPaths,
+      };
+    }
+
+    await delay(subJobPollMs);
+  }
+
+  const timedJob = await queue.getJob(created.id);
+  const timedRunChain = await agentRuntime.chain(agentRunStream(childStream, childRunId));
+  const timedData = extractAxiomSimpleWorkerData({
+    runChain: timedRunChain,
+    childRunId,
+    childStream,
+    jobId: created.id,
+    queueStatus: timedJob?.status,
+    queueError: timedJob?.lastError,
+  });
+  const timeoutNote = `timed out after ${timeoutMs}ms`;
+  const timeoutSummary = [
+    timeoutNote,
+    timedData.validation?.summary ? `validation: ${timedData.validation.summary}` : "",
+    timedData.failureMessage ? `failure: ${timedData.failureMessage}` : "",
+    clipText(timedData.finalResponse, 400) ?? "",
+  ].filter(Boolean).join("\n");
+
+  return {
+    workerId: input.workerId,
+    label: input.label,
+    strategy: input.strategy,
+    phase: input.phase,
+    sourceWorkerId: input.sourceWorkerId,
+    status: "failed",
+    jobId: created.id,
+    childRunId,
+    childStream,
+    snapshot: timedData.snapshot,
+    summary: timeoutSummary || timeoutNote,
+    finalResponse: timedData.finalResponse,
+    validation: timedData.validation,
+    successfulVerify: timedData.successfulVerify,
+    candidateContent: timedData.candidateContent,
+    formalStatement: timedData.formalStatement,
+    failureMessage: [timeoutNote, timedData.failureMessage].filter(Boolean).join("; "),
+    touchedPaths: timedData.touchedPaths,
+  };
+};
+
+const delegateAxiomForTheorem = async (input: {
+  readonly task: string;
+  readonly config?: Readonly<Record<string, unknown>>;
+  readonly timeoutMs?: number;
+}) => {
+  const runId = `theorem_axiom_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const stream = "agents/axiom";
+  const created = await queue.enqueue({
+    agentId: "axiom",
+    lane: "follow_up",
+    sessionKey: `theorem:axiom:${runId}`,
+    singletonMode: "allow",
+    maxAttempts: 2,
+    payload: {
+      kind: "axiom.run",
+      stream,
+      runId,
+      problem: input.task,
+      config: {
+        maxIterations: 12,
+        maxToolOutputChars: 6_000,
+        memoryScope: "axiom",
+        workspace: ".",
+        leanEnvironment: process.env.AXIOM_LEAN_ENVIRONMENT ?? "lean-4.28.0",
+        leanTimeoutSeconds: 120,
+        autoRepair: true,
+        ...(input.config ?? {}),
+      },
+      isSubAgent: true,
+    },
+  });
+  sse.publish("jobs", created.id);
+
+  const settled = await queue.waitForJob(created.id, input.timeoutMs ?? 180_000, subJobPollMs);
+  if (!settled) {
+    return {
+      jobId: created.id,
+      runId,
+      stream,
+      status: "missing",
+      summary: `Axiom subjob missing (${created.id}).`,
+    };
+  }
+
+  const runChain = await agentRuntime.chain(agentRunStream(stream, runId));
+  const finalResponse = [...runChain].reverse().find((receipt) => receipt.body.type === "response.finalized") as
+    | { body: Extract<AgentEvent, { type: "response.finalized" }> }
+    | undefined;
+  const finalStatus = [...runChain].reverse().find((receipt) => receipt.body.type === "run.status") as
+    | { body: Extract<AgentEvent, { type: "run.status" }> }
+    | undefined;
+  const validations = runChain.filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
+    receipt.body.type === "validation.report"
+  );
+  const toolCalls = runChain.filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "tool.called" }> } =>
+    receipt.body.type === "tool.called"
+  );
+  const leanTools = [...new Set(toolCalls
+    .map((receipt) => receipt.body.tool)
+    .filter((tool) => tool.startsWith("lean.")))];
+  const axleValidations = validations.filter((receipt) =>
+    receipt.body.gate.startsWith("axle")
+    && receipt.body.evidence
+  );
+  const verifyValidations = axleValidations.filter((receipt) => {
+    const tool = receipt.body.evidence?.tool;
+    return tool === "lean.verify" || tool === "lean.verify_file";
+  });
+  const successfulFinalVerify = [...verifyValidations].reverse().find((receipt) =>
+    receipt.body.ok
+    && receipt.body.evidence?.candidateHash
+    && receipt.body.evidence?.formalStatementHash
+  );
+  const theoremToSorryFailure = [...toolCalls].reverse().find((receipt) =>
+    (receipt.body.tool === "lean.theorem2sorry" || receipt.body.tool === "lean.theorem2sorry_file")
+    && Boolean(receipt.body.error)
+  );
+  const latestValidation = validations[validations.length - 1];
+
+  const validationEvidence = axleValidations
+    .map((receipt) => {
+      const evidence = receipt.body.evidence;
+      if (!evidence?.tool) return undefined;
+      return {
+        tool: evidence.tool,
+        environment: evidence.environment,
+        candidateHash: evidence.candidateHash,
+        formalStatementHash: evidence.formalStatementHash,
+        candidateContent: evidence.candidateContent,
+        formalStatement: evidence.formalStatement,
+        ok: receipt.body.ok,
+        failedDeclarations: evidence.failedDeclarations ?? [],
+        timings: evidence.timings,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  const outcome = (() => {
+    if (finalStatus?.body.status === "failed") return "delegate_failed";
+    if (theoremToSorryFailure) return "theorem2sorry_failed";
+    if (verifyValidations.length === 0 && axleValidations.length === 0) return "no_axle_validation";
+    if (verifyValidations.length === 0) return "no_final_verify";
+    if (!successfulFinalVerify) return "axle_verify_failed";
+    return "verified";
+  })();
+
+  const summary = [
+    `status: ${settled.status}`,
+    `outcome: ${outcome}`,
+    leanTools.length > 0 ? `AXLE tools: ${leanTools.join(", ")}` : "",
+    finalStatus?.body.note ? `note: ${finalStatus.body.note}` : "",
+    latestValidation?.body.summary ? `validation: ${latestValidation.body.summary}` : "",
+    finalResponse?.body.content ?? "",
+  ].filter(Boolean).join("\n");
+
+  return {
+    jobId: created.id,
+    runId,
+    stream,
+    status: settled.status,
+    outcome,
+    evidence: validationEvidence,
+    verifiedCandidateContent: successfulFinalVerify?.body.evidence?.candidateContent,
+    verifiedCandidateHash: successfulFinalVerify?.body.evidence?.candidateHash,
+    verifiedFormalStatementHash: successfulFinalVerify?.body.evidence?.formalStatementHash,
+    summary: summary || JSON.stringify(settled.result ?? { status: settled.status }),
+  };
+};
+
+theoremRunner = createAgentRunner({
+  defaultStream: "agents/theorem", sseTopic: "theorem", sseTokenEvent: "theorem-token",
+  normalizeConfig: normalizeTheoremConfig, runtime: theoremRuntime,
+  prompts: THEOREM_PROMPTS, model: THEOREM_MODEL,
+  promptHash: THEOREM_PROMPTS_HASH, promptPath: THEOREM_PROMPTS_PATH,
+  runFn: runTheoremGuild as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  extras: { axiomDelegate: delegateAxiomForTheorem },
+});
+
+axiomGuildRunner = async (payload, control) => {
+  const { stream, runId, runStream, problem } = extractRunPayload(payload, "agents/axiom-guild");
+  const configInput = typeof payload.config === "object" && payload.config
+    ? payload.config as Record<string, unknown>
+    : {};
+  const config = normalizeTheoremConfig(configInput);
+  const { apiReady, apiNote } = apiStatus();
+  const result = await runTheoremGuild({
+    stream,
+    runId,
+    runStream,
+    problem,
+    config,
+    runtime: theoremRuntime,
+    prompts: AXIOM_GUILD_PROMPTS,
+    llmText: (opts) => llmText({
+      ...opts,
+      onDelta: async (delta) => {
+        if (!delta) return;
+        sse.publishData("theorem", stream, "theorem-token", JSON.stringify({ runId, delta }));
+      },
+    }),
+    model: AXIOM_GUILD_MODEL,
+    promptHash: AXIOM_GUILD_PROMPTS_HASH,
+    promptPath: AXIOM_GUILD_PROMPTS_PATH,
+    apiReady,
+    apiNote,
+    control,
+    broadcast: () => { sse.publish("theorem", stream); sse.publish("receipt"); },
+    axiomDelegate: delegateAxiomForTheorem,
+    axiomPolicy: "required",
+    axiomConfig: {
+      maxIterations: 12,
+      leanEnvironment: process.env.AXIOM_LEAN_ENVIRONMENT ?? "lean-4.28.0",
+      autoRepair: true,
+    },
+  });
+  const recovery = control?.jobId
+    ? await maybeQueueAxiomGuildVerifyFailureFollowUp({
+        queue,
+        theoremRuntime,
+        payload,
+        result,
+        jobId: control.jobId,
+        onJobQueued: (jobId) => sse.publish("jobs", jobId),
+        onReceipt: () => {
+          sse.publish("theorem", stream);
+          sse.publish("receipt");
+        },
+  })
+    : {};
+  return { ...result, ...recovery };
+};
+
+axiomSimpleRunner = async (payload, control) => {
+  const { stream, runId, runStream, problem } = extractRunPayload(payload, "agents/axiom-simple");
+  const configInput = typeof payload.config === "object" && payload.config
+    ? payload.config as Record<string, unknown>
+    : {};
+  const config = normalizeAxiomSimpleConfig(configInput);
+  const result = await runAxiomSimple({
+    stream,
+    runId,
+    runStream,
+    problem,
+    config,
+    runtime: axiomSimpleRuntime,
+    control,
+    launchWorker: launchAxiomSimpleWorker,
+    broadcast: () => {
+      sse.publish("theorem", stream);
+      sse.publish("receipt");
+    },
+  });
+  return result as unknown as Record<string, unknown>;
+};
 
 const inspectorRunner = async (payload: Record<string, unknown>): Promise<void> => {
   const runId = typeof payload.runId === "string" && payload.runId.trim()
@@ -582,8 +1162,31 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
     }
     mergeCommands(merged, commands);
     await handleDelegates(spec, job, merged, commands);
-    await spec.runner(merged, createRunControl(job.id));
-    return { ok: true, result: { runId: merged.runId as string | undefined, stream: merged.stream as string | undefined } };
+    const result = await spec.runner(merged, createRunControl(job.id));
+    const normalizedResult: Record<string, unknown> = {
+      runId: merged.runId as string | undefined,
+      stream: merged.stream as string | undefined,
+      ...(result ?? {}),
+    };
+    if (normalizedResult.status === "failed") {
+      const failure = typeof normalizedResult.failure === "object" && normalizedResult.failure && !Array.isArray(normalizedResult.failure)
+        ? normalizedResult.failure as Record<string, unknown>
+        : undefined;
+      const failureMessage = typeof failure?.message === "string" && failure.message.trim()
+        ? failure.message
+        : undefined;
+      return {
+        ok: false,
+        error: typeof normalizedResult.note === "string" && normalizedResult.note.trim()
+          ? normalizedResult.note
+          : failureMessage
+            ? failureMessage
+          : "run failed",
+        result: normalizedResult,
+        noRetry: true,
+      };
+    }
+    return { ok: true, result: normalizedResult };
   };
 
 const worker = new JobWorker({
@@ -598,6 +1201,16 @@ const worker = new JobWorker({
       defaultSubConfig: { rounds: 1, maxDepth: 1, memoryWindow: 40, branchThreshold: 2 },
       runtime: theoremRuntime, runStreamFn: theoremRunStream, runner: theoremRunner,
     }),
+    "axiom-guild": createWorkerHandler({
+      defaultStream: "agents/axiom-guild", defaultAgentId: "axiom-guild", kind: "axiom-guild.run",
+      defaultSubConfig: { rounds: 2, maxDepth: 2, memoryWindow: 60, branchThreshold: 2 },
+      runtime: theoremRuntime, runStreamFn: theoremRunStream, runner: axiomGuildRunner,
+    }),
+    "axiom-simple": createWorkerHandler({
+      defaultStream: "agents/axiom-simple", defaultAgentId: "axiom-simple", kind: "axiom-simple.run",
+      defaultSubConfig: { workerCount: 3, repairMode: "auto" },
+      runtime: axiomSimpleRuntime, runStreamFn: axiomSimpleRunStream, runner: axiomSimpleRunner,
+    }),
     writer: createWorkerHandler({
       defaultStream: "agents/writer", defaultAgentId: "writer", kind: "writer.run",
       defaultSubConfig: { maxParallel: 1 },
@@ -608,6 +1221,19 @@ const worker = new JobWorker({
       defaultStream: "agents/agent", defaultAgentId: "agent", kind: "agent.run",
       defaultSubConfig: { maxIterations: 3, maxToolOutputChars: 2500, memoryScope: "agent", workspace: "." },
       runtime: agentRuntime, runStreamFn: agentRunStream, runner: agentRunner,
+    }),
+    axiom: createWorkerHandler({
+      defaultStream: "agents/axiom", defaultAgentId: "axiom", kind: "axiom.run",
+      defaultSubConfig: {
+        maxIterations: 12,
+        maxToolOutputChars: 6000,
+        memoryScope: "axiom",
+        workspace: ".",
+        leanEnvironment: process.env.AXIOM_LEAN_ENVIRONMENT ?? "lean-4.28.0",
+        leanTimeoutSeconds: 120,
+        autoRepair: true,
+      },
+      runtime: agentRuntime, runStreamFn: agentRunStream, runner: axiomRunner,
     }),
     inspector: async (job, ctx) => {
       await ctx.pullCommands(["steer", "follow_up"]);
@@ -676,8 +1302,10 @@ const routes = await loadAgentRoutes({
   runtimes: {
     todo: runtime,
     theorem: theoremRuntime,
+    "axiom-simple": axiomSimpleRuntime,
     writer: writerRuntime,
     agent: agentRuntime,
+    axiom: agentRuntime,
     inspector: inspectorRuntime,
     selfImprovement: selfImprovementRuntime,
     memory: memoryRuntime,
@@ -687,24 +1315,28 @@ const routes = await loadAgentRoutes({
     writer: WRITER_PROMPTS,
     inspector: INSPECTOR_PROMPTS,
     agent: AGENT_PROMPTS,
+    axiom: AXIOM_PROMPTS,
   },
   promptHashes: {
     theorem: THEOREM_PROMPTS_HASH,
     writer: WRITER_PROMPTS_HASH,
     inspector: INSPECTOR_PROMPTS_HASH,
     agent: AGENT_PROMPTS_HASH,
+    axiom: AXIOM_PROMPTS_HASH,
   },
   promptPaths: {
     theorem: THEOREM_PROMPTS_PATH,
     writer: WRITER_PROMPTS_PATH,
     inspector: INSPECTOR_PROMPTS_PATH,
     agent: AGENT_PROMPTS_PATH,
+    axiom: AXIOM_PROMPTS_PATH,
   },
   models: {
     theorem: THEOREM_MODEL,
     writer: WRITER_MODEL,
     inspector: INSPECTOR_MODEL,
     agent: AGENT_MODEL,
+    axiom: AXIOM_MODEL,
   },
   helpers: {
     memoryTools,

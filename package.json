@@ -14,13 +14,18 @@
     "video:render": "npm --prefix video run render",
     "video:render:vertical": "npm --prefix video run render:vertical",
     "start": "node dist/server.js",
+    "eval:axiom": "tsx scripts/axiom-eval.ts",
+    "eval:axiom:first": "tsx scripts/axiom-eval.ts --case list_length_append_nat",
+    "eval:axiom-guild": "tsx scripts/axiom-guild-eval.ts",
+    "eval:axiom-guild:first": "tsx scripts/axiom-guild-eval.ts --case infinitely_many_primes",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "new:agent": "tsx src/cli.ts new",
+    "test:axle:deterministic": "tsx --test --test-concurrency=1 tests/deterministic/*.test.ts",
     "test:smoke": "tsx --test --test-concurrency=1 tests/smoke/*.test.ts",
     "test:perf": "tsx --test --test-concurrency=1 tests/perf/*.bench.ts",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src/core src/engine src/agents tests; then echo \"explicit any found\"; exit 1; fi",
-    "verify": "npm run build && npm run check:no-any && npm run test:smoke"
+    "verify": "npm run build && npm run check:no-any && npm run test:axle:deterministic && npm run test:smoke"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.10",

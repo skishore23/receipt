@@ -10,10 +10,11 @@ import { agentRunFormSchema } from "../framework/schemas.js";
 import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import type { RuntimeOp } from "../framework/translators.js";
 import { executeRuntimeOps } from "../framework/translators.js";
-import { SseHub } from "../framework/sse-hub.js";
+import { SseHub, type Topic } from "../framework/sse-hub.js";
 import type { EnqueueJobInput, QueueCommandInput, QueueJob } from "../adapters/jsonl-queue.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
 import { esc as escapeHtml, truncate } from "../views/agent-framework.js";
+import { getAgentDisplayMeta, getAgentDisplayName, MONITOR_AGENT_IDS } from "./agent-display.js";
 import { agentRunStream } from "./agent.streams.js";
 import { getLatestAgentRunId, parseAgentConfig } from "./agent.js";
 
@@ -38,6 +39,8 @@ const summarizeEvent = (event: AgentEvent): string => {
   switch (event.type) {
     case "problem.set":
       return `problem.set ${event.problem.slice(0, 140)}`;
+    case "failure.report":
+      return `failure ${event.failure.failureClass} - ${event.failure.message}`;
     case "run.status":
       return `run.status ${event.status}${event.note ? ` - ${event.note}` : ""}`;
     case "iteration.started":
@@ -83,13 +86,29 @@ const parseJobStatus = (value: string | undefined): QueueJob["status"] | undefin
     : undefined
 );
 
+const readJobFollowUpMeta = (job: QueueJob): {
+  readonly followUpJobId?: string;
+  readonly followUpRunId?: string;
+  readonly failureClass?: string;
+  readonly failure?: Record<string, unknown>;
+} => ({
+  followUpJobId: typeof job.result?.followUpJobId === "string" ? job.result.followUpJobId : undefined,
+  followUpRunId: typeof job.result?.followUpRunId === "string" ? job.result.followUpRunId : undefined,
+  failureClass: typeof job.result?.failureClass === "string" ? job.result.failureClass : undefined,
+  failure: typeof job.result?.failure === "object" && job.result.failure && !Array.isArray(job.result.failure)
+    ? job.result.failure as Record<string, unknown>
+    : undefined,
+});
+
 const summarizeJobPayload = (job: QueueJob): string => {
   const kind = typeof job.payload.kind === "string" ? job.payload.kind : "";
   const problemRaw = typeof job.payload.problem === "string" ? job.payload.problem : "";
   const problem = problemRaw.replace(/\s+/g, " ").trim();
-  if (kind && problem) return `${kind} - ${problem.slice(0, 88)}`;
+  const { followUpJobId } = readJobFollowUpMeta(job);
+  const followUpSuffix = followUpJobId ? ` [next: ${followUpJobId}]` : "";
+  if (problem) return `${problem.slice(0, 100)}${followUpSuffix}`;
+  if (kind.endsWith(".run")) return `${getAgentDisplayName(job.agentId)} run`;
   if (kind) return kind;
-  if (problem) return problem.slice(0, 100);
   return "(no summary)";
 };
 
@@ -99,6 +118,18 @@ const formatDateTime = (ts: number): string => new Date(ts).toLocaleString();
 const classForStatus = (status: QueueJob["status"]): string => `status-${status}`;
 
 const MONITOR_BASE_PATH = "/monitor";
+const monitorPrimaryTopic = (stream: string): Extract<Topic, "agent" | "theorem" | "writer"> => {
+  const normalized = stream.trim().toLowerCase();
+  if (normalized.includes("axiom-guild") || normalized.includes("theorem")) return "theorem";
+  if (normalized.includes("writer")) return "writer";
+  return "agent";
+};
+
+const monitorSseSubscriptions = (stream: string): ReadonlyArray<{ topic: Topic; stream?: string }> => [
+  { topic: monitorPrimaryTopic(stream), stream },
+  { topic: "receipt" },
+  { topic: "jobs" },
+];
 
 const buildShellUrl = (
   stream: string,
@@ -135,9 +166,10 @@ const redirectResponse = (
     },
   });
 
-const AGENT_IDS = ["theorem", "writer", "agent", "inspector"] as const;
-
 const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): string => {
+  const agentOptions = MONITOR_AGENT_IDS
+    .map((agentId) => `<option value="${escapeHtml(agentId)}"${agentId === "agent" ? " selected" : ""}>${escapeHtml(getAgentDisplayName(agentId))}</option>`)
+    .join("");
   return `<!doctype html>
 <html>
 <head>
@@ -729,10 +761,7 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
         <form id="monitor-submit-form" class="submit-form" method="post" action="/monitor/run">
           <label>Agent
             <select name="agentId" id="monitor-submit-agent">
-              <option value="agent" selected>agent</option>
-              <option value="theorem">theorem</option>
-              <option value="writer">writer</option>
-              <option value="inspector">inspector</option>
+              ${agentOptions}
             </select>
           </label>
           <label>Task
@@ -856,6 +885,9 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
   const jobsAbortButton = document.getElementById("monitor-jobs-abort");
   const globalStatus = document.getElementById("monitor-global-status");
   let refreshing = false;
+  let refreshPending = false;
+  let detailRefreshing = false;
+  let detailRefreshPending = false;
   const setGlobalStatus = (message) => {
     if (!globalStatus) return;
     globalStatus.textContent = message || "";
@@ -949,21 +981,36 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
     }
   });
   const refreshJobDetail = async () => {
-    if (!detailBox) return;
-    if (!job) {
-      clearDetail();
-      setDrawerOpen(false);
+    if (detailRefreshing) {
+      detailRefreshPending = true;
       return;
     }
-    if (!drawerOpen) return;
-    const params = new URLSearchParams({ stream });
-    if (run) params.set("run", run);
-    if (job) params.set("job", job);
-    const res = await fetch(basePath + "/island/job?" + params.toString(), { cache: "no-store" });
-    const text = await res.text();
-    detailBox.innerHTML = text;
-    setDrawerOpen(true);
+    detailRefreshing = true;
+    try {
+      if (!detailBox) return;
+      if (!job) {
+        clearDetail();
+        setDrawerOpen(false);
+        return;
+      }
+      if (!drawerOpen) return;
+      const params = new URLSearchParams({ stream });
+      if (run) params.set("run", run);
+      if (job) params.set("job", job);
+      const res = await fetch(basePath + "/island/job?" + params.toString(), { cache: "no-store" });
+      const text = await res.text();
+      detailBox.innerHTML = text;
+      setDrawerOpen(true);
+    } finally {
+      detailRefreshing = false;
+      if (detailRefreshPending) {
+        detailRefreshPending = false;
+        setTimeout(() => { void refreshJobDetail(); }, 0);
+      }
+    }
   };
+  const scheduleRefreshAll = () => { void refreshAll(); };
+  const scheduleRefreshJobDetail = () => { void refreshJobDetail(); };
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -976,20 +1023,20 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
     run = nextRun || "";
     if (detailBox) detailBox.innerHTML = '<p class="small muted">Loading selected job...</p>';
     openDrawer();
-    void refreshAll();
+    scheduleRefreshAll();
   });
   drawerBackdrop?.addEventListener("click", () => {
     closeDrawer();
-    void refreshAll();
+    scheduleRefreshAll();
   });
   drawerClose?.addEventListener("click", () => {
     closeDrawer();
-    void refreshAll();
+    scheduleRefreshAll();
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !drawerOpen) return;
     closeDrawer();
-    void refreshAll();
+    scheduleRefreshAll();
   });
   document.addEventListener("submit", async (event) => {
     const target = event.target;
@@ -1033,6 +1080,7 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           kind: agentId + ".run",
+          agentName: submitAgent instanceof HTMLSelectElement ? submitAgent.selectedOptions[0]?.textContent?.trim() : undefined,
           problem: String(problem).trim(),
         }),
       });
@@ -1095,7 +1143,10 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
   setInterval(updateClock, 1000);
 
   async function refreshAll() {
-    if (refreshing) return;
+    if (refreshing) {
+      refreshPending = true;
+      return;
+    }
     refreshing = true;
     try {
       await Promise.all([refreshJobs(), refreshAgents(), refreshActivity()]);
@@ -1103,12 +1154,20 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
       syncUrl();
     } finally {
       refreshing = false;
+      if (refreshPending) {
+        refreshPending = false;
+        setTimeout(() => { void refreshAll(); }, 0);
+      }
     }
   }
 
   const es = new EventSource(basePath + "/stream?stream=" + encodeURIComponent(stream));
-  es.addEventListener("agent-refresh", () => { void refreshAll(); });
-  es.addEventListener("agent-token", () => { void refreshJobDetail(); });
+  ["agent-refresh", "theorem-refresh", "writer-refresh", "receipt-refresh", "job-refresh"].forEach((eventName) => {
+    es.addEventListener(eventName, scheduleRefreshAll);
+  });
+  ["agent-token", "theorem-token", "writer-token"].forEach((eventName) => {
+    es.addEventListener(eventName, scheduleRefreshJobDetail);
+  });
   if (!drawerOpen) setDrawerOpen(false);
   void refreshAll();
   setInterval(() => { void refreshAll(); }, 3000);
@@ -1253,10 +1312,12 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
           const idLabel = truncate(job.id, 28);
           const rowRun = typeof job.payload.runId === "string" ? job.payload.runId : "";
           const rowStream = typeof job.payload.stream === "string" ? job.payload.stream : "";
+          const agentName = typeof job.payload.agentName === "string" ? job.payload.agentName : undefined;
+          const agent = getAgentDisplayMeta(job.agentId, agentName);
           return `<tr class="job-row${selectedClass}">
             <td><button class="job-select mono" type="button" data-job-select="${escapeHtml(job.id)}" data-job-run="${escapeHtml(rowRun)}" data-job-stream="${escapeHtml(rowStream)}" title="${escapeHtml(job.id)}">${escapeHtml(idLabel)}</button></td>
             <td><span class="status-pill ${statusClass}">${escapeHtml(job.status)}</span></td>
-            <td class="mono">${escapeHtml(job.agentId)}</td>
+            <td title="${escapeHtml(agent.rawId ?? agent.label)}">${escapeHtml(agent.label)}</td>
             <td class="mono">${job.attempt}/${job.maxAttempts}</td>
             <td class="mono" title="${escapeHtml(formatDateTime(job.updatedAt))}">${escapeHtml(updatedLabel)}</td>
             <td>${escapeHtml(truncate(summary, 72))}</td>
@@ -1324,22 +1385,41 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
 
         const payloadJson = escapeHtml(JSON.stringify(job.payload, null, 2));
         const resultJson = job.result ? escapeHtml(JSON.stringify(job.result, null, 2)) : "";
+        const { followUpJobId, followUpRunId, failureClass, failure } = readJobFollowUpMeta(job);
         const lastError = job.lastError ? `<div class="detail-card"><div class="k">Last Error</div><div class="v mono">${escapeHtml(job.lastError)}</div></div>` : "";
+        const failureJson = failure ? `<div><div class="k">Failure</div><pre>${escapeHtml(JSON.stringify(failure, null, 2))}</pre></div>` : "";
         const canceled = job.canceledReason
           ? `<div class="detail-card"><div class="k">Cancel Reason</div><div class="v">${escapeHtml(job.canceledReason)}</div></div>`
           : "";
+        const followUpCards = [
+          failureClass
+            ? `<div class="detail-card"><div class="k">Failure Class</div><div class="v mono">${escapeHtml(failureClass)}</div></div>`
+            : "",
+          followUpJobId
+            ? `<div class="detail-card"><div class="k">Follow-up Job</div><div class="v mono">${escapeHtml(followUpJobId)}</div></div>`
+            : "",
+          followUpRunId
+            ? `<div class="detail-card"><div class="k">Follow-up Run</div><div class="v mono">${escapeHtml(followUpRunId)}</div></div>`
+            : "",
+        ].filter(Boolean).join("");
+        const agentName = typeof job.payload.agentName === "string" ? job.payload.agentName : undefined;
+        const agent = getAgentDisplayMeta(job.agentId, agentName);
+        const agentValue = agent.rawId
+          ? `${escapeHtml(agent.label)}<div class="small mono">${escapeHtml(agent.rawId)}</div>`
+          : escapeHtml(agent.label);
 
         return html(`
           <div class="job-detail" data-job-id="${escapeHtml(job.id)}">
             <div class="detail-grid">
               <div class="detail-card"><div class="k">Job Id</div><div class="v mono">${escapeHtml(job.id)}</div></div>
               <div class="detail-card"><div class="k">Status</div><div class="v"><span class="status-pill ${classForStatus(job.status)}">${escapeHtml(job.status)}</span></div></div>
-              <div class="detail-card"><div class="k">Agent</div><div class="v mono">${escapeHtml(job.agentId)}</div></div>
+              <div class="detail-card"><div class="k">Agent</div><div class="v">${agentValue}</div></div>
               <div class="detail-card"><div class="k">Lane</div><div class="v mono">${escapeHtml(job.lane)}</div></div>
               <div class="detail-card"><div class="k">Attempt</div><div class="v mono">${job.attempt}/${job.maxAttempts}</div></div>
               <div class="detail-card"><div class="k">Updated</div><div class="v mono">${escapeHtml(formatDateTime(job.updatedAt))}</div></div>
               <div class="detail-card"><div class="k">Session</div><div class="v mono">${escapeHtml(job.sessionKey ?? "(none)")}</div></div>
               <div class="detail-card"><div class="k">Abort Requested</div><div class="v mono">${job.abortRequested ? "yes" : "no"}</div></div>
+              ${followUpCards}
               ${lastError}
               ${canceled}
             </div>
@@ -1350,6 +1430,7 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
             ${resultJson
               ? `<div><div class="k">Result</div><pre>${resultJson}</pre></div>`
               : ""}
+            ${failureJson}
             <div>
               <div class="k">Commands</div>
               <ul class="log-list">${commandRows}</ul>
@@ -1384,22 +1465,24 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
       };
 
       const agentsIslandHandler = async (_c: Context) => {
-        const cards = await Promise.all(AGENT_IDS.map(async (agentId) => {
-          const jobs = await listJobs({ limit: 20 });
+        const jobs = await listJobs({ limit: 40 });
+        const cards = MONITOR_AGENT_IDS.map((agentId) => {
           const agentJobs = jobs.filter((j) => j.agentId === agentId);
           const active = agentJobs.filter((j) => !TERMINAL_JOB_STATUS.has(j.status)).length;
           const total = agentJobs.length;
           const lastJob = agentJobs[0];
           const lastStatus = lastJob ? lastJob.status : "idle";
           const statusClass = lastJob ? classForStatus(lastJob.status) : "";
+          const agent = getAgentDisplayMeta(agentId);
           return `<div class="agent-card">
             <div class="agent-card-head">
-              <span class="agent-card-name mono">${escapeHtml(agentId)}</span>
+              <span class="agent-card-name">${escapeHtml(agent.label)}</span>
               <span class="status-pill ${statusClass}">${escapeHtml(active > 0 ? "active" : lastStatus)}</span>
             </div>
+            ${agent.rawId ? `<div class="agent-card-stat mono">${escapeHtml(agent.rawId)}</div>` : ""}
             <div class="agent-card-stat">${total} jobs · ${active} active</div>
           </div>`;
-        }));
+        });
         return html(cards.join(""));
       };
 
@@ -1413,10 +1496,11 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
         const items = recent.map((receipt) => {
           const ts = new Date(receipt.ts).toLocaleTimeString();
           const agentId = (receipt.body as { agentId?: string }).agentId ?? "";
+          const agent = getAgentDisplayMeta(agentId);
           const summary = summarizeEvent(receipt.body);
           return `<li>
             <span class="activity-ts">${escapeHtml(ts)}</span>
-            <span class="activity-body">${agentId ? `<span class="activity-agent">${escapeHtml(agentId)}</span> ` : ""}${escapeHtml(summary)}</span>
+            <span class="activity-body">${agentId ? `<span class="activity-agent" title="${escapeHtml(agent.rawId ?? agent.label)}">${escapeHtml(agent.label)}</span> ` : ""}${escapeHtml(summary)}</span>
           </li>`;
         }).join("");
         return html(`<ul class="activity-list">${items}</ul>`);
@@ -1563,7 +1647,7 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
 
       const streamHandler = async (c: Context) => {
         const stream = c.req.query("stream") ?? "agents/agent";
-        return sse.subscribe("agent", stream, c.req.raw.signal);
+        return sse.subscribeMany(monitorSseSubscriptions(stream), c.req.raw.signal);
       };
 
       app.get("/monitor", shellHandler);

@@ -24,12 +24,17 @@ npm run build
 receipt new my-agent --template basic
 receipt dev
 receipt run theorem --problem "Prove a simple claim"
+receipt run axiom --problem "Write a Lean proof and verify it"
 receipt jobs
 receipt abort <job-id>
 receipt trace <run-id>
 receipt replay <run-id>
 receipt inspect <run-id>
 receipt fork <run-id> --at 12
+```
+
+```bash
+npm run eval:axiom:first
 ```
 
 ## Public SDK
@@ -55,8 +60,16 @@ Queue streams:
 ## Architecture docs
 
 - [architecture.md](./architecture.md)
+- [docs/receipt-production-rfc.md](./docs/receipt-production-rfc.md)
+- [docs/receipt-coding-runtime.md](./docs/receipt-coding-runtime.md)
+- [docs/receipt-cli-mvp-architecture.md](./docs/receipt-cli-mvp-architecture.md)
 - [docs/agent-framework.md](./docs/agent-framework.md)
+- [docs/axiom-theorem-prover.md](./docs/axiom-theorem-prover.md)
+- [docs/axiom-public-prover.md](./docs/axiom-public-prover.md)
+- [docs/axiom-benchmark.md](./docs/axiom-benchmark.md)
 - [docs/create-agent.md](./docs/create-agent.md)
+- [docs/agenthub-on-receipt.md](./docs/agenthub-on-receipt.md)
+- [docs/agenthub-prd.md](./docs/agenthub-prd.md)
 - [docs/api/README.md](./docs/api/README.md)
 - [docs/api/http.md](./docs/api/http.md)
 - [docs/api/sse.md](./docs/api/sse.md)

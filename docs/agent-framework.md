@@ -64,6 +64,7 @@ Lifecycle uses leases, heartbeats, retries, singleton behavior, and in-flight co
 ## First-party modules
 
 - Theorem (`src/agents/theorem.agent.ts`)
+- Axiom (`src/agents/axiom.agent.ts`)
 - Writer (`src/agents/writer.agent.ts`)
 - Monitor/Agent (`src/agents/monitor.agent.ts`)
 - Inspector (`src/agents/inspector.agent.ts`)

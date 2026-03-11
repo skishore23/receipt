@@ -4,6 +4,12 @@
 
 import type { Chain } from "../core/types.js";
 import { computeHash, verify } from "../core/chain.js";
+import {
+  MERGE_LENSES,
+  THEOREM_PODS,
+  podByAgent,
+  type BracketTree,
+} from "../agents/theorem.rebracket.js";
 import type { TheoremEvent, TheoremState } from "../modules/theorem.js";
 import type { TheoremRunSummary } from "../agents/theorem.js";
 import {
@@ -104,7 +110,474 @@ const renderProof = (raw: string): string => {
   return html;
 };
 
+const extractAxiomSummaryLine = (summary: string): string => {
+  const lines = summary.split("\n").map((line) => line.trim()).filter(Boolean);
+  const chosen = lines.find((line) => /^AXLE tools:/i.test(line))
+    ?? lines.find((line) => /^validation:/i.test(line))
+    ?? lines.find((line) => /^note:/i.test(line))
+    ?? lines.find((line) => !/^status:/i.test(line))
+    ?? lines[0]
+    ?? "";
+  return truncate(chosen, 140);
+};
+
+const shortHash = (value?: string): string =>
+  value ? `${value.slice(0, 12)}${value.length > 12 ? "..." : ""}` : "—";
+
 type TeamMember = { readonly id: string; readonly name: string };
+
+const POD_LABELS = new Map(THEOREM_PODS.map((pod) => [pod.id, pod.label] as const));
+
+const teamNameMap = (team: ReadonlyArray<TeamMember>): ReadonlyMap<string, string> =>
+  new Map(team.map((member) => [member.id, member.name] as const));
+
+const findBracketTree = (bracket: string): BracketTree | undefined =>
+  MERGE_LENSES.find((lens) => lens.bracket === bracket)?.tree;
+
+const bracketTreeString = (tree: BracketTree): string =>
+  typeof tree === "string" ? tree : `(${bracketTreeString(tree[0])} o ${bracketTreeString(tree[1])})`;
+
+const bracketLeafLabel = (leaf: string): string =>
+  POD_LABELS.get(leaf) ?? leaf;
+
+const expandBracketTree = (tree: BracketTree): string =>
+  typeof tree === "string"
+    ? bracketLeafLabel(tree)
+    : `(${expandBracketTree(tree[0])} o ${expandBracketTree(tree[1])})`;
+
+const mergeStepOperand = (tree: BracketTree): string =>
+  typeof tree === "string" ? bracketLeafLabel(tree) : "previous result";
+
+const mergeStepsForTree = (tree: BracketTree, out: string[] = []): string[] => {
+  if (typeof tree === "string") return out;
+  mergeStepsForTree(tree[0], out);
+  mergeStepsForTree(tree[1], out);
+  out.push(`Merge ${mergeStepOperand(tree[0])} + ${mergeStepOperand(tree[1])}`);
+  return out;
+};
+
+const formatBracketForDisplay = (bracket: string): { expanded: string; raw: string; steps: ReadonlyArray<string> } => {
+  const tree = findBracketTree(bracket);
+  if (!tree) {
+    return { expanded: bracket, raw: bracket, steps: [] };
+  }
+  return {
+    expanded: expandBracketTree(tree),
+    raw: bracket,
+    steps: mergeStepsForTree(tree),
+  };
+};
+
+const podLegendRows = (team: ReadonlyArray<TeamMember>): string => {
+  const names = teamNameMap(team);
+  return THEOREM_PODS.map((pod) => {
+    const detail = pod.id === "D"
+      ? pod.agents.map((agentId) => names.get(agentId) ?? prettyAgent(agentId)).join(", ")
+      : "";
+    return `<div class="bracket-legend-item">
+      <div class="bracket-legend-key">${esc(pod.id)}</div>
+      <div class="bracket-legend-copy">
+        <div class="bracket-legend-label">${esc(pod.label)}</div>
+        ${detail ? `<div class="bracket-legend-detail">${esc(detail)}</div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+};
+
+const isAxleVerifyTool = (tool?: string): boolean =>
+  tool === "lean.verify" || tool === "lean.verify_file";
+
+const shellEscapeSingleQuoted = (value: string): string =>
+  value.replace(/'/g, "'\"'\"'");
+
+const buildVerifyProofCurl = (opts: {
+  readonly content: string;
+  readonly formalStatement: string;
+  readonly environment: string;
+}): string => {
+  const payload = JSON.stringify({
+    content: opts.content,
+    formal_statement: opts.formalStatement,
+    environment: opts.environment,
+    ignore_imports: true,
+  });
+  return [
+    "curl -s -X POST https://axle.axiommath.ai/api/v1/verify_proof \\",
+    '  -H "Content-Type: application/json" \\',
+    `  -d '${shellEscapeSingleQuoted(payload)}' | jq`,
+  ].join("\n");
+};
+
+type MermaidDag = {
+  readonly nodes: ReadonlyArray<{
+    id: string;
+    label: string;
+    kind: "pod" | "merge" | "summary" | "verify" | "final";
+    memory: boolean;
+    podId?: string;
+    bracket?: string;
+    detail?: string;
+  }>;
+  readonly edges: ReadonlyArray<{
+    from: string;
+    to: string;
+    memory: boolean;
+  }>;
+};
+
+const buildMermaidDag = (tree: BracketTree, memoryPods: ReadonlySet<string>): MermaidDag => {
+  let mergeIndex = 0;
+  const nodes: Array<MermaidDag["nodes"][number]> = [];
+  const edges: Array<MermaidDag["edges"][number]> = [];
+
+  const walk = (node: BracketTree): {
+    id: string;
+    memory: boolean;
+  } => {
+    if (typeof node === "string") {
+      const id = `pod_${node.toLowerCase()}`;
+      const memory = memoryPods.has(node);
+      nodes.push({
+        id,
+        label: bracketLeafLabel(node),
+        kind: "pod",
+        memory,
+        podId: node,
+      });
+      return { id, memory };
+    }
+
+    const left = walk(node[0]);
+    const right = walk(node[1]);
+    mergeIndex += 1;
+    const id = `merge_${mergeIndex}`;
+    const memory = left.memory || right.memory;
+    nodes.push({
+      id,
+      label: `Merge ${mergeIndex}`,
+      kind: "merge",
+      memory,
+      bracket: bracketTreeString(node),
+      detail: `Merge ${mergeStepOperand(node[0])} + ${mergeStepOperand(node[1])}`,
+    });
+    edges.push({ from: left.id, to: id, memory: left.memory });
+    edges.push({ from: right.id, to: id, memory: right.memory });
+    return { id, memory };
+  };
+
+  const root = walk(tree);
+  nodes.push({
+    id: "stage_summary",
+    label: "Summary",
+    kind: "summary",
+    memory: root.memory,
+    bracket: bracketTreeString(tree),
+    detail: "Publish merged summary",
+  });
+  nodes.push({
+    id: "stage_verify",
+    label: "Verify",
+    kind: "verify",
+    memory: false,
+    detail: "Run verifier checks",
+  });
+  nodes.push({
+    id: "stage_final",
+    label: "Final proof",
+    kind: "final",
+    memory: false,
+    detail: "Finalize proof",
+  });
+
+  edges.push({ from: root.id, to: "stage_summary", memory: root.memory });
+  edges.push({ from: "stage_summary", to: "stage_verify", memory: false });
+  edges.push({ from: "stage_verify", to: "stage_final", memory: false });
+
+  return { nodes, edges };
+};
+
+type DagAttributionRow = {
+  readonly node: string;
+  readonly owner: string;
+  readonly detail: string;
+  readonly kind: "pod" | "merge" | "summary" | "verify" | "final";
+  readonly memory: boolean;
+};
+
+const dagKindLabel = (kind: DagAttributionRow["kind"]): string =>
+  kind === "pod"
+    ? "Pod"
+    : kind === "merge"
+      ? "Merge"
+      : kind === "summary"
+        ? "Summary"
+        : kind === "verify"
+          ? "Verify"
+          : "Final";
+
+const agentNameForDag = (agentId?: string): string =>
+  agentId ? prettyAgent(agentId) : "Orchestrator";
+
+type DagContributionEvent = Extract<
+  TheoremEvent,
+  {
+    type:
+      | "attempt.proposed"
+      | "lemma.proposed"
+      | "critique.raised"
+      | "patch.applied"
+      | "summary.made"
+      | "solution.finalized"
+      | "tool.called"
+      | "subagent.merged"
+      | "verification.report";
+  }
+>;
+
+const isDagContributionEvent = (
+  event: TheoremEvent
+): event is DagContributionEvent =>
+  event.type === "attempt.proposed"
+  || event.type === "lemma.proposed"
+  || event.type === "critique.raised"
+  || event.type === "patch.applied"
+  || event.type === "summary.made"
+  || event.type === "solution.finalized"
+  || event.type === "tool.called"
+  || event.type === "subagent.merged"
+  || event.type === "verification.report";
+
+const podContributionEvent = (podId: string, event: DagContributionEvent): boolean => {
+  if (podId === "A" || podId === "B" || podId === "C") {
+    return event.type === "attempt.proposed"
+      || event.type === "tool.called"
+      || event.type === "subagent.merged";
+  }
+  if (podId === "D") {
+    return event.type === "lemma.proposed"
+      || event.type === "critique.raised"
+      || event.type === "patch.applied"
+      || event.type === "tool.called"
+      || event.type === "subagent.merged";
+  }
+  return false;
+};
+
+const describeDagContribution = (event: DagContributionEvent): string => {
+  switch (event.type) {
+    case "attempt.proposed":
+      return "proposed attempt";
+    case "lemma.proposed":
+      return "added lemma";
+    case "critique.raised":
+      return "raised critique";
+    case "patch.applied":
+      return "applied patch";
+    case "summary.made":
+      return `merged ${formatBracketForDisplay(event.bracket).expanded}`;
+    case "solution.finalized":
+      return `finalized proof (${event.confidence.toFixed(2)})`;
+    case "tool.called":
+      return event.tool === "axiom.delegate" ? "delegated to Axiom worker" : `ran ${event.tool}`;
+    case "subagent.merged":
+      return `merged Axiom worker ${event.subRunId}`;
+    case "verification.report":
+      return `verification ${event.status}`;
+  }
+};
+
+const buildDagAttributionRows = (dag: MermaidDag, chain: Chain<TheoremEvent>): ReadonlyArray<DagAttributionRow> => {
+  const summaryByBracket = new Map<string, Extract<TheoremEvent, { type: "summary.made" }>>();
+  const podEvents = new Map<string, DagContributionEvent[]>();
+  let latestVerification: Extract<TheoremEvent, { type: "verification.report" }> | undefined;
+  let latestSolution: Extract<TheoremEvent, { type: "solution.finalized" }> | undefined;
+
+  for (const receipt of chain) {
+    const event = receipt.body;
+    if (event.type === "summary.made") {
+      summaryByBracket.set(event.bracket, event);
+    }
+    if (event.type === "verification.report") {
+      latestVerification = event;
+    }
+    if (event.type === "solution.finalized") {
+      latestSolution = event;
+    }
+    if (!isDagContributionEvent(event) || !event.agentId) continue;
+    const podId = podByAgent.get(event.agentId);
+    if (!podId || !podContributionEvent(podId, event)) continue;
+    const rows = podEvents.get(podId) ?? [];
+    rows.push(event);
+    podEvents.set(podId, rows);
+  }
+
+  return dag.nodes.map((node) => {
+    if (node.kind === "pod") {
+      const events = node.podId ? (podEvents.get(node.podId) ?? []) : [];
+      const configuredAgents = node.podId
+        ? (THEOREM_PODS.find((pod) => pod.id === node.podId)?.agents ?? [])
+        : [];
+      const activeAgents = [...new Set(events.map((event) => event.agentId).filter((agentId): agentId is string => Boolean(agentId)))];
+      const owners = activeAgents.length > 0 ? activeAgents : configuredAgents;
+      const latest = events[events.length - 1];
+      return {
+        node: node.label,
+        owner: owners.length > 0 ? owners.map((agentId) => prettyAgent(agentId)).join(", ") : "Waiting",
+        detail: latest
+          ? `${events.length} receipts · latest ${agentNameForDag(latest.agentId)} ${describeDagContribution(latest)}`
+          : "Waiting for pod receipts.",
+        kind: node.kind,
+        memory: node.memory,
+      };
+    }
+
+    if (node.kind === "merge") {
+      const summary = node.bracket ? summaryByBracket.get(node.bracket) : undefined;
+      return {
+        node: node.label,
+        owner: summary ? agentNameForDag(summary.agentId) : "Synthesizer",
+        detail: summary ? (node.detail ?? "Merged branch outputs") : `Pending: ${node.detail ?? "merge receipt"}`,
+        kind: node.kind,
+        memory: node.memory,
+      };
+    }
+
+    if (node.kind === "summary") {
+      const summary = node.bracket ? summaryByBracket.get(node.bracket) : undefined;
+      return {
+        node: node.label,
+        owner: summary ? agentNameForDag(summary.agentId) : "Synthesizer",
+        detail: summary ? `Published bracket ${formatBracketForDisplay(summary.bracket).expanded}` : "Waiting for root summary.",
+        kind: node.kind,
+        memory: node.memory,
+      };
+    }
+
+    if (node.kind === "verify") {
+      return {
+        node: node.label,
+        owner: latestVerification ? agentNameForDag(latestVerification.agentId) : "Verifier",
+        detail: latestVerification
+          ? `Verification ${latestVerification.status}${latestVerification.evidence?.tool ? ` via ${latestVerification.evidence.tool}` : ""}`
+          : "Waiting for verifier receipt.",
+        kind: node.kind,
+        memory: node.memory,
+      };
+    }
+
+    return {
+      node: node.label,
+      owner: latestSolution ? agentNameForDag(latestSolution.agentId) : "Synthesizer",
+      detail: latestSolution
+        ? `Finalized proof (${latestSolution.confidence.toFixed(2)})`
+        : "Waiting for final proof.",
+      kind: node.kind,
+      memory: node.memory,
+    };
+  });
+};
+
+const mermaidLabel = (value: string): string => JSON.stringify(value);
+
+const mermaidClassLine = (ids: ReadonlyArray<string>, className: string): string | undefined =>
+  ids.length > 0 ? `  class ${ids.join(",")} ${className};` : undefined;
+
+const buildMermaidDagDefinition = (tree: BracketTree, memoryPods: ReadonlySet<string>): string => {
+  const dag = buildMermaidDag(tree, memoryPods);
+  const podIds = dag.nodes.filter((node) => node.kind === "pod").map((node) => node.id);
+  const mergeIds = dag.nodes.filter((node) => node.kind === "merge").map((node) => node.id);
+  const summaryIds = dag.nodes.filter((node) => node.kind === "summary").map((node) => node.id);
+  const verifyIds = dag.nodes.filter((node) => node.kind === "verify").map((node) => node.id);
+  const finalIds = dag.nodes.filter((node) => node.kind === "final").map((node) => node.id);
+  const memoryIds = dag.nodes.filter((node) => node.memory).map((node) => node.id);
+  const memoryEdgeIndexes = dag.edges
+    .map((edge, index) => edge.memory ? index : -1)
+    .filter((index) => index >= 0);
+
+  return [
+    "flowchart TD",
+    "  classDef podNode fill:#08121f,stroke:#394354,color:#f3f5f7,stroke-width:1.5px;",
+    "  classDef mergeNode fill:#0d1520,stroke:#4a5568,color:#f3f5f7,stroke-width:1.5px;",
+    "  classDef summaryNode fill:#173224,stroke:#4fbf7c,color:#f3f5f7,stroke-width:2px;",
+    "  classDef verifyNode fill:#2b223c,stroke:#8f67d8,color:#f3f5f7,stroke-width:2px;",
+    "  classDef finalNode fill:#3c3220,stroke:#d1aa54,color:#f3f5f7,stroke-width:2px;",
+    "  classDef memoryNode fill:#173224,stroke:#6ef3a0,color:#f3f5f7,stroke-width:3px;",
+    ...dag.nodes.map((node) => `  ${node.id}[${mermaidLabel(node.label)}]`),
+    ...dag.edges.map((edge) => `  ${edge.from} --> ${edge.to}`),
+    mermaidClassLine(podIds, "podNode"),
+    mermaidClassLine(mergeIds, "mergeNode"),
+    mermaidClassLine(summaryIds, "summaryNode"),
+    mermaidClassLine(verifyIds, "verifyNode"),
+    mermaidClassLine(finalIds, "finalNode"),
+    mermaidClassLine(memoryIds, "memoryNode"),
+    memoryEdgeIndexes.length > 0
+      ? `  linkStyle ${memoryEdgeIndexes.join(",")} stroke:#6ef3a0,stroke-width:4px;`
+      : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+};
+
+const theoremDagHtml = (opts: {
+  readonly bracket: string;
+  readonly chain: Chain<TheoremEvent>;
+  readonly memoryEvent?: Extract<TheoremEvent, { type: "memory.slice" }>;
+}): string => {
+  const tree = findBracketTree(opts.bracket) ?? findBracketTree("(((A o B) o C) o D)");
+  if (!tree) return "";
+
+  const memoryPods = new Set(
+    (opts.memoryEvent?.items ?? [])
+      .map((item) => item.agentId ? podByAgent.get(item.agentId) : undefined)
+      .filter((value): value is string => Boolean(value))
+  );
+  const memoryLabels = [...memoryPods].map((pod) => bracketLeafLabel(pod));
+  const bracketDisplay = formatBracketForDisplay(opts.bracket);
+  const dag = buildMermaidDag(tree, memoryPods);
+  const mermaid = buildMermaidDagDefinition(tree, memoryPods);
+  const attributionRows = buildDagAttributionRows(dag, opts.chain);
+
+  return `<section class="dag-card">
+    <div class="dag-head">
+      <div class="dag-title">Workflow DAG</div>
+      <div class="dag-meta">Current merge: ${esc(bracketDisplay.expanded)}</div>
+      <div class="dag-meta">Raw: ${esc(bracketDisplay.raw)}</div>
+    </div>
+    <div class="mermaid dag-mermaid" aria-label="Current theorem workflow DAG">${esc(mermaid)}</div>
+    <div class="dag-note">
+      ${opts.memoryEvent
+        ? `Memory focus: ${esc(opts.memoryEvent.phase)} · ${opts.memoryEvent.itemCount} items${memoryLabels.length > 0 ? ` · ${esc(memoryLabels.join(", "))}` : ""}`
+        : "Memory focus: unavailable"}
+    </div>
+    <div class="dag-attribution">
+      ${attributionRows.map((row) => `<div class="dag-actor ${row.memory ? "memory" : ""}">
+        <div class="dag-actor-top">
+          <div class="dag-actor-node">${esc(row.node)}</div>
+          <div class="dag-actor-kind">${esc(dagKindLabel(row.kind))}</div>
+        </div>
+        <div class="dag-actor-owner">${esc(row.owner)}</div>
+        <div class="dag-actor-detail">${esc(row.detail)}</div>
+      </div>`).join("")}
+    </div>
+    <div class="dag-legend">
+      <span class="dag-chip">Mermaid flowchart from the current rebracket tree</span>
+      <span class="dag-chip">Receipt-backed owners for pods, merges, verify, and final proof</span>
+      <span class="dag-chip memory">Memory highlight = pods and merge links in the latest shared memory slice</span>
+    </div>
+  </section>`;
+};
+
+const latestBracketFromChain = (chain: Chain<TheoremEvent>): string => {
+  const latestBracketReceipt = [...chain].reverse().find((receipt) => {
+    const event = receipt.body;
+    return (
+      (event.type === "rebracket.applied" && Boolean(event.bracket))
+      || (event.type === "summary.made" && Boolean(event.bracket))
+      || (event.type === "memory.slice" && Boolean(event.bracket))
+    );
+  }) as
+    | { body: Extract<TheoremEvent, { type: "rebracket.applied" | "summary.made" | "memory.slice" }> }
+    | undefined;
+  return latestBracketReceipt?.body.bracket ?? "(((A o B) o C) o D)";
+};
 
 // ============================================================================
 // Shell
@@ -115,8 +588,26 @@ export const theoremShell = (
   examples: ReadonlyArray<{ id: string; label: string; problem: string }>,
   activeRun?: string,
   at?: number | null,
-  branch?: string
+  branch?: string,
+  opts?: {
+    readonly basePath?: string;
+    readonly title?: string;
+    readonly brand?: string;
+    readonly brandTag?: string;
+    readonly brandSub?: string;
+    readonly controlsTitle?: string;
+    readonly controlsSub?: string;
+    readonly runButtonLabel?: string;
+  }
 ): string => {
+  const basePath = opts?.basePath ?? "/theorem";
+  const title = opts?.title ?? "Receipt - Theorem Guild";
+  const brand = opts?.brand ?? "Theorem Guild";
+  const brandTag = opts?.brandTag ?? "multi-agent";
+  const brandSub = opts?.brandSub ?? "Receipts only. Streams per run. Replay-first.";
+  const controlsTitle = opts?.controlsTitle ?? "Multi-agent proof run";
+  const controlsSub = opts?.controlsSub ?? "Parallel attempts, critiques, and merges recorded as receipts.";
+  const runButtonLabel = opts?.runButtonLabel ?? "Run multi-agent";
   const resumeQuery = activeRun
     ? [
         `stream=${encodeURIComponent(stream)}`,
@@ -125,19 +616,20 @@ export const theoremShell = (
         at !== null && at !== undefined ? `at=${encodeURIComponent(String(at))}` : "",
       ].filter(Boolean).join("&")
     : "";
-  const resumeUrl = activeRun ? `/theorem/run?${resumeQuery}` : "";
+  const resumeUrl = activeRun ? `${basePath}/run?${resumeQuery}` : "";
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Receipt - Theorem Guild</title>
+  <title>${esc(title)}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <script>
@@ -187,13 +679,55 @@ export const theoremShell = (
         });
       };
 
+      const renderMermaid = function (root) {
+        const target = root instanceof HTMLElement ? root : document.body;
+        const mermaid = window.mermaid;
+        if (!mermaid) return;
+
+        if (window.receiptMermaidInit !== "1") {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: "base",
+            securityLevel: "loose",
+            fontFamily: "Space Grotesk",
+            themeVariables: {
+              lineColor: "#7f8ca3",
+              textColor: "#f3f5f7",
+              edgeLabelBackground: "#0b0e14",
+            },
+            flowchart: {
+              useMaxWidth: true,
+              htmlLabels: false,
+              curve: "basis",
+            },
+          });
+          window.receiptMermaidInit = "1";
+        }
+
+        target.querySelectorAll(".mermaid").forEach(function (node, index) {
+          if (!(node instanceof HTMLElement)) return;
+          if (node.dataset.mermaidDone === "1") return;
+          const source = (node.textContent || "").trim();
+          if (!source) return;
+          const renderId = "receipt-mermaid-" + Date.now() + "-" + index;
+          mermaid.render(renderId, source).then(function (result) {
+            node.innerHTML = result.svg;
+            node.dataset.mermaidDone = "1";
+            if (typeof result.bindFunctions === "function") result.bindFunctions(node);
+          }).catch(function () {});
+        });
+      };
+
       window.receiptRenderMath = renderMath;
+      window.receiptRenderMermaid = renderMermaid;
       document.addEventListener("DOMContentLoaded", function () {
         renderMath(document.body);
+        renderMermaid(document.body);
       });
       document.addEventListener("htmx:afterSwap", function (evt) {
         const target = evt && evt.target instanceof HTMLElement ? evt.target : document.body;
         renderMath(target);
+        renderMermaid(target);
       });
     })();
   </script>
@@ -452,16 +986,16 @@ export const theoremShell = (
     }
   </style>
 </head>
-<body hx-ext="sse" sse-connect="/theorem/stream?stream=${encodeURIComponent(stream)}">
+<body hx-ext="sse" sse-connect="${basePath}/stream?stream=${encodeURIComponent(stream)}">
   <div class="app">
     <aside class="sidebar">
-      <div class="brand">Theorem Guild <span class="brand-tag">multi-agent</span></div>
-      <div class="brand-sub">Receipts only. Streams per run. Replay-first.</div>
+      <div class="brand">${esc(brand)} <span class="brand-tag">${esc(brandTag)}</span></div>
+      <div class="brand-sub">${esc(brandSub)}</div>
       <div class="nav-title">Runs</div>
-      <button class="new-chat" type="button" onclick="window.location.href='/theorem?stream=${encodeURIComponent(stream)}&run=new'">+ New Run</button>
+      <button class="new-chat" type="button" onclick="window.location.href='${basePath}?stream=${encodeURIComponent(stream)}&run=new'">+ New Run</button>
       <div id="tg-folds"
            class="folds"
-           hx-get="/theorem/island/folds?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
+           hx-get="${basePath}/island/folds?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
            hx-trigger="load, sse:theorem-refresh throttle:800ms"
            hx-swap="innerHTML">
         <div class="empty">Loading runs...</div>
@@ -471,16 +1005,16 @@ export const theoremShell = (
     <main class="main">
       <div id="tg-travel"
            class="travel-island"
-           hx-get="/theorem/island/travel?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
+           hx-get="${basePath}/island/travel?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
            hx-trigger="load, sse:theorem-refresh throttle:700ms"
            hx-swap="innerHTML">
         <div class="empty">Loading time travel...</div>
       </div>
 
       <div class="controls">
-        <div class="controls-title">Multi-agent proof run</div>
-        <div class="controls-sub">Parallel attempts, critiques, and merges recorded as receipts.</div>
-        <form hx-post="/theorem/run?stream=${encodeURIComponent(stream)}" hx-swap="none">
+        <div class="controls-title">${esc(controlsTitle)}</div>
+        <div class="controls-sub">${esc(controlsSub)}</div>
+        <form hx-post="${basePath}/run?stream=${encodeURIComponent(stream)}" hx-swap="none">
           <textarea name="problem" id="tg-problem" placeholder="Paste a theorem / problem statement for the guild..." required></textarea>
           <div class="run-controls">
             <label class="rounds">
@@ -499,7 +1033,7 @@ export const theoremShell = (
               <span>Branch threshold</span>
               <input type="number" name="branch" min="1" max="6" value="2" />
             </label>
-            <button>Run multi-agent</button>
+            <button>${esc(runButtonLabel)}</button>
           </div>
         </form>
         <div class="examples">
@@ -514,7 +1048,7 @@ export const theoremShell = (
       </div>
 
       <div class="run-area" id="tg-chat"
-           hx-get="/theorem/island/chat?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
+           hx-get="${basePath}/island/chat?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
            hx-trigger="load, sse:theorem-refresh throttle:1200ms"
            hx-swap="innerHTML">
         <div class="empty">Loading run...</div>
@@ -522,7 +1056,7 @@ export const theoremShell = (
     </main>
 
     <aside class="activity" id="tg-side"
-           hx-get="/theorem/island/side?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
+           hx-get="${basePath}/island/side?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun ?? "")}&branch=${encodeURIComponent(branch ?? "")}&at=${encodeURIComponent(String(at ?? ""))}"
            hx-trigger="load, sse:theorem-refresh throttle:800ms"
            hx-swap="innerHTML">
       <div class="empty">Loading panels...</div>
@@ -606,8 +1140,12 @@ export const theoremFoldsHtml = (
   stream: string,
   runs: ReadonlyArray<TheoremRunSummary>,
   activeRun?: string,
-  at?: number | null
+  at?: number | null,
+  opts?: {
+    readonly basePath?: string;
+  }
 ): string => {
+  const basePath = opts?.basePath ?? "/theorem";
   if (runs.length === 0) return `<div class="empty">No runs yet.</div>`;
 
   const items = runs.map((run) => {
@@ -619,7 +1157,7 @@ export const theoremFoldsHtml = (
         : "running";
     const when = run.startedAt ? new Date(run.startedAt).toLocaleTimeString() : "-";
     return `<a class="fold-item ${active ? "active" : ""} ${statusClass}"
-      href="/theorem?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(run.runId)}&at=${encodeURIComponent(String(at ?? ""))}">
+      href="${basePath}?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(run.runId)}&at=${encodeURIComponent(String(at ?? ""))}">
       <div class="fold-head">
         <span class="fold-dot ${statusClass}"></span>
         <span class="fold-title">${esc(truncate(run.problem || run.runId, 30))}</span>
@@ -658,8 +1196,10 @@ export const theoremTravelHtml = (opts: {
   readonly branch?: string;
   readonly at: number | null | undefined;
   readonly total: number;
+  readonly basePath?: string;
 }): string => {
   const { stream, runId, branch, at, total } = opts;
+  const basePath = opts.basePath ?? "/theorem";
   if (!runId) {
     return `<div class="travel-hero">
       <div class="travel-head">
@@ -677,7 +1217,7 @@ export const theoremTravelHtml = (opts: {
     const q = new URLSearchParams({ stream, run: runId });
     if (branch) q.set("branch", branch);
     if (nextAt !== undefined && nextAt !== null && nextAt < maxAt) q.set("at", String(nextAt));
-    return `/theorem/travel?${q.toString()}`;
+    return `${basePath}/travel?${q.toString()}`;
   };
   const atStart = currentAt <= 0;
   const atHead = currentAt >= maxAt;
@@ -704,7 +1244,7 @@ export const theoremTravelHtml = (opts: {
         <input type="hidden" name="run" value="${esc(runId)}" />
         ${branch ? `<input type="hidden" name="branch" value="${esc(branch)}" />` : ""}
         <input class="travel-slider" type="range" min="0" max="${maxAt}" value="${currentAt}" name="at"
-          hx-get="/theorem/travel" hx-include="closest form" hx-trigger="change delay:90ms" hx-swap="none" />
+          hx-get="${basePath}/travel" hx-include="closest form" hx-trigger="change delay:90ms" hx-swap="none" />
       </form>
       <div class="travel-step">Step ${currentAt} / ${maxAt}</div>
     </div>
@@ -720,7 +1260,7 @@ type ChatItem = {
   readonly role: "user" | "agent" | "system";
   readonly label: string;
   readonly content: string;
-  readonly kind?: "attempt" | "lemma" | "critique" | "patch" | "branch" | "rebracket" | "summary" | "parallel";
+  readonly kind?: "attempt" | "lemma" | "critique" | "patch" | "branch" | "rebracket" | "summary" | "parallel" | "tool" | "delegate";
 };
 
 const upsertChat = (
@@ -755,7 +1295,7 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
   };
   type CoordTrail = {
     ts: number;
-    kind: "attempt" | "lemma" | "critique" | "patch" | "branch" | "rebracket" | "summary" | "parallel" | "status";
+    kind: "attempt" | "lemma" | "critique" | "patch" | "branch" | "rebracket" | "summary" | "parallel" | "status" | "tool" | "delegate";
     agent?: string;
     body: string;
   };
@@ -888,6 +1428,21 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
           body: `Final proof emitted (confidence ${e.confidence.toFixed(2)}).`,
         });
         break;
+      case "failure.report":
+        items.push({
+          id: r.id,
+          role: "system",
+          label: "Failure",
+          content: `Class: ${e.failure.failureClass}\nStage: ${e.failure.stage}\n${e.failure.message}${e.failure.details ? `\n\n${e.failure.details}` : ""}`,
+          kind: "summary",
+        });
+        pushTrail({
+          ts: r.ts,
+          kind: "status",
+          agent: prettyAgent(e.agentId ?? "orchestrator"),
+          body: `Failure ${e.failure.failureClass}: ${e.failure.message}`,
+        });
+        break;
       case "run.status":
         runStatus = e.status;
         runNote = e.note;
@@ -929,6 +1484,51 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
           body: `Verification status: ${e.status}.`,
         });
         break;
+      case "tool.called":
+        const isAxiomDelegate = e.tool === "axiom.delegate";
+        const axiomToolNote = isAxiomDelegate ? extractAxiomSummaryLine(e.summary ?? "") : "";
+        items.push({
+          id: r.id,
+          role: "system",
+          label: isAxiomDelegate
+            ? `${prettyAgent(e.agentId ?? "orchestrator")} · Axiom Worker`
+            : `${prettyAgent(e.agentId ?? "orchestrator")} · Tool`,
+          content: isAxiomDelegate
+            ? `Delegated theorem subtask to AXLE-powered Axiom worker.${e.summary ? `\n${e.summary}` : ""}${e.error ? `\nError: ${e.error}` : ""}`
+            : `${e.tool}${e.summary ? `\n${e.summary}` : ""}${e.error ? `\nError: ${e.error}` : ""}`,
+          kind: "tool",
+        });
+        if (e.agentId) {
+          touchAgent(e.agentId, { lastAction: isAxiomDelegate ? "Delegated to Axiom worker" : `${e.tool}${e.error ? " failed" : ""}` }, r.ts);
+        }
+        pushTrail({
+          ts: r.ts,
+          kind: "tool",
+          agent: prettyAgent(e.agentId ?? "orchestrator"),
+          body: isAxiomDelegate
+            ? `Delegated to Axiom worker${e.error ? ` failed (${e.error})` : axiomToolNote ? ` · ${axiomToolNote}` : e.summary ? ` · ${e.summary}` : ""}.`
+            : `${e.tool}${e.error ? ` failed (${e.error})` : e.summary ? ` → ${e.summary}` : ""}.`,
+        });
+        break;
+      case "subagent.merged":
+        const axiomMergeNote = extractAxiomSummaryLine(e.summary);
+        items.push({
+          id: r.id,
+          role: "system",
+          label: `${prettyAgent(e.agentId ?? "orchestrator")} → Axiom / AXLE`,
+          content: `Axiom task:\n${e.task}\n\nAxiom result:\n${e.summary}`,
+          kind: "delegate",
+        });
+        if (e.agentId) {
+          touchAgent(e.agentId, { lastAction: `Merged Axiom worker ${e.subRunId}` }, r.ts);
+        }
+        pushTrail({
+          ts: r.ts,
+          kind: "delegate",
+          agent: prettyAgent(e.agentId ?? "orchestrator"),
+          body: `Merged Axiom worker ${e.subRunId}${axiomMergeNote ? ` · ${axiomMergeNote}` : ""}.`,
+        });
+        break;
       case "agent.status":
         touchAgent(
           e.agentId,
@@ -962,18 +1562,19 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
         }
         break;
       case "rebracket.applied":
+        const displayBracket = formatBracketForDisplay(e.bracket);
         items.push({
           id: r.id,
           role: "system",
           label: "System",
-          content: `Rebracket → ${e.bracket} (score ${e.score.toFixed(2)})`,
+          content: `Rebracket → ${displayBracket.expanded} (score ${e.score.toFixed(2)})\nRaw: ${displayBracket.raw}`,
           kind: "rebracket",
         });
         pushTrail({
           ts: r.ts,
           kind: "rebracket",
           agent: "Orchestrator",
-          body: `Rebracketed to ${e.bracket} (score ${e.score.toFixed(2)}).`,
+          body: `Rebracketed to ${displayBracket.expanded} (score ${e.score.toFixed(2)}). Raw: ${displayBracket.raw}.`,
         });
         break;
       case "branch.created":
@@ -1044,6 +1645,10 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
     .filter((r) => r.body.type === "prompt.context")
     .filter((r, idx, arr) => arr.findIndex((x) => x.hash === r.hash) === idx)
     .length;
+  const latestMemoryEvent = ([...chain].reverse().find((r) => r.body.type === "memory.slice") as
+    | { body: Extract<TheoremEvent, { type: "memory.slice" }> }
+    | undefined)?.body;
+  const latestBracket = latestBracketFromChain(chain);
   const coordCount = coordTrail.length;
   const nowLabel = parallelLabel
     || (runningPhase && runningAgent ? `${prettyAgent(runningAgent)} · ${runningPhase}` : "")
@@ -1095,6 +1700,12 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
       <div class="result-body">${resultBodyHtml}</div>
       ${gapsHtml}
     </div>
+
+    ${theoremDagHtml({
+      bracket: latestBracket,
+      chain,
+      memoryEvent: latestMemoryEvent,
+    })}
 
     ${frameworkCoordinationHtml({
       palette: "theorem",
@@ -1184,6 +1795,117 @@ export const theoremChatHtml = (chain: Chain<TheoremEvent>): string => {
       border-radius: 6px;
     }
     .result-gaps ul { margin: 6px 0 0 16px; padding: 0; color: rgba(255,255,255,0.7); font-size: 12px; }
+    .dag-card {
+      display: grid;
+      gap: 10px;
+      border-radius: 16px;
+      border: 1px solid rgba(107,220,255,0.22);
+      background: linear-gradient(140deg, rgba(107,220,255,0.1), rgba(255,211,106,0.08));
+      padding: 14px 16px;
+    }
+    .dag-head { display: grid; gap: 4px; }
+    .dag-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.86);
+    }
+    .dag-meta {
+      font-size: 11px;
+      color: rgba(255,255,255,0.68);
+      overflow-wrap: anywhere;
+    }
+    .dag-mermaid {
+      width: 100%;
+      min-height: 280px;
+      overflow-x: auto;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(11,14,20,0.5);
+      padding: 8px;
+    }
+    .dag-mermaid svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-width: 100%;
+    }
+    .dag-mermaid svg .edgePath .path,
+    .dag-mermaid svg .flowchart-link {
+      stroke: rgba(170, 184, 204, 0.72);
+      stroke-width: 2.25px;
+    }
+    .dag-mermaid svg .arrowheadPath {
+      fill: rgba(170, 184, 204, 0.82);
+      stroke: rgba(170, 184, 204, 0.82);
+    }
+    .dag-note {
+      font-size: 11px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.74);
+    }
+    .dag-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .dag-attribution {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+    }
+    .dag-actor {
+      display: grid;
+      gap: 6px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(14,18,26,0.72);
+    }
+    .dag-actor.memory {
+      border-color: rgba(110,243,160,0.36);
+      box-shadow: inset 0 0 0 1px rgba(110,243,160,0.08);
+    }
+    .dag-actor-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+    .dag-actor-node {
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.92);
+    }
+    .dag-actor-kind {
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.56);
+    }
+    .dag-actor-owner {
+      font-size: 11px;
+      color: rgba(107,220,255,0.92);
+    }
+    .dag-actor-detail {
+      font-size: 11px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.72);
+    }
+    .dag-chip {
+      font-size: 10px;
+      border-radius: 999px;
+      padding: 4px 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.72);
+      background: rgba(18,20,28,0.56);
+    }
+    .dag-chip.memory {
+      border-color: rgba(110,243,160,0.38);
+      color: rgba(110,243,160,0.92);
+      background: rgba(110,243,160,0.12);
+    }
   </style>`;
 };
 
@@ -1222,6 +1944,9 @@ const activityRows = (
       case "patch.applied":
       case "summary.made":
       case "solution.finalized":
+      case "failure.report":
+      case "tool.called":
+      case "subagent.merged":
         if (e.agentId) touch(e.agentId, idx);
         break;
       default:
@@ -1379,6 +2104,36 @@ export const theoremSideHtml = (
   activityChain?: Chain<TheoremEvent>
 ): string => {
   const activitySource = activityChain ?? chain;
+  const axiomDelegateEvents = activitySource.filter((r): r is typeof r & { body: Extract<TheoremEvent, { type: "tool.called" }> } =>
+    r.body.type === "tool.called" && r.body.tool === "axiom.delegate"
+  );
+  const axiomMergeEvents = activitySource.filter((r): r is typeof r & { body: Extract<TheoremEvent, { type: "subagent.merged" }> } =>
+    r.body.type === "subagent.merged"
+  );
+  const lastAxiomMerge = axiomMergeEvents[axiomMergeEvents.length - 1]?.body;
+  const finalAxiomEvidence = state.verification?.evidence
+    ?? [...axiomMergeEvents]
+      .reverse()
+      .flatMap((receipt) => receipt.body.evidence ?? [])
+      .find((item) => item.phase === "verify");
+  const verificationRan = isAxleVerifyTool(finalAxiomEvidence?.tool);
+  const verifyProofUrl = "https://axle.axiommath.ai/api/v1/verify_proof";
+  const exactVerifyPayload = verificationRan
+    && finalAxiomEvidence?.candidateContent
+    && finalAxiomEvidence?.formalStatement
+    ? {
+        content: finalAxiomEvidence.candidateContent,
+        formalStatement: finalAxiomEvidence.formalStatement,
+        environment: finalAxiomEvidence.environment ?? "lean-4.28.0",
+      }
+    : undefined;
+  const verifyCurl = exactVerifyPayload
+    ? buildVerifyProofCurl({
+        content: exactVerifyPayload.content,
+        formalStatement: exactVerifyPayload.formalStatement,
+        environment: exactVerifyPayload.environment,
+      })
+    : undefined;
   const summaryEvents = chain.filter((r) => r.body.type === "summary.made") as Array<{ body: Extract<TheoremEvent, { type: "summary.made" }> }>;
   const rebracketEvents = chain.filter((r) => r.body.type === "rebracket.applied") as Array<{ body: Extract<TheoremEvent, { type: "rebracket.applied" }> }>;
   const latestRebracket = rebracketEvents[rebracketEvents.length - 1]?.body;
@@ -1414,7 +2169,9 @@ export const theoremSideHtml = (
   const effectiveRun = runId ?? state.runId ?? "";
   const isBranch = Boolean(branchStream);
   const activeChainStream = chainStream ?? runStream;
-  const bracketText = latestRebracket?.bracket ?? summary?.bracket ?? (state.solution ? "(bracket pending)" : "((A o B) o C)");
+  const bracketText = latestRebracket?.bracket ?? summary?.bracket ?? (state.solution ? "(bracket pending)" : "(((A o B) o C) o D)");
+  const bracketDisplay = formatBracketForDisplay(bracketText);
+  const bracketLegend = podLegendRows(team);
   const noteText = latestRebracket
     ? (latestRebracket.note ?? `Rotation score ${latestRebracket.score.toFixed(2)}`)
     : summary?.content
@@ -1488,8 +2245,37 @@ export const theoremSideHtml = (
     state.solution ? `Confidence: ${state.solution.confidence.toFixed(2)}` : "Confidence: —",
     state.solution?.gaps?.length ? `Gaps: ${state.solution.gaps.length}` : "Gaps: 0",
     state.verification ? `Verification: ${state.verification.status}` : "Verification: —",
+    `Axiom delegates: ${axiomDelegateEvents.length}`,
+    `Axiom merges: ${axiomMergeEvents.length}`,
     `Integrity: ${integrityLabel}`,
   ];
+  const axiomCard = axiomDelegateEvents.length > 0 || axiomMergeEvents.length > 0
+    ? `<section class="side-card">
+      <h2>AXLE</h2>
+      <div class="meta-list">
+        <div class="meta-item">Verification run: ${verificationRan ? "yes" : "no"}</div>
+        <div class="meta-item">Delegations: ${axiomDelegateEvents.length}</div>
+        <div class="meta-item">Merged workers: ${axiomMergeEvents.length}</div>
+        <div class="meta-item">Last worker: ${esc(lastAxiomMerge?.subRunId ?? "—")}</div>
+        <div class="meta-item">Last outcome: ${esc(lastAxiomMerge?.outcome ?? "—")}</div>
+        <div class="meta-item">Last summary: ${esc(lastAxiomMerge ? extractAxiomSummaryLine(lastAxiomMerge.summary) : "—")}</div>
+        <div class="meta-item">Final verify tool: ${esc(finalAxiomEvidence?.tool ?? "—")}</div>
+        <div class="meta-item">Final environment: ${esc(finalAxiomEvidence?.environment ?? "—")}</div>
+        <div class="meta-item">Candidate hash: ${esc(shortHash(finalAxiomEvidence?.candidateHash))}</div>
+        <div class="meta-item">Statement hash: ${esc(shortHash(finalAxiomEvidence?.formalStatementHash))}</div>
+      </div>
+      <div class="axiom-link-row">
+        <a class="axiom-link" href="${verifyProofUrl}" target="_blank" rel="noreferrer noopener">Open AXLE verify_proof endpoint</a>
+      </div>
+      ${verifyCurl
+        ? `<details class="axiom-curl">
+            <summary>Derived verify_proof curl</summary>
+            <div class="axiom-curl-note">Derived from persisted AXLE verification evidence for this run.</div>
+            <pre>${esc(verifyCurl)}</pre>
+          </details>`
+        : `<div class="axiom-curl-note">Curl preview unavailable: exact AXLE candidate/formal-statement payload was not persisted for this run.</div>`}
+    </section>`
+    : "";
 
   return `<div class="side-stack">
     <section class="side-card">
@@ -1519,7 +2305,12 @@ export const theoremSideHtml = (
 
     <section class="side-card">
       <h2>Rebracket</h2>
-      <div class="bracket">${esc(bracketText)}</div>
+      <div class="bracket">${esc(bracketDisplay.expanded)}</div>
+      <div class="bracket-raw">Raw: ${esc(bracketDisplay.raw)}</div>
+      <div class="bracket-legend">${bracketLegend}</div>
+      ${bracketDisplay.steps.length > 0
+        ? `<div class="bracket-steps">${bracketDisplay.steps.map((step, index) => `<div class="bracket-step">${index + 1}. ${esc(step)}</div>`).join("")}</div>`
+        : ""}
       <div class="bracket-note">${esc(noteText)}</div>
       <div class="policy-note">${esc(rebracketPolicy)}</div>
     </section>
@@ -1528,6 +2319,8 @@ export const theoremSideHtml = (
       <h2>Shared Memory</h2>
       <div class="memory-panel">${memoryPulse}</div>
     </section>
+
+    ${axiomCard}
 
     <section class="side-card">
       <h2>Metrics</h2>
@@ -1555,7 +2348,59 @@ export const theoremSideHtml = (
       color: rgba(107,220,255,0.85);
       background: rgba(107,220,255,0.08);
     }
-    .bracket { font-family: "IBM Plex Mono", monospace; font-size: 12px; padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.04); }
+    .bracket {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      overflow-wrap: anywhere;
+    }
+    .bracket-raw {
+      margin-top: 8px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      color: rgba(255,255,255,0.55);
+      overflow-wrap: anywhere;
+    }
+    .bracket-legend { display: grid; gap: 8px; margin-top: 10px; }
+    .bracket-legend-item {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+    }
+    .bracket-legend-key {
+      min-width: 20px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      color: rgba(107,220,255,0.92);
+    }
+    .bracket-legend-copy { min-width: 0; }
+    .bracket-legend-label { font-size: 11px; color: rgba(255,255,255,0.86); }
+    .bracket-legend-detail {
+      margin-top: 2px;
+      font-size: 10px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.58);
+      overflow-wrap: anywhere;
+    }
+    .bracket-steps { display: grid; gap: 8px; margin-top: 10px; }
+    .bracket-step {
+      font-size: 11px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.78);
+      border-radius: 10px;
+      border: 1px solid rgba(107,220,255,0.12);
+      background: rgba(107,220,255,0.05);
+      padding: 7px 9px;
+      overflow-wrap: anywhere;
+    }
     .stream-pill {
       display: inline-flex;
       align-items: center;
@@ -1592,6 +2437,43 @@ export const theoremSideHtml = (
       border-radius: 10px;
       padding: 6px 8px;
       overflow-wrap: anywhere;
+    }
+    .axiom-link-row { margin-top: 10px; }
+    .axiom-link {
+      font-size: 11px;
+      color: rgba(107,220,255,0.95);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(107,220,255,0.35);
+    }
+    .axiom-link:hover { border-bottom-color: rgba(107,220,255,0.75); }
+    .axiom-curl {
+      margin-top: 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      padding: 8px 10px;
+    }
+    .axiom-curl summary {
+      cursor: pointer;
+      font-size: 11px;
+      color: rgba(255,255,255,0.86);
+      list-style: none;
+    }
+    .axiom-curl summary::-webkit-details-marker { display: none; }
+    .axiom-curl-note {
+      margin-top: 8px;
+      font-size: 10px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.58);
+    }
+    .axiom-curl pre {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      line-height: 1.5;
+      color: rgba(255,255,255,0.88);
     }
     .metric-list { display: grid; gap: 6px; }
     .metric-list.compact { margin-bottom: 10px; }

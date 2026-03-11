@@ -45,6 +45,23 @@ type TheoremRouteDeps = {
   readonly enqueueJob: (job: EnqueueJobInput) => Promise<void>;
 };
 
+type TheoremRouteUiConfig = {
+  readonly routeId?: string;
+  readonly basePath?: string;
+  readonly defaultStream?: string;
+  readonly jobAgentId?: string;
+  readonly jobKind?: string;
+  readonly jobIdPrefix?: string;
+  readonly title?: string;
+  readonly brand?: string;
+  readonly brandTag?: string;
+  readonly brandSub?: string;
+  readonly controlsTitle?: string;
+  readonly controlsSub?: string;
+  readonly runButtonLabel?: string;
+  readonly examples?: ReadonlyArray<{ id: string; label: string; problem: string }>;
+};
+
 type TheoremRunStartIntent = {
   readonly stream: string;
   readonly runId: string;
@@ -58,6 +75,13 @@ type TheoremRunStartIntent = {
   readonly resumeRequested: boolean;
 };
 
+type TheoremRunStartIntentOptions = {
+  readonly basePath?: string;
+  readonly jobAgentId?: string;
+  readonly jobKind?: string;
+  readonly jobIdPrefix?: string;
+};
+
 const mergeTimelineChains = <T extends { readonly id: string; readonly ts: number; readonly stream: string }>(
   chains: ReadonlyArray<ReadonlyArray<T>>
 ) => {
@@ -66,14 +90,59 @@ const mergeTimelineChains = <T extends { readonly id: string; readonly ts: numbe
   return merged;
 };
 
-export const translateTheoremRunStartIntent = (
-  intent: TheoremRunStartIntent
+const normalizeBasePath = (value?: string): string => {
+  const raw = (value ?? "/theorem").trim();
+  if (!raw) return "/theorem";
+  const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : withSlash;
+};
+
+const normalizeTheoremRouteUiConfig = (config?: TheoremRouteUiConfig): Required<TheoremRouteUiConfig> => ({
+  routeId: config?.routeId ?? "theorem",
+  basePath: normalizeBasePath(config?.basePath),
+  defaultStream: config?.defaultStream ?? "agents/theorem",
+  jobAgentId: config?.jobAgentId ?? "theorem",
+  jobKind: config?.jobKind ?? "theorem.run",
+  jobIdPrefix: config?.jobIdPrefix ?? config?.routeId ?? "theorem",
+  title: config?.title ?? "Receipt - Theorem Guild",
+  brand: config?.brand ?? "Theorem Guild",
+  brandTag: config?.brandTag ?? "multi-agent",
+  brandSub: config?.brandSub ?? "Receipts only. Streams per run. Replay-first.",
+  controlsTitle: config?.controlsTitle ?? "Multi-agent proof run",
+  controlsSub: config?.controlsSub ?? "Parallel attempts, critiques, and merges recorded as receipts.",
+  runButtonLabel: config?.runButtonLabel ?? "Run multi-agent",
+  examples: config?.examples ?? THEOREM_EXAMPLES,
+});
+
+const isRunOrBranchStream = (runStream: string, candidate: string): boolean =>
+  candidate === runStream || candidate.startsWith(`${runStream}/branches/`);
+
+export const resolveTheoremResumeAnchor = (
+  displayChain: Chain<TheoremEvent>,
+  runStream: string,
+  at: number | null,
+): { readonly stream: string; readonly hash: string } | undefined => {
+  if (at === null) return undefined;
+  const viewChain = sliceTheoremChainByStep(displayChain, at);
+  const anchor = viewChain[viewChain.length - 1];
+  if (!anchor) return undefined;
+  if (!isRunOrBranchStream(runStream, anchor.stream)) return undefined;
+  return { stream: anchor.stream, hash: anchor.hash };
+};
+
+const translateTheoremRunStartIntentInternal = (
+  intent: TheoremRunStartIntent,
+  opts?: TheoremRunStartIntentOptions
 ): ReadonlyArray<RuntimeOp<TheoremCmd>> => {
+  const basePath = normalizeBasePath(opts?.basePath);
+  const jobAgentId = opts?.jobAgentId ?? "theorem";
+  const jobKind = opts?.jobKind ?? "theorem.run";
+  const jobIdPrefix = opts?.jobIdPrefix ?? "theorem";
   const ops: RuntimeOp<TheoremCmd>[] = [];
   let runStreamOverride: string | undefined;
   let forkedBranch: string | undefined;
   const queuedProblem = intent.append ? `${intent.resolvedProblem}\n\n${intent.append}` : intent.resolvedProblem;
-  const queueJobId = `theorem_${intent.runId}_${Date.now().toString(36)}`;
+  const queueJobId = `${jobIdPrefix}_${intent.runId}_${Date.now().toString(36)}`;
 
   if (intent.resumeRequested && intent.sourceChain.length > 0) {
     const forkSlice = intent.at === null ? intent.sourceChain : sliceTheoremChainByStep(intent.sourceChain, intent.at);
@@ -122,13 +191,13 @@ export const translateTheoremRunStartIntent = (
     type: "enqueue_job",
     job: {
       jobId: queueJobId,
-      agentId: "theorem",
+      agentId: jobAgentId,
       lane: "collect",
-      sessionKey: `theorem:${intent.stream}`,
+      sessionKey: `${jobAgentId}:${intent.stream}`,
       singletonMode: "cancel",
       maxAttempts: 2,
       payload: {
-        kind: "theorem.run",
+        kind: jobKind,
         stream: intent.stream,
         runId: intent.runId,
         runStream: runStreamOverride,
@@ -141,13 +210,21 @@ export const translateTheoremRunStartIntent = (
   const redirectParams = new URLSearchParams({ stream: intent.stream, run: intent.runId });
   if (forkedBranch) redirectParams.set("branch", forkedBranch);
   redirectParams.set("job", queueJobId);
-  ops.push({ type: "redirect", header: "HX-Redirect", url: `/theorem?${redirectParams.toString()}` });
+  ops.push({ type: "redirect", header: "HX-Redirect", url: `${basePath}?${redirectParams.toString()}` });
 
   return ops;
 };
 
-export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => {
+export const translateTheoremRunStartIntent = (
+  intent: TheoremRunStartIntent
+): ReadonlyArray<RuntimeOp<TheoremCmd>> =>
+  translateTheoremRunStartIntentInternal(intent);
+
+export const createTheoremRoute = (deps: TheoremRouteDeps, ui?: TheoremRouteUiConfig): AgentRouteModule => {
   const { runtime, enqueueJob, sse } = deps;
+  const uiConfig = normalizeTheoremRouteUiConfig(ui);
+  const basePath = uiConfig.basePath;
+  const defaultStream = uiConfig.defaultStream;
 
   const loadTheoremRunChain = async (
     baseStream: string,
@@ -224,21 +301,21 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
   };
 
   return {
-    id: "theorem",
+    id: uiConfig.routeId,
     kind: "run",
     paths: {
-      shell: "/theorem",
-      folds: "/theorem/island/folds",
-      travelIsland: "/theorem/island/travel",
-      travel: "/theorem/travel",
-      chat: "/theorem/island/chat",
-      side: "/theorem/island/side",
-      run: "/theorem/run",
-      stream: "/theorem/stream",
+      shell: basePath,
+      folds: `${basePath}/island/folds`,
+      travelIsland: `${basePath}/island/travel`,
+      travel: `${basePath}/travel`,
+      chat: `${basePath}/island/chat`,
+      side: `${basePath}/island/side`,
+      run: `${basePath}/run`,
+      stream: `${basePath}/stream`,
     },
     register: (app: Hono) => {
-      app.get("/theorem", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(basePath, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -246,11 +323,18 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         const chain = await runtime.chain(stream);
         const latest = getLatestTheoremRunId(chain);
         const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
-        return html(theoremShell(stream, THEOREM_EXAMPLES, activeRun, wantsEmpty ? null : at, branchParam ?? undefined));
+        return html(theoremShell(
+          stream,
+          uiConfig.examples,
+          activeRun,
+          wantsEmpty ? null : at,
+          branchParam ?? undefined,
+          uiConfig
+        ));
       });
 
-      app.get("/theorem/island/folds", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/island/folds`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
         const at = parseAt(c.req.query("at"));
@@ -265,11 +349,11 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
           const startedAt = runChain.length > 0 ? runChain[0]?.ts : run.startedAt;
           return { ...run, count, startedAt };
         }));
-        return html(theoremFoldsHtml(stream, runsWithCounts, activeRun, wantsEmpty ? null : at));
+        return html(theoremFoldsHtml(stream, runsWithCounts, activeRun, wantsEmpty ? null : at, { basePath }));
       });
 
-      app.get("/theorem/island/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/island/travel`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -277,7 +361,7 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         const indexChain = await runtime.chain(stream);
         const latest = getLatestTheoremRunId(indexChain);
         const activeRun = wantsEmpty ? undefined : (runParam ?? latest ?? undefined);
-        if (!activeRun) return html(theoremTravelHtml({ stream, at: null, total: 0 }));
+        if (!activeRun) return html(theoremTravelHtml({ stream, at: null, total: 0, basePath }));
 
         const runData = await loadTheoremRunChain(stream, activeRun, branchParam);
         const displayChain = !runData.isBranch
@@ -290,11 +374,12 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
           branch: runData.isBranch ? runData.chainStream : undefined,
           at: wantsEmpty ? null : at,
           total: totalSteps,
+          basePath,
         }));
       });
 
-      app.get("/theorem/travel", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/travel`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -302,7 +387,7 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         const latest = getLatestTheoremRunId(indexChain);
         const activeRun = runParam?.trim() ? runParam : (latest ?? undefined);
         if (!activeRun) {
-          return html("", { "HX-Push-Url": `/theorem?stream=${encodeURIComponent(stream)}&run=new` });
+          return html("", { "HX-Push-Url": `${basePath}?stream=${encodeURIComponent(stream)}&run=new` });
         }
 
         const runs = buildTheoremRuns(indexChain);
@@ -338,22 +423,22 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         const urlParams = new URLSearchParams({ stream, run: activeRun });
         if (activeBranch) urlParams.set("branch", activeBranch);
         if (viewAt !== null) urlParams.set("at", String(viewAt));
-        const nextUrl = `/theorem?${urlParams.toString()}`;
+        const nextUrl = `${basePath}?${urlParams.toString()}`;
         const atParam = String(viewAt ?? "");
         const branchParamForQuery = activeBranch ?? "";
 
         return html(`
 <div id="tg-folds" class="folds" hx-swap-oob="outerHTML"
-     hx-get="/theorem/island/folds?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&at=${encodeURIComponent(atParam)}"
-     hx-trigger="load, sse:theorem-refresh throttle:800ms" hx-swap="innerHTML">${theoremFoldsHtml(stream, runsWithCounts, activeRun, viewAt)}</div>
+     hx-get="${basePath}/island/folds?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&at=${encodeURIComponent(atParam)}"
+     hx-trigger="load, sse:theorem-refresh throttle:800ms" hx-swap="innerHTML">${theoremFoldsHtml(stream, runsWithCounts, activeRun, viewAt, { basePath })}</div>
 <div id="tg-travel" class="travel-island" hx-swap-oob="outerHTML"
-     hx-get="/theorem/island/travel?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
-     hx-trigger="load, sse:theorem-refresh throttle:700ms" hx-swap="innerHTML">${theoremTravelHtml({ stream, runId: activeRun, branch: activeBranch, at: viewAt, total: totalSteps })}</div>
+     hx-get="${basePath}/island/travel?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
+     hx-trigger="load, sse:theorem-refresh throttle:700ms" hx-swap="innerHTML">${theoremTravelHtml({ stream, runId: activeRun, branch: activeBranch, at: viewAt, total: totalSteps, basePath })}</div>
 <div id="tg-chat" class="run-area" hx-swap-oob="outerHTML"
-     hx-get="/theorem/island/chat?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
+     hx-get="${basePath}/island/chat?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
      hx-trigger="load, sse:theorem-refresh throttle:1200ms" hx-swap="innerHTML">${theoremChatHtml(viewChain)}</div>
 <div id="tg-side" class="activity" hx-swap-oob="outerHTML"
-     hx-get="/theorem/island/side?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
+     hx-get="${basePath}/island/side?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(activeRun)}&branch=${encodeURIComponent(branchParamForQuery)}&at=${encodeURIComponent(atParam)}"
      hx-trigger="load, sse:theorem-refresh throttle:800ms" hx-swap="innerHTML">${theoremSideHtml(
           stateResolved,
           viewChain,
@@ -368,8 +453,8 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         )}</div>`, { "HX-Push-Url": nextUrl });
       });
 
-      app.get("/theorem/island/chat", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/island/chat`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -387,8 +472,8 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         return html(theoremChatHtml(viewChain));
       });
 
-      app.get("/theorem/island/side", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/island/side`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const wantsEmpty = runParam !== undefined && (runParam.trim() === "" || runParam === "new" || runParam === "none");
@@ -433,12 +518,12 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
       });
 
       app.post(
-        "/theorem/run",
+        `${basePath}/run`,
         zValidator("form", theoremRunFormSchema, (result) => {
           if (!result.success) return text(400, "problem required");
         }),
         async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+        const stream = c.req.query("stream") ?? defaultStream;
         const runParam = c.req.query("run");
         const branchParam = parseBranch(c.req.query("branch"));
         const at = parseAt(c.req.query("at"));
@@ -451,6 +536,7 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
         const branchPrefix = `${runStream}/branches/`;
         let sourceStream = runStream;
         let sourceChain = await runtime.chain(runStream);
+        let resumeAt = at;
         if (branchParam && branchParam.startsWith(branchPrefix)) {
           const branchChain = await runtime.chain(branchParam);
           if (branchChain.length > 0) {
@@ -458,6 +544,27 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
             sourceChain = branchChain;
           }
         }
+
+        if (runParam?.trim().length && at !== null) {
+          const displayChain = sourceStream === runStream
+            ? await buildTheoremDisplayChain(stream, runId)
+            : sourceChain;
+          const anchor = resolveTheoremResumeAnchor(displayChain, runStream, at);
+          if (anchor) {
+            const anchorChain = await runtime.chain(anchor.stream);
+            const anchorIndex = anchorChain.findIndex((receipt) => receipt.hash === anchor.hash);
+            if (anchorIndex >= 0) {
+              sourceStream = anchor.stream;
+              sourceChain = anchorChain.slice(0, anchorIndex + 1);
+              resumeAt = null;
+            }
+          }
+          if (resumeAt !== null) {
+            sourceChain = sliceTheoremChainByStep(sourceChain, at);
+            resumeAt = null;
+          }
+        }
+
         const existingState = sourceChain.length > 0 ? fold(sourceChain, reduceTheorem, initialTheorem) : undefined;
         const resolvedProblem = existingState?.problem || problem || "";
         if (!resolvedProblem) return text(400, "problem required");
@@ -473,17 +580,22 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
           });
         }
 
-        const ops = translateTheoremRunStartIntent({
+        const ops = translateTheoremRunStartIntentInternal({
           stream,
           runId,
           runStream,
           sourceStream,
           sourceChain,
-          at,
+          at: resumeAt,
           append,
           resolvedProblem,
           config,
           resumeRequested: Boolean(runParam?.trim().length),
+        }, {
+          basePath,
+          jobAgentId: uiConfig.jobAgentId,
+          jobKind: uiConfig.jobKind,
+          jobIdPrefix: uiConfig.jobIdPrefix,
         });
 
         const redirect = await executeRuntimeOps(ops, {
@@ -504,13 +616,13 @@ export const createTheoremRoute = (deps: TheoremRouteDeps): AgentRouteModule => 
           },
         });
 
-        if (!redirect) return html("", { "HX-Redirect": `/theorem?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(runId)}` });
+        if (!redirect) return html("", { "HX-Redirect": `${basePath}?stream=${encodeURIComponent(stream)}&run=${encodeURIComponent(runId)}` });
         return html("", { [redirect.header]: redirect.url });
         }
       );
 
-      app.get("/theorem/stream", async (c) => {
-        const stream = c.req.query("stream") ?? "agents/theorem";
+      app.get(`${basePath}/stream`, async (c) => {
+        const stream = c.req.query("stream") ?? defaultStream;
         return sse.subscribe("theorem", stream, c.req.raw.signal);
       });
     },
