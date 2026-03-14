@@ -457,6 +457,11 @@ const createHubRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         (payload) => jsonResponse(200, payload)
       ));
 
+      app.post("/hub/api/objectives/:id/archive", async (c) => wrap(
+        async () => ({ objective: await service.archiveObjective(c.req.param("id")) }),
+        (payload) => jsonResponse(200, payload)
+      ));
+
       app.post("/hub/api/objectives/:id/merge", async (c) => wrap(
         async () => ({ objective: await service.mergeObjective(c.req.param("id")) }),
         (payload) => jsonResponse(200, payload)
@@ -543,6 +548,11 @@ const createHubRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       app.post("/hub/ui/objectives/:id/approve", async (c) => wrap(
         async () => service.approveObjective(c.req.param("id")),
         () => emptyOk({ "HX-Trigger": "hub-summary-refresh,hub-board-refresh,hub-objective-refresh,hub-live-refresh,hub-debug-refresh,hub-commits-refresh" })
+      ));
+
+      app.post("/hub/ui/objectives/:id/archive", async (c) => wrap(
+        async () => service.archiveObjective(c.req.param("id")),
+        () => emptyOk({ "HX-Trigger": "hub-summary-refresh,hub-board-refresh,hub-objective-refresh,hub-live-refresh,hub-compose-refresh" })
       ));
 
       app.post("/hub/ui/objectives/:id/merge", async (c) => wrap(

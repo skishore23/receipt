@@ -85,48 +85,63 @@ const liveNarrative = (phase: string | undefined, status: string | undefined, el
   return `${phaseLabel} idle.`;
 };
 
+const archiveIcon = (): string => `
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true">
+    <rect x="2.25" y="2.25" width="11.5" height="2.5" rx="0.75"></rect>
+    <path d="M3.5 4.75v6.75c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25V4.75"></path>
+    <path d="M6 8h4"></path>
+  </svg>
+`;
+
 const renderCard = (card: HubObjectiveCard, activeId?: string): string => `
-  <form
-    class="card-action"
-    hx-get="/hub/island/board?objective=${encodeURIComponent(card.objectiveId)}"
-    hx-target="#hub-board"
-    hx-swap="outerHTML"
-    hx-push-url="/hub?objective=${encodeURIComponent(card.objectiveId)}">
-    <button
-      type="submit"
-      class="objective-card${card.objectiveId === activeId ? " active" : ""}${isLiveJobStatus(card.activeJobStatus) ? " live-card" : ""}"
-      aria-pressed="${card.objectiveId === activeId ? "true" : "false"}">
-      <span class="card-top">
-        <span class="badge ${statusClass(card.status)}">${esc(presentObjectiveStatus(card.status))}</span>
-        ${card.activeJobStatus ? `
-          <span class="mini-status${isLiveJobStatus(card.activeJobStatus) ? " live" : ""}">
-            ${isLiveJobStatus(card.activeJobStatus) ? `<span class="live-dot"></span>` : ""}
-            ${esc(presentJobState(card.activeJobStatus))}
-            ${card.activeElapsedMs ? ` · ${esc(formatDuration(card.activeElapsedMs))}` : ""}
-          </span>` : ""}
-      </span>
-      <span class="card-title">${esc(truncate(card.title, 72))}</span>
-      <span class="card-meta">
-        ${card.assignedAgentId ? `<span>${esc(card.assignedAgentId)}</span>` : `<span>unassigned</span>`}
-        ${card.currentPhase ? `<span>${esc(card.currentPhase)}</span>` : ""}
-      </span>
-      ${card.status === "awaiting_confirmation"
-        ? `${card.latestSummary
+  <div class="objective-card-shell">
+    <form
+      class="card-action card-select"
+      hx-get="/hub/island/board?objective=${encodeURIComponent(card.objectiveId)}"
+      hx-target="#hub-board"
+      hx-swap="outerHTML"
+      hx-push-url="/hub?objective=${encodeURIComponent(card.objectiveId)}">
+      <button
+        type="submit"
+        class="objective-card${card.objectiveId === activeId ? " active" : ""}${isLiveJobStatus(card.activeJobStatus) ? " live-card" : ""}"
+        aria-pressed="${card.objectiveId === activeId ? "true" : "false"}">
+        <span class="card-top">
+          <span class="badge ${statusClass(card.status)}">${esc(presentObjectiveStatus(card.status))}</span>
+          ${card.activeJobStatus ? `
+            <span class="mini-status${isLiveJobStatus(card.activeJobStatus) ? " live" : ""}">
+              ${isLiveJobStatus(card.activeJobStatus) ? `<span class="live-dot"></span>` : ""}
+              ${esc(presentJobState(card.activeJobStatus))}
+              ${card.activeElapsedMs ? ` · ${esc(formatDuration(card.activeElapsedMs))}` : ""}
+            </span>` : ""}
+        </span>
+        <span class="card-title">${esc(truncate(card.title, 72))}</span>
+        <span class="card-meta">
+          ${card.assignedAgentId ? `<span>${esc(card.assignedAgentId)}</span>` : `<span>unassigned</span>`}
+          ${card.currentPhase ? `<span>${esc(card.currentPhase)}</span>` : ""}
+        </span>
+        ${card.status === "awaiting_confirmation"
+          ? `${card.latestSummary
+              ? `<span class="card-summary">${esc(truncate(card.latestSummary, 112))}</span>`
+              : `<span class="card-summary muted">Approved candidate ready to merge.</span>`}
+             <span class="card-runtime">Review is complete. Human merge is the final step.</span>`
+          : isLiveJobStatus(card.activeJobStatus)
+          ? `<span class="card-summary live">${esc(liveNarrative(card.currentPhase, card.activeJobStatus, card.activeElapsedMs))}</span>
+             <span class="card-runtime">${esc(truncate(card.liveActivity || "Codex is working in the background.", 112))}</span>`
+          : card.latestSummary
             ? `<span class="card-summary">${esc(truncate(card.latestSummary, 112))}</span>`
-            : `<span class="card-summary muted">Approved candidate ready to merge.</span>`}
-           <span class="card-runtime">Review is complete. Human merge is the final step.</span>`
-        : isLiveJobStatus(card.activeJobStatus)
-        ? `<span class="card-summary live">${esc(liveNarrative(card.currentPhase, card.activeJobStatus, card.activeElapsedMs))}</span>
-           <span class="card-runtime">${esc(truncate(card.liveActivity || "Codex is working in the background.", 112))}</span>`
-        : card.latestSummary
-          ? `<span class="card-summary">${esc(truncate(card.latestSummary, 112))}</span>`
-          : `<span class="card-summary muted">No summary yet.</span>`}
-      <span class="card-foot">
-        ${card.latestCommitHash ? `<span class="hash">${esc(shortHash(card.latestCommitHash))}</span>` : `<span class="hash muted">no commit</span>`}
-        <span class="time">${esc(formatTime(card.updatedAt))}</span>
-      </span>
-    </button>
-  </form>
+            : `<span class="card-summary muted">No summary yet.</span>`}
+        <span class="card-foot">
+          ${card.latestCommitHash ? `<span class="hash">${esc(shortHash(card.latestCommitHash))}</span>` : `<span class="hash muted">no commit</span>`}
+          <span class="time">${esc(formatTime(card.updatedAt))}</span>
+        </span>
+      </button>
+    </form>
+    <form class="card-archive" hx-post="/hub/ui/objectives/${encodeURIComponent(card.objectiveId)}/archive" hx-swap="none">
+      <button type="submit" class="archive-button" aria-label="Archive objective ${esc(card.title)}" title="Archive objective">
+        ${archiveIcon()}
+      </button>
+    </form>
+  </div>
 `;
 
 const renderLane = (
@@ -941,6 +956,9 @@ export const hubShell = (opts: {
       display: grid;
       gap: 8px;
     }
+    .objective-card-shell {
+      position: relative;
+    }
     .card-action {
       margin: 0;
     }
@@ -957,6 +975,39 @@ export const hubShell = (opts: {
       display: grid;
       gap: 6px;
       transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+    }
+    .objective-card {
+      padding-right: 44px;
+    }
+    .card-archive {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      margin: 0;
+      z-index: 1;
+    }
+    .archive-button {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(11, 13, 17, 0.72);
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(12px);
+    }
+    .archive-button:hover {
+      color: var(--ink);
+      border-color: rgba(140,196,255,0.28);
+      background: rgba(11, 13, 17, 0.9);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+    }
+    .archive-button svg {
+      width: 13px;
+      height: 13px;
     }
     .mini-card, .pass-row {
       display: block;

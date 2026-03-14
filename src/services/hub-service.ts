@@ -149,6 +149,7 @@ export type HubObjectiveCard = {
   readonly title: string;
   readonly status: ObjectiveStatus;
   readonly lane: ObjectiveLane;
+  readonly archivedAt?: number;
   readonly currentPhase?: ObjectivePhase;
   readonly assignedAgentId?: string;
   readonly latestSummary?: string;
@@ -844,6 +845,19 @@ export class HubService {
     return this.buildObjectiveDetail(state);
   }
 
+  async archiveObjective(objectiveId: string): Promise<ObjectiveDetail> {
+    await this.ensureBootstrap();
+    const state = await this.requireObjectiveState(objectiveId);
+    if (!state.archivedAt) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.archived",
+        objectiveId,
+        archivedAt: Date.now(),
+      });
+    }
+    return this.getObjective(objectiveId);
+  }
+
   async mergeObjective(objectiveId: string): Promise<ObjectiveDetail> {
     await this.ensureBootstrap();
     let state = await this.requireObjectiveState(objectiveId);
@@ -961,6 +975,7 @@ export class HubService {
     if (mirrorStale && !mirror.syncing) {
       this.git.scheduleSyncFromSource();
     }
+    const objectives = this.visibleObjectives(hubState);
     return {
       repoRoot: this.git.repoRoot,
       defaultBranch,
@@ -978,8 +993,8 @@ export class HubService {
             : "fresh",
       mirrorLastSyncAt: mirror.lastSyncAt,
       mirrorLastSyncError: mirror.lastSyncError,
-      objectiveCount: Object.keys(hubState.objectives).length,
-      awaitingConfirmationCount: Object.values(hubState.objectives).filter((objective) => objective.status === "awaiting_confirmation").length,
+      objectiveCount: objectives.length,
+      awaitingConfirmationCount: objectives.filter((objective) => objective.status === "awaiting_confirmation").length,
       agentIds: Object.values(hubState.agents)
         .sort((a, b) => a.agentId.localeCompare(b.agentId))
         .map((agent) => agent.agentId),
@@ -989,7 +1004,7 @@ export class HubService {
   async buildBoardProjection(selectedObjectiveId?: string): Promise<HubBoardProjection> {
     await this.ensureBootstrap();
     const hubState = await this.hubRuntime.state(HUB_STREAM);
-    const objectives = Object.values(hubState.objectives).sort((a, b) => b.updatedAt - a.updatedAt);
+    const objectives = this.visibleObjectives(hubState).sort((a, b) => b.updatedAt - a.updatedAt);
     const resolvedSelectedObjectiveId = this.resolveSelectedObjectiveId(hubState, selectedObjectiveId);
     const jobs = await Promise.all(
       objectives.map((objective) => objective.currentJobId ? this.loadFreshJob(objective.currentJobId) : Promise.resolve(undefined))
@@ -1177,7 +1192,7 @@ export class HubService {
       sourceDirty: sourceStatus.dirty,
       sourceBranch: sourceStatus.branch,
       channels: Object.keys(hubState.channels).sort((a, b) => a.localeCompare(b)),
-      objectiveCount: Object.keys(hubState.objectives).length,
+      objectiveCount: this.visibleObjectives(hubState).length,
     };
   }
 
@@ -2237,6 +2252,7 @@ export class HubService {
       checks: state.checks,
       status: state.status,
       lane: state.lane,
+      archivedAt: state.archivedAt,
       currentPhase: state.currentPhase,
       assignedAgentId: state.assignedAgentId,
       latestCommitHash: state.latestCommitHash,
@@ -2267,6 +2283,7 @@ export class HubService {
       title: objective.title,
       status: derived.status,
       lane: derived.lane,
+      archivedAt: objective.archivedAt,
       currentPhase: objective.currentPhase,
       assignedAgentId: objective.assignedAgentId,
       latestSummary: derived.latestSummary,
@@ -2498,9 +2515,13 @@ export class HubService {
     return undefined;
   }
 
+  private visibleObjectives(state: HubState): HubObjectiveSummary[] {
+    return Object.values(state.objectives).filter((objective) => !objective.archivedAt);
+  }
+
   private resolveSelectedObjectiveId(state: HubState, preferredId?: string): string | undefined {
-    if (preferredId && state.objectives[preferredId]) return preferredId;
-    return Object.values(state.objectives)
+    if (preferredId && state.objectives[preferredId] && !state.objectives[preferredId].archivedAt) return preferredId;
+    return this.visibleObjectives(state)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((objective) => objective.objectiveId)
       .at(0);

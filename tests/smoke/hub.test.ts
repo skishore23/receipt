@@ -717,6 +717,8 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(selectedBoardHtml, /id="hub-objective"/);
     assert.match(selectedBoardHtml, /hx-swap-oob="outerHTML"/);
     assert.match(selectedBoardHtml, /id="hub-live"/);
+    assert.match(selectedBoardHtml, new RegExp(`/hub/ui/objectives/${created.objective.objectiveId}/archive`));
+    assert.match(selectedBoardHtml, /aria-label="Archive objective/);
 
     const selectedObjectiveRes = await fetch(`${base}/hub/island/objective?objective=${created.objective.objectiveId}`);
     assert.equal(selectedObjectiveRes.status, 200);
@@ -756,6 +758,55 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
       lanes: Record<string, Array<{ objectiveId: string }>>;
     };
     assert.ok(statePayload.lanes.completed.some((item) => item.objectiveId === created.objective.objectiveId));
+
+    const archiveUiRes = await fetch(`${base}/hub/ui/objectives/${created.objective.objectiveId}/archive`, {
+      method: "POST",
+    });
+    assert.equal(archiveUiRes.status, 200);
+    assert.match(archiveUiRes.headers.get("hx-trigger") ?? "", /hub-board-refresh/);
+    assert.match(archiveUiRes.headers.get("hx-trigger") ?? "", /hub-compose-refresh/);
+
+    const archiveApiRes = await fetch(`${base}/hub/api/objectives/${created.objective.objectiveId}/archive`, {
+      method: "POST",
+    });
+    assert.equal(archiveApiRes.status, 200);
+    const archiveApiPayload = await archiveApiRes.json() as {
+      objective: {
+        objectiveId: string;
+        archivedAt?: number;
+      };
+    };
+    assert.equal(archiveApiPayload.objective.objectiveId, created.objective.objectiveId);
+    assert.ok(archiveApiPayload.objective.archivedAt);
+
+    const listAfterArchiveRes = await fetch(`${base}/hub/api/objectives`);
+    assert.equal(listAfterArchiveRes.status, 200);
+    const listAfterArchivePayload = await listAfterArchiveRes.json() as {
+      objectives: Array<{ objectiveId: string }>;
+    };
+    assert.ok(!listAfterArchivePayload.objectives.some((item) => item.objectiveId === created.objective.objectiveId));
+
+    const composeAfterArchiveRes = await fetch(`${base}/hub/island/compose`);
+    assert.equal(composeAfterArchiveRes.status, 200);
+    assert.match(await composeAfterArchiveRes.text(), /0 tracked/);
+
+    const hiddenStateRes = await fetch(`${base}/hub/api/state?objective=${created.objective.objectiveId}`);
+    assert.equal(hiddenStateRes.status, 200);
+    const hiddenStatePayload = await hiddenStateRes.json() as {
+      objectives: Array<{ objectiveId: string }>;
+      lanes: Record<string, Array<{ objectiveId: string }>>;
+      selectedObjective?: { objectiveId: string };
+    };
+    assert.equal(hiddenStatePayload.objectives.length, 0);
+    assert.ok(Object.values(hiddenStatePayload.lanes).every((lane) => !lane.some((item) => item.objectiveId === created.objective.objectiveId)));
+    assert.equal(hiddenStatePayload.selectedObjective, undefined);
+
+    const hiddenBoardRes = await fetch(`${base}/hub/island/board?objective=${created.objective.objectiveId}`);
+    assert.equal(hiddenBoardRes.status, 200);
+    const hiddenBoardHtml = await hiddenBoardRes.text();
+    assert.match(hiddenBoardHtml, /No objectives\./);
+    assert.match(hiddenBoardHtml, /Select a card/);
+    assert.doesNotMatch(hiddenBoardHtml, new RegExp(created.objective.objectiveId));
   } finally {
     await stopChild(child);
   }

@@ -114,6 +114,7 @@ export type ObjectiveRecord = {
   readonly checks: ReadonlyArray<string>;
   readonly status: ObjectiveStatus;
   readonly lane: ObjectiveLane;
+  readonly archivedAt?: number;
   readonly currentPhase?: ObjectivePhase;
   readonly assignedAgentId?: string;
   readonly latestCommitHash?: string;
@@ -263,6 +264,11 @@ export type ObjectiveEvent =
       readonly objectiveId: string;
       readonly canceledAt: number;
       readonly reason?: string;
+    }
+  | {
+      readonly type: "objective.archived";
+      readonly objectiveId: string;
+      readonly archivedAt: number;
     };
 
 export type ObjectiveCmd = {
@@ -676,6 +682,14 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
           updatedAt: event.canceledAt,
         },
       };
+    case "objective.archived": {
+      const archivedAt = state.archivedAt ?? event.archivedAt;
+      return {
+        ...state,
+        archivedAt,
+        updatedAt: archivedAt,
+      };
+    }
     default: {
       const _never: never = event;
       return _never;
