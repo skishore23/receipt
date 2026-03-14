@@ -70,6 +70,7 @@ Queue streams:
 - [docs/create-agent.md](./docs/create-agent.md)
 - [docs/agenthub-on-receipt.md](./docs/agenthub-on-receipt.md)
 - [docs/agenthub-prd.md](./docs/agenthub-prd.md)
+- [docs/hub-dogfood.md](./docs/hub-dogfood.md)
 - [docs/api/README.md](./docs/api/README.md)
 - [docs/api/http.md](./docs/api/http.md)
 - [docs/api/sse.md](./docs/api/sse.md)
@@ -87,7 +88,10 @@ In Receipt, rebracketing means dynamically changing merge parenthesization based
 
 ```bash
 npm run dev
+npm run hub:onboard
 npm run test:smoke
 ```
 
 The server auto-loads route modules from `src/agents/*.agent.ts`.
+
+The Git-first hub is mounted at `/hub` and can be bootstrapped with the default team in [config/hub-agents.json](./config/hub-agents.json).

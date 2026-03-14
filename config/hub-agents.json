@@ -1,0 +1,19 @@
+{
+  "agents": [
+    {
+      "agentId": "planner-1",
+      "displayName": "Planner 1",
+      "memoryScope": "hub/agents/planner-1"
+    },
+    {
+      "agentId": "builder-1",
+      "displayName": "Builder 1",
+      "memoryScope": "hub/agents/builder-1"
+    },
+    {
+      "agentId": "reviewer-1",
+      "displayName": "Reviewer 1",
+      "memoryScope": "hub/agents/reviewer-1"
+    }
+  ]
+}

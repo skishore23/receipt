@@ -13,6 +13,7 @@ import { serve } from "@hono/node-server";
 import { jsonlStore, jsonBranchStore } from "./adapters/jsonl.js";
 import { jsonlIndexedStore } from "./adapters/jsonl-indexed.js";
 import { jsonlQueue, type EnqueueJobInput } from "./adapters/jsonl-queue.js";
+import { LocalCodexExecutor } from "./adapters/codex-executor.js";
 import {
   createMemoryTools,
   decideMemory,
@@ -74,6 +75,7 @@ import { agentRunStream } from "./agents/agent.streams.js";
 import { axiomSimpleRunStream } from "./agents/axiom-simple.streams.js";
 import { runReceiptInspector } from "./agents/inspector.js";
 import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-recovery.js";
+import { HubService } from "./services/hub-service.js";
 import {
   assertReceiptFileName,
   listReceiptFiles,
@@ -385,6 +387,16 @@ const delegationTools = createDelegationTools({
     return { id: job.id, status: job.status, result: job.result, lastError: job.lastError };
   },
   dataDir: DATA_DIR,
+});
+
+const hubCodexExecutor = new LocalCodexExecutor();
+const hubService = new HubService({
+  dataDir: DATA_DIR,
+  queue,
+  jobRuntime,
+  sse,
+  codexExecutor: hubCodexExecutor,
+  memoryTools,
 });
 
 const agentRunner = createAgentRunner({
@@ -1240,6 +1252,30 @@ const worker = new JobWorker({
       await inspectorRunner(job.payload);
       return { ok: true, result: { runId: job.payload.runId as string | undefined, stream: INSPECTOR_STREAM } };
     },
+    codex: async (job, ctx) => {
+      await ctx.pullCommands(["steer", "follow_up"]);
+      try {
+        const result = await hubService.runObjectivePass(job.payload, {
+          shouldAbort: async () => {
+            const aborts = await ctx.pullCommands(["abort"]);
+            return aborts.length > 0 || job.abortRequested === true;
+          },
+        });
+        return { ok: true, result };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: message,
+          result: {
+            ...(typeof job.payload.objectiveId === "string" ? { objectiveId: job.payload.objectiveId } : {}),
+            status: "failed",
+            message,
+          },
+          noRetry: true,
+        };
+      }
+    },
   },
 });
 worker.start();
@@ -1341,6 +1377,7 @@ const routes = await loadAgentRoutes({
   helpers: {
     memoryTools,
     delegationTools,
+    hubService,
   },
 });
 
