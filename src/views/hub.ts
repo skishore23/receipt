@@ -72,6 +72,10 @@ const presentJobState = (status: string | undefined): string => {
   if (status === "canceled") return "canceled";
   return status ?? "idle";
 };
+const presentObjectiveStatus = (status: string): string =>
+  status === "awaiting_confirmation"
+    ? "ready to merge"
+    : status.replaceAll("_", " ");
 const liveNarrative = (phase: string | undefined, status: string | undefined, elapsedMs: number | undefined): string => {
   const phaseLabel = phase ? `${phase} pass` : "pass";
   const duration = elapsedMs ? ` for ${formatDuration(elapsedMs)}` : "";
@@ -93,7 +97,7 @@ const renderCard = (card: HubObjectiveCard, activeId?: string): string => `
       class="objective-card${card.objectiveId === activeId ? " active" : ""}${isLiveJobStatus(card.activeJobStatus) ? " live-card" : ""}"
       aria-pressed="${card.objectiveId === activeId ? "true" : "false"}">
       <span class="card-top">
-        <span class="badge ${statusClass(card.status)}">${esc(card.status.replaceAll("_", " "))}</span>
+        <span class="badge ${statusClass(card.status)}">${esc(presentObjectiveStatus(card.status))}</span>
         ${card.activeJobStatus ? `
           <span class="mini-status${isLiveJobStatus(card.activeJobStatus) ? " live" : ""}">
             ${isLiveJobStatus(card.activeJobStatus) ? `<span class="live-dot"></span>` : ""}
@@ -106,7 +110,10 @@ const renderCard = (card: HubObjectiveCard, activeId?: string): string => `
         ${card.assignedAgentId ? `<span>${esc(card.assignedAgentId)}</span>` : `<span>unassigned</span>`}
         ${card.currentPhase ? `<span>${esc(card.currentPhase)}</span>` : ""}
       </span>
-      ${isLiveJobStatus(card.activeJobStatus)
+      ${card.status === "awaiting_confirmation"
+        ? `<span class="card-summary live">Review is complete. Human merge is the final step.</span>
+           <span class="card-runtime">Open this card to inspect the reviewer verdict or merge the candidate into main.</span>`
+        : isLiveJobStatus(card.activeJobStatus)
         ? `<span class="card-summary live">${esc(liveNarrative(card.currentPhase, card.activeJobStatus, card.activeElapsedMs))}</span>
            <span class="card-runtime">${esc(truncate(card.liveActivity || "Codex is working in the background.", 112))}</span>`
         : card.latestSummary
@@ -297,7 +304,7 @@ const renderObjectiveDetail = (model: HubObjectiveProjection): string => {
         </div>
       </div>
       <div class="detail-badges">
-        <span class="badge ${statusClass(objective.status)}">${esc(objective.status.replaceAll("_", " "))}</span>
+        <span class="badge ${statusClass(objective.status)}">${esc(presentObjectiveStatus(objective.status))}</span>
         ${objective.assignedAgentId ? `<span class="tag">${esc(objective.assignedAgentId)}</span>` : ""}
         ${objective.latestCommitHash ? `<span class="tag">commit ${esc(shortHash(objective.latestCommitHash))}</span>` : ""}
       </div>
@@ -325,6 +332,12 @@ const renderObjectiveDetail = (model: HubObjectiveProjection): string => {
           <div class="detail-text">${esc(objective.latestReviewOutcome ?? "pending")}${objective.latestReviewSummary ? `<br/>${esc(objective.latestReviewSummary)}` : ""}</div>
         </div>
       </div>
+      ${canMerge ? `
+        <div class="live-banner ready-banner">
+          <span class="mini-status live"><span class="live-dot"></span>review complete</span>
+          <span>This objective is finished from the agents' side. Merge the approved candidate into ${esc(mergeTarget)} to close the loop.</span>
+        </div>
+      ` : ""}
       <div class="detail-actions">
         ${canResume ? `
           <form hx-post="/hub/ui/objectives/${encodeURIComponent(objective.objectiveId)}/resume" hx-swap="none">
@@ -536,7 +549,7 @@ export const hubBoard = (model: HubBoardProjection): string => `
       ${renderLane("Planner", "planner-1", model.lanes.planner, model.selectedObjectiveId)}
       ${renderLane("Builder", "builder-1", model.lanes.builder, model.selectedObjectiveId)}
       ${renderLane("Reviewer", "reviewer-1", model.lanes.reviewer, model.selectedObjectiveId)}
-      ${renderLane("Awaiting Confirmation", "human merge required", model.lanes.awaiting_confirmation, model.selectedObjectiveId)}
+      ${renderLane("Ready To Merge", "review complete · human merge required", model.lanes.awaiting_confirmation, model.selectedObjectiveId)}
       ${renderLane("Blocked", "needs intervention", model.lanes.blocked, model.selectedObjectiveId)}
       ${renderLane("Completed", "closed objectives", model.lanes.completed, model.selectedObjectiveId)}
     </div>
@@ -1362,7 +1375,7 @@ export const hubDashboard = (model: HubDashboardModel): string => `
     <div class="summary-tile">
       <div class="summary-label">Objectives</div>
       <div class="summary-value">${model.objectives.length}</div>
-      <div class="muted">${model.lanes.awaiting_confirmation.length} awaiting confirmation</div>
+      <div class="muted">${model.lanes.awaiting_confirmation.length} ready to merge</div>
     </div>
     <div class="summary-tile">
       <div class="summary-label">Agents</div>
@@ -1380,7 +1393,7 @@ export const hubDashboard = (model: HubDashboardModel): string => `
         ${renderLane("Planner", "planner-1", model.lanes.planner, model.selectedObjective?.objectiveId)}
         ${renderLane("Builder", "builder-1", model.lanes.builder, model.selectedObjective?.objectiveId)}
         ${renderLane("Reviewer", "reviewer-1", model.lanes.reviewer, model.selectedObjective?.objectiveId)}
-        ${renderLane("Awaiting Confirmation", "human merge required", model.lanes.awaiting_confirmation, model.selectedObjective?.objectiveId)}
+        ${renderLane("Ready To Merge", "review complete · human merge required", model.lanes.awaiting_confirmation, model.selectedObjective?.objectiveId)}
         ${renderLane("Blocked", "needs intervention", model.lanes.blocked, model.selectedObjective?.objectiveId)}
         ${renderLane("Completed", "closed objectives", model.lanes.completed, model.selectedObjective?.objectiveId)}
       </div>

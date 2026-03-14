@@ -612,7 +612,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.doesNotMatch(boardHtml, /sse-connect=/);
     assert.doesNotMatch(boardHtml, /load, sse:receipt-refresh/);
     assert.match(boardHtml, /Objective Grid/);
-    assert.match(boardHtml, /Awaiting Confirmation/);
+    assert.match(boardHtml, /Ready To Merge/);
     assert.doesNotMatch(boardHtml, /npm run build/);
     assert.doesNotMatch(boardHtml, /Create Objective/);
     assert.doesNotMatch(boardHtml, /href="\/hub\?objective=/);
