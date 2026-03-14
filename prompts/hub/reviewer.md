@@ -32,12 +32,13 @@ Review the current candidate commit. Do not modify tracked project files in v1. 
 When you are done, write JSON to `{{result_path}}` with exactly this shape:
 {
   "outcome": "approved" | "changes_requested" | "blocked",
-  "summary": "review verdict",
-  "handoff": "clear next step for the next builder pass or final approver"
+  "summary": "review verdict that states whether the built change is actually ready and what it delivers",
+  "handoff": "clear next step for the next builder pass or the human merger"
 }
 
 Rules:
 - Use `approved` only when the objective appears complete.
 - Use `changes_requested` when more coding work is required.
 - Use `blocked` when you cannot evaluate the candidate.
+- If approved, make it obvious in `handoff` what the final human merge will land.
 - Do not commit.

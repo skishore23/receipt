@@ -29,11 +29,13 @@ Produce a short execution plan for the builder. Do not modify tracked project fi
 When you are done, write JSON to `{{result_path}}` with exactly this shape:
 {
   "outcome": "plan_ready" | "blocked",
-  "summary": "one short paragraph",
-  "handoff": "clear instructions for the builder"
+  "summary": "two short sentences explaining the plan and the repo surfaces the builder must touch",
+  "handoff": "one concise handoff telling the builder exactly what to change, what to avoid, and what to verify"
 }
 
 Rules:
 - If you are blocked, explain the blocker in both `summary` and `handoff`.
+- `summary` must be understandable to a human skimming the objective later.
+- `handoff` must be actionable without rereading your whole prompt.
 - Do not commit.
 - Do not edit source files.

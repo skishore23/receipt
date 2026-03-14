@@ -111,8 +111,10 @@ const renderCard = (card: HubObjectiveCard, activeId?: string): string => `
         ${card.currentPhase ? `<span>${esc(card.currentPhase)}</span>` : ""}
       </span>
       ${card.status === "awaiting_confirmation"
-        ? `<span class="card-summary live">Review is complete. Human merge is the final step.</span>
-           <span class="card-runtime">Open this card to inspect the reviewer verdict or merge the candidate into main.</span>`
+        ? `${card.latestSummary
+            ? `<span class="card-summary">${esc(truncate(card.latestSummary, 112))}</span>`
+            : `<span class="card-summary muted">Approved candidate ready to merge.</span>`}
+           <span class="card-runtime">Review is complete. Human merge is the final step.</span>`
         : isLiveJobStatus(card.activeJobStatus)
         ? `<span class="card-summary live">${esc(liveNarrative(card.currentPhase, card.activeJobStatus, card.activeElapsedMs))}</span>
            <span class="card-runtime">${esc(truncate(card.liveActivity || "Codex is working in the background.", 112))}</span>`
@@ -328,8 +330,28 @@ const renderObjectiveDetail = (model: HubObjectiveProjection): string => {
           <div class="detail-text mono" title="${esc(objective.baseHash)}">${esc(truncateMiddle(objective.baseHash, 12, 12))}</div>
         </div>
         <div>
-          <div class="detail-label">Latest Review</div>
+          <div class="detail-label">Next Handoff</div>
+          <div class="detail-text">${esc(objective.nextHandoff ?? "No active handoff.")}</div>
+        </div>
+      </div>
+      <div class="detail-stage-grid">
+        <div class="detail-stage">
+          <div class="detail-label">Planned</div>
+          <div class="detail-text">${esc(objective.latestPlanSummary ?? "Planner has not produced a durable plan yet.")}</div>
+          <div class="detail-note">${esc(objective.latestPlanHandoff ?? "No builder handoff recorded yet.")}</div>
+        </div>
+        <div class="detail-stage">
+          <div class="detail-label">Built</div>
+          <div class="detail-text">${esc(objective.latestBuildSummary ?? "No candidate has been built yet.")}</div>
+          <div class="detail-note">
+            ${esc(objective.latestBuildHandoff ?? "No reviewer handoff recorded yet.")}
+            ${objective.latestCommitHash ? `<br/><span class="mono">candidate ${esc(shortHash(objective.latestCommitHash))}</span>` : ""}
+          </div>
+        </div>
+        <div class="detail-stage">
+          <div class="detail-label">Review</div>
           <div class="detail-text">${esc(objective.latestReviewOutcome ?? "pending")}${objective.latestReviewSummary ? `<br/>${esc(objective.latestReviewSummary)}` : ""}</div>
+          <div class="detail-note">${esc(objective.latestReviewHandoff ?? "No reviewer handoff recorded yet.")}</div>
         </div>
       </div>
       ${canMerge ? `
@@ -1066,6 +1088,26 @@ export const hubShell = (opts: {
     }
     .detail-grid.compact {
       gap: 9px 12px;
+    }
+    .detail-stage-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 12px 0;
+    }
+    .detail-stage {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025));
+    }
+    .detail-note {
+      color: rgba(184, 194, 214, 0.72);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
     }
     .detail-label {
       color: var(--muted);

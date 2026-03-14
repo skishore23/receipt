@@ -245,8 +245,14 @@ export type ObjectiveDetail = HubObjectiveCard & {
   readonly createdAt: number;
   readonly passes: ReadonlyArray<ObjectivePassView>;
   readonly latestCheckResults: ReadonlyArray<ObjectiveCheckResult>;
+  readonly latestPlanSummary?: string;
+  readonly latestPlanHandoff?: string;
+  readonly latestBuildSummary?: string;
+  readonly latestBuildHandoff?: string;
   readonly latestReviewOutcome?: Extract<ObjectivePassOutcome, "approved" | "changes_requested">;
   readonly latestReviewSummary?: string;
+  readonly latestReviewHandoff?: string;
+  readonly nextHandoff?: string;
   readonly activePass?: ObjectivePassView;
   readonly graph: ObjectiveGraphProjection;
 };
@@ -317,6 +323,13 @@ export type HubObjectivePassJobPayload = {
   readonly stdoutPath: string;
   readonly stderrPath: string;
   readonly lastMessagePath: string;
+};
+
+type ObjectiveStageSnapshot = {
+  readonly summary?: string;
+  readonly handoff?: string;
+  readonly outcome?: ObjectivePassOutcome;
+  readonly commitHash?: string;
 };
 
 type HubServiceOptions = {
@@ -2157,6 +2170,12 @@ export class HubService {
         } satisfies ObjectivePassView;
       })
     );
+    const latestPlan = [...passViews]
+      .reverse()
+      .find((pass) => pass.phase === "planner" && pass.outcome === "plan_ready");
+    const latestBuild = [...passViews]
+      .reverse()
+      .find((pass) => pass.phase === "builder" && pass.outcome === "candidate_ready");
     const latestReview = [...passViews]
       .reverse()
       .find((pass) => pass.phase === "reviewer" && (pass.outcome === "approved" || pass.outcome === "changes_requested"));
@@ -2172,10 +2191,20 @@ export class HubService {
       createdAt: state.createdAt,
       passes: passViews,
       latestCheckResults: state.latestCheckResults,
+      latestPlanSummary: latestPlan?.summary,
+      latestPlanHandoff: latestPlan?.handoff,
+      latestBuildSummary: latestBuild?.summary,
+      latestBuildHandoff: latestBuild?.handoff,
       latestReviewOutcome: latestReview?.outcome === "approved" || latestReview?.outcome === "changes_requested"
         ? latestReview.outcome
         : undefined,
       latestReviewSummary: latestReview?.summary,
+      latestReviewHandoff: latestReview?.handoff,
+      nextHandoff: this.nextHandoffForState(state, {
+        planner: latestPlan,
+        builder: latestBuild,
+        reviewer: latestReview,
+      }),
       activePass,
       graph: this.buildObjectiveGraphProjection(state),
     };
@@ -2196,6 +2225,9 @@ export class HubService {
 
   private toObjectiveSummary(state: ObjectiveState): HubObjectiveSummary {
     const currentPass = state.currentPassId ? state.passes[state.currentPassId] : undefined;
+    const latestPlan = this.latestStageSnapshot(state, "planner", ["plan_ready"]);
+    const latestBuild = this.latestStageSnapshot(state, "builder", ["candidate_ready"]);
+    const latestReview = this.latestStageSnapshot(state, "reviewer", ["approved", "changes_requested"]);
     return {
       objectiveId: state.objectiveId,
       title: state.title,
@@ -2218,6 +2250,12 @@ export class HubService {
       currentPassPhase: currentPass?.phase,
       currentPassStatus: currentPass?.status,
       currentPassDispatchedAt: currentPass?.dispatchedAt,
+      latestPlanSummary: latestPlan?.summary,
+      latestPlanHandoff: latestPlan?.handoff,
+      latestBuildSummary: latestBuild?.summary,
+      latestBuildHandoff: latestBuild?.handoff,
+      latestReviewSummary: latestReview?.summary,
+      latestReviewHandoff: latestReview?.handoff,
     };
   }
 
@@ -2286,13 +2324,28 @@ export class HubService {
   }
 
   private deriveObjectiveDisplay(
-    objective: Pick<HubObjectiveSummary, "status" | "lane" | "latestSummary" | "blockedReason" | "currentJobId" | "currentPassStatus">,
+    objective: Pick<
+      HubObjectiveSummary,
+      | "status"
+      | "lane"
+      | "latestSummary"
+      | "blockedReason"
+      | "currentJobId"
+      | "currentPassPhase"
+      | "currentPassStatus"
+      | "latestPlanSummary"
+      | "latestPlanHandoff"
+      | "latestBuildSummary"
+      | "latestBuildHandoff"
+      | "latestReviewSummary"
+      | "latestReviewHandoff"
+    >,
     job: JobRecord | undefined,
   ): Pick<HubObjectiveCard, "status" | "lane" | "latestSummary" | "blockedReason"> {
     const base = {
       status: objective.status,
       lane: objective.lane || objectiveLaneForStatus(objective.status),
-      latestSummary: objective.latestSummary,
+      latestSummary: this.objectiveCardSummary(objective),
       blockedReason: objective.blockedReason,
     } satisfies Pick<HubObjectiveCard, "status" | "lane" | "latestSummary" | "blockedReason">;
 
@@ -2315,6 +2368,106 @@ export class HubService {
       };
     }
     return base;
+  }
+
+  private latestStageSnapshot(
+    state: ObjectiveState,
+    phase: ObjectivePhase,
+    outcomes?: ReadonlyArray<ObjectivePassOutcome>,
+  ): ObjectiveStageSnapshot | undefined {
+    for (let index = state.passOrder.length - 1; index >= 0; index -= 1) {
+      const pass = state.passes[state.passOrder[index] ?? ""];
+      if (!pass || pass.phase !== phase) continue;
+      if (outcomes && (!pass.outcome || !outcomes.includes(pass.outcome))) continue;
+      return {
+        summary: pass.summary,
+        handoff: pass.handoff,
+        outcome: pass.outcome,
+        commitHash: pass.commitHash,
+      };
+    }
+    return undefined;
+  }
+
+  private nextHandoffForState(
+    state: ObjectiveState,
+    stages: {
+      readonly planner?: Pick<ObjectivePassRecord, "handoff">;
+      readonly builder?: Pick<ObjectivePassRecord, "handoff">;
+      readonly reviewer?: Pick<ObjectivePassRecord, "handoff">;
+    },
+  ): string | undefined {
+    if (state.status === "planning") {
+      return "Planner is gathering repo context and preparing the builder handoff.";
+    }
+    if (state.status === "building") {
+      return stages.planner?.handoff ?? stages.builder?.handoff;
+    }
+    if (state.status === "reviewing") {
+      return stages.builder?.handoff ?? stages.reviewer?.handoff;
+    }
+    if (state.status === "awaiting_confirmation") {
+      return stages.reviewer?.handoff ?? "Merge the approved candidate into the target branch.";
+    }
+    if (state.status === "completed") {
+      return "Merged into the target branch. Objective closed.";
+    }
+    if (state.status === "blocked" || state.status === "failed") {
+      return state.blockedReason ?? stages.reviewer?.handoff ?? stages.builder?.handoff ?? stages.planner?.handoff;
+    }
+    if (state.status === "canceled") {
+      return "Objective canceled.";
+    }
+    return undefined;
+  }
+
+  private objectiveCardSummary(
+    objective: Pick<
+      HubObjectiveSummary,
+      | "status"
+      | "latestSummary"
+      | "blockedReason"
+      | "currentPassPhase"
+      | "currentPassStatus"
+      | "latestPlanSummary"
+      | "latestPlanHandoff"
+      | "latestBuildSummary"
+      | "latestBuildHandoff"
+      | "latestReviewSummary"
+      | "latestReviewHandoff"
+    >,
+  ): string | undefined {
+    if (objective.status === "building" && objective.currentPassStatus === "queued" && objective.currentPassPhase === "builder") {
+      return objective.latestSummary
+        ?? objective.latestPlanHandoff
+        ?? objective.latestPlanSummary;
+    }
+    if (objective.status === "awaiting_confirmation" || objective.status === "completed") {
+      return objective.latestBuildSummary
+        ?? objective.latestReviewSummary
+        ?? objective.latestSummary;
+    }
+    if (objective.status === "reviewing") {
+      return objective.latestBuildHandoff
+        ?? objective.latestBuildSummary
+        ?? objective.latestSummary;
+    }
+    if (objective.status === "building") {
+      return objective.latestPlanHandoff
+        ?? objective.latestPlanSummary
+        ?? objective.latestSummary;
+    }
+    if (objective.status === "planning") {
+      return objective.latestPlanSummary ?? objective.latestSummary;
+    }
+    if (objective.status === "blocked" || objective.status === "failed") {
+      return objective.blockedReason
+        ?? objective.latestReviewHandoff
+        ?? objective.latestBuildHandoff
+        ?? objective.latestPlanHandoff
+        ?? objective.latestSummary;
+    }
+    return objective.latestSummary;
   }
 
   private describePassActivity(pass: ObjectivePassRecord, job?: JobRecord): string | undefined {

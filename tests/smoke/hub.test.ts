@@ -690,12 +690,42 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
       [0, 1, 1, 1, 1],
     );
 
+    const objectiveDetailRes = await fetch(`${base}/hub/api/objectives/${created.objective.objectiveId}`);
+    assert.equal(objectiveDetailRes.status, 200);
+    const objectiveDetailPayload = await objectiveDetailRes.json() as {
+      objective: {
+        latestPlanSummary?: string;
+        latestPlanHandoff?: string;
+        latestBuildSummary?: string;
+        latestBuildHandoff?: string;
+        latestReviewSummary?: string;
+        latestReviewHandoff?: string;
+        nextHandoff?: string;
+      };
+    };
+    assert.equal(objectiveDetailPayload.objective.latestPlanSummary, "Plan ready for implementation.");
+    assert.match(objectiveDetailPayload.objective.latestPlanHandoff ?? "", /Implement the requested change/i);
+    assert.equal(objectiveDetailPayload.objective.latestBuildSummary, "Implemented builder pass 4.");
+    assert.match(objectiveDetailPayload.objective.latestBuildHandoff ?? "", /Verify OBJECTIVE_AUTOGEN\.txt/i);
+    assert.equal(objectiveDetailPayload.objective.latestReviewSummary, "The candidate looks good.");
+    assert.match(objectiveDetailPayload.objective.latestReviewHandoff ?? "", /human confirmation/i);
+    assert.match(objectiveDetailPayload.objective.nextHandoff ?? "", /human confirmation|merge/i);
+
     const selectedBoardRes = await fetch(`${base}/hub/island/board?objective=${created.objective.objectiveId}`);
     assert.equal(selectedBoardRes.status, 200);
     const selectedBoardHtml = await selectedBoardRes.text();
     assert.match(selectedBoardHtml, /id="hub-objective"/);
     assert.match(selectedBoardHtml, /hx-swap-oob="outerHTML"/);
     assert.match(selectedBoardHtml, /id="hub-live"/);
+
+    const selectedObjectiveRes = await fetch(`${base}/hub/island/objective?objective=${created.objective.objectiveId}`);
+    assert.equal(selectedObjectiveRes.status, 200);
+    const selectedObjectiveHtml = await selectedObjectiveRes.text();
+    assert.match(selectedObjectiveHtml, /Planned/);
+    assert.match(selectedObjectiveHtml, /Built/);
+    assert.match(selectedObjectiveHtml, /Review/);
+    assert.match(selectedObjectiveHtml, /Next Handoff/);
+    assert.match(selectedObjectiveHtml, /Implemented builder pass 4\./);
 
     const sourceHeadBeforeMerge = await git(repoDir, ["rev-parse", "HEAD"]);
 

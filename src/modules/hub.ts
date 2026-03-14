@@ -60,6 +60,12 @@ export type HubObjectiveSummary = ObjectiveRecord & {
   readonly currentPassPhase?: ObjectivePhase;
   readonly currentPassStatus?: ObjectivePassStatus;
   readonly currentPassDispatchedAt?: number;
+  readonly latestPlanSummary?: string;
+  readonly latestPlanHandoff?: string;
+  readonly latestBuildSummary?: string;
+  readonly latestBuildHandoff?: string;
+  readonly latestReviewSummary?: string;
+  readonly latestReviewHandoff?: string;
 };
 
 export type HubEvent =

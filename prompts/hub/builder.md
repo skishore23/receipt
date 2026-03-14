@@ -33,11 +33,13 @@ Implement the objective in this worktree. Make the smallest coherent change that
 When you are done, write JSON to `{{result_path}}` with exactly this shape:
 {
   "outcome": "candidate_ready" | "blocked",
-  "summary": "what changed and why",
-  "handoff": "what the reviewer should verify"
+  "summary": "what was built for the user, which code surfaces changed, and which checks ran",
+  "handoff": "what the reviewer should verify, plus any remaining risk or edge case to inspect"
 }
 
 Rules:
 - If you are blocked, explain the blocker in both `summary` and `handoff`.
+- `summary` must clearly say what the user now has after this change.
+- Name important files, routes, or UI surfaces when relevant.
 - Leave the worktree ready for checks and auto-commit by the hub.
 - Do not include markdown fences in `result.json`.
