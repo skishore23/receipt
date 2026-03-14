@@ -1,6 +1,7 @@
 import { esc, truncate } from "./agent-framework.js";
 import type {
   HubCommitView,
+  HubComposeModel,
   HubDashboardModel,
   HubObjectiveCard,
   ObjectivePassView,
@@ -91,13 +92,17 @@ const renderLane = (
   </section>
 `;
 
-const renderObjectiveForm = (model: HubDashboardModel): string => `
+export const hubCompose = (model: HubComposeModel): string => `
   <section class="panel objective-compose">
     <div class="panel-head">
       <h2>Create Objective</h2>
-      <span>${model.objectives.length} tracked</span>
+      <span>${model.objectiveCount} tracked</span>
     </div>
-    <form class="objective-form" hx-post="/hub/ui/objectives" hx-swap="none">
+    <form
+      class="objective-form"
+      hx-post="/hub/ui/objectives"
+      hx-swap="none"
+      hx-on::after-request="if (event.detail.successful) this.reset()">
       <input name="title" placeholder="Add agent deletion to /hub" required />
       <textarea name="prompt" placeholder="Describe the objective, acceptance criteria, and any repo-specific constraints." required></textarea>
       <div class="compose-actions">
@@ -942,9 +947,13 @@ export const hubShell = (query = ""): string => `<!doctype html>
       </div>
       <a class="back" href="/monitor">Open command center</a>
     </div>
+    <div id="hub-compose"
+      hx-get="/hub/island/compose"
+      hx-trigger="load"
+      hx-swap="innerHTML"></div>
     <div id="hub-dashboard"
       hx-get="/hub/island/dashboard${query}"
-      hx-trigger="load, hub-refresh from:body, every 4s"
+      hx-trigger="load, hub-refresh from:body"
       hx-swap="innerHTML"></div>
   </div>
 </body>
@@ -975,7 +984,6 @@ export const hubDashboard = (model: HubDashboardModel): string => `
       <div class="muted">${model.agents.map((agent) => esc(agent.agentId)).join(" · ")}</div>
     </div>
   </div>
-  ${renderObjectiveForm(model)}
   <div class="board-shell">
     <section class="panel">
       <div class="panel-head">

@@ -6,7 +6,7 @@ import type { MemoryTools } from "../adapters/memory-tools.js";
 import type { AgentLoaderContext, AgentModuleFactory, AgentRouteModule } from "../framework/agent-types.js";
 import { html, text } from "../framework/http.js";
 import { HubService, HubServiceError } from "../services/hub-service.js";
-import { hubDashboard, hubShell } from "../views/hub.js";
+import { hubCompose, hubDashboard, hubShell } from "../views/hub.js";
 
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), {
@@ -126,6 +126,11 @@ const createHubRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           console.error(err);
           return text(500, "hub server error");
         }));
+
+      app.get("/hub/island/compose", async () => wrap(
+        async () => service.buildComposeModel(),
+        (model) => html(hubCompose(model))
+      ));
 
       app.get("/hub/api/state", async (c) => wrap(
         async () => service.buildStatePayload(

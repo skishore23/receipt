@@ -196,6 +196,14 @@ export type HubDashboardModel = {
   readonly selectedObjective?: ObjectiveDetail;
 };
 
+export type HubComposeModel = {
+  readonly defaultBranch: string;
+  readonly sourceDirty: boolean;
+  readonly sourceBranch?: string;
+  readonly channels: ReadonlyArray<string>;
+  readonly objectiveCount: number;
+};
+
 export type HubObjectiveInput = {
   readonly title: string;
   readonly prompt: string;
@@ -884,6 +892,22 @@ export class HubService {
       objectives: objectiveCards,
       lanes,
       selectedObjective,
+    };
+  }
+
+  async buildComposeModel(): Promise<HubComposeModel> {
+    await this.ensureBootstrap();
+    const [hubState, sourceStatus, defaultBranch] = await Promise.all([
+      this.hubRuntime.state(HUB_STREAM),
+      this.git.sourceStatus(),
+      this.git.defaultBranch(),
+    ]);
+    return {
+      defaultBranch,
+      sourceDirty: sourceStatus.dirty,
+      sourceBranch: sourceStatus.branch,
+      channels: Object.keys(hubState.channels).sort((a, b) => a.localeCompare(b)),
+      objectiveCount: Object.keys(hubState.objectives).length,
     };
   }
 

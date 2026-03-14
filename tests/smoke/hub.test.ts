@@ -514,6 +514,13 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.equal(shellRes.status, 200);
     const shellHtml = await shellRes.text();
     assert.match(shellHtml, /Receipt Hub/);
+    assert.match(shellHtml, /id="hub-compose"/);
+    assert.doesNotMatch(shellHtml, /every 4s/);
+
+    const composeRes = await fetch(`${base}/hub/island/compose`);
+    assert.equal(composeRes.status, 200);
+    const composeHtml = await composeRes.text();
+    assert.match(composeHtml, /Create Objective/);
 
     const dashboardRes = await fetch(`${base}/hub/island/dashboard`);
     assert.equal(dashboardRes.status, 200);
@@ -521,6 +528,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(dashboardHtml, /Objective Grid/);
     assert.match(dashboardHtml, /Awaiting Confirmation/);
     assert.doesNotMatch(dashboardHtml, /npm run build/);
+    assert.doesNotMatch(dashboardHtml, /Create Objective/);
 
     const objectiveCreate = await fetch(`${base}/hub/api/objectives`, {
       method: "POST",
