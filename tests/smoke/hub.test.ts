@@ -574,7 +574,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(shellHtml, /id="hub-board"/);
     assert.match(shellHtml, /id="hub-objective"/);
     assert.match(shellHtml, /id="hub-live"/);
-    assert.match(shellHtml, /sse-connect="\/hub\/stream\/board"/);
+    assert.match(shellHtml, /<body hx-ext="sse" sse-connect="\/hub\/stream">/);
     assert.doesNotMatch(shellHtml, /EventSource\(/);
     assert.doesNotMatch(shellHtml, /id="hub-dashboard"/);
     assert.doesNotMatch(shellHtml, /load, sse:receipt-refresh/);
@@ -600,6 +600,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     const summaryHtml = await summaryRes.text();
     assert.match(summaryHtml, /id="hub-summary"/);
     assert.match(summaryHtml, /mirror/i);
+    assert.doesNotMatch(summaryHtml, /sse-connect=/);
 
     const boardRes = await fetch(`${base}/hub/island/board`);
     assert.equal(boardRes.status, 200);
@@ -608,6 +609,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(boardHtml, /id="hub-board"/);
     assert.match(boardHtml, /sse:receipt-refresh/);
     assert.match(boardHtml, /sse:job-refresh/);
+    assert.doesNotMatch(boardHtml, /sse-connect=/);
     assert.doesNotMatch(boardHtml, /load, sse:receipt-refresh/);
     assert.match(boardHtml, /Objective Grid/);
     assert.match(boardHtml, /Awaiting Confirmation/);
@@ -620,6 +622,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(objectiveRes.headers.get("server-timing") ?? "", /hub-objective/);
     const objectiveHtml = await objectiveRes.text();
     assert.match(objectiveHtml, /id="hub-objective"/);
+    assert.doesNotMatch(objectiveHtml, /sse-connect=/);
     assert.doesNotMatch(objectiveHtml, /load, sse:receipt-refresh/);
 
     const liveRes = await fetch(`${base}/hub/island/live`);
@@ -627,6 +630,7 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(liveRes.headers.get("server-timing") ?? "", /hub-live/);
     const liveHtml = await liveRes.text();
     assert.match(liveHtml, /id="hub-live"/);
+    assert.doesNotMatch(liveHtml, /sse-connect=/);
     assert.match(liveHtml, /select an objective|has no active Codex pass/i);
 
     const debugRes = await fetch(`${base}/hub/island/debug`);

@@ -519,8 +519,6 @@ const renderCommitExplorer = (model: HubCommitProjection, selectedObjectiveId?: 
 
 export const hubSummaryIsland = (model: HubRepoProjection): string => `
   <div id="hub-summary"
-    hx-ext="sse"
-    sse-connect="/hub/stream/board"
     hx-get="/hub/island/summary"
     hx-trigger="sse:receipt-refresh throttle:900ms, hub-summary-refresh from:body"
     hx-swap="outerHTML">
@@ -548,8 +546,6 @@ export const hubBoard = (model: HubBoardProjection): string => `
 export const hubBoardIsland = (model: HubBoardProjection, query = "", oob = false): string => `
   <div id="hub-board"
     ${oob ? `hx-swap-oob="outerHTML"` : ""}
-    hx-ext="sse"
-    sse-connect="/hub/stream/board"
     hx-get="/hub/island/board${query}"
     hx-trigger="sse:receipt-refresh throttle:700ms, sse:job-refresh throttle:350ms, hub-board-refresh from:body"
     hx-swap="outerHTML">
@@ -560,7 +556,6 @@ export const hubBoardIsland = (model: HubBoardProjection, query = "", oob = fals
 export const hubObjectiveIsland = (model: HubObjectiveProjection, query = "", oob = false): string => `
   <div id="hub-objective"
     ${oob ? `hx-swap-oob="outerHTML"` : ""}
-    ${model.selectedObjectiveId ? `hx-ext="sse" sse-connect="/hub/stream/objective?objective=${encodeURIComponent(model.selectedObjectiveId)}"` : ""}
     hx-get="/hub/island/objective${query}"
     hx-trigger="${model.selectedObjectiveId ? "sse:receipt-refresh throttle:700ms, sse:job-refresh throttle:400ms, " : ""}hub-objective-refresh from:body"
     hx-swap="outerHTML">
@@ -571,7 +566,6 @@ export const hubObjectiveIsland = (model: HubObjectiveProjection, query = "", oo
 export const hubLiveIsland = (model: HubLiveProjection, query = "", oob = false): string => `
   <div id="hub-live"
     ${oob ? `hx-swap-oob="outerHTML"` : ""}
-    ${model.selectedObjectiveId ? `hx-ext="sse" sse-connect="/hub/stream/live?objective=${encodeURIComponent(model.selectedObjectiveId)}"` : ""}
     hx-get="/hub/island/live${query}"
     hx-trigger="${model.selectedObjectiveId ? "sse:job-refresh throttle:300ms, sse:receipt-refresh throttle:450ms, " : ""}hub-live-refresh from:body"
     hx-swap="outerHTML">
@@ -1278,7 +1272,7 @@ export const hubShell = (opts: {
     }
   </style>
 </head>
-<body>
+<body hx-ext="sse" sse-connect="/hub/stream">
   <div class="shell">
     <div class="head">
       <div>
