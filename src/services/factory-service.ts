@@ -54,6 +54,8 @@ const DEFAULT_CHECKS = ["npm run build"] as const;
 const FACTORY_DATA_DIR = ".receipt/factory";
 const AGENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "theorem", "writer", "inspector", "agent", "infra", "axiom"]);
+const DISCOVERY_ONLY_RE = /\b(search|locate|identify|inspect|find|trace|look\s+for|determine|record)\b/i;
+const DIFF_PRODUCING_RE = /\b(edit|change|update|remove|add|implement|write|modify|refactor|fix|test|verify|run|create)\b/i;
 
 const shortHash = (value: string | undefined): string => value ? value.slice(0, 8) : "none";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -933,6 +935,10 @@ export class FactoryService {
         const decision = await this.resolveOrchestratorDecision(state, semanticActions);
         await this.applyAction(state, decision.action, decision.reason, decision.confidence, decision.source);
         state = await this.getObjectiveState(objectiveId);
+        if (this.isMutationAction(decision.action.type)) {
+          await this.reactObjective(objectiveId);
+          return;
+        }
       } catch (err) {
         if (err instanceof FactoryStaleObjectiveError) {
           await this.reactObjective(objectiveId);
@@ -1069,11 +1075,13 @@ export class FactoryService {
     const failedCheck = checkResults.find((check) => !check.ok);
     const status = await this.git.worktreeStatus(payload.workspacePath);
     if (!status.dirty) {
+      const noDiffReason = `factory task produced no tracked diff: ${summary}`;
+      await this.commitTaskMemory(state, task, payload.candidateId, `${summary}\n\n${handoff}`, "blocked_no_diff");
       await this.emitObjective(payload.objectiveId, {
         type: "task.blocked",
         objectiveId: payload.objectiveId,
         taskId: payload.taskId,
-        reason: "factory task produced no tracked diff",
+        reason: noDiffReason,
         blockedAt: completedAt,
       });
       return;
@@ -1445,14 +1453,7 @@ export class FactoryService {
   }
 
   private async buildMutationActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>> {
-    if (this.orchestratorMode !== "enabled") return [];
     if (state.policy.mutation.aggressiveness === "off") return [];
-    if (
-      state.lastMutationAt
-      && Date.now() - state.lastMutationAt < state.policy.throttles.mutationCooldownMs
-    ) {
-      return [];
-    }
     const allMutableTasks = state.taskOrder
       .map((taskId) => state.graph.nodes[taskId])
       .filter((task): task is FactoryTaskRecord => Boolean(task));
@@ -1480,8 +1481,39 @@ export class FactoryService {
       }
     })();
     if (mutableTasks.length === 0) return [];
-
+    const heuristicActions = this.buildDeterministicMutationActions(state, mutableTasks);
+    if (heuristicActions.length > 0) return heuristicActions;
+    if (this.orchestratorMode !== "enabled") return [];
+    if (
+      state.lastMutationAt
+      && Date.now() - state.lastMutationAt < state.policy.throttles.mutationCooldownMs
+    ) {
+      return [];
+    }
     return this.planMutationActions(state, mutableTasks);
+  }
+
+  private buildDeterministicMutationActions(
+    state: FactoryState,
+    tasks: ReadonlyArray<FactoryTaskRecord>,
+  ): ReadonlyArray<FactoryAction> {
+    const actions: FactoryAction[] = [];
+    for (const task of tasks) {
+      if (task.status !== "blocked") continue;
+      if (!task.blockedReason?.startsWith("factory task produced no tracked diff")) continue;
+      if (!this.isDiscoveryOnlyTask(task)) continue;
+      const hasRunnableDependents = this.directDependents(state, task.taskId)
+        .some((dependent) => ["pending", "ready", "blocked"].includes(dependent.status));
+      if (!hasRunnableDependents) continue;
+      actions.push({
+        actionId: `action_supersede_${task.taskId}_no_diff`,
+        type: "supersede_task",
+        label: `Bypass ${task.taskId}`,
+        taskId: task.taskId,
+        summary: `${task.taskId} only produced analysis with no tracked diff. Supersede it and let downstream implementation tasks continue.`,
+      });
+    }
+    return actions;
   }
 
   private async planMutationActions(
@@ -1716,13 +1748,25 @@ export class FactoryService {
       return;
     }
     if (action.type === "supersede_task" && action.taskId) {
-      await this.emitObjectiveBatch(state.objectiveId, [rebracket, {
-        type: "task.superseded",
-        objectiveId: state.objectiveId,
-        taskId: action.taskId,
+      const dependencyUpdates = this.buildDependencyReplacementEvents(
+        state,
+        action.taskId,
+        state.graph.nodes[action.taskId]?.dependsOn ?? [],
         reason,
-        supersededAt: appliedAt,
-      }], basedOn);
+        basedOn,
+        appliedAt,
+      );
+      await this.emitObjectiveBatch(state.objectiveId, [
+        rebracket,
+        ...dependencyUpdates,
+        {
+          type: "task.superseded",
+          objectiveId: state.objectiveId,
+          taskId: action.taskId,
+          reason,
+          supersededAt: appliedAt + dependencyUpdates.length,
+        },
+      ], basedOn);
       return;
     }
     if (action.type === "block_objective") {
@@ -1777,6 +1821,14 @@ export class FactoryService {
       });
       previousNewTaskId = taskId;
     }
+    const dependencyUpdates = this.buildDependencyReplacementEvents(
+      state,
+      sourceTaskId,
+      previousNewTaskId ? [previousNewTaskId] : [...source.dependsOn],
+      reason,
+      basedOn,
+      createdAt + newTasks.length,
+    );
     await this.emitObjectiveBatch(state.objectiveId, [
       rebracket,
       {
@@ -1788,12 +1840,13 @@ export class FactoryService {
         basedOn,
         createdAt,
       },
+      ...dependencyUpdates,
       {
         type: "task.superseded",
         objectiveId: state.objectiveId,
         taskId: sourceTaskId,
         reason,
-        supersededAt: createdAt + newTasks.length,
+        supersededAt: createdAt + newTasks.length + dependencyUpdates.length,
       },
     ], basedOn);
   }
@@ -2265,7 +2318,10 @@ export class FactoryService {
           schemaName: "factory_task_decomposition",
           system: [
             "Decompose the objective into a small DAG of implementation tasks.",
-            "Return only actionable tasks. Use workerType codex unless a specialist is clearly better.",
+            "Return only actionable implementation or validation tasks. Use workerType codex unless a specialist is clearly better.",
+            "Avoid pure search, locate, identify, or report-only tasks when the overall objective is to change code.",
+            "Fold discovery work into the implementation task prompt unless the objective is explicitly investigation-only.",
+            "Each non-validation task should be expected to produce a tracked repository diff.",
             "Keep dependency edges between task IDs by referring to earlier returned task ids like task_01, task_02.",
           ].join("\n"),
           user: JSON.stringify({ title, prompt }, null, 2),
@@ -2308,7 +2364,63 @@ export class FactoryService {
         dependsOn,
       });
     }
-    return normalized;
+    return this.collapseDiscoveryOnlyTasks(normalized);
+  }
+
+  private collapseDiscoveryOnlyTasks(tasks: ReadonlyArray<DecomposedTaskSpec>): ReadonlyArray<DecomposedTaskSpec> {
+    let current = tasks.map((task) => ({
+      ...task,
+      dependsOn: [...task.dependsOn],
+    }));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const removedTaskIds = new Set<string>();
+      const inheritedDeps = new Map<string, string[]>();
+      const inheritedPrompts = new Map<string, string[]>();
+      for (const task of current) {
+        if (!this.isDiscoveryOnlyTask(task)) continue;
+        const children = current.filter((candidate) => candidate.dependsOn.includes(task.taskId));
+        if (children.length === 0) continue;
+        changed = true;
+        removedTaskIds.add(task.taskId);
+        for (const child of children) {
+          inheritedDeps.set(child.taskId, [
+            ...(inheritedDeps.get(child.taskId) ?? []),
+            ...task.dependsOn,
+          ]);
+          inheritedPrompts.set(child.taskId, [
+            ...(inheritedPrompts.get(child.taskId) ?? []),
+            `Before making changes, ${task.prompt}`,
+          ]);
+        }
+      }
+      if (!changed) break;
+      const filtered = current
+        .filter((task) => !removedTaskIds.has(task.taskId))
+        .map((task) => ({
+          ...task,
+          prompt: [...(inheritedPrompts.get(task.taskId) ?? []), task.prompt].join("\n\n"),
+          dependsOn: [...new Set([
+            ...(inheritedDeps.get(task.taskId) ?? []),
+            ...task.dependsOn.filter((depId) => !removedTaskIds.has(depId)),
+          ])],
+        }));
+      const idMap = new Map(filtered.map((task, index) => [task.taskId, taskOrdinalId(index)] as const));
+      current = filtered.map((task, index) => ({
+        ...task,
+        taskId: taskOrdinalId(index),
+        dependsOn: [...new Set(task.dependsOn
+          .map((depId) => idMap.get(depId))
+          .filter((depId): depId is string => Boolean(depId)))],
+      }));
+    }
+    return current;
+  }
+
+  private isDiscoveryOnlyTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
+    const text = `${task.title}\n${task.prompt}`;
+    return DISCOVERY_ONLY_RE.test(text) && !DIFF_PRODUCING_RE.test(text);
   }
 
   private normalizeDecompositionDependencies(
@@ -2353,6 +2465,49 @@ export class FactoryService {
     return normalized;
   }
 
+  private directDependents(
+    state: FactoryState,
+    taskId: string,
+  ): ReadonlyArray<FactoryTaskRecord> {
+    return state.taskOrder
+      .map((id) => state.graph.nodes[id])
+      .filter((task): task is FactoryTaskRecord => Boolean(task))
+      .filter((task) => task.dependsOn.includes(taskId));
+  }
+
+  private buildDependencyReplacementEvents(
+    state: FactoryState,
+    sourceTaskId: string,
+    replacementDependsOn: ReadonlyArray<string>,
+    reason: string,
+    basedOn: string | undefined,
+    updatedAt: number,
+  ): ReadonlyArray<FactoryEvent> {
+    const replacement = [...new Set(replacementDependsOn.filter((depId) => depId && depId !== sourceTaskId))];
+    const events: FactoryEvent[] = [];
+    for (const [index, dependent] of this.directDependents(state, sourceTaskId).entries()) {
+      const nextDependsOn = [...new Set(dependent.dependsOn.flatMap((depId) =>
+        depId === sourceTaskId ? replacement : [depId]
+      ))];
+      if (
+        nextDependsOn.length === dependent.dependsOn.length
+        && nextDependsOn.every((depId, dependencyIndex) => depId === dependent.dependsOn[dependencyIndex])
+      ) {
+        continue;
+      }
+      events.push({
+        type: "task.dependency.updated",
+        objectiveId: state.objectiveId,
+        taskId: dependent.taskId,
+        dependsOn: nextDependsOn,
+        reason,
+        basedOn,
+        updatedAt: updatedAt + index,
+      });
+    }
+    return events;
+  }
+
   private dependsTransitivelyOn(
     state: FactoryState,
     taskId: string,
@@ -2365,6 +2520,14 @@ export class FactoryService {
     if (!task) return false;
     if (task.dependsOn.includes(targetTaskId)) return true;
     return task.dependsOn.some((depId) => this.dependsTransitivelyOn(state, depId, targetTaskId, seen));
+  }
+
+  private isMutationAction(actionType: FactoryAction["type"]): boolean {
+    return actionType === "split_task"
+      || actionType === "reassign_task"
+      || actionType === "update_dependencies"
+      || actionType === "unblock_task"
+      || actionType === "supersede_task";
   }
 
   private latestTaskCandidate(state: FactoryState, taskId: string): FactoryCandidateRecord | undefined {

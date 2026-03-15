@@ -219,6 +219,87 @@ test("factory candidate lineage: rework dispatch mints a fresh candidate id", { 
   assert.ok(detail.candidates.some((candidate) => candidate.candidateId === "task_01_candidate_02"));
 });
 
+test("factory no-diff discovery tasks are bypassed so downstream implementation can continue", { timeout: 120_000 }, async () => {
+  const dataDir = await createTempDir("receipt-factory-no-diff-bypass");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  let runs = 0;
+  const codexExecutor: CodexExecutor = {
+    run: async (input) => {
+      runs += 1;
+      await fs.writeFile(input.promptPath, input.prompt, "utf-8");
+      await fs.writeFile(input.stdoutPath, "", "utf-8");
+      await fs.writeFile(input.stderrPath, "", "utf-8");
+      const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
+      assert.ok(resultPath, "task result path missing");
+      if (runs >= 2) {
+        await fs.writeFile(path.join(input.workspacePath, "IMPLEMENTED.txt"), `run ${runs}\n`, "utf-8");
+      }
+      await fs.writeFile(resultPath, JSON.stringify({
+        outcome: "approved",
+        summary: runs === 1
+          ? "Located the Factory page link source but intentionally made no repository changes."
+          : "Removed the link and produced a repository diff.",
+        handoff: runs === 1
+          ? "Proceed to the implementation task now that the link source is known."
+          : "Ready for review.",
+      }, null, 2), "utf-8");
+      await fs.writeFile(input.lastMessagePath, `run ${runs}`, "utf-8");
+      return { exitCode: 0, signal: null, stdout: "", stderr: "", lastMessage: `run ${runs}` };
+    },
+  };
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor,
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Locate the Factory view and Open Hub link source",
+    prompt: "Search the repo to find where the /factory page renders the Open Hub link and record the file path.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    emitObjective(objectiveId: string, event: unknown): Promise<void>;
+  };
+  await internals.emitObjective(created.objectiveId, {
+    type: "task.added",
+    objectiveId: created.objectiveId,
+    createdAt: created.createdAt + 1,
+    task: {
+      nodeId: "task_02",
+      taskId: "task_02",
+      taskKind: "planned",
+      title: "Remove the Open Hub link",
+      prompt: "Edit the Factory page so the Open Hub link is removed.",
+      workerType: "codex",
+      baseCommit: created.baseHash,
+      dependsOn: ["task_01"],
+      status: "pending",
+      skillBundlePaths: [],
+      contextRefs: [],
+      artifactRefs: {},
+      createdAt: created.createdAt + 1,
+    },
+  });
+
+  const firstJob = await findLatestFactoryJob(queue, created.objectiveId);
+  assert.equal(firstJob.taskId, "task_01");
+  await service.runTask(firstJob);
+
+  const detail = await service.getObjective(created.objectiveId);
+  assert.equal(detail.status, "executing");
+  assert.equal(detail.tasks.find((task) => task.taskId === "task_01")?.status, "superseded");
+  assert.equal(detail.tasks.find((task) => task.taskId === "task_02")?.status, "running");
+  const nextJob = await findLatestFactoryJob(queue, created.objectiveId);
+  assert.equal(nextJob.taskId, "task_02");
+});
+
 test("factory optimistic mutation append: stale heads are rejected without mutating the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-stale-append");
   const repoRoot = await createSourceRepo();

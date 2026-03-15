@@ -64,7 +64,11 @@ export const factoryComposeIsland = (model: FactoryComposeModel): string => `
 const renderCard = (
   card: FactoryBoardProjection["objectives"][number],
   activeId?: string,
-): string => `
+): string => {
+  const summary = card.status === "blocked" && card.blockedReason
+    ? `Blocked: ${card.blockedReason}`
+    : card.latestSummary ?? card.blockedReason ?? "No summary yet.";
+  return `
   <a class="factory-card${card.objectiveId === activeId ? " active" : ""}" href="/factory${factoryQuery(card.objectiveId)}">
     <div class="factory-card-top">
       <span class="badge ${statusClass(card.status)}">${esc(card.status.replaceAll("_", " "))}</span>
@@ -76,13 +80,14 @@ const renderCard = (
       <span>${card.readyTaskCount} ready</span>
       <span>integration ${esc(card.integrationStatus)}</span>
     </div>
-    <div class="factory-card-summary">${esc(truncate(card.latestSummary ?? card.blockedReason ?? "No summary yet.", 144))}</div>
+    <div class="factory-card-summary">${esc(truncate(summary, 144))}</div>
     <div class="factory-card-meta">
       <span>${esc(card.lane)}</span>
       <span>${esc(shortHash(card.latestCommitHash))}</span>
     </div>
   </a>
 `;
+};
 
 const renderLane = (
   title: string,
@@ -130,6 +135,7 @@ const renderTask = (task: FactoryObjectiveDetail["tasks"][number]): string => `
       <div>${esc(task.title)}</div>
       <div class="factory-muted">${esc(task.workerType)} · kind ${esc(task.taskKind)}${task.sourceTaskId ? ` · source ${esc(task.sourceTaskId)}` : ""}</div>
       ${task.dependsOn.length ? `<div class="factory-muted">depends on ${esc(task.dependsOn.join(", "))}</div>` : ""}
+      ${task.blockedReason ? `<div class="factory-note warn"><strong>Blocked:</strong> ${esc(task.blockedReason)}</div>` : ""}
       ${task.latestSummary ? `<div>${esc(task.latestSummary)}</div>` : ""}
       <div class="factory-tags">
         ${task.candidateId ? `<span class="tag">${esc(task.candidateId)}</span>` : ""}
@@ -164,6 +170,11 @@ export const factoryObjectiveIsland = (detail: FactoryObjectiveDetail | undefine
       </section>
     `;
   }
+  const blockedTasks = detail.tasks.filter((task) => task.status === "blocked");
+  const blockedReason = detail.blockedReason ?? blockedTasks[0]?.blockedReason;
+  const blockedHint = blockedReason?.includes("no tracked diff")
+    ? "This task returned analysis without a committed repository change. React will bypass it only when downstream implementation tasks can safely continue."
+    : undefined;
   return `
     <section id="factory-objective" class="factory-panel">
       <div class="factory-head">
@@ -189,6 +200,15 @@ export const factoryObjectiveIsland = (detail: FactoryObjectiveDetail | undefine
         <div class="factory-stat"><span>Reconciliation</span><strong>${detail.budgetState.reconciliationTasksUsed}/${detail.policy.budgets.maxReconciliationTasks}</strong></div>
         <div class="factory-stat"><span>Elapsed</span><strong>${detail.budgetState.elapsedMinutes}m</strong></div>
       </div>
+      ${blockedReason ? `
+        <div class="factory-note warn">
+          <strong>Why blocked:</strong> ${esc(blockedReason)}
+          ${blockedHint ? `<div class="factory-muted">${esc(blockedHint)}</div>` : ""}
+          ${blockedTasks.length
+            ? `<div class="factory-muted">Blocked tasks: ${esc(blockedTasks.map((task) => `${task.taskId}${task.blockedReason ? ` (${task.blockedReason})` : ""}`).join(" · "))}</div>`
+            : ""}
+        </div>
+      ` : ""}
       ${detail.budgetState.policyBlockedReason ? `<div class="factory-note warn">${esc(detail.budgetState.policyBlockedReason)}</div>` : ""}
       <details class="factory-detail">
         <summary>Prompt and policy</summary>

@@ -23,6 +23,7 @@ import {
   type FactoryEvent,
 } from "../../src/modules/factory.ts";
 import { FactoryService } from "../../src/services/factory-service.ts";
+import { factoryObjectiveIsland } from "../../src/views/factory.ts";
 import type { BranchStore, Receipt, Store } from "../../src/core/types.ts";
 
 const stream = "factory/objectives/demo";
@@ -314,4 +315,125 @@ test("factory decomposition: invalid dependency references are dropped and canon
   ]);
   assert.equal(created.policy.concurrency.maxActiveTasks, 4);
   assert.equal(created.budgetState.taskRunsUsed, 1);
+});
+
+test("factory decomposition: search-only discovery steps collapse into implementation tasks", async () => {
+  const dataDir = await createTempDir("receipt-factory-collapse-discovery");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const llmStructured = async <Schema extends ZodTypeAny>(opts: {
+    readonly schemaName: string;
+    readonly schema: Schema;
+  }): Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }> => {
+    const payload = {
+      tasks: [
+        {
+          title: "Locate the /factory view and Open Hub link source",
+          prompt: "Search the codebase to identify where the /factory page renders the Open Hub link and record the exact file path.",
+          workerType: "codex",
+          dependsOn: [],
+        },
+        {
+          title: "Remove the Open Hub link from /factory",
+          prompt: "Edit the Factory page so the Open Hub link is no longer rendered.",
+          workerType: "codex",
+          dependsOn: ["task_01"],
+        },
+        {
+          title: "Verify the /factory page still renders cleanly",
+          prompt: "Run the relevant checks and add or update coverage for the removed link if appropriate.",
+          workerType: "codex",
+          dependsOn: ["task_02"],
+        },
+      ],
+    };
+    return {
+      parsed: opts.schema.parse(payload),
+      raw: JSON.stringify(payload),
+    };
+  };
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    llmStructured,
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Collapse search-only decomposition",
+    prompt: "Remove the Open Hub link from the /factory page.",
+    checks: ["git status --short"],
+  });
+
+  const tasks = created.tasks.map((task) => ({ title: task.title, dependsOn: task.dependsOn }));
+  assert.deepEqual(tasks, [
+    { title: "Remove the Open Hub link from /factory", dependsOn: [] },
+    { title: "Verify the /factory page still renders cleanly", dependsOn: ["task_01"] },
+  ]);
+});
+
+test("factory objective island: blocked reasons are surfaced prominently", () => {
+  const markup = factoryObjectiveIsland({
+    objectiveId: "objective_demo",
+    title: "Blocked objective",
+    status: "blocked",
+    archivedAt: undefined,
+    updatedAt: 10,
+    latestSummary: "Blocked while waiting on a diff-producing task.",
+    blockedReason: "factory task produced no tracked diff: located the file but changed nothing",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    taskCount: 1,
+    integrationStatus: "idle",
+    latestCommitHash: undefined,
+    prompt: "Remove the Open Hub link from /factory.",
+    channel: "results",
+    baseHash: "abc1234",
+    checks: ["npm run build"],
+    policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    budgetState: {
+      taskRunsUsed: 1,
+      candidatePassesByTask: {},
+      reconciliationTasksUsed: 0,
+      elapsedMinutes: 1,
+      lastMutationAt: undefined,
+      lastDispatchAt: 10,
+      policyBlockedReason: undefined,
+    },
+    createdAt: 1,
+    tasks: [{
+      nodeId: "task_01",
+      taskId: "task_01",
+      taskKind: "planned",
+      title: "Locate the link source",
+      prompt: "Search the repo and record the file path.",
+      workerType: "codex",
+      baseCommit: "abc1234",
+      dependsOn: [],
+      status: "blocked",
+      skillBundlePaths: [],
+      contextRefs: [],
+      artifactRefs: {},
+      createdAt: 1,
+      completedAt: 10,
+      blockedReason: "factory task produced no tracked diff: located the file but changed nothing",
+      workspaceExists: false,
+      workspaceDirty: false,
+    }],
+    candidates: [],
+    integration: {
+      status: "idle",
+      queuedCandidateIds: [],
+      validationResults: [],
+      updatedAt: 10,
+    },
+    latestRebracket: undefined,
+  });
+
+  assert.match(markup, /Why blocked:/);
+  assert.match(markup, /factory task produced no tracked diff/);
+  assert.match(markup, /Blocked tasks:/);
 });
