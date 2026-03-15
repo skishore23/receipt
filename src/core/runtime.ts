@@ -10,7 +10,7 @@
 // 6. Supports branching (forking chains at any point)
 // ============================================================================
 
-import type { Chain, Decide, Reducer, Branch, Store, BranchStore } from "./types.js";
+import type { Chain, Decide, Reducer, Branch, Receipt, Store, BranchStore } from "./types.js";
 import { receipt, fold, verify } from "./chain.js";
 
 // ============================================================================
@@ -64,10 +64,14 @@ export const createRuntime = <Cmd, Event, State>(
     readonly eventId?: string;
     readonly expectedPrev?: string;
   };
+  type StreamSnapshot = {
+    readonly chain: Chain<Event>;
+    readonly state: State;
+    readonly version?: string;
+  };
 
-  const getChain = (stream: string) => store.read(stream);
-  const getChainAt = (stream: string, n: number) => store.take(stream, n);
   const streamLocks = new Map<string, Promise<void>>();
+  const snapshots = new Map<string, StreamSnapshot>();
 
   const enqueueStream = async <T>(stream: string, op: () => Promise<T>): Promise<T> => {
     const previous = streamLocks.get(stream) ?? Promise.resolve();
@@ -100,15 +104,34 @@ export const createRuntime = <Cmd, Event, State>(
     return runLocked(0);
   };
 
+  const loadSnapshot = async (stream: string): Promise<StreamSnapshot> => {
+    const cached = snapshots.get(stream);
+    if (cached) {
+      if (!store.version) return cached;
+      const currentVersion = await store.version(stream);
+      if (currentVersion === cached.version) return cached;
+    }
+    const chain = [...await store.read(stream)];
+    const snapshot = {
+      chain,
+      state: fold(chain, reducer, initial),
+      version: store.version ? await store.version(stream) : undefined,
+    } satisfies StreamSnapshot;
+    snapshots.set(stream, snapshot);
+    return snapshot;
+  };
+
+  const getChain = async (stream: string) => (await loadSnapshot(stream)).chain;
+  const getChainAt = async (stream: string, n: number) => (await loadSnapshot(stream)).chain.slice(0, n);
+
   const getState = async (stream: string) => {
-    const chain = await getChain(stream);
-    return fold(chain, reducer, initial);
+    return (await loadSnapshot(stream)).state;
   };
 
   const getStateAt = async (stream: string, n: number) => {
     if (n === 0) return initial;
-    const chain = await getChainAt(stream, n);
-    return fold(chain, reducer, initial);
+    const snapshot = await loadSnapshot(stream);
+    return fold(snapshot.chain.slice(0, n), reducer, initial);
   };
 
   const asEmitLike = (cmd: Cmd): EmitLikeCommand | undefined => {
@@ -132,19 +155,22 @@ export const createRuntime = <Cmd, Event, State>(
       const emitLike = asEmitLike(cmd);
       const eventId = emitLike?.eventId;
       const expectedPrev = emitLike?.expectedPrev;
-      const chain = eventId ? await store.read(stream) : undefined;
+      const snapshot = await loadSnapshot(stream);
+      const chain = snapshot.chain;
 
       if (eventId && chain && alreadyApplied(chain, eventId)) {
         return [];
       }
 
-      const head = chain ? chain[chain.length - 1] : await store.head(stream);
+      const head = chain[chain.length - 1];
       if (typeof expectedPrev === "string" && expectedPrev !== (head?.hash ?? undefined)) {
         throw new Error(`Expected prev hash ${expectedPrev} but head is ${head?.hash ?? "undefined"}`);
       }
 
       const events = decide(cmd);
       let prev = head?.hash;
+      let nextState = snapshot.state;
+      const appended = [...chain];
 
       for (let idx = 0; idx < events.length; idx += 1) {
         const event = events[idx];
@@ -157,6 +183,15 @@ export const createRuntime = <Cmd, Event, State>(
         const r = receipt(stream, prev, event, Date.now(), eventHint ? { eventId: eventHint } : undefined);
         await store.append(r);
         prev = r.hash;
+        appended.push(r);
+        nextState = reducer(nextState, event, r.ts);
+      }
+      if (events.length > 0) {
+        snapshots.set(stream, {
+          chain: appended,
+          state: nextState,
+          version: store.version ? await store.version(stream) : snapshot.version,
+        });
       }
       return events;
     });
@@ -168,11 +203,20 @@ export const createRuntime = <Cmd, Event, State>(
       
       // Copy receipts to new stream (re-link to form new chain).
       let prev: string | undefined;
+      const forkedChain: Receipt<Event>[] = [];
+      let forkedState = initial;
       for (const r of parentChain) {
         const newReceipt = receipt(newName, prev, r.body, r.ts);
         await store.append(newReceipt);
         prev = newReceipt.hash;
+        forkedChain.push(newReceipt);
+        forkedState = reducer(forkedState, newReceipt.body, newReceipt.ts);
       }
+      snapshots.set(newName, {
+        chain: forkedChain,
+        state: forkedState,
+        version: store.version ? await store.version(newName) : undefined,
+      });
       
       // Save branch metadata.
       const branch: Branch = {

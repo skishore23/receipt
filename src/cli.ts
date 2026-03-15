@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
+import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryState } from "./adapters/memory-tools.js";
 import { jsonBranchStore, jsonlStore } from "./adapters/jsonl.js";
 import { jsonlQueue } from "./adapters/jsonl-queue.js";
 import { createRuntime } from "./core/runtime.js";
@@ -23,7 +24,7 @@ const ROOT = process.cwd();
 const DATA_DIR = process.env.DATA_DIR ?? path.join(ROOT, "data");
 
 const printUsage = (): void => {
-  console.log(`receipt <command> [args]\n\nCommands:\n  receipt new <agent-id> [--template basic|assistant-tool|human-loop|merge]\n  receipt dev\n  receipt run <agent-id> --problem <text> [--stream agents/<agentId>] [--run-id <runId>]\n  receipt trace <run-id|stream>\n  receipt replay <run-id|stream>\n  receipt fork <run-id|stream> --at <index> [--name <branch-name>]\n  receipt inspect <run-id|stream>\n  receipt jobs [--status queued|leased|running|completed|failed|canceled] [--limit <n>]\n  receipt abort <job-id> [--reason <text>]`);
+  console.log(`receipt <command> [args]\n\nCommands:\n  receipt new <agent-id> [--template basic|assistant-tool|human-loop|merge]\n  receipt dev\n  receipt run <agent-id> --problem <text> [--stream agents/<agentId>] [--run-id <runId>]\n  receipt trace <run-id|stream>\n  receipt replay <run-id|stream>\n  receipt fork <run-id|stream> --at <index> [--name <branch-name>]\n  receipt inspect <run-id|stream>\n  receipt jobs [--status queued|leased|running|completed|failed|canceled] [--limit <n>]\n  receipt abort <job-id> [--reason <text>]\n  receipt memory <read|search|summarize|commit|diff> <scope> [options]`);
 };
 
 const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {
@@ -74,6 +75,20 @@ const getQueue = () => {
     initialJob
   );
   return jsonlQueue({ runtime, stream: "jobs" });
+};
+
+const getMemoryTools = () => {
+  const runtime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
+    jsonlStore<MemoryEvent>(DATA_DIR),
+    jsonBranchStore(DATA_DIR),
+    decideMemory,
+    reduceMemory,
+    initialMemoryState
+  );
+  return createMemoryTools({
+    dir: DATA_DIR,
+    runtime,
+  });
 };
 
 const looksLikeDefineAgentSpec = (value: unknown): value is {
@@ -390,6 +405,72 @@ const commandAbort = async (jobId: string, flags: Flags): Promise<void> => {
   console.log(JSON.stringify({ ok: true, jobId, commandId: queued.id }, null, 2));
 };
 
+const parseNumberFlag = (flags: Flags, key: string): number | undefined => {
+  const raw = asString(flags, key);
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) throw new Error(`--${key} must be a number`);
+  return parsed;
+};
+
+const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const subcommand = args[0];
+  const scope = args[1];
+  if (!subcommand) throw new Error("memory subcommand is required");
+  if (!scope) throw new Error("memory scope is required");
+  const memoryTools = getMemoryTools();
+
+  switch (subcommand) {
+    case "read": {
+      const limit = parseNumberFlag(flags, "limit");
+      const entries = await memoryTools.read({ scope, limit });
+      console.log(JSON.stringify({ entries }, null, 2));
+      return;
+    }
+    case "search": {
+      const query = asString(flags, "query") ?? args.slice(2).join(" ").trim();
+      if (!query) throw new Error("memory search requires --query or trailing query text");
+      const limit = parseNumberFlag(flags, "limit");
+      const entries = await memoryTools.search({ scope, query, limit });
+      console.log(JSON.stringify({ entries }, null, 2));
+      return;
+    }
+    case "summarize": {
+      const query = asString(flags, "query") ?? (args.length > 2 ? args.slice(2).join(" ").trim() : undefined);
+      const limit = parseNumberFlag(flags, "limit");
+      const maxChars = parseNumberFlag(flags, "max-chars");
+      const result = await memoryTools.summarize({ scope, query, limit, maxChars });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case "commit": {
+      const text = asString(flags, "text") ?? args.slice(2).join(" ").trim();
+      if (!text) throw new Error("memory commit requires --text or trailing text");
+      const tags = (asString(flags, "tags") ?? "")
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean);
+      const entry = await memoryTools.commit({
+        scope,
+        text,
+        tags: tags.length ? tags : undefined,
+      });
+      console.log(JSON.stringify({ entry }, null, 2));
+      return;
+    }
+    case "diff": {
+      const fromTs = parseNumberFlag(flags, "from-ts");
+      if (fromTs === undefined) throw new Error("memory diff requires --from-ts");
+      const toTs = parseNumberFlag(flags, "to-ts");
+      const entries = await memoryTools.diff({ scope, fromTs, toTs });
+      console.log(JSON.stringify({ entries }, null, 2));
+      return;
+    }
+    default:
+      throw new Error(`Unknown memory subcommand '${subcommand}'`);
+  }
+};
+
 const main = async (): Promise<void> => {
   const parsed = parseArgs(process.argv.slice(2));
   const command = parsed.command;
@@ -449,6 +530,9 @@ const main = async (): Promise<void> => {
       await commandAbort(jobId, parsed.flags);
       return;
     }
+    case "memory":
+      await commandMemory(parsed.args, parsed.flags);
+      return;
     default:
       throw new Error(`Unknown command '${command}'`);
   }

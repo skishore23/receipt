@@ -1,0 +1,3469 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+import { z } from "zod";
+
+import { jsonBranchStore, jsonlStore } from "../adapters/jsonl.js";
+import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue.js";
+import { type CodexExecutor, type CodexRunControl } from "../adapters/codex-executor.js";
+import { HubGit, HubGitError } from "../adapters/hub-git.js";
+import type { MemoryTools } from "../adapters/memory-tools.js";
+import {
+  DEFAULT_FACTORY_OBJECTIVE_POLICY,
+  buildFactoryProjection,
+  decideFactory,
+  factoryActivatableTasks,
+  factoryReadyTasks,
+  initialFactoryState,
+  normalizeFactoryObjectivePolicy,
+  reduceFactory,
+  type FactoryBudgetState,
+  type FactoryCandidateRecord,
+  type FactoryCheckResult,
+  type FactoryCmd,
+  type FactoryEvent,
+  type FactoryNormalizedObjectivePolicy,
+  type FactoryObjectiveStatus,
+  type FactoryObjectivePolicy,
+  type FactoryProjection,
+  type FactoryState,
+  type FactoryTaskRecord,
+  type FactoryTaskStatus,
+  type FactoryWorkerType,
+  type FactoryCandidateStatus,
+} from "../modules/factory.js";
+import { createRuntime, type Runtime } from "../core/runtime.js";
+import { type GraphRef } from "../core/graph.js";
+import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString } from "../framework/http.js";
+import type { SseHub } from "../framework/sse-hub.js";
+import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../modules/job.js";
+import {
+  fallbackFactoryDecision,
+  type FactoryAction,
+  type FactoryActionTaskDraft,
+  type FactoryOrchestrator,
+  type FactoryOrchestratorInput,
+} from "./factory-orchestrator.js";
+
+const execFileAsync = promisify(execFile);
+
+const FACTORY_STREAM_PREFIX = "factory/objectives";
+const DEFAULT_CHECKS = ["npm run build"] as const;
+const FACTORY_DATA_DIR = ".receipt/factory";
+const AGENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
+const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "theorem", "writer", "inspector", "agent", "infra", "axiom"]);
+
+const shortHash = (value: string | undefined): string => value ? value.slice(0, 8) : "none";
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const requireNonEmpty = (value: unknown, message: string): string => {
+  try {
+    return requireTrimmedString(value, message);
+  } catch {
+    throw new FactoryServiceError(400, message);
+  }
+};
+const clipText = (value: string | undefined, max = 280): string | undefined => {
+  if (!value) return undefined;
+  const trimmed = trimmedString(value);
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
+};
+const tailText = (value: string, maxChars: number): string =>
+  value.length <= maxChars ? value.trimEnd() : `…${value.slice(value.length - maxChars).trimEnd()}`;
+const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+const prependPath = (dir: string, currentPath: string | undefined): string =>
+  currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
+const uniqueChecks = (checks?: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const source = (checks ?? DEFAULT_CHECKS)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(source)];
+};
+const stateRef = (ref: string, label?: string): GraphRef => ({ kind: "state", ref, label });
+const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref, label });
+const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
+const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
+const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
+const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
+  status === "completed" || status === "failed" || status === "canceled";
+const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
+  status === "queued" || status === "leased" || status === "running";
+
+const factoryLane = (status: FactoryObjectiveStatus): FactoryObjectiveLane => {
+  switch (status) {
+    case "decomposing":
+    case "planning":
+      return "planning";
+    case "executing":
+      return "executing";
+    case "integrating":
+      return "integrating";
+    case "promoting":
+      return "promoting";
+    case "blocked":
+    case "failed":
+    case "canceled":
+      return "blocked";
+    case "completed":
+      return "completed";
+    default:
+      return "planning";
+  }
+};
+
+const objectiveTaskStatusPriority = (status: FactoryTaskStatus): number => {
+  switch (status) {
+    case "running":
+      return 0;
+    case "reviewing":
+      return 1;
+    case "ready":
+      return 2;
+    case "blocked":
+      return 3;
+    case "pending":
+      return 4;
+    case "approved":
+      return 5;
+    case "integrated":
+      return 6;
+    case "superseded":
+      return 7;
+    default:
+      return 8;
+  }
+};
+
+export class FactoryServiceError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+class FactoryStaleObjectiveError extends Error {
+  readonly objectiveId: string;
+  readonly expectedPrev: string;
+
+  constructor(objectiveId: string, expectedPrev: string, actualPrev?: string) {
+    super(`factory objective ${objectiveId} advanced before applying a mutation (${expectedPrev} -> ${actualPrev ?? "undefined"})`);
+    this.objectiveId = objectiveId;
+    this.expectedPrev = expectedPrev;
+  }
+}
+
+export type FactoryServiceOptions = {
+  readonly dataDir: string;
+  readonly queue: JsonlQueue;
+  readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
+  readonly sse: SseHub;
+  readonly codexExecutor: CodexExecutor;
+  readonly memoryTools?: MemoryTools;
+  readonly orchestrator?: FactoryOrchestrator;
+  readonly orchestratorMode?: "disabled" | "enabled";
+  readonly repoRoot?: string;
+  readonly llmStructured?: <Schema extends z.ZodTypeAny>(opts: {
+    readonly system?: string;
+    readonly user: string;
+    readonly schema: Schema;
+    readonly schemaName: string;
+  }) => Promise<{ readonly parsed: z.infer<Schema>; readonly raw: string }>;
+};
+
+export type FactoryObjectiveInput = {
+  readonly title: string;
+  readonly prompt: string;
+  readonly baseHash?: string;
+  readonly checks?: ReadonlyArray<string>;
+  readonly channel?: string;
+  readonly policy?: FactoryObjectivePolicy;
+};
+
+export type FactoryTaskView = FactoryTaskRecord & {
+  readonly candidate?: FactoryCandidateRecord;
+  readonly jobStatus?: JobStatus | "missing";
+  readonly job?: JobRecord;
+  readonly workspaceExists: boolean;
+  readonly workspaceDirty: boolean;
+  readonly workspaceHead?: string;
+  readonly elapsedMs?: number;
+  readonly stdoutTail?: string;
+  readonly stderrTail?: string;
+  readonly lastMessage?: string;
+};
+
+export type FactoryObjectiveCard = {
+  readonly objectiveId: string;
+  readonly title: string;
+  readonly status: FactoryObjectiveStatus;
+  readonly archivedAt?: number;
+  readonly updatedAt: number;
+  readonly latestSummary?: string;
+  readonly blockedReason?: string;
+  readonly activeTaskCount: number;
+  readonly readyTaskCount: number;
+  readonly taskCount: number;
+  readonly integrationStatus: FactoryState["integration"]["status"];
+  readonly latestCommitHash?: string;
+};
+
+export type FactoryObjectiveDetail = FactoryObjectiveCard & {
+  readonly prompt: string;
+  readonly channel: string;
+  readonly baseHash: string;
+  readonly checks: ReadonlyArray<string>;
+  readonly policy: FactoryNormalizedObjectivePolicy;
+  readonly budgetState: FactoryBudgetState;
+  readonly createdAt: number;
+  readonly tasks: ReadonlyArray<FactoryTaskView>;
+  readonly candidates: ReadonlyArray<FactoryCandidateRecord>;
+  readonly integration: FactoryState["integration"];
+  readonly latestRebracket?: FactoryState["latestRebracket"];
+};
+
+export type FactoryComposeModel = {
+  readonly defaultBranch: string;
+  readonly sourceDirty: boolean;
+  readonly sourceBranch?: string;
+  readonly objectiveCount: number;
+  readonly defaultPolicy: FactoryNormalizedObjectivePolicy;
+};
+
+export type FactoryObjectiveLane =
+  | "planning"
+  | "executing"
+  | "integrating"
+  | "promoting"
+  | "blocked"
+  | "completed";
+
+export type FactoryBoardProjection = {
+  readonly objectives: ReadonlyArray<FactoryObjectiveCard & { readonly lane: FactoryObjectiveLane }>;
+  readonly lanes: Readonly<Record<FactoryObjectiveLane, ReadonlyArray<FactoryObjectiveCard & { readonly lane: FactoryObjectiveLane }>>>;
+  readonly selectedObjectiveId?: string;
+};
+
+export type FactoryLiveProjection = {
+  readonly selectedObjectiveId?: string;
+  readonly objectiveTitle?: string;
+  readonly objectiveStatus?: FactoryObjectiveStatus;
+  readonly activeTasks: ReadonlyArray<FactoryTaskView>;
+  readonly recentJobs: ReadonlyArray<QueueJob>;
+};
+
+export type FactoryDebugProjection = {
+  readonly objectiveId: string;
+  readonly title: string;
+  readonly status: FactoryObjectiveStatus;
+  readonly policy: FactoryNormalizedObjectivePolicy;
+  readonly budgetState: FactoryBudgetState;
+  readonly recentReceipts: ReadonlyArray<{
+    readonly type: string;
+    readonly hash: string;
+    readonly ts: number;
+    readonly summary: string;
+  }>;
+  readonly activeJobs: ReadonlyArray<QueueJob>;
+  readonly lastJobs: ReadonlyArray<QueueJob>;
+  readonly taskWorktrees: ReadonlyArray<{
+    readonly taskId: string;
+    readonly workspacePath?: string;
+    readonly exists: boolean;
+    readonly dirty: boolean;
+    readonly head?: string;
+    readonly branch?: string;
+  }>;
+  readonly integrationWorktree?: {
+    readonly workspacePath?: string;
+    readonly exists: boolean;
+    readonly dirty: boolean;
+    readonly head?: string;
+    readonly branch?: string;
+  };
+  readonly latestContextPacks: ReadonlyArray<{
+    readonly taskId: string;
+    readonly candidateId?: string;
+    readonly contextPackPath?: string;
+    readonly memoryScriptPath?: string;
+  }>;
+};
+
+export type FactoryTaskJobPayload = {
+  readonly kind: "factory.task.run";
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly workerType: FactoryWorkerType;
+  readonly candidateId: string;
+  readonly baseCommit: string;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly promptPath: string;
+  readonly resultPath: string;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
+  readonly lastMessagePath: string;
+  readonly manifestPath: string;
+  readonly contextPackPath: string;
+  readonly memoryScriptPath: string;
+  readonly memoryConfigPath: string;
+  readonly repoSkillPaths: ReadonlyArray<string>;
+  readonly skillBundlePaths: ReadonlyArray<string>;
+  readonly contextRefs: ReadonlyArray<GraphRef>;
+  readonly integrationRef?: GraphRef;
+  readonly problem: string;
+  readonly config: Readonly<Record<string, unknown>>;
+};
+
+export type FactoryIntegrationJobPayload = {
+  readonly kind: "factory.integration.validate";
+  readonly objectiveId: string;
+  readonly candidateId: string;
+  readonly workspacePath: string;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
+  readonly resultPath: string;
+  readonly checks: ReadonlyArray<string>;
+};
+
+type DecomposedTaskSpec = {
+  readonly taskId: string;
+  readonly title: string;
+  readonly prompt: string;
+  readonly workerType: FactoryWorkerType;
+  readonly dependsOn: ReadonlyArray<string>;
+};
+
+type FactoryMutationPlan = {
+  readonly actions: ReadonlyArray<
+    | {
+        readonly type: "split_task";
+        readonly taskId: string;
+        readonly reason: string;
+        readonly tasks: ReadonlyArray<FactoryActionTaskDraft>;
+      }
+    | {
+        readonly type: "reassign_task";
+        readonly taskId: string;
+        readonly workerType: string;
+        readonly reason: string;
+      }
+    | {
+        readonly type: "update_dependencies";
+        readonly taskId: string;
+        readonly dependsOn: ReadonlyArray<string>;
+        readonly reason: string;
+      }
+    | {
+        readonly type: "unblock_task";
+        readonly taskId: string;
+        readonly reason: string;
+      }
+    | {
+        readonly type: "supersede_task";
+        readonly taskId: string;
+        readonly reason: string;
+      }
+  >;
+};
+
+type FactoryMemoryScopeSpec = {
+  readonly key: string;
+  readonly scope: string;
+  readonly label: string;
+  readonly defaultQuery: string;
+};
+
+type FactoryContextTaskNode = {
+  readonly taskId: string;
+  readonly taskKind: FactoryTaskRecord["taskKind"];
+  readonly title: string;
+  readonly status: FactoryTaskStatus;
+  readonly workerType: FactoryWorkerType;
+  readonly sourceTaskId?: string;
+  readonly sourceCandidateId?: string;
+  readonly latestSummary?: string;
+  readonly blockedReason?: string;
+  readonly candidateId?: string;
+  readonly candidateStatus?: FactoryCandidateStatus;
+  readonly memorySummary?: string;
+  readonly children: ReadonlyArray<FactoryContextTaskNode>;
+};
+
+type FactoryContextRelatedTask = {
+  readonly taskId: string;
+  readonly taskKind: FactoryTaskRecord["taskKind"];
+  readonly title: string;
+  readonly status: FactoryTaskStatus;
+  readonly workerType: FactoryWorkerType;
+  readonly sourceTaskId?: string;
+  readonly sourceCandidateId?: string;
+  readonly relations: ReadonlyArray<"focus" | "dependency" | "dependent" | "split_source" | "split_child">;
+  readonly latestSummary?: string;
+  readonly blockedReason?: string;
+  readonly candidateId?: string;
+  readonly candidateStatus?: FactoryCandidateStatus;
+  readonly memorySummary?: string;
+};
+
+type FactoryContextReceipt = {
+  readonly type: string;
+  readonly at: number;
+  readonly taskId?: string;
+  readonly candidateId?: string;
+  readonly summary: string;
+};
+
+type FactoryContextObjectiveSlice = {
+  readonly frontierTasks: ReadonlyArray<FactoryContextRelatedTask>;
+  readonly recentCompletedTasks: ReadonlyArray<FactoryContextRelatedTask>;
+  readonly integrationTasks: ReadonlyArray<FactoryContextRelatedTask>;
+  readonly recentObjectiveReceipts: ReadonlyArray<FactoryContextReceipt>;
+  readonly objectiveMemorySummary?: string;
+  readonly integrationMemorySummary?: string;
+};
+
+type FactoryContextPack = {
+  readonly objectiveId: string;
+  readonly title: string;
+  readonly prompt: string;
+  readonly task: {
+    readonly taskId: string;
+    readonly title: string;
+    readonly prompt: string;
+    readonly workerType: FactoryWorkerType;
+    readonly status: FactoryTaskStatus;
+    readonly candidateId: string;
+  };
+  readonly integration: {
+    readonly status: FactoryState["integration"]["status"];
+    readonly headCommit?: string;
+    readonly activeCandidateId?: string;
+    readonly conflictReason?: string;
+    readonly lastSummary?: string;
+  };
+  readonly dependencyTree: ReadonlyArray<FactoryContextTaskNode>;
+  readonly relatedTasks: ReadonlyArray<FactoryContextRelatedTask>;
+  readonly candidateLineage: ReadonlyArray<{
+    readonly candidateId: string;
+    readonly parentCandidateId?: string;
+    readonly status: FactoryCandidateStatus;
+    readonly summary?: string;
+    readonly headCommit?: string;
+    readonly latestReason?: string;
+  }>;
+  readonly recentReceipts: ReadonlyArray<FactoryContextReceipt>;
+  readonly objectiveSlice: FactoryContextObjectiveSlice;
+  readonly memory: {
+    readonly overview?: string;
+    readonly objective?: string;
+    readonly integration?: string;
+  };
+};
+
+const decompositionSchema = z.object({
+  tasks: z.array(z.object({
+    title: z.string().min(1),
+    prompt: z.string().min(1),
+    workerType: z.string().min(1).default("codex"),
+    dependsOn: z.array(z.string().min(1)).max(12).default([]),
+  })).min(1).max(8),
+});
+
+const mutationPlanSchema = z.object({
+  actions: z.array(z.union([
+    z.object({
+      type: z.literal("split_task"),
+      taskId: z.string().min(1),
+      reason: z.string().min(1),
+      tasks: z.array(z.object({
+        title: z.string().min(1),
+        prompt: z.string().min(1),
+        workerType: z.string().min(1).default("codex"),
+      })).min(1).max(3),
+    }),
+    z.object({
+      type: z.literal("reassign_task"),
+      taskId: z.string().min(1),
+      workerType: z.string().min(1),
+      reason: z.string().min(1),
+    }),
+    z.object({
+      type: z.literal("update_dependencies"),
+      taskId: z.string().min(1),
+      dependsOn: z.array(z.string().min(1)).max(12),
+      reason: z.string().min(1),
+    }),
+    z.object({
+      type: z.literal("unblock_task"),
+      taskId: z.string().min(1),
+      reason: z.string().min(1),
+    }),
+    z.object({
+      type: z.literal("supersede_task"),
+      taskId: z.string().min(1),
+      reason: z.string().min(1),
+    }),
+  ])).max(6).default([]),
+});
+
+const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
+  const normalized = (value ?? "codex").trim().toLowerCase() || "codex";
+  return SUPPORTED_WORKER_TYPES.has(normalized) ? normalized : "codex";
+};
+
+const taskOrdinalId = (index: number): string => `task_${String(index + 1).padStart(2, "0")}`;
+
+const objectiveStream = (objectiveId: string): string => `${FACTORY_STREAM_PREFIX}/${objectiveId}`;
+
+export class FactoryService {
+  readonly dataDir: string;
+  readonly queue: JsonlQueue;
+  readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
+  readonly sse: SseHub;
+  readonly codexExecutor: CodexExecutor;
+  readonly memoryTools?: MemoryTools;
+  readonly orchestrator?: FactoryOrchestrator;
+  readonly orchestratorMode: "disabled" | "enabled";
+  readonly git: HubGit;
+
+  private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
+  private readonly llmStructured?: FactoryServiceOptions["llmStructured"];
+
+  constructor(opts: FactoryServiceOptions) {
+    this.dataDir = opts.dataDir;
+    this.queue = opts.queue;
+    this.jobRuntime = opts.jobRuntime;
+    this.sse = opts.sse;
+    this.codexExecutor = opts.codexExecutor;
+    this.memoryTools = opts.memoryTools;
+    this.orchestrator = opts.orchestrator;
+    this.orchestratorMode = opts.orchestratorMode ?? "disabled";
+    this.llmStructured = opts.llmStructured;
+    this.git = new HubGit({
+      dataDir: opts.dataDir,
+      repoRoot: opts.repoRoot ?? process.env.HUB_REPO_ROOT ?? process.cwd(),
+    });
+    this.runtime = createRuntime<FactoryCmd, FactoryEvent, FactoryState>(
+      jsonlStore<FactoryEvent>(opts.dataDir),
+      jsonBranchStore(opts.dataDir),
+      decideFactory,
+      reduceFactory,
+      initialFactoryState,
+    );
+  }
+
+  async ensureBootstrap(): Promise<void> {
+    await this.git.ensureReady();
+  }
+
+  async createObjective(input: FactoryObjectiveInput): Promise<FactoryObjectiveDetail> {
+    await this.ensureBootstrap();
+    const title = requireNonEmpty(input.title, "title required");
+    const prompt = requireNonEmpty(input.prompt, "prompt required");
+    const checks = uniqueChecks(input.checks);
+    const channel = input.channel?.trim() || "results";
+    const policy = normalizeFactoryObjectivePolicy(input.policy);
+    const sourceStatus = await this.git.sourceStatus();
+    if (!input.baseHash && sourceStatus.dirty) {
+      throw new FactoryServiceError(
+        409,
+        "source repository has uncommitted changes. Factory objectives only see committed Git history. Commit or stash changes first, or provide baseHash explicitly.",
+      );
+    }
+    const objectiveId = this.makeId("objective");
+    const baseHash = await this.git.resolveBaseHash(input.baseHash);
+    const createdAt = Date.now();
+    await this.emitObjective(objectiveId, {
+      type: "objective.created",
+      objectiveId,
+      title,
+      prompt,
+      channel,
+      baseHash,
+      checks,
+      policy,
+      createdAt,
+    });
+    const taskSpecs = await this.decomposeObjective(title, prompt);
+    for (const spec of taskSpecs) {
+      const taskId = spec.taskId;
+      const task: FactoryTaskRecord = {
+        nodeId: taskId,
+        taskId,
+        taskKind: "planned",
+        title: spec.title,
+        prompt: spec.prompt,
+        workerType: normalizeWorkerType(spec.workerType),
+        baseCommit: baseHash,
+        dependsOn: spec.dependsOn,
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [
+          stateRef(`${objectiveStream(objectiveId)}:objective`, "objective"),
+          commitRef(baseHash, "base commit"),
+        ],
+        artifactRefs: {},
+        createdAt,
+      };
+      await this.emitObjective(objectiveId, {
+        type: "task.added",
+        objectiveId,
+        task,
+        createdAt,
+      });
+    }
+    await this.reactObjective(objectiveId);
+    return this.getObjective(objectiveId);
+  }
+
+  async listObjectives(): Promise<ReadonlyArray<FactoryObjectiveCard>> {
+    await this.ensureBootstrap();
+    const streams = await this.discoverObjectiveStreams();
+    const details = await Promise.all(
+      streams.map(async (stream) => {
+        const state = await this.runtime.state(stream);
+        return state.objectiveId ? this.toObjectiveCard(state) : undefined;
+      })
+    );
+    return details
+      .filter((detail): detail is FactoryObjectiveCard => Boolean(detail))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  async getObjectiveState(objectiveId: string): Promise<FactoryState> {
+    await this.ensureBootstrap();
+    const state = await this.runtime.state(objectiveStream(objectiveId));
+    if (!state.objectiveId) throw new FactoryServiceError(404, "factory objective not found");
+    return state;
+  }
+
+  async getObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    return this.buildObjectiveDetail(state);
+  }
+
+  async getObjectiveDebug(objectiveId: string): Promise<FactoryDebugProjection> {
+    const state = await this.getObjectiveState(objectiveId);
+    return this.buildObjectiveDebug(state);
+  }
+
+  async listObjectiveReceipts(
+    objectiveId: string,
+    limit = 40,
+  ): Promise<ReadonlyArray<{ readonly type: string; readonly hash: string; readonly ts: number; readonly summary: string }>> {
+    await this.getObjectiveState(objectiveId);
+    const chain = await this.runtime.chain(objectiveStream(objectiveId));
+    return [...chain]
+      .slice(-Math.max(1, Math.min(limit, 200)))
+      .map((receipt) => ({
+        type: receipt.body.type,
+        hash: receipt.hash,
+        ts: receipt.ts,
+        summary: this.summarizeReceipt(receipt.body),
+      }));
+  }
+
+  async buildBoardProjection(selectedObjectiveId?: string): Promise<FactoryBoardProjection> {
+    const objectives = (await this.listObjectives())
+      .filter((objective) => !objective.archivedAt)
+      .map((objective) => ({
+        ...objective,
+        lane: factoryLane(objective.status),
+      }));
+    const resolvedSelectedObjectiveId = this.resolveSelectedObjectiveId(objectives, selectedObjectiveId);
+    return {
+      objectives,
+      lanes: {
+        planning: objectives.filter((objective) => objective.lane === "planning"),
+        executing: objectives.filter((objective) => objective.lane === "executing"),
+        integrating: objectives.filter((objective) => objective.lane === "integrating"),
+        promoting: objectives.filter((objective) => objective.lane === "promoting"),
+        blocked: objectives.filter((objective) => objective.lane === "blocked"),
+        completed: objectives.filter((objective) => objective.lane === "completed"),
+      },
+      selectedObjectiveId: resolvedSelectedObjectiveId,
+    };
+  }
+
+  async buildComposeModel(): Promise<FactoryComposeModel> {
+    const [sourceStatus, defaultBranch, objectives] = await Promise.all([
+      this.git.sourceStatus(),
+      this.git.defaultBranch(),
+      this.listObjectives(),
+    ]);
+    return {
+      defaultBranch,
+      sourceDirty: sourceStatus.dirty,
+      sourceBranch: sourceStatus.branch,
+      objectiveCount: objectives.filter((objective) => !objective.archivedAt).length,
+      defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    };
+  }
+
+  async buildLiveProjection(selectedObjectiveId?: string): Promise<FactoryLiveProjection> {
+    const board = await this.buildBoardProjection(selectedObjectiveId);
+    const objectiveId = board.selectedObjectiveId;
+    if (!objectiveId) {
+      return {
+        activeTasks: [],
+        recentJobs: [],
+      };
+    }
+    const [detail, jobs] = await Promise.all([
+      this.getObjective(objectiveId),
+      this.queue.listJobs({ limit: 40 }),
+    ]);
+    const activeTasks = detail.tasks.filter((task) => isActiveJobStatus(task.jobStatus));
+    const recentJobs = jobs
+      .filter((job) => (job.payload as Record<string, unknown>).objectiveId === objectiveId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 8);
+    return {
+      selectedObjectiveId: objectiveId,
+      objectiveTitle: detail.title,
+      objectiveStatus: detail.status,
+      activeTasks,
+      recentJobs,
+    };
+  }
+
+  async promoteObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    if (state.integration.status !== "ready_to_promote" || !state.integration.activeCandidateId) {
+      throw new FactoryServiceError(409, "objective is not ready to promote");
+    }
+    await this.promoteIntegration(state, state.integration.activeCandidateId);
+    return this.getObjective(objectiveId);
+  }
+
+  async cancelObjective(objectiveId: string, reason?: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    for (const taskId of state.graph.activeNodeIds) {
+      const task = state.graph.nodes[taskId];
+      if (task?.jobId) {
+        await this.queue.cancel(task.jobId, reason ?? "factory objective canceled", "factory");
+      }
+    }
+    await this.emitObjective(objectiveId, {
+      type: "objective.canceled",
+      objectiveId,
+      canceledAt: Date.now(),
+      reason,
+    });
+    return this.getObjective(objectiveId);
+  }
+
+  async archiveObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    if (!state.archivedAt) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.archived",
+        objectiveId,
+        archivedAt: Date.now(),
+      });
+    }
+    return this.getObjective(objectiveId);
+  }
+
+  async cleanupObjectiveWorkspaces(objectiveId: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    const workspacePaths = new Set<string>();
+    for (const taskId of state.taskOrder) {
+      const task = state.graph.nodes[taskId];
+      if (task?.workspacePath) workspacePaths.add(task.workspacePath);
+    }
+    const diskEntries = await fs.readdir(this.git.worktreesDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of diskEntries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.startsWith(`${objectiveId}_`) && !entry.name.startsWith(`factory_integration_${objectiveId}`)) continue;
+      workspacePaths.add(path.join(this.git.worktreesDir, entry.name));
+    }
+    if (state.integration.branchRef?.kind === "workspace") {
+      workspacePaths.add(state.integration.branchRef.ref);
+    }
+    await Promise.all(
+      [...workspacePaths].map(async (workspacePath) => {
+        await this.git.removeWorkspace(workspacePath).catch(() => undefined);
+      }),
+    );
+    return this.getObjective(objectiveId);
+  }
+
+  async resumeObjectives(): Promise<void> {
+    const objectives = await this.listObjectives();
+    for (const objective of objectives.filter((item) => !["completed", "failed", "canceled"].includes(item.status))) {
+      await this.reactObjective(objective.objectiveId);
+    }
+  }
+
+  private objectiveElapsedMinutes(state: FactoryState, now = Date.now()): number {
+    if (!state.createdAt) return 0;
+    return Math.max(0, Math.floor((now - state.createdAt) / 60_000));
+  }
+
+  private buildBudgetState(
+    state: FactoryState,
+    now = Date.now(),
+    policyBlockedReason?: string,
+  ): FactoryBudgetState {
+    return {
+      taskRunsUsed: state.taskRunsUsed,
+      candidatePassesByTask: state.candidatePassesByTask,
+      reconciliationTasksUsed: state.reconciliationTasksUsed,
+      elapsedMinutes: this.objectiveElapsedMinutes(state, now),
+      lastMutationAt: state.lastMutationAt,
+      lastDispatchAt: state.lastDispatchAt,
+      policyBlockedReason: policyBlockedReason ?? this.derivePolicyBlockedReason(state, now),
+    };
+  }
+
+  private derivePolicyBlockedReason(state: FactoryState, now = Date.now()): string | undefined {
+    const elapsedMinutes = this.objectiveElapsedMinutes(state, now);
+    if (elapsedMinutes > state.policy.budgets.maxObjectiveMinutes) {
+      return `Policy blocked: objective exceeded maxObjectiveMinutes (${elapsedMinutes}/${state.policy.budgets.maxObjectiveMinutes}).`;
+    }
+    if (state.taskRunsUsed >= state.policy.budgets.maxTaskRuns) {
+      return `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`;
+    }
+    if (state.blockedReason?.startsWith("Policy blocked:")) return state.blockedReason;
+    return undefined;
+  }
+
+  private taskReworkPolicyBlockedReason(state: FactoryState, task: FactoryTaskRecord): string | undefined {
+    const latest = this.latestTaskCandidate(state, task.taskId);
+    if (!latest || !["changes_requested", "rejected", "conflicted"].includes(latest.status)) return undefined;
+    const passes = state.candidatePassesByTask[task.taskId] ?? 0;
+    if (passes < state.policy.budgets.maxCandidatePassesPerTask) return undefined;
+    return `Policy blocked: ${task.taskId} exhausted maxCandidatePassesPerTask (${passes}/${state.policy.budgets.maxCandidatePassesPerTask}).`;
+  }
+
+  private resolveSelectedObjectiveId(
+    objectives: ReadonlyArray<{ readonly objectiveId: string }>,
+    preferredId?: string,
+  ): string | undefined {
+    if (preferredId && objectives.some((objective) => objective.objectiveId === preferredId)) return preferredId;
+    return objectives[0]?.objectiveId;
+  }
+
+  async reactObjective(objectiveId: string): Promise<void> {
+    let state = await this.getObjectiveState(objectiveId);
+
+    if (["completed", "failed", "canceled"].includes(state.status)) return;
+
+    const elapsedBlockedReason = this.derivePolicyBlockedReason({
+      ...state,
+      taskRunsUsed: 0,
+    } as FactoryState);
+    if (elapsedBlockedReason?.includes("maxObjectiveMinutes")) {
+      if (state.blockedReason !== elapsedBlockedReason || state.status !== "blocked") {
+        await this.emitObjective(objectiveId, {
+          type: "objective.blocked",
+          objectiveId,
+          reason: elapsedBlockedReason,
+          summary: elapsedBlockedReason,
+          blockedAt: Date.now(),
+        });
+      }
+      return;
+    }
+
+    for (const taskId of [...state.graph.activeNodeIds]) {
+      const task = state.graph.nodes[taskId];
+      if (!task?.jobId) continue;
+      const job = await this.loadFreshJob(task.jobId);
+      if (!job || !isTerminalJobStatus(job.status)) continue;
+      if ((job.status === "failed" || job.status === "canceled") && (task.status === "running" || task.status === "reviewing")) {
+        await this.emitObjective(objectiveId, {
+          type: "task.blocked",
+          objectiveId,
+          taskId,
+          reason: job.lastError ?? job.canceledReason ?? "factory task failed",
+          blockedAt: Date.now(),
+        });
+        state = await this.getObjectiveState(objectiveId);
+      }
+    }
+
+    for (const task of factoryActivatableTasks(state)) {
+      await this.emitObjective(objectiveId, {
+        type: "task.ready",
+        objectiveId,
+        taskId: task.taskId,
+        readyAt: Date.now(),
+      });
+      state = await this.getObjectiveState(objectiveId);
+    }
+
+    for (const task of factoryReadyTasks(state)) {
+      const blockedReason = this.taskReworkPolicyBlockedReason(state, task);
+      if (!blockedReason) continue;
+      await this.emitObjective(objectiveId, {
+        type: "task.blocked",
+        objectiveId,
+        taskId: task.taskId,
+        reason: blockedReason,
+        blockedAt: Date.now(),
+      });
+      state = await this.getObjectiveState(objectiveId);
+    }
+
+    const activeCount = state.graph.activeNodeIds.length;
+    const capacity = Math.max(0, state.policy.concurrency.maxActiveTasks - activeCount);
+    const dispatchWindow = Math.min(capacity, state.policy.throttles.maxDispatchesPerReact);
+    const taskRunBudgetExhausted = state.taskRunsUsed >= state.policy.budgets.maxTaskRuns;
+    const dispatchPolicyBlockedReason = taskRunBudgetExhausted
+      ? `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`
+      : undefined;
+    const ready = taskRunBudgetExhausted
+      ? []
+      : factoryReadyTasks(state).slice(0, dispatchWindow);
+    for (const task of ready) {
+      await this.dispatchTask(state, task);
+      state = await this.getObjectiveState(objectiveId);
+    }
+
+    const semanticActions = await this.buildSemanticActions(state);
+    if (semanticActions.length > 0) {
+      try {
+        const decision = await this.resolveOrchestratorDecision(state, semanticActions);
+        await this.applyAction(state, decision.action, decision.reason, decision.confidence, decision.source);
+        state = await this.getObjectiveState(objectiveId);
+      } catch (err) {
+        if (err instanceof FactoryStaleObjectiveError) {
+          await this.reactObjective(objectiveId);
+          return;
+        }
+        throw err;
+      }
+    }
+
+    const projection = buildFactoryProjection(state);
+    if (
+      projection.tasks.length > 0
+      && projection.tasks.every((task) => ["integrated", "superseded"].includes(task.status))
+      && state.integration.status === "promoted"
+      && state.status !== "completed"
+    ) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.completed",
+        objectiveId,
+        summary: state.integration.lastSummary ?? "Factory objective completed.",
+        completedAt: Date.now(),
+      });
+      return;
+    }
+
+    if (
+      projection.tasks.length > 0
+      && projection.readyTasks.length === 0
+      && projection.activeTasks.length === 0
+      && state.integration.status === "idle"
+      && projection.tasks.every((task) => ["blocked", "superseded"].includes(task.status))
+      && state.status !== "blocked"
+    ) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.blocked",
+        objectiveId,
+        reason: "No runnable tasks remained.",
+        summary: "Factory objective is blocked with no runnable tasks.",
+        blockedAt: Date.now(),
+      });
+    }
+
+    if (
+      dispatchPolicyBlockedReason
+      && buildFactoryProjection(state).readyTasks.length > 0
+      && state.graph.activeNodeIds.length === 0
+      && state.integration.status === "idle"
+      && state.status !== "blocked"
+    ) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.blocked",
+        objectiveId,
+        reason: dispatchPolicyBlockedReason,
+        summary: dispatchPolicyBlockedReason,
+        blockedAt: Date.now(),
+      });
+    }
+  }
+
+  async runTask(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
+    await this.ensureBootstrap();
+    const parsed = this.parseTaskPayload(payload);
+    const state = await this.getObjectiveState(parsed.objectiveId);
+    const task = state.graph.nodes[parsed.taskId];
+    if (!task) throw new FactoryServiceError(404, "factory task not found");
+    const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
+    let rebuiltPacket = false;
+    if (!workspaceStatus.exists) {
+      await this.git.restoreWorkspace({
+        workspaceId: parsed.workspaceId,
+        branchName: `hub/${task.workerType}/${parsed.workspaceId}`,
+        workspacePath: parsed.workspacePath,
+        baseHash: parsed.baseCommit,
+      });
+      rebuiltPacket = true;
+    }
+    const manifestPresent = await fs.access(parsed.manifestPath).then(() => true).catch(() => false);
+    if (rebuiltPacket || !manifestPresent) {
+      await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
+    }
+    const renderedPrompt = await this.renderTaskPrompt(state, task, parsed);
+    const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
+    await this.codexExecutor.run({
+      prompt: renderedPrompt,
+      workspacePath: parsed.workspacePath,
+      promptPath: parsed.promptPath,
+      lastMessagePath: parsed.lastMessagePath,
+      stdoutPath: parsed.stdoutPath,
+      stderrPath: parsed.stderrPath,
+      objectiveId: parsed.objectiveId,
+      taskId: parsed.taskId,
+      candidateId: parsed.candidateId,
+      integrationRef: parsed.integrationRef,
+      contextRefs: parsed.contextRefs,
+      skillBundlePaths: parsed.skillBundlePaths,
+      repoSkillPaths: parsed.repoSkillPaths,
+      env: {
+        DATA_DIR: this.dataDir,
+        PATH: prependPath(receiptBinDir, process.env.PATH),
+      },
+    }, control);
+    const rawResult = await fs.readFile(parsed.resultPath, "utf-8").catch(() => "");
+    await this.applyTaskWorkerResult(parsed, this.parseTaskResult(rawResult));
+    await this.reactObjective(parsed.objectiveId);
+    return {
+      objectiveId: parsed.objectiveId,
+      taskId: parsed.taskId,
+      candidateId: parsed.candidateId,
+      status: "completed",
+    };
+  }
+
+  async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
+    const state = await this.getObjectiveState(payload.objectiveId);
+    const task = state.graph.nodes[payload.taskId];
+    if (!task) throw new FactoryServiceError(404, "factory task not found");
+    const summary = requireNonEmpty(rawResult.summary, "task result summary required");
+    const handoff = optionalTrimmedString(rawResult.handoff) ?? summary;
+    const outcome = optionalTrimmedString(rawResult.outcome) ?? "approved";
+    const completedAt = Date.now();
+
+    if (outcome === "blocked") {
+      await this.emitObjective(payload.objectiveId, {
+        type: "task.blocked",
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        reason: handoff,
+        blockedAt: completedAt,
+      });
+      return;
+    }
+
+    const checkResults = await this.runChecks(state.checks, payload.workspacePath);
+    const failedCheck = checkResults.find((check) => !check.ok);
+    const status = await this.git.worktreeStatus(payload.workspacePath);
+    if (!status.dirty) {
+      await this.emitObjective(payload.objectiveId, {
+        type: "task.blocked",
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        reason: "factory task produced no tracked diff",
+        blockedAt: completedAt,
+      });
+      return;
+    }
+
+    const committed = await this.git.commitWorkspace(
+      payload.workspacePath,
+      `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`
+    );
+    const resultRefs = {
+      manifest: fileRef(payload.manifestPath, "task manifest"),
+      prompt: fileRef(payload.promptPath, "task prompt"),
+      result: fileRef(payload.resultPath, "task result"),
+      stdout: fileRef(payload.stdoutPath, "task stdout"),
+      stderr: fileRef(payload.stderrPath, "task stderr"),
+      lastMessage: fileRef(payload.lastMessagePath, "task last message"),
+      contextPack: fileRef(payload.contextPackPath, "task recursive context pack"),
+      memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
+      memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
+      commit: commitRef(committed.hash, "candidate commit"),
+    } satisfies Readonly<Record<string, GraphRef>>;
+
+    await this.emitObjective(payload.objectiveId, {
+      type: "candidate.produced",
+      objectiveId: payload.objectiveId,
+      candidateId: payload.candidateId,
+      taskId: payload.taskId,
+      headCommit: committed.hash,
+      summary,
+      handoff,
+      checkResults,
+      artifactRefs: resultRefs,
+      producedAt: completedAt,
+    });
+    await this.emitObjective(payload.objectiveId, {
+      type: "task.review.requested",
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      reviewRequestedAt: completedAt,
+    });
+
+    if (failedCheck) {
+      await this.emitObjective(payload.objectiveId, {
+        type: "candidate.reviewed",
+        objectiveId: payload.objectiveId,
+        candidateId: payload.candidateId,
+        taskId: payload.taskId,
+        status: "changes_requested",
+        summary: `Verification failed: ${failedCheck.command}`,
+        handoff,
+        reviewedAt: completedAt,
+      });
+      return;
+    }
+
+    const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
+      outcome === "changes_requested" ? "changes_requested" : outcome === "rejected" ? "rejected" : "approved";
+    await this.emitObjective(payload.objectiveId, {
+      type: "candidate.reviewed",
+      objectiveId: payload.objectiveId,
+      candidateId: payload.candidateId,
+      taskId: payload.taskId,
+      status: reviewStatus,
+      summary,
+      handoff,
+      reviewedAt: completedAt,
+    });
+    await this.commitTaskMemory(state, task, payload.candidateId, summary, reviewStatus);
+  }
+
+  async runIntegrationValidation(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const parsed = this.parseIntegrationPayload(payload);
+    const state = await this.getObjectiveState(parsed.objectiveId);
+    const startedAt = Date.now();
+    await this.emitObjective(parsed.objectiveId, {
+      type: "integration.validating",
+      objectiveId: parsed.objectiveId,
+      candidateId: parsed.candidateId,
+      startedAt,
+    });
+    const results = await this.runChecks(parsed.checks, parsed.workspacePath);
+    const failed = results.find((result) => !result.ok);
+    const raw = JSON.stringify({ results }, null, 2);
+    await fs.mkdir(path.dirname(parsed.resultPath), { recursive: true });
+    await fs.writeFile(parsed.resultPath, raw, "utf-8");
+    await fs.writeFile(parsed.stdoutPath, results.map((result) => result.stdout).join("\n"), "utf-8");
+    await fs.writeFile(parsed.stderrPath, results.map((result) => result.stderr).join("\n"), "utf-8");
+    if (failed) {
+      await this.commitIntegrationMemory(state, parsed.candidateId, `Integration validation failed: ${failed.command}`, ["integration", "failed"]);
+      await this.emitObjective(parsed.objectiveId, {
+        type: "integration.conflicted",
+        objectiveId: parsed.objectiveId,
+        candidateId: parsed.candidateId,
+        reason: `integration validation failed: ${failed.command}`,
+        conflictedAt: Date.now(),
+      });
+      await this.spawnReconciliationTask(state, parsed.candidateId, `Resolve integration failure in ${failed.command}.`);
+      await this.reactObjective(parsed.objectiveId);
+      return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "failed" };
+    }
+    const head = await this.git.worktreeStatus(parsed.workspacePath);
+    await this.emitObjective(parsed.objectiveId, {
+      type: "integration.ready_to_promote",
+      objectiveId: parsed.objectiveId,
+      candidateId: parsed.candidateId,
+      headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
+      validationResults: results,
+      summary: `Integration checks passed for ${parsed.candidateId}.`,
+      readyAt: Date.now(),
+    });
+    await this.commitIntegrationMemory(state, parsed.candidateId, `Integration checks passed for ${parsed.candidateId}.`, ["integration", "ready_to_promote"]);
+    await this.reactObjective(parsed.objectiveId);
+    return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
+  }
+
+  async loadFreshJob(jobId: string): Promise<JobRecord | undefined> {
+    return this.queue.getJob(jobId);
+  }
+
+  private nextTaskOrdinal(state: FactoryState): number {
+    return state.taskOrder
+      .map((taskId) => /^task_(\d+)$/i.exec(taskId)?.[1])
+      .map((value) => Number.parseInt(value ?? "", 10))
+      .filter((value) => Number.isFinite(value))
+      .reduce((max, value) => Math.max(max, value), 0);
+  }
+
+  private nextTaskId(state: FactoryState, offset = 0): string {
+    return taskOrdinalId(this.nextTaskOrdinal(state) + offset);
+  }
+
+  private async dispatchTask(state: FactoryState, task: FactoryTaskRecord): Promise<void> {
+    const candidateId = this.resolveDispatchCandidateId(state, task);
+    if (!state.candidates[candidateId]) {
+      const createdAt = Date.now();
+      const priorCandidate = this.latestTaskCandidate(state, task.taskId);
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.created",
+        objectiveId: state.objectiveId,
+        createdAt,
+        candidate: {
+          candidateId,
+          taskId: task.taskId,
+          status: "planned",
+          parentCandidateId: priorCandidate?.candidateId,
+          baseCommit: priorCandidate?.headCommit ?? this.resolveTaskBaseCommit(state, task),
+          checkResults: [],
+          artifactRefs: {},
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      state = await this.getObjectiveState(state.objectiveId);
+    }
+
+    const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
+    const workspace = await this.ensureTaskWorkspace(state, task, workspaceId);
+    const initialManifest = await this.writeTaskPacket(state, task, candidateId, workspace.path);
+    const jobId = `job_factory_${state.objectiveId}_${task.taskId}_${candidateId}`;
+    await this.emitObjective(state.objectiveId, {
+      type: "task.dispatched",
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      candidateId,
+      jobId,
+      workspaceId,
+      workspacePath: workspace.path,
+      skillBundlePaths: initialManifest.skillBundlePaths,
+      contextRefs: initialManifest.contextRefs,
+      startedAt: Date.now(),
+    });
+    state = await this.getObjectiveState(state.objectiveId);
+    const refreshedTask = state.graph.nodes[task.taskId] ?? task;
+    const manifest = await this.writeTaskPacket(state, refreshedTask, candidateId, workspace.path);
+
+    const payload: FactoryTaskJobPayload = {
+      kind: "factory.task.run",
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      workerType: task.workerType,
+      candidateId,
+      baseCommit: this.resolveTaskBaseCommit(state, task),
+      workspaceId,
+      workspacePath: workspace.path,
+      promptPath: manifest.promptPath,
+      resultPath: manifest.resultPath,
+      stdoutPath: manifest.stdoutPath,
+      stderrPath: manifest.stderrPath,
+      lastMessagePath: manifest.lastMessagePath,
+      manifestPath: manifest.manifestPath,
+      contextPackPath: manifest.contextPackPath,
+      memoryScriptPath: manifest.memoryScriptPath,
+      memoryConfigPath: manifest.memoryConfigPath,
+      repoSkillPaths: manifest.repoSkillPaths,
+      skillBundlePaths: manifest.skillBundlePaths,
+      contextRefs: manifest.contextRefs,
+      integrationRef: state.integration.branchRef,
+      problem: task.prompt,
+      config: {
+        workspace: workspace.path,
+        memoryScope: `factory/objectives/${state.objectiveId}/tasks/${task.taskId}`,
+        maxIterations: 6,
+      },
+    };
+    const created = await this.queue.enqueue({
+      jobId,
+      agentId: task.workerType === "codex" ? "codex" : String(task.workerType),
+      lane: "collect",
+      sessionKey: `factory:${state.objectiveId}:${task.taskId}`,
+      singletonMode: "allow",
+      maxAttempts: 2,
+      payload,
+    });
+    this.sse.publish("jobs", created.id);
+  }
+
+  private async resolveOrchestratorDecision(
+    state: FactoryState,
+    actions: ReadonlyArray<FactoryAction>,
+  ): Promise<{
+    readonly action: FactoryAction;
+    readonly reason: string;
+    readonly confidence: number;
+    readonly source: "orchestrator" | "fallback";
+  }> {
+    const input: FactoryOrchestratorInput = {
+      objectiveId: state.objectiveId,
+      title: state.title,
+      prompt: state.prompt,
+      baseHash: state.baseHash,
+      basedOn: await this.currentHeadHash(state.objectiveId),
+      tasks: state.taskOrder
+        .map((taskId) => state.graph.nodes[taskId])
+        .filter((task): task is FactoryTaskRecord => Boolean(task))
+        .map((task) => ({
+          taskId: task.taskId,
+          title: task.title,
+          status: task.status,
+          workerType: task.workerType,
+          dependsOn: task.dependsOn,
+          latestSummary: task.latestSummary,
+          blockedReason: task.blockedReason,
+        })),
+      candidates: state.candidateOrder
+        .map((candidateId) => state.candidates[candidateId])
+        .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate))
+        .map((candidate) => ({
+          candidateId: candidate.candidateId,
+          taskId: candidate.taskId,
+          status: candidate.status,
+          summary: candidate.summary,
+          headCommit: candidate.headCommit,
+          lastScore: candidate.lastScore,
+          lastScoreReason: candidate.lastScoreReason,
+        })),
+      integration: {
+        status: state.integration.status,
+        headCommit: state.integration.headCommit,
+        activeCandidateId: state.integration.activeCandidateId,
+        queuedCandidateIds: state.integration.queuedCandidateIds,
+        conflictReason: state.integration.conflictReason,
+      },
+      actions,
+    };
+    const now = Date.now();
+    await this.emitObjective(state.objectiveId, {
+      type: "merge.evidence.computed",
+      objectiveId: state.objectiveId,
+      frontierTaskIds: state.taskOrder,
+      actionIds: actions.map((action) => action.actionId),
+      summary: actions.map((action) => `${action.type}:${action.taskId ?? action.candidateId ?? action.actionId}`).join(", "),
+      basedOn: input.basedOn,
+      computedAt: now,
+    });
+    for (const [index, action] of actions.entries()) {
+      if (action.type !== "queue_integration" || !action.candidateId) continue;
+      const total = Math.max(1, actions.filter((item) => item.type === "queue_integration" && item.candidateId).length);
+      const score = Number(((total - index) / total).toFixed(3));
+      await this.emitObjective(state.objectiveId, {
+        type: "merge.candidate.scored",
+        objectiveId: state.objectiveId,
+        candidateId: action.candidateId,
+        score,
+        scoreVector: {
+          priority: score,
+          deterministic_order: score,
+        },
+        reason: `Candidate ${action.candidateId} ranked for integration by action order.`,
+        scoredAt: now + index,
+      });
+    }
+
+    const fallback = fallbackFactoryDecision(input);
+    let selected = fallback;
+    let source: "orchestrator" | "fallback" = "fallback";
+    if (this.orchestratorMode === "enabled" && this.orchestrator) {
+      try {
+        const proposed = await this.orchestrator.decide(input);
+        if (proposed.confidence >= 0.55 && actions.some((action) => action.actionId === proposed.selectedActionId)) {
+          selected = proposed;
+          source = "orchestrator";
+        }
+      } catch {
+        source = "fallback";
+      }
+    }
+    const action = actions.find((item) => item.actionId === selected.selectedActionId) ?? actions[0];
+    if (!action) throw new FactoryServiceError(500, "factory orchestrator selected no action");
+    return {
+      action,
+      reason: selected.reason,
+      confidence: selected.confidence,
+      source,
+    };
+  }
+
+  private async buildSemanticActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>> {
+    const actions: FactoryAction[] = [];
+    const approvedCandidates = state.candidateOrder
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate))
+      .filter((candidate) => candidate.status === "approved");
+
+    if ((state.integration.status === "idle" || state.integration.status === "conflicted") && approvedCandidates.length > 0) {
+      for (const candidate of approvedCandidates) {
+        actions.push({
+          actionId: `action_queue_${candidate.candidateId}`,
+          type: "queue_integration",
+          label: `Queue ${candidate.candidateId} for integration`,
+          candidateId: candidate.candidateId,
+          taskId: candidate.taskId,
+          summary: candidate.summary,
+        });
+      }
+    }
+
+    if (
+      state.integration.status === "ready_to_promote"
+      && state.integration.activeCandidateId
+      && state.policy.promotion.autoPromote
+    ) {
+      actions.push({
+        actionId: `action_promote_${state.integration.activeCandidateId}`,
+        type: "promote_integration",
+        label: `Promote integrated candidate ${state.integration.activeCandidateId}`,
+        candidateId: state.integration.activeCandidateId,
+      });
+    }
+
+    const mutationActions = await this.buildMutationActions(state);
+    actions.push(...mutationActions);
+
+    if (actions.length === 0 && state.graph.activeNodeIds.length === 0 && factoryReadyTasks(state).length === 0) {
+      const blocked = state.taskOrder
+        .map((taskId) => state.graph.nodes[taskId])
+        .find((task) => task?.status === "blocked");
+      if (blocked) {
+        actions.push({
+          actionId: `action_block_${blocked.taskId}`,
+          type: "block_objective",
+          label: `Block objective on ${blocked.taskId}`,
+          taskId: blocked.taskId,
+          summary: blocked.blockedReason ?? blocked.latestSummary ?? `Task ${blocked.taskId} is blocked.`,
+        });
+      }
+    }
+
+    return actions;
+  }
+
+  private async buildMutationActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>> {
+    if (this.orchestratorMode !== "enabled") return [];
+    if (state.policy.mutation.aggressiveness === "off") return [];
+    if (
+      state.lastMutationAt
+      && Date.now() - state.lastMutationAt < state.policy.throttles.mutationCooldownMs
+    ) {
+      return [];
+    }
+    const allMutableTasks = state.taskOrder
+      .map((taskId) => state.graph.nodes[taskId])
+      .filter((task): task is FactoryTaskRecord => Boolean(task));
+    const blockedTasks = allMutableTasks.filter((task) => task.status === "blocked");
+    const pendingTasks = allMutableTasks.filter((task) => task.status === "pending");
+    const readyTasks = allMutableTasks.filter((task) => task.status === "ready");
+    const mutableTasks = (() => {
+      switch (state.policy.mutation.aggressiveness) {
+        case "conservative":
+          return blockedTasks;
+        case "aggressive":
+          return [
+            ...blockedTasks,
+            ...readyTasks.slice(0, 2),
+            ...pendingTasks.slice(0, 2),
+          ];
+        case "balanced":
+        default:
+          return blockedTasks.length > 0
+            ? [
+                ...blockedTasks,
+                ...pendingTasks.slice(0, 2),
+              ]
+            : [];
+      }
+    })();
+    if (mutableTasks.length === 0) return [];
+
+    return this.planMutationActions(state, mutableTasks);
+  }
+
+  private async planMutationActions(
+    state: FactoryState,
+    tasks: ReadonlyArray<FactoryTaskRecord>,
+  ): Promise<ReadonlyArray<FactoryAction>> {
+    if (!this.llmStructured || tasks.length === 0) return [];
+    try {
+      const { parsed } = await this.llmStructured({
+        schema: mutationPlanSchema,
+        schemaName: "factory_task_mutation_plan",
+        system: [
+          "You are proposing runtime task-graph mutations for the Receipt factory.",
+          `Mutation aggressiveness is ${state.policy.mutation.aggressiveness}.`,
+          state.policy.mutation.aggressiveness === "conservative"
+            ? "Only mutate blocked tasks. Prefer reassigning or unblocking."
+            : state.policy.mutation.aggressiveness === "balanced"
+              ? "Only mutate blocked tasks and a small number of pending tasks. Prefer reassigning or unblocking before splitting."
+              : "Only mutate tasks that are pending, ready, or blocked. Prefer reassigning or unblocking before splitting.",
+          "Use split_task only when the task should be replaced with smaller sub-tasks.",
+          "Do not mutate running, approved, integrated, superseded, failed, or canceled history.",
+        ].join("\n"),
+        user: JSON.stringify({
+          objectiveId: state.objectiveId,
+          title: state.title,
+          prompt: state.prompt,
+          integration: state.integration,
+          tasks: tasks.map((task) => ({
+            taskId: task.taskId,
+            title: task.title,
+            prompt: task.prompt,
+            workerType: task.workerType,
+            status: task.status,
+            dependsOn: task.dependsOn,
+            latestSummary: task.latestSummary,
+            blockedReason: task.blockedReason,
+          })),
+        }, null, 2),
+      });
+      return this.normalizePlannedMutationActions(state, parsed);
+    } catch {
+      return [];
+    }
+  }
+
+  private normalizePlannedMutationActions(
+    state: FactoryState,
+    plan: FactoryMutationPlan,
+  ): ReadonlyArray<FactoryAction> {
+    const aggressiveness = state.policy.mutation.aggressiveness;
+    const mutable = new Map(
+      state.taskOrder
+        .map((taskId) => state.graph.nodes[taskId])
+        .filter((task): task is FactoryTaskRecord => Boolean(task))
+        .filter((task) => {
+          if (aggressiveness === "conservative") return task.status === "blocked";
+          if (aggressiveness === "balanced") return task.status === "blocked" || task.status === "pending";
+          return task.status === "blocked" || task.status === "pending" || task.status === "ready";
+        })
+        .map((task) => [task.taskId, task] as const),
+    );
+    const actions: FactoryAction[] = [];
+    for (const action of plan.actions) {
+      const task = mutable.get(action.taskId);
+      if (!task) continue;
+      if (action.type === "split_task") {
+        if (aggressiveness === "conservative" && task.status !== "blocked") continue;
+        const tasks = action.tasks
+          .map((draft) => ({
+            title: clipText(draft.title, 120) ?? draft.title.trim(),
+            prompt: draft.prompt.trim(),
+            workerType: normalizeWorkerType(draft.workerType),
+          }))
+          .filter((draft) => draft.title && draft.prompt)
+          .map((draft) => ({
+            ...draft,
+            dependsOn: [] as string[],
+          }));
+        if (tasks.length === 0) continue;
+        actions.push({
+          actionId: `action_split_${task.taskId}`,
+          type: "split_task",
+          label: `Split ${task.taskId}`,
+          taskId: task.taskId,
+          summary: action.reason,
+          tasks,
+        });
+        continue;
+      }
+      if (action.type === "reassign_task") {
+        const workerType = normalizeWorkerType(action.workerType);
+        if (workerType === task.workerType) continue;
+        actions.push({
+          actionId: `action_reassign_${task.taskId}_${String(workerType)}`,
+          type: "reassign_task",
+          label: `Reassign ${task.taskId} to ${workerType}`,
+          taskId: task.taskId,
+          workerType,
+          summary: action.reason,
+        });
+        continue;
+      }
+      if (action.type === "update_dependencies") {
+        if (aggressiveness !== "aggressive") continue;
+        const dependsOn = this.normalizeExistingDependencies(state, task.taskId, action.dependsOn);
+        const currentDependsOn = this.normalizeExistingDependencies(state, task.taskId, task.dependsOn);
+        if (dependsOn.length === currentDependsOn.length && dependsOn.every((depId, index) => depId === currentDependsOn[index])) continue;
+        actions.push({
+          actionId: `action_deps_${task.taskId}`,
+          type: "update_dependencies",
+          label: `Update dependencies for ${task.taskId}`,
+          taskId: task.taskId,
+          dependsOn,
+          summary: action.reason,
+        });
+        continue;
+      }
+      if (action.type === "unblock_task" && task.status === "blocked") {
+        actions.push({
+          actionId: `action_unblock_${task.taskId}`,
+          type: "unblock_task",
+          label: `Unblock ${task.taskId}`,
+          taskId: task.taskId,
+          summary: action.reason,
+        });
+        continue;
+      }
+      if (action.type === "supersede_task") {
+        if (aggressiveness !== "aggressive" || task.status !== "ready") continue;
+        actions.push({
+          actionId: `action_supersede_${task.taskId}`,
+          type: "supersede_task",
+          label: `Supersede ${task.taskId}`,
+          taskId: task.taskId,
+          summary: action.reason,
+        });
+      }
+    }
+    return actions;
+  }
+
+  private async applyAction(
+    state: FactoryState,
+    action: FactoryAction,
+    reason: string,
+    confidence: number,
+    source: "orchestrator" | "fallback",
+  ): Promise<void> {
+    const appliedAt = Date.now();
+    const basedOn = await this.currentHeadHash(state.objectiveId);
+    const rebracket: FactoryEvent = {
+      type: "rebracket.applied",
+      objectiveId: state.objectiveId,
+      frontierTaskIds: state.taskOrder,
+      selectedActionId: action.actionId,
+      reason,
+      confidence,
+      source,
+      basedOn,
+      appliedAt,
+    };
+
+    if (action.type === "queue_integration" && action.candidateId) {
+      await this.queueIntegration(state, action.candidateId, {
+        expectedPrev: basedOn,
+        prefixEvents: [rebracket],
+      });
+      return;
+    }
+    if (action.type === "promote_integration" && action.candidateId) {
+      await this.promoteIntegration(state, action.candidateId, {
+        expectedPrev: basedOn,
+        prefixEvents: [rebracket],
+      });
+      return;
+    }
+    if (action.type === "split_task" && action.taskId && action.tasks?.length) {
+      await this.applySplitTaskAction(state, action.taskId, action.tasks, reason, rebracket, basedOn);
+      return;
+    }
+    if (action.type === "reassign_task" && action.taskId && action.workerType) {
+      const events: FactoryEvent[] = [rebracket, {
+        type: "task.worker.reassigned",
+        objectiveId: state.objectiveId,
+        taskId: action.taskId,
+        workerType: action.workerType,
+        reason,
+        basedOn,
+        updatedAt: appliedAt,
+      }];
+      const current = state.graph.nodes[action.taskId];
+      if (current?.status === "blocked") {
+        events.push({
+          type: "task.unblocked",
+          objectiveId: state.objectiveId,
+          taskId: action.taskId,
+          readyAt: appliedAt + 1,
+        });
+      }
+      await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
+      return;
+    }
+    if (action.type === "update_dependencies" && action.taskId && action.dependsOn) {
+      const events: FactoryEvent[] = [rebracket, {
+        type: "task.dependency.updated",
+        objectiveId: state.objectiveId,
+        taskId: action.taskId,
+        dependsOn: action.dependsOn,
+        reason,
+        basedOn,
+        updatedAt: appliedAt,
+      }];
+      const current = state.graph.nodes[action.taskId];
+      if (current?.status === "blocked") {
+        events.push({
+          type: "task.unblocked",
+          objectiveId: state.objectiveId,
+          taskId: action.taskId,
+          readyAt: appliedAt + 1,
+        });
+      }
+      await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
+      return;
+    }
+    if (action.type === "unblock_task" && action.taskId) {
+      await this.emitObjectiveBatch(state.objectiveId, [rebracket, {
+        type: "task.unblocked",
+        objectiveId: state.objectiveId,
+        taskId: action.taskId,
+        readyAt: appliedAt,
+      }], basedOn);
+      return;
+    }
+    if (action.type === "supersede_task" && action.taskId) {
+      await this.emitObjectiveBatch(state.objectiveId, [rebracket, {
+        type: "task.superseded",
+        objectiveId: state.objectiveId,
+        taskId: action.taskId,
+        reason,
+        supersededAt: appliedAt,
+      }], basedOn);
+      return;
+    }
+    if (action.type === "block_objective") {
+      const blockReason = action.summary ?? reason;
+      await this.emitObjectiveBatch(state.objectiveId, [rebracket, {
+        type: "objective.blocked",
+        objectiveId: state.objectiveId,
+        reason: blockReason,
+        summary: blockReason,
+        blockedAt: appliedAt,
+      }], basedOn);
+    }
+  }
+
+  private async applySplitTaskAction(
+    state: FactoryState,
+    sourceTaskId: string,
+    drafts: ReadonlyArray<FactoryActionTaskDraft>,
+    reason: string,
+    rebracket: FactoryEvent,
+    basedOn: string | undefined,
+  ): Promise<void> {
+    const source = state.graph.nodes[sourceTaskId];
+    if (!source) return;
+    const createdAt = Date.now();
+    const newTasks: FactoryTaskRecord[] = [];
+    let previousNewTaskId: string | undefined;
+    for (const [index, draft] of drafts.entries()) {
+      const taskId = this.nextTaskId(state, index);
+      const dependsOn = index === 0
+        ? [...new Set(source.dependsOn)]
+        : [previousNewTaskId!];
+      newTasks.push({
+        nodeId: taskId,
+        taskId,
+        taskKind: "split",
+        title: clipText(draft.title, 120) ?? draft.title,
+        prompt: draft.prompt,
+        workerType: normalizeWorkerType(String(draft.workerType)),
+        sourceTaskId,
+        baseCommit: this.resolveTaskBaseCommit(state, source),
+        dependsOn,
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [
+          stateRef(`${objectiveStream(state.objectiveId)}:task/${sourceTaskId}`, `source task ${sourceTaskId}`),
+          ...source.contextRefs,
+        ],
+        artifactRefs: {},
+        createdAt: createdAt + index,
+        basedOn,
+      });
+      previousNewTaskId = taskId;
+    }
+    await this.emitObjectiveBatch(state.objectiveId, [
+      rebracket,
+      {
+        type: "task.split",
+        objectiveId: state.objectiveId,
+        sourceTaskId,
+        tasks: newTasks,
+        reason,
+        basedOn,
+        createdAt,
+      },
+      {
+        type: "task.superseded",
+        objectiveId: state.objectiveId,
+        taskId: sourceTaskId,
+        reason,
+        supersededAt: createdAt + newTasks.length,
+      },
+    ], basedOn);
+  }
+
+  private async queueIntegration(
+    state: FactoryState,
+    candidateId: string,
+    opts?: {
+      readonly expectedPrev?: string;
+      readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
+    },
+  ): Promise<void> {
+    const candidate = state.candidates[candidateId];
+    if (!candidate?.headCommit) throw new FactoryServiceError(409, "candidate has no commit to integrate");
+    const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
+    const now = Date.now();
+    await this.emitObjectiveBatch(state.objectiveId, [
+      ...(opts?.prefixEvents ?? []),
+      {
+        type: "integration.queued",
+        objectiveId: state.objectiveId,
+        candidateId,
+        branchName: workspace.branchName,
+        branchRef: workspaceRef(workspace.path, "integration workspace"),
+        queuedAt: now,
+      },
+      {
+        type: "integration.merging",
+        objectiveId: state.objectiveId,
+        candidateId,
+        startedAt: now + 1,
+      },
+    ], opts?.expectedPrev);
+
+    try {
+      const merged = await this.git.mergeCommitIntoWorkspace(
+        workspace.path,
+        candidate.headCommit,
+        `[factory][${state.objectiveId}] integrate ${candidateId}`
+      );
+      await this.emitObjective(state.objectiveId, {
+        type: "merge.applied",
+        objectiveId: state.objectiveId,
+        candidateId,
+        taskId: candidate.taskId,
+        summary: `Integrated ${candidateId} into ${workspace.branchName}.`,
+        mergeCommit: merged.hash,
+        appliedAt: Date.now(),
+      });
+      await this.emitObjective(state.objectiveId, {
+        type: "task.integrated",
+        objectiveId: state.objectiveId,
+        taskId: candidate.taskId,
+        summary: `Integrated ${candidateId}.`,
+        integratedAt: Date.now(),
+      });
+      await this.enqueueIntegrationValidation(state.objectiveId, candidateId, workspace.path, state.checks);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.conflicted",
+        objectiveId: state.objectiveId,
+        candidateId,
+        reason: message,
+        conflictedAt: Date.now(),
+      });
+      await this.emitObjective(state.objectiveId, {
+        type: "integration.conflicted",
+        objectiveId: state.objectiveId,
+        candidateId,
+        reason: message,
+        conflictedAt: Date.now(),
+      });
+      await this.spawnReconciliationTask(state, candidateId, `Reconcile ${candidateId} against the integration branch.`);
+      await this.commitIntegrationMemory(state, candidateId, `Integration merge conflicted for ${candidateId}: ${message}`, ["integration", "conflicted"]);
+      await this.reactObjective(state.objectiveId);
+    }
+  }
+
+  private async enqueueIntegrationValidation(
+    objectiveId: string,
+    candidateId: string,
+    workspacePath: string,
+    checks: ReadonlyArray<string>,
+  ): Promise<void> {
+    const files = this.integrationFilePaths(workspacePath, candidateId);
+    const payload: FactoryIntegrationJobPayload = {
+      kind: "factory.integration.validate",
+      objectiveId,
+      candidateId,
+      workspacePath,
+      stdoutPath: files.stdoutPath,
+      stderrPath: files.stderrPath,
+      resultPath: files.resultPath,
+      checks,
+    };
+    const created = await this.queue.enqueue({
+      jobId: `job_factory_validate_${objectiveId}_${candidateId}`,
+      agentId: "codex",
+      lane: "collect",
+      sessionKey: `factory:integration:${objectiveId}`,
+      singletonMode: "allow",
+      maxAttempts: 1,
+      payload,
+    });
+    this.sse.publish("jobs", created.id);
+  }
+
+  private async promoteIntegration(
+    state: FactoryState,
+    candidateId: string,
+    opts?: {
+      readonly expectedPrev?: string;
+      readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
+    },
+  ): Promise<void> {
+    const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
+    const status = await this.git.worktreeStatus(workspace.path);
+    const commit = status.head ?? state.integration.headCommit;
+    if (!commit) throw new FactoryServiceError(409, "integration branch has no HEAD to promote");
+    await this.emitObjectiveBatch(state.objectiveId, [
+      ...(opts?.prefixEvents ?? []),
+      {
+        type: "integration.promoting",
+        objectiveId: state.objectiveId,
+        candidateId,
+        startedAt: Date.now(),
+      },
+    ], opts?.expectedPrev);
+    let promoted: Awaited<ReturnType<HubGit["promoteCommit"]>>;
+    try {
+      promoted = await this.git.promoteCommit(commit);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.match(/uncommitted changes/i)) {
+        await this.emitObjective(state.objectiveId, {
+          type: "integration.ready_to_promote",
+          objectiveId: state.objectiveId,
+          candidateId,
+          headCommit: commit,
+          validationResults: state.integration.validationResults,
+          summary: state.integration.lastSummary ?? `Integration checks passed for ${candidateId}.`,
+          readyAt: Date.now(),
+        });
+        await this.emitObjective(state.objectiveId, {
+          type: "objective.blocked",
+          objectiveId: state.objectiveId,
+          reason: `Promotion blocked: ${message}`,
+          summary: `Promotion blocked until the source branch is clean.`,
+          blockedAt: Date.now(),
+        });
+        await this.commitIntegrationMemory(state, candidateId, `Promotion blocked until the source branch is clean.`, ["integration", "blocked"]);
+        return;
+      }
+      const freshBase = await this.git.resolveBaseHash();
+      await this.git.ensureIntegrationWorkspace(state.objectiveId, freshBase, { resetToBase: true });
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.conflicted",
+        objectiveId: state.objectiveId,
+        candidateId,
+        reason: message,
+        conflictedAt: Date.now(),
+      });
+      await this.emitObjective(state.objectiveId, {
+        type: "integration.conflicted",
+        objectiveId: state.objectiveId,
+        candidateId,
+        reason: message,
+        headCommit: freshBase,
+        conflictedAt: Date.now(),
+      });
+      await this.spawnReconciliationTask(
+        state,
+        candidateId,
+        `Reconcile ${candidateId} against the current source branch after promotion conflict.`,
+        freshBase,
+      );
+      await this.commitIntegrationMemory(state, candidateId, `Promotion conflicted for ${candidateId}: ${message}`, ["integration", "conflicted"]);
+      await this.reactObjective(state.objectiveId);
+      return;
+    }
+    await this.emitObjective(state.objectiveId, {
+      type: "integration.promoted",
+      objectiveId: state.objectiveId,
+      candidateId,
+      promotedCommit: promoted.mergedHead,
+      summary: `Promoted ${shortHash(promoted.mergedHead)} into ${promoted.targetBranch}.`,
+      promotedAt: Date.now(),
+    });
+    await this.commitIntegrationMemory(state, candidateId, `Promoted ${shortHash(promoted.mergedHead)} into ${promoted.targetBranch}.`, ["integration", "promoted"]);
+    await this.emitObjective(state.objectiveId, {
+      type: "objective.completed",
+      objectiveId: state.objectiveId,
+      summary: `Factory objective completed with ${shortHash(promoted.mergedHead)} on ${promoted.targetBranch}.`,
+      completedAt: Date.now(),
+    });
+  }
+
+  private async spawnReconciliationTask(
+    state: FactoryState,
+    candidateId: string,
+    reason: string,
+    baseCommit?: string,
+  ): Promise<void> {
+    const current = await this.getObjectiveState(state.objectiveId);
+    const candidate = current.candidates[candidateId];
+    if (!candidate) return;
+    if (current.reconciliationTasksUsed >= current.policy.budgets.maxReconciliationTasks) {
+      const blockedReason = `Policy blocked: objective exhausted maxReconciliationTasks (${current.reconciliationTasksUsed}/${current.policy.budgets.maxReconciliationTasks}).`;
+      await this.emitObjective(current.objectiveId, {
+        type: "objective.blocked",
+        objectiveId: current.objectiveId,
+        reason: blockedReason,
+        summary: blockedReason,
+        blockedAt: Date.now(),
+      });
+      return;
+    }
+    const basedOn = await this.currentHeadHash(current.objectiveId);
+    const taskId = this.nextTaskId(current);
+    const createdAt = Date.now();
+    try {
+      await this.emitObjectiveBatch(current.objectiveId, [{
+        type: "task.added",
+        objectiveId: current.objectiveId,
+        createdAt,
+        task: {
+          nodeId: taskId,
+          taskId,
+          taskKind: "reconciliation",
+          title: `Reconcile ${candidateId}`,
+          prompt: `${reason}\nCurrent candidate: ${candidateId}\nObjective: ${current.prompt}`,
+          workerType: "codex",
+          sourceTaskId: candidate.taskId,
+          sourceCandidateId: candidateId,
+          baseCommit: baseCommit ?? current.integration.headCommit ?? current.baseHash,
+          dependsOn: [],
+          status: "pending",
+          skillBundlePaths: [],
+          contextRefs: [
+            stateRef(`${objectiveStream(current.objectiveId)}:task/${candidate.taskId}`, "prior task"),
+            commitRef(baseCommit ?? current.integration.headCommit ?? current.baseHash, "integration head"),
+          ],
+          artifactRefs: {},
+          createdAt,
+          basedOn,
+        },
+      }], basedOn);
+    } catch (err) {
+      if (err instanceof FactoryStaleObjectiveError) {
+        await this.spawnReconciliationTask(current, candidateId, reason, baseCommit);
+        return;
+      }
+      throw err;
+    }
+  }
+
+  private async buildObjectiveDetail(state: FactoryState): Promise<FactoryObjectiveDetail> {
+    const tasks = await Promise.all(
+      state.taskOrder.map(async (taskId) => {
+        const task = state.graph.nodes[taskId];
+        const job = task?.jobId ? await this.loadFreshJob(task.jobId) : undefined;
+        const workspaceStatus = task?.workspacePath
+          ? await this.git.worktreeStatus(task.workspacePath)
+          : { exists: false, dirty: false };
+        return {
+          ...task,
+          candidate: task?.candidateId ? state.candidates[task.candidateId] : undefined,
+          jobStatus: job?.status ?? (task?.jobId ? "missing" : undefined),
+          job,
+          workspaceExists: workspaceStatus.exists,
+          workspaceDirty: workspaceStatus.dirty,
+          workspaceHead: workspaceStatus.head,
+          elapsedMs: task?.startedAt ? Math.max(0, Date.now() - task.startedAt) : undefined,
+          stdoutTail: task?.workspacePath ? await this.readTextTail(this.taskFilePaths(task.workspacePath, task.taskId).stdoutPath, 900) : undefined,
+          stderrTail: task?.workspacePath ? await this.readTextTail(this.taskFilePaths(task.workspacePath, task.taskId).stderrPath, 600) : undefined,
+          lastMessage: task?.workspacePath ? await this.readTextTail(this.taskFilePaths(task.workspacePath, task.taskId).lastMessagePath, 400) : undefined,
+        } satisfies FactoryTaskView;
+      })
+    );
+    return {
+      ...this.toObjectiveCard(state),
+      prompt: state.prompt,
+      channel: state.channel,
+      baseHash: state.baseHash,
+      checks: state.checks,
+      policy: state.policy,
+      budgetState: this.buildBudgetState(state),
+      createdAt: state.createdAt,
+      tasks,
+      candidates: state.candidateOrder
+        .map((candidateId) => state.candidates[candidateId])
+        .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate)),
+      integration: state.integration,
+      latestRebracket: state.latestRebracket,
+    };
+  }
+
+  private async buildObjectiveDebug(state: FactoryState): Promise<FactoryDebugProjection> {
+    const [detail, chain, jobs] = await Promise.all([
+      this.buildObjectiveDetail(state),
+      this.runtime.chain(objectiveStream(state.objectiveId)),
+      this.queue.listJobs({ limit: 80 }),
+    ]);
+    const objectiveJobs = jobs
+      .filter((job) => {
+        const payload = job.payload as Record<string, unknown>;
+        return payload.objectiveId === state.objectiveId;
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const activeJobs = objectiveJobs.filter((job) => !isTerminalJobStatus(job.status)).slice(0, 12);
+    const taskWorktrees = await Promise.all(
+      detail.tasks.map(async (task) => {
+        const status = task.workspacePath
+          ? await this.git.worktreeStatus(task.workspacePath)
+          : { exists: false, dirty: false };
+        return {
+          taskId: task.taskId,
+          workspacePath: task.workspacePath,
+          exists: status.exists,
+          dirty: status.dirty,
+          head: status.head,
+          branch: status.branch,
+        };
+      }),
+    );
+    const integrationWorktree = state.integration.branchRef?.kind === "workspace"
+      ? await this.git.worktreeStatus(state.integration.branchRef.ref).then((status) => ({
+        workspacePath: state.integration.branchRef?.kind === "workspace" ? state.integration.branchRef.ref : undefined,
+        exists: status.exists,
+        dirty: status.dirty,
+        head: status.head,
+        branch: status.branch,
+      }))
+      : undefined;
+    return {
+      objectiveId: state.objectiveId,
+      title: state.title,
+      status: state.status,
+      policy: state.policy,
+      budgetState: detail.budgetState,
+      recentReceipts: [...chain].slice(-40).map((receipt) => ({
+        type: receipt.body.type,
+        hash: receipt.hash,
+        ts: receipt.ts,
+        summary: this.summarizeReceipt(receipt.body),
+      })),
+      activeJobs,
+      lastJobs: objectiveJobs.slice(0, 20),
+      taskWorktrees,
+      integrationWorktree,
+      latestContextPacks: detail.tasks.map((task) => {
+        if (!task.workspacePath) {
+          return {
+            taskId: task.taskId,
+            candidateId: task.candidateId,
+            contextPackPath: undefined,
+            memoryScriptPath: undefined,
+          };
+        }
+        const files = this.taskFilePaths(task.workspacePath, task.taskId);
+        return {
+          taskId: task.taskId,
+          candidateId: task.candidateId,
+          contextPackPath: files.contextPackPath,
+          memoryScriptPath: files.memoryScriptPath,
+        };
+      }),
+    };
+  }
+
+  private toObjectiveCard(state: FactoryState): FactoryObjectiveCard {
+    const projection = buildFactoryProjection(state);
+    const latestCandidate = projection.candidates.at(-1);
+    return {
+      objectiveId: state.objectiveId,
+      title: state.title,
+      status: state.status,
+      archivedAt: state.archivedAt,
+      updatedAt: state.updatedAt,
+      latestSummary: state.latestSummary,
+      blockedReason: state.blockedReason,
+      activeTaskCount: projection.activeTasks.length,
+      readyTaskCount: projection.readyTasks.length,
+      taskCount: projection.tasks.length,
+      integrationStatus: state.integration.status,
+      latestCommitHash: state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit,
+    };
+  }
+
+  private async emitObjectiveBatch(
+    objectiveId: string,
+    events: ReadonlyArray<FactoryEvent>,
+    expectedPrev?: string,
+  ): Promise<void> {
+    if (events.length === 0) return;
+    const stream = objectiveStream(objectiveId);
+    try {
+      await this.runtime.execute(stream, {
+        type: "emit",
+        eventId: makeEventId(stream),
+        events,
+        expectedPrev,
+      });
+    } catch (err) {
+      if (
+        typeof expectedPrev === "string"
+        && err instanceof Error
+        && err.message.startsWith("Expected prev hash ")
+      ) {
+        const actualPrev = /but head is (.+)$/.exec(err.message)?.[1];
+        throw new FactoryStaleObjectiveError(objectiveId, expectedPrev, actualPrev);
+      }
+      throw err;
+    }
+    this.sse.publish("receipt");
+  }
+
+  private async emitObjective(objectiveId: string, event: FactoryEvent): Promise<void> {
+    await this.emitObjectiveBatch(objectiveId, [event]);
+  }
+
+  private async currentHeadHash(objectiveId: string): Promise<string | undefined> {
+    const chain = await this.runtime.chain(objectiveStream(objectiveId));
+    return chain[chain.length - 1]?.hash;
+  }
+
+  private async discoverObjectiveStreams(): Promise<ReadonlyArray<string>> {
+    const discovered = new Set<string>();
+    const manifestPath = path.join(this.dataDir, "_streams.json");
+    const raw = await fs.readFile(manifestPath, "utf-8").catch(() => "");
+    if (raw.trim()) {
+      try {
+        const manifest = JSON.parse(raw) as { readonly byStream?: Record<string, string> };
+        for (const stream of Object.keys(manifest.byStream ?? {})) {
+          if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
+            discovered.add(stream);
+          }
+        }
+      } catch {
+        // fall through to file scan
+      }
+    }
+    const files = await fs.readdir(this.dataDir).catch(() => []);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const filePath = path.join(this.dataDir, file);
+      const firstLine = (await fs.readFile(filePath, "utf-8").catch(() => ""))
+        .split(/\r?\n/)
+        .find((line) => line.trim());
+      if (!firstLine) continue;
+      try {
+        const parsed = JSON.parse(firstLine) as { readonly stream?: string };
+        if (typeof parsed.stream === "string" && parsed.stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
+          discovered.add(parsed.stream);
+        }
+      } catch {
+        // ignore unrelated or corrupt files here; the runtime will surface corruption on actual reads
+      }
+    }
+    return [...discovered];
+  }
+
+  private async decomposeObjective(title: string, prompt: string): Promise<ReadonlyArray<DecomposedTaskSpec>> {
+    if (this.llmStructured) {
+      try {
+        const { parsed } = await this.llmStructured({
+          schema: decompositionSchema,
+          schemaName: "factory_task_decomposition",
+          system: [
+            "Decompose the objective into a small DAG of implementation tasks.",
+            "Return only actionable tasks. Use workerType codex unless a specialist is clearly better.",
+            "Keep dependency edges between task IDs by referring to earlier returned task ids like task_01, task_02.",
+          ].join("\n"),
+          user: JSON.stringify({ title, prompt }, null, 2),
+        });
+        const normalized = this.normalizeDecomposedTasks(parsed.tasks);
+        if (normalized.length > 0) return normalized;
+      } catch {
+        // fall through to deterministic fallback
+      }
+    }
+    return [{
+      taskId: taskOrdinalId(0),
+      title: clipText(title, 120) ?? title,
+      prompt,
+      workerType: "codex",
+      dependsOn: [],
+    }];
+  }
+
+  private normalizeDecomposedTasks(
+    tasks: ReadonlyArray<{
+      readonly title: string;
+      readonly prompt: string;
+      readonly workerType: string;
+      readonly dependsOn: ReadonlyArray<string>;
+    }>,
+  ): ReadonlyArray<DecomposedTaskSpec> {
+    const normalized: DecomposedTaskSpec[] = [];
+    for (const [index, task] of tasks.entries()) {
+      const taskId = taskOrdinalId(index);
+      const title = clipText(task.title, 120) ?? task.title.trim();
+      const prompt = task.prompt.trim();
+      if (!title || !prompt) continue;
+      const dependsOn = this.normalizeDecompositionDependencies(index, task.dependsOn);
+      normalized.push({
+        taskId,
+        title,
+        prompt,
+        workerType: normalizeWorkerType(task.workerType),
+        dependsOn,
+      });
+    }
+    return normalized;
+  }
+
+  private normalizeDecompositionDependencies(
+    taskIndex: number,
+    requested: ReadonlyArray<string>,
+  ): ReadonlyArray<string> {
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const dep of requested) {
+      const trimmed = dep.trim();
+      const match = /^task_(\d+)$/i.exec(trimmed);
+      if (!match) continue;
+      const ordinal = Number.parseInt(match[1] ?? "", 10);
+      if (!Number.isFinite(ordinal) || ordinal <= 0 || ordinal >= taskIndex + 1) continue;
+      const canonical = taskOrdinalId(ordinal - 1);
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      normalized.push(canonical);
+    }
+    return normalized;
+  }
+
+  private normalizeExistingDependencies(
+    state: FactoryState,
+    taskId: string,
+    requested: ReadonlyArray<string>,
+  ): ReadonlyArray<string> {
+    const taskIndex = state.taskOrder.indexOf(taskId);
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const depId of requested) {
+      const trimmed = depId.trim();
+      if (!trimmed || trimmed === taskId || seen.has(trimmed)) continue;
+      const dep = state.graph.nodes[trimmed];
+      if (!dep || dep.status === "superseded") continue;
+      const depIndex = state.taskOrder.indexOf(trimmed);
+      if (taskIndex >= 0 && depIndex >= taskIndex) continue;
+      if (this.dependsTransitivelyOn(state, trimmed, taskId)) continue;
+      seen.add(trimmed);
+      normalized.push(trimmed);
+    }
+    return normalized;
+  }
+
+  private dependsTransitivelyOn(
+    state: FactoryState,
+    taskId: string,
+    targetTaskId: string,
+    seen = new Set<string>(),
+  ): boolean {
+    if (seen.has(taskId)) return false;
+    seen.add(taskId);
+    const task = state.graph.nodes[taskId];
+    if (!task) return false;
+    if (task.dependsOn.includes(targetTaskId)) return true;
+    return task.dependsOn.some((depId) => this.dependsTransitivelyOn(state, depId, targetTaskId, seen));
+  }
+
+  private latestTaskCandidate(state: FactoryState, taskId: string): FactoryCandidateRecord | undefined {
+    for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
+      const candidateId = state.candidateOrder[index];
+      const candidate = state.candidates[candidateId];
+      if (candidate?.taskId === taskId) return candidate;
+    }
+    return undefined;
+  }
+
+  private nextCandidateId(state: FactoryState, taskId: string): string {
+    const ordinal = state.candidateOrder
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is FactoryCandidateRecord => candidate?.taskId === taskId)
+      .map((candidate) => /^.+_candidate_(\d+)$/i.exec(candidate.candidateId)?.[1])
+      .map((value) => Number.parseInt(value ?? "", 10))
+      .filter((value) => Number.isFinite(value))
+      .reduce((max, value) => Math.max(max, value), 0);
+    return `${taskId}_candidate_${String(ordinal + 1).padStart(2, "0")}`;
+  }
+
+  private resolveDispatchCandidateId(state: FactoryState, task: FactoryTaskRecord): string {
+    const latest = this.latestTaskCandidate(state, task.taskId);
+    if (!latest) return `${task.taskId}_candidate_01`;
+    if (["planned", "running", "awaiting_review"].includes(latest.status)) return latest.candidateId;
+    return this.nextCandidateId(state, task.taskId);
+  }
+
+  private collectDependencyClosure(
+    state: FactoryState,
+    taskId: string,
+    seen = new Set<string>(),
+  ): ReadonlyArray<string> {
+    if (seen.has(taskId)) return [];
+    seen.add(taskId);
+    const task = state.graph.nodes[taskId];
+    if (!task) return [];
+    const collected: string[] = [];
+    for (const depId of task.dependsOn) {
+      collected.push(depId);
+      for (const nested of this.collectDependencyClosure(state, depId, seen)) {
+        if (!collected.includes(nested)) collected.push(nested);
+      }
+    }
+    return collected;
+  }
+
+  private async summarizeScope(scope: string, query: string, maxChars: number): Promise<string | undefined> {
+    if (!this.memoryTools) return undefined;
+    try {
+      const { summary } = await this.memoryTools.summarize({
+        scope,
+        query,
+        limit: 6,
+        maxChars,
+      });
+      return summary.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async buildContextNode(
+    state: FactoryState,
+    taskId: string,
+  ): Promise<FactoryContextTaskNode | undefined> {
+    const task = state.graph.nodes[taskId];
+    if (!task) return undefined;
+    const candidate = this.latestTaskCandidate(state, taskId);
+    const memorySummary = await this.summarizeScope(
+      `factory/objectives/${state.objectiveId}/tasks/${taskId}`,
+      `${task.title}\n${task.prompt}`,
+      320,
+    );
+    const children = await Promise.all(task.dependsOn.map((depId) => this.buildContextNode(state, depId)));
+    return {
+      taskId: task.taskId,
+      taskKind: task.taskKind,
+      title: task.title,
+      status: task.status,
+      workerType: task.workerType,
+      sourceTaskId: task.sourceTaskId,
+      sourceCandidateId: task.sourceCandidateId,
+      latestSummary: task.latestSummary,
+      blockedReason: task.blockedReason,
+      candidateId: candidate?.candidateId,
+      candidateStatus: candidate?.status,
+      memorySummary,
+      children: children.filter((child): child is FactoryContextTaskNode => Boolean(child)),
+    };
+  }
+
+  private async buildRelatedContextTask(
+    state: FactoryState,
+    taskId: string,
+    relations: ReadonlySet<"focus" | "dependency" | "dependent" | "split_source" | "split_child">,
+  ): Promise<FactoryContextRelatedTask | undefined> {
+    const task = state.graph.nodes[taskId];
+    if (!task) return undefined;
+    const candidate = this.latestTaskCandidate(state, taskId);
+    const memorySummary = await this.summarizeScope(
+      `factory/objectives/${state.objectiveId}/tasks/${taskId}`,
+      `${task.title}\n${task.prompt}`,
+      320,
+    );
+    const relationOrder = ["focus", "dependency", "dependent", "split_source", "split_child"] as const;
+    return {
+      taskId: task.taskId,
+      taskKind: task.taskKind,
+      title: task.title,
+      status: task.status,
+      workerType: task.workerType,
+      sourceTaskId: task.sourceTaskId,
+      sourceCandidateId: task.sourceCandidateId,
+      relations: relationOrder.filter((relation) => relations.has(relation)),
+      latestSummary: task.latestSummary,
+      blockedReason: task.blockedReason,
+      candidateId: candidate?.candidateId,
+      candidateStatus: candidate?.status,
+      memorySummary,
+    };
+  }
+
+  private summarizeReceipt(event: FactoryEvent): string {
+    switch (event.type) {
+      case "task.added":
+        return `${event.task.taskId} added: ${event.task.title}`;
+      case "task.split":
+        return `${event.sourceTaskId} split into ${event.tasks.map((task) => task.taskId).join(", ")}`;
+      case "task.worker.reassigned":
+        return `${event.taskId} reassigned to ${event.workerType}: ${event.reason}`;
+      case "task.dependency.updated":
+        return `${event.taskId} deps -> ${event.dependsOn.join(", ") || "none"}: ${event.reason}`;
+      case "task.blocked":
+        return `${event.taskId} blocked: ${event.reason}`;
+      case "task.unblocked":
+        return `${event.taskId} unblocked`;
+      case "task.superseded":
+        return `${event.taskId} superseded: ${event.reason}`;
+      case "candidate.produced":
+        return `${event.candidateId} produced: ${event.summary}`;
+      case "candidate.reviewed":
+        return `${event.candidateId} ${event.status}: ${event.summary}`;
+      case "candidate.conflicted":
+        return `${event.candidateId} conflicted: ${event.reason}`;
+      case "integration.conflicted":
+        return `integration conflicted: ${event.reason}`;
+      case "integration.ready_to_promote":
+        return `integration ready: ${event.summary}`;
+      case "integration.promoted":
+        return `promoted: ${event.summary}`;
+      case "rebracket.applied":
+        return `orchestration chose ${event.selectedActionId ?? "none"}: ${event.reason}`;
+      default:
+        return event.type;
+    }
+  }
+
+  private receiptTaskOrCandidateId(event: FactoryEvent): { readonly taskId?: string; readonly candidateId?: string } {
+    switch (event.type) {
+      case "task.added":
+        return { taskId: event.task.taskId };
+      case "task.split":
+        return { taskId: event.sourceTaskId };
+      case "task.dependency.updated":
+      case "task.worker.reassigned":
+      case "task.ready":
+      case "task.review.requested":
+      case "task.approved":
+      case "task.integrated":
+      case "task.blocked":
+      case "task.unblocked":
+      case "task.superseded":
+        return { taskId: event.taskId };
+      case "task.dispatched":
+        return { taskId: event.taskId, candidateId: event.candidateId };
+      case "candidate.created":
+        return { taskId: event.candidate.taskId, candidateId: event.candidate.candidateId };
+      case "candidate.produced":
+      case "candidate.reviewed":
+        return { taskId: event.taskId, candidateId: event.candidateId };
+      case "candidate.conflicted":
+      case "merge.candidate.scored":
+      case "integration.queued":
+      case "integration.merging":
+      case "integration.validating":
+      case "integration.ready_to_promote":
+      case "integration.promoting":
+      case "integration.promoted":
+        return { candidateId: event.candidateId };
+      case "merge.applied":
+        return { taskId: event.taskId, candidateId: event.candidateId };
+      case "integration.conflicted":
+        return { candidateId: event.candidateId };
+      default:
+        return {};
+    }
+  }
+
+  private buildSplitIndex(chain: ReadonlyArray<{ readonly body: FactoryEvent }>): {
+    readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
+    readonly parentByChild: ReadonlyMap<string, string>;
+  } {
+    const childrenBySource = new Map<string, string[]>();
+    const parentByChild = new Map<string, string>();
+    for (const receipt of chain) {
+      const event = receipt.body;
+      if (event.type !== "task.split") continue;
+      const children = event.tasks.map((task) => task.taskId);
+      childrenBySource.set(event.sourceTaskId, [...(childrenBySource.get(event.sourceTaskId) ?? []), ...children]);
+      for (const child of children) parentByChild.set(child, event.sourceTaskId);
+    }
+    return { childrenBySource, parentByChild };
+  }
+
+  private collectDependentClosure(
+    state: FactoryState,
+    taskId: string,
+    seen = new Set<string>(),
+  ): ReadonlyArray<string> {
+    if (seen.has(taskId)) return [];
+    seen.add(taskId);
+    const directDependents = state.taskOrder
+      .map((id) => state.graph.nodes[id])
+      .filter((task): task is FactoryTaskRecord => Boolean(task))
+      .filter((task) => task.dependsOn.includes(taskId))
+      .map((task) => task.taskId);
+    const collected: string[] = [];
+    for (const dependentId of directDependents) {
+      if (!collected.includes(dependentId)) collected.push(dependentId);
+      for (const nested of this.collectDependentClosure(state, dependentId, seen)) {
+        if (!collected.includes(nested)) collected.push(nested);
+      }
+    }
+    return collected;
+  }
+
+  private collectSplitClosure(
+    taskId: string,
+    splitIndex: {
+      readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
+      readonly parentByChild: ReadonlyMap<string, string>;
+    },
+    seen = new Set<string>(),
+  ): ReadonlyArray<{ readonly taskId: string; readonly relation: "split_source" | "split_child" }> {
+    if (seen.has(taskId)) return [];
+    seen.add(taskId);
+    const collected: Array<{ readonly taskId: string; readonly relation: "split_source" | "split_child" }> = [];
+    const parent = splitIndex.parentByChild.get(taskId);
+    if (parent) {
+      collected.push({ taskId: parent, relation: "split_source" });
+      for (const nested of this.collectSplitClosure(parent, splitIndex, seen)) {
+        if (!collected.some((item) => item.taskId === nested.taskId && item.relation === nested.relation)) collected.push(nested);
+      }
+    }
+    for (const child of splitIndex.childrenBySource.get(taskId) ?? []) {
+      collected.push({ taskId: child, relation: "split_child" });
+      for (const nested of this.collectSplitClosure(child, splitIndex, seen)) {
+        if (!collected.some((item) => item.taskId === nested.taskId && item.relation === nested.relation)) collected.push(nested);
+      }
+    }
+    return collected;
+  }
+
+  private collectContextSubgraphRelations(
+    state: FactoryState,
+    taskId: string,
+    splitIndex: {
+      readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
+      readonly parentByChild: ReadonlyMap<string, string>;
+    },
+  ): ReadonlyMap<string, ReadonlySet<"focus" | "dependency" | "dependent" | "split_source" | "split_child">> {
+    const relations = new Map<string, Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">>();
+    const mark = (targetTaskId: string, relation: "focus" | "dependency" | "dependent" | "split_source" | "split_child"): void => {
+      const current = relations.get(targetTaskId) ?? new Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">();
+      current.add(relation);
+      relations.set(targetTaskId, current);
+    };
+    mark(taskId, "focus");
+    for (const depId of this.collectDependencyClosure(state, taskId)) mark(depId, "dependency");
+    for (const dependentId of this.collectDependentClosure(state, taskId)) mark(dependentId, "dependent");
+    for (const relation of this.collectSplitClosure(taskId, splitIndex)) mark(relation.taskId, relation.relation);
+    return relations;
+  }
+
+  private taskRecency(task: FactoryTaskRecord): number {
+    return task.completedAt ?? task.reviewingAt ?? task.startedAt ?? task.readyAt ?? task.createdAt;
+  }
+
+  private async buildObjectiveSliceTasks(
+    state: FactoryState,
+    taskIds: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<FactoryContextRelatedTask>> {
+    const items = await Promise.all(
+      taskIds.map((taskId) =>
+        this.buildRelatedContextTask(
+          state,
+          taskId,
+          new Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">(),
+        )
+      ),
+    );
+    return items.filter((item): item is FactoryContextRelatedTask => Boolean(item));
+  }
+
+  private async buildTaskContextPack(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    candidateId: string,
+  ): Promise<FactoryContextPack> {
+    const chain = await this.runtime.chain(objectiveStream(state.objectiveId));
+    const splitIndex = this.buildSplitIndex(chain);
+    const dependencyIds = this.collectDependencyClosure(state, task.taskId);
+    const dependencyTree = await Promise.all(task.dependsOn.map((depId) => this.buildContextNode(state, depId)));
+    const subgraphRelations = this.collectContextSubgraphRelations(state, task.taskId, splitIndex);
+    const relatedTasks = await Promise.all(
+      [...subgraphRelations.entries()].map(([relatedTaskId, relations]) =>
+        this.buildRelatedContextTask(state, relatedTaskId, relations)
+      ),
+    );
+    const lineage = state.candidateOrder
+      .map((id) => state.candidates[id])
+      .filter((candidate): candidate is FactoryCandidateRecord => candidate?.taskId === task.taskId)
+      .map((candidate) => ({
+        candidateId: candidate.candidateId,
+        parentCandidateId: candidate.parentCandidateId,
+        status: candidate.status,
+        summary: candidate.summary,
+        headCommit: candidate.headCommit,
+        latestReason: candidate.latestReason,
+      }));
+    const relatedTaskIds = new Set<string>([...subgraphRelations.keys(), ...dependencyIds]);
+    const relatedCandidateIds = new Set<string>([
+      candidateId,
+      ...lineage.map((candidate) => candidate.candidateId),
+      ...state.candidateOrder
+        .map((id) => state.candidates[id])
+        .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate) && relatedTaskIds.has(candidate.taskId))
+        .map((candidate) => candidate.candidateId),
+    ]);
+    const recentReceipts = [...chain]
+      .reverse()
+      .filter((receipt) => {
+        const ref = this.receiptTaskOrCandidateId(receipt.body);
+        return (ref.taskId && relatedTaskIds.has(ref.taskId))
+          || (ref.candidateId && relatedCandidateIds.has(ref.candidateId))
+          || receipt.body.type.startsWith("integration.")
+          || receipt.body.type === "rebracket.applied";
+      })
+      .slice(0, 12)
+      .reverse()
+      .map((receipt) => {
+        const ref = this.receiptTaskOrCandidateId(receipt.body);
+        return {
+          type: receipt.body.type,
+          at: receipt.ts,
+          taskId: ref.taskId,
+          candidateId: ref.candidateId,
+          summary: this.summarizeReceipt(receipt.body),
+        } satisfies FactoryContextReceipt;
+      });
+    const focusedReceiptKeys = new Set(recentReceipts.map((receipt) => `${receipt.type}:${receipt.at}:${receipt.summary}`));
+    const objectiveTasks = state.taskOrder
+      .map((taskId) => state.graph.nodes[taskId])
+      .filter((node): node is FactoryTaskRecord => Boolean(node));
+    const frontierTaskIds = objectiveTasks
+      .filter((item) => ["ready", "running", "reviewing", "blocked"].includes(item.status))
+      .sort((a, b) =>
+        objectiveTaskStatusPriority(a.status) - objectiveTaskStatusPriority(b.status)
+        || this.taskRecency(b) - this.taskRecency(a)
+        || a.taskId.localeCompare(b.taskId)
+      )
+      .slice(0, 12)
+      .map((item) => item.taskId);
+    const recentCompletedTaskIds = objectiveTasks
+      .filter((item) => ["approved", "integrated", "blocked", "superseded"].includes(item.status))
+      .sort((a, b) => this.taskRecency(b) - this.taskRecency(a) || a.taskId.localeCompare(b.taskId))
+      .slice(0, 8)
+      .map((item) => item.taskId);
+    const integrationTaskIds = objectiveTasks
+      .filter((item) => {
+        const candidateIdForTask = item.candidateId;
+        if (!candidateIdForTask) return false;
+        return state.integration.activeCandidateId === candidateIdForTask
+          || state.integration.queuedCandidateIds.includes(candidateIdForTask);
+      })
+      .map((item) => item.taskId);
+    const recentObjectiveReceipts = [...chain]
+      .reverse()
+      .map((receipt) => {
+        const ref = this.receiptTaskOrCandidateId(receipt.body);
+        return {
+          type: receipt.body.type,
+          at: receipt.ts,
+          taskId: ref.taskId,
+          candidateId: ref.candidateId,
+          summary: this.summarizeReceipt(receipt.body),
+        } satisfies FactoryContextReceipt;
+      })
+      .filter((receipt) => !focusedReceiptKeys.has(`${receipt.type}:${receipt.at}:${receipt.summary}`))
+      .slice(0, 20)
+      .reverse();
+    const [overview, objectiveMemory, integrationMemory] = await Promise.all([
+      this.summarizeScope(`factory/objectives/${state.objectiveId}`, `${state.title}\n${task.title}`, 520),
+      this.summarizeScope(`factory/objectives/${state.objectiveId}`, state.title, 360),
+      this.summarizeScope(`factory/objectives/${state.objectiveId}/integration`, `${state.title}\nintegration`, 360),
+    ]);
+    const [frontierTasks, recentCompletedTasks, integrationTasks] = await Promise.all([
+      this.buildObjectiveSliceTasks(state, frontierTaskIds),
+      this.buildObjectiveSliceTasks(state, recentCompletedTaskIds),
+      this.buildObjectiveSliceTasks(state, integrationTaskIds),
+    ]);
+    return {
+      objectiveId: state.objectiveId,
+      title: state.title,
+      prompt: state.prompt,
+      task: {
+        taskId: task.taskId,
+        title: task.title,
+        prompt: task.prompt,
+        workerType: task.workerType,
+        status: task.status,
+        candidateId,
+      },
+      integration: {
+        status: state.integration.status,
+        headCommit: state.integration.headCommit,
+        activeCandidateId: state.integration.activeCandidateId,
+        conflictReason: state.integration.conflictReason,
+        lastSummary: state.integration.lastSummary,
+      },
+      dependencyTree: dependencyTree.filter((node): node is FactoryContextTaskNode => Boolean(node)),
+      relatedTasks: relatedTasks
+        .filter((node): node is FactoryContextRelatedTask => Boolean(node))
+        .sort((a, b) => state.taskOrder.indexOf(a.taskId) - state.taskOrder.indexOf(b.taskId)),
+      candidateLineage: lineage,
+      recentReceipts,
+      objectiveSlice: {
+        frontierTasks,
+        recentCompletedTasks,
+        integrationTasks,
+        recentObjectiveReceipts,
+        objectiveMemorySummary: objectiveMemory,
+        integrationMemorySummary: integrationMemory,
+      },
+      memory: {
+        overview,
+        objective: objectiveMemory,
+        integration: integrationMemory,
+      },
+    };
+  }
+
+  private resolveTaskBaseCommit(state: FactoryState, task: FactoryTaskRecord): string {
+    if (task.candidateId) {
+      const candidate = state.candidates[task.candidateId];
+      if (candidate?.headCommit) return candidate.headCommit;
+    }
+    return state.integration.headCommit ?? task.baseCommit ?? state.baseHash;
+  }
+
+  private async ensureTaskWorkspace(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    workspaceId: string,
+  ): Promise<{ readonly path: string; readonly branchName: string; readonly baseHash: string }> {
+    const baseHash = this.resolveTaskBaseCommit(state, task);
+    const workspacePath = path.join(this.git.worktreesDir, workspaceId);
+    const branchName = `hub/${task.workerType}/${workspaceId}`;
+    const existing = await this.git.worktreeStatus(workspacePath);
+    if (existing.exists) {
+      return {
+        path: workspacePath,
+        branchName: existing.branch ?? branchName,
+        baseHash: existing.head ?? baseHash,
+      };
+    }
+    const created = await this.git.createWorkspace({
+      workspaceId,
+      agentId: String(task.workerType),
+      baseHash,
+    });
+    return created;
+  }
+
+  private memoryScopesForTask(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    candidateId: string,
+  ): ReadonlyArray<FactoryMemoryScopeSpec> {
+    const baseQuery = `${state.title}\n${task.title}\n${task.prompt}`;
+    const scopes: FactoryMemoryScopeSpec[] = [
+      {
+        key: "agent",
+        scope: `factory/agents/${String(task.workerType)}`,
+        label: `Agent memory (${String(task.workerType)})`,
+        defaultQuery: baseQuery,
+      },
+      {
+        key: "repo",
+        scope: "factory/repo/shared",
+        label: "Repo shared memory",
+        defaultQuery: `${state.title}\n${task.title}`,
+      },
+      {
+        key: "objective",
+        scope: `factory/objectives/${state.objectiveId}`,
+        label: "Objective memory",
+        defaultQuery: state.title,
+      },
+      {
+        key: "task",
+        scope: `factory/objectives/${state.objectiveId}/tasks/${task.taskId}`,
+        label: "Task memory",
+        defaultQuery: task.title,
+      },
+      {
+        key: "candidate",
+        scope: `factory/objectives/${state.objectiveId}/candidates/${candidateId}`,
+        label: "Candidate memory",
+        defaultQuery: `${candidateId}\n${task.title}`,
+      },
+      {
+        key: "integration",
+        scope: `factory/objectives/${state.objectiveId}/integration`,
+        label: "Integration memory",
+        defaultQuery: `${state.title}\nintegration`,
+      },
+    ];
+    return scopes;
+  }
+
+  private buildMemoryScriptSource(configPath: string): string {
+    const normalizedConfigPath = configPath.replace(/\\/g, "\\\\");
+    return [
+      "#!/usr/bin/env node",
+      `const fs = require("node:fs");`,
+      `const { execFileSync } = require("node:child_process");`,
+      `const config = JSON.parse(fs.readFileSync(${JSON.stringify(normalizedConfigPath)}, "utf-8"));`,
+      `const args = process.argv.slice(2);`,
+      `const compact = (value, maxChars) => value.length <= maxChars ? value : \`\${value.slice(0, Math.max(0, maxChars - 1))}…\`;`,
+      `const formatTree = (nodes, depth = 0) => (nodes || []).flatMap((node) => {`,
+      `  const indent = "  ".repeat(depth);`,
+      `  const head = \`\${indent}- \${node.taskId}: \${node.title} [\${node.status}]\${node.candidateStatus ? \` · candidate \${node.candidateStatus}\` : ""}\`;`,
+      `  const note = node.memorySummary ? \`\${indent}  memory: \${node.memorySummary}\` : "";`,
+      `  return [head, note, ...formatTree(node.children || [], depth + 1)].filter(Boolean);`,
+      `});`,
+      `const runReceipt = (receiptArgs) => {`,
+      `  const raw = execFileSync("receipt", receiptArgs, { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 });`,
+      `  return JSON.parse(raw || "{}");`,
+      `};`,
+      `const resolveScope = (key) => config.scopes.find((scope) => scope.key === key || scope.scope === key);`,
+      `const formatEntries = (entries) => (entries || []).map((entry) => \`- \${entry.text}\${entry.tags?.length ? \` [\${entry.tags.join(", ")}]\` : ""}\`).join("\\n");`,
+      `const command = args[0] || "overview";`,
+      `if (command === "context") {`,
+      `  const maxChars = Number(args[1] || config.defaultMaxChars || 2800) || 2800;`,
+      `  const pack = config.contextPackPath ? JSON.parse(fs.readFileSync(config.contextPackPath, "utf-8")) : undefined;`,
+      `  if (!pack) {`,
+      `    process.stdout.write("No recursive context pack found.\\n");`,
+      `    process.exit(0);`,
+      `  }`,
+      `  const lines = [`,
+      `    \`Objective: \${pack.title}\`,`,
+      `    \`Task: \${pack.task.taskId} · \${pack.task.title} [\${pack.task.status}]\`,`,
+      `    pack.memory?.overview ? \`Overview: \${pack.memory.overview}\` : "",`,
+      `    pack.integration?.status ? \`Integration: \${pack.integration.status}\${pack.integration.lastSummary ? \` · \${pack.integration.lastSummary}\` : ""}\` : "",`,
+      `    pack.relatedTasks?.length ? "Recursive subgraph:" : "",`,
+      `    ...(pack.relatedTasks || []).map((task) => \`- \${task.taskId} [\${task.relations.join(", ")}] · \${task.title} [\${task.status}]\${task.candidateStatus ? \` · candidate \${task.candidateStatus}\` : ""}\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.dependencyTree?.length ? "Dependencies:" : "",`,
+      `    ...formatTree(pack.dependencyTree || []),`,
+      `    pack.candidateLineage?.length ? "Candidate lineage:" : "",`,
+      `    ...(pack.candidateLineage || []).map((candidate) => \`- \${candidate.candidateId} [\${candidate.status}]\${candidate.summary ? \` · \${candidate.summary}\` : ""}\`),`,
+      `    pack.recentReceipts?.length ? "Recent receipts:" : "",`,
+      `    ...(pack.recentReceipts || []).map((receipt) => \`- \${receipt.type}: \${receipt.summary}\`),`,
+      `    pack.objectiveSlice?.frontierTasks?.length ? "Objective frontier:" : "",`,
+      `    ...(pack.objectiveSlice?.frontierTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice?.recentCompletedTasks?.length ? "Recent completed tasks:" : "",`,
+      `    ...(pack.objectiveSlice?.recentCompletedTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice?.integrationTasks?.length ? "Integration tasks:" : "",`,
+      `    ...(pack.objectiveSlice?.integrationTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice?.objectiveMemorySummary ? \`Objective memory: \${pack.objectiveSlice.objectiveMemorySummary}\` : "",`,
+      `    pack.objectiveSlice?.integrationMemorySummary ? \`Integration memory: \${pack.objectiveSlice.integrationMemorySummary}\` : "",`,
+      `    pack.objectiveSlice?.recentObjectiveReceipts?.length ? "Objective-wide receipts:" : "",`,
+      `    ...(pack.objectiveSlice?.recentObjectiveReceipts || []).map((receipt) => \`- \${receipt.type}: \${receipt.summary}\`),`,
+      `  ].filter(Boolean);`,
+      `  process.stdout.write(compact(lines.join("\\n"), maxChars) + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "objective") {`,
+      `  const maxChars = Number(args[1] || 1800) || 1800;`,
+      `  const pack = config.contextPackPath ? JSON.parse(fs.readFileSync(config.contextPackPath, "utf-8")) : undefined;`,
+      `  if (!pack?.objectiveSlice) {`,
+      `    process.stdout.write("No objective slice found.\\n");`,
+      `    process.exit(0);`,
+      `  }`,
+      `  const lines = [`,
+      `    \`Objective: \${pack.title}\`,`,
+      `    pack.objectiveSlice.objectiveMemorySummary ? \`Objective memory: \${pack.objectiveSlice.objectiveMemorySummary}\` : "",`,
+      `    pack.objectiveSlice.integrationMemorySummary ? \`Integration memory: \${pack.objectiveSlice.integrationMemorySummary}\` : "",`,
+      `    pack.objectiveSlice.frontierTasks?.length ? "Frontier tasks:" : "",`,
+      `    ...(pack.objectiveSlice.frontierTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice.integrationTasks?.length ? "Integration tasks:" : "",`,
+      `    ...(pack.objectiveSlice.integrationTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice.recentCompletedTasks?.length ? "Recent completed tasks:" : "",`,
+      `    ...(pack.objectiveSlice.recentCompletedTasks || []).map((task) => \`- \${task.taskId} · \${task.title} [\${task.status}]\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,
+      `    pack.objectiveSlice.recentObjectiveReceipts?.length ? "Recent objective receipts:" : "",`,
+      `    ...(pack.objectiveSlice.recentObjectiveReceipts || []).map((receipt) => \`- \${receipt.type}: \${receipt.summary}\`),`,
+      `  ].filter(Boolean);`,
+      `  process.stdout.write(compact(lines.join("\\n"), maxChars) + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "overview") {`,
+      `  const query = (args[1] || config.defaultQuery || "").trim();`,
+      `  const maxChars = Number(args[2] || config.defaultMaxChars || 2400) || 2400;`,
+      `  const perScopeMax = Math.max(180, Math.floor(maxChars / Math.max(1, config.scopes.length)));`,
+      `  const blocks = config.scopes.map((scope) => {`,
+      `    const result = runReceipt(["memory", "summarize", scope.scope, "--query", query || scope.defaultQuery || "", "--limit", String(config.defaultLimit || 6), "--max-chars", String(perScopeMax)]);`,
+      `    const summary = typeof result.summary === "string" ? result.summary.trim() : "";`,
+      `    return summary ? \`## \${scope.label}\\n\${summary}\` : "";`,
+      `  }).filter(Boolean);`,
+      `  const output = blocks.length ? compact(blocks.join("\\n\\n"), maxChars) : "No memory entries found.";`,
+      `  process.stdout.write(output + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "scope") {`,
+      `  const scope = resolveScope(args[1]);`,
+      `  if (!scope) throw new Error("unknown memory scope");`,
+      `  const query = (args[2] || scope.defaultQuery || config.defaultQuery || "").trim();`,
+      `  const maxChars = Number(args[3] || config.defaultMaxChars || 1600) || 1600;`,
+      `  const result = runReceipt(["memory", "summarize", scope.scope, "--query", query, "--limit", String(config.defaultLimit || 6), "--max-chars", String(maxChars)]);`,
+      `  process.stdout.write((result.summary || "No memory entries found.") + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "search") {`,
+      `  const scope = resolveScope(args[1]);`,
+      `  if (!scope) throw new Error("unknown memory scope");`,
+      `  const query = (args[2] || "").trim();`,
+      `  if (!query) throw new Error("search requires a query");`,
+      `  const limit = Number(args[3] || config.defaultLimit || 6) || 6;`,
+      `  const result = runReceipt(["memory", "search", scope.scope, "--query", query, "--limit", String(limit)]);`,
+      `  process.stdout.write((formatEntries(result.entries) || "No memory entries found.") + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "read") {`,
+      `  const scope = resolveScope(args[1]);`,
+      `  if (!scope) throw new Error("unknown memory scope");`,
+      `  const limit = Number(args[2] || config.defaultLimit || 6) || 6;`,
+      `  const result = runReceipt(["memory", "read", scope.scope, "--limit", String(limit)]);`,
+      `  process.stdout.write((formatEntries(result.entries) || "No memory entries found.") + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `if (command === "commit") {`,
+      `  const scope = resolveScope(args[1]);`,
+      `  if (!scope) throw new Error("unknown memory scope");`,
+      `  const text = args.slice(2).join(" ").trim();`,
+      `  if (!text) throw new Error("commit requires text");`,
+      `  const result = runReceipt(["memory", "commit", scope.scope, "--text", text]);`,
+      `  process.stdout.write(JSON.stringify(result, null, 2) + "\\n");`,
+      `  process.exit(0);`,
+      `}`,
+      `throw new Error(\`unknown memory command '\${command}'\`);`,
+      "",
+    ].join("\n");
+  }
+
+  private taskFilePaths(workspacePath: string, taskId: string) {
+    const root = path.join(workspacePath, FACTORY_DATA_DIR);
+    return {
+      manifestPath: path.join(root, `${taskId}.manifest.json`),
+      contextPackPath: path.join(root, `${taskId}.context-pack.json`),
+      promptPath: path.join(root, `${taskId}.prompt.md`),
+      resultPath: path.join(root, `${taskId}.result.json`),
+      stdoutPath: path.join(root, `${taskId}.stdout.log`),
+      stderrPath: path.join(root, `${taskId}.stderr.log`),
+      lastMessagePath: path.join(root, `${taskId}.last-message.md`),
+      skillBundlePath: path.join(root, `${taskId}.skill-bundle.json`),
+      memoryScriptPath: path.join(root, `${taskId}.memory.cjs`),
+      memoryConfigPath: path.join(root, `${taskId}.memory-scopes.json`),
+    };
+  }
+
+  private integrationFilePaths(workspacePath: string, candidateId: string) {
+    const root = path.join(workspacePath, FACTORY_DATA_DIR);
+    return {
+      resultPath: path.join(root, `${candidateId}.integration.json`),
+      stdoutPath: path.join(root, `${candidateId}.integration.stdout.log`),
+      stderrPath: path.join(root, `${candidateId}.integration.stderr.log`),
+    };
+  }
+
+  private async writeTaskPacket(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    candidateId: string,
+    workspacePath: string,
+  ): Promise<{
+    readonly manifestPath: string;
+    readonly contextPackPath: string;
+    readonly promptPath: string;
+    readonly resultPath: string;
+    readonly stdoutPath: string;
+    readonly stderrPath: string;
+    readonly lastMessagePath: string;
+    readonly memoryScriptPath: string;
+    readonly memoryConfigPath: string;
+    readonly repoSkillPaths: ReadonlyArray<string>;
+    readonly skillBundlePaths: ReadonlyArray<string>;
+    readonly contextRefs: ReadonlyArray<GraphRef>;
+  }> {
+    const files = this.taskFilePaths(workspacePath, task.taskId);
+    await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
+    await fs.rm(files.resultPath, { force: true });
+    const repoSkillPaths = await this.collectRepoSkillPaths();
+    const memoryScopes = this.memoryScopesForTask(state, task, candidateId);
+    const contextPack = await this.buildTaskContextPack(state, task, candidateId);
+    const skillBundle = {
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      title: task.title,
+      workerType: task.workerType,
+      repoSkillPaths,
+      generatedAt: Date.now(),
+    };
+    await fs.writeFile(files.skillBundlePath, JSON.stringify(skillBundle, null, 2), "utf-8");
+    const manifest = {
+      objective: {
+        objectiveId: state.objectiveId,
+        title: state.title,
+        prompt: state.prompt,
+        baseHash: state.baseHash,
+        checks: state.checks,
+      },
+      task: {
+        taskId: task.taskId,
+        title: task.title,
+        prompt: task.prompt,
+        workerType: task.workerType,
+        baseCommit: this.resolveTaskBaseCommit(state, task),
+        dependsOn: task.dependsOn,
+      },
+      candidate: state.candidates[candidateId] ?? {
+        candidateId,
+        taskId: task.taskId,
+      },
+      integration: state.integration,
+      memory: {
+        scriptPath: files.memoryScriptPath,
+        configPath: files.memoryConfigPath,
+        scopes: memoryScopes,
+      },
+      context: {
+        packPath: files.contextPackPath,
+      },
+      contextRefs: [
+        ...task.contextRefs,
+        artifactRef(files.contextPackPath, "recursive context pack"),
+      ],
+      repoSkillPaths,
+      skillBundlePaths: [files.skillBundlePath],
+      traceRefs: [
+        stateRef(objectiveStream(state.objectiveId), "factory objective stream"),
+        ...task.dependsOn.map((depId) => stateRef(`${objectiveStream(state.objectiveId)}:task/${depId}`, depId)),
+      ],
+    };
+    const memoryConfig = {
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      candidateId,
+      contextPackPath: files.contextPackPath,
+      defaultQuery: `${state.title}\n${task.title}\n${task.prompt}`,
+      defaultLimit: 6,
+      defaultMaxChars: 2400,
+      scopes: memoryScopes,
+    };
+    await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
+    await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+    await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
+    await fs.writeFile(files.memoryScriptPath, this.buildMemoryScriptSource(files.memoryConfigPath), "utf-8");
+    if (process.platform !== "win32") await fs.chmod(files.memoryScriptPath, 0o755);
+    return {
+      manifestPath: files.manifestPath,
+      contextPackPath: files.contextPackPath,
+      promptPath: files.promptPath,
+      resultPath: files.resultPath,
+      stdoutPath: files.stdoutPath,
+      stderrPath: files.stderrPath,
+      lastMessagePath: files.lastMessagePath,
+      memoryScriptPath: files.memoryScriptPath,
+      memoryConfigPath: files.memoryConfigPath,
+      repoSkillPaths,
+      skillBundlePaths: [files.skillBundlePath],
+      contextRefs: [
+        ...task.contextRefs,
+        artifactRef(files.contextPackPath, "recursive context pack"),
+      ],
+    };
+  }
+
+  private async renderTaskPrompt(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    payload: FactoryTaskJobPayload,
+  ): Promise<string> {
+    const dependencySummaries = task.dependsOn
+      .map((depId) => state.graph.nodes[depId])
+      .filter((dep): dep is FactoryTaskRecord => Boolean(dep))
+      .map((dep) => `- ${dep.taskId}: ${dep.latestSummary ?? dep.title}`)
+      .join("\n") || "- none";
+    const memorySummary = await this.loadMemorySummary(`factory/objectives/${state.objectiveId}/tasks/${task.taskId}`, task.prompt);
+    return [
+      `# Factory Task`,
+      ``,
+      `Objective: ${state.title}`,
+      `Objective ID: ${state.objectiveId}`,
+      `Task ID: ${task.taskId}`,
+      `Worker Type: ${task.workerType}`,
+      `Base Commit: ${payload.baseCommit}`,
+      `Candidate ID: ${payload.candidateId}`,
+      ``,
+      `## Objective Prompt`,
+      state.prompt,
+      ``,
+      `## Task Prompt`,
+      task.prompt,
+      ``,
+      `## Dependencies`,
+      dependencySummaries,
+      ``,
+      `## Checks`,
+      state.checks.map((check) => `- ${check}`).join("\n") || "- none",
+      ``,
+      `## Context Refs`,
+      payload.contextRefs.map((ref) => `- ${ref.kind}: ${ref.label ?? ref.ref}`).join("\n") || "- none",
+      ``,
+      `## Repo Skills`,
+      payload.repoSkillPaths.map((skill) => `- ${skill}`).join("\n") || "- none",
+      ``,
+      `## Generated Skill Bundles`,
+      payload.skillBundlePaths.map((skill) => `- ${skill}`).join("\n") || "- none",
+      ``,
+      `## Memory Access`,
+      `Use the layered memory script at ${payload.memoryScriptPath} instead of pulling large raw memory dumps.`,
+      `Recommended commands:`,
+      `- node ${payload.memoryScriptPath} context 2800`,
+      `- node ${payload.memoryScriptPath} objective 1800`,
+      `- node ${payload.memoryScriptPath} overview "${task.title}" 2400`,
+      `- node ${payload.memoryScriptPath} scope task "${task.title}" 1400`,
+      `- node ${payload.memoryScriptPath} scope objective "${state.title}" 1400`,
+      `- node ${payload.memoryScriptPath} search repo "${task.title}" 6`,
+      `- node ${payload.memoryScriptPath} commit task "short durable note"`,
+      `The script is the primary memory interface. It compacts receipt-backed memory across agent, repo, objective, task, candidate, and integration scopes, renders the focused recursive subgraph, and exposes a bounded objective-wide slice from ${payload.contextPackPath}.`,
+      ``,
+      `## Bootstrap Memory Summary`,
+      `Use this short summary only as a starting hint. Pull deeper context through the memory script and write durable notes back through it.`,
+      memorySummary || "No durable task memory yet.",
+      ``,
+      `## Result Contract`,
+      `Write JSON to ${payload.resultPath} with:`,
+      `{ "outcome": "approved" | "changes_requested" | "blocked", "summary": string, "handoff": string }`,
+      `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker.`,
+    ].join("\n");
+  }
+
+  private parseTaskPayload(payload: Record<string, unknown>): FactoryTaskJobPayload {
+    if (payload.kind !== "factory.task.run") throw new FactoryServiceError(400, "invalid factory task payload");
+    return {
+      kind: "factory.task.run",
+      objectiveId: requireNonEmpty(payload.objectiveId, "objectiveId required"),
+      taskId: requireNonEmpty(payload.taskId, "taskId required"),
+      workerType: normalizeWorkerType(requireNonEmpty(payload.workerType, "workerType required")),
+      candidateId: requireNonEmpty(payload.candidateId, "candidateId required"),
+      baseCommit: requireNonEmpty(payload.baseCommit, "baseCommit required"),
+      workspaceId: requireNonEmpty(payload.workspaceId, "workspaceId required"),
+      workspacePath: requireNonEmpty(payload.workspacePath, "workspacePath required"),
+      promptPath: requireNonEmpty(payload.promptPath, "promptPath required"),
+      resultPath: requireNonEmpty(payload.resultPath, "resultPath required"),
+      stdoutPath: requireNonEmpty(payload.stdoutPath, "stdoutPath required"),
+      stderrPath: requireNonEmpty(payload.stderrPath, "stderrPath required"),
+      lastMessagePath: requireNonEmpty(payload.lastMessagePath, "lastMessagePath required"),
+      manifestPath: requireNonEmpty(payload.manifestPath, "manifestPath required"),
+      contextPackPath: requireNonEmpty(payload.contextPackPath, "contextPackPath required"),
+      memoryScriptPath: requireNonEmpty(payload.memoryScriptPath, "memoryScriptPath required"),
+      memoryConfigPath: requireNonEmpty(payload.memoryConfigPath, "memoryConfigPath required"),
+      repoSkillPaths: Array.isArray(payload.repoSkillPaths) ? payload.repoSkillPaths.filter((item): item is string => typeof item === "string") : [],
+      skillBundlePaths: Array.isArray(payload.skillBundlePaths) ? payload.skillBundlePaths.filter((item): item is string => typeof item === "string") : [],
+      contextRefs: Array.isArray(payload.contextRefs) ? payload.contextRefs.filter((item): item is GraphRef => isRecord(item) && typeof item.kind === "string" && typeof item.ref === "string") : [],
+      integrationRef: isRecord(payload.integrationRef) && typeof payload.integrationRef.kind === "string" && typeof payload.integrationRef.ref === "string"
+        ? payload.integrationRef as GraphRef
+        : undefined,
+      problem: requireNonEmpty(payload.problem, "problem required"),
+      config: isRecord(payload.config) ? payload.config : {},
+    };
+  }
+
+  private parseIntegrationPayload(payload: Record<string, unknown>): FactoryIntegrationJobPayload {
+    if (payload.kind !== "factory.integration.validate") {
+      throw new FactoryServiceError(400, "invalid factory integration payload");
+    }
+    return {
+      kind: "factory.integration.validate",
+      objectiveId: requireNonEmpty(payload.objectiveId, "objectiveId required"),
+      candidateId: requireNonEmpty(payload.candidateId, "candidateId required"),
+      workspacePath: requireNonEmpty(payload.workspacePath, "workspacePath required"),
+      stdoutPath: requireNonEmpty(payload.stdoutPath, "stdoutPath required"),
+      stderrPath: requireNonEmpty(payload.stderrPath, "stderrPath required"),
+      resultPath: requireNonEmpty(payload.resultPath, "resultPath required"),
+      checks: Array.isArray(payload.checks) ? payload.checks.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [],
+    };
+  }
+
+  private parseTaskResult(raw: string): Record<string, unknown> {
+    if (!raw.trim()) throw new FactoryServiceError(500, "missing factory task result.json");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new FactoryServiceError(500, `malformed factory task result.json: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!isRecord(parsed)) throw new FactoryServiceError(500, "factory task result must be an object");
+    return parsed;
+  }
+
+  private async ensureWorkspaceReceiptCli(workspacePath: string): Promise<string> {
+    const binDir = path.join(workspacePath, ".receipt", "bin");
+    const shimPath = path.join(binDir, process.platform === "win32" ? "receipt.cmd" : "receipt");
+    const runtimeRoot = process.cwd();
+    const cliPath = path.join(runtimeRoot, "src", "cli.ts");
+    const tsxLoaderPath = path.join(runtimeRoot, "node_modules", "tsx", "dist", "loader.mjs");
+    await fs.mkdir(binDir, { recursive: true });
+    const body = process.platform === "win32"
+      ? [
+          "@echo off",
+          `set "DATA_DIR=${this.dataDir}"`,
+          `node --import "${tsxLoaderPath}" "${cliPath}" %*`,
+          "",
+        ].join("\r\n")
+      : [
+          "#!/bin/sh",
+          `export DATA_DIR=${shellQuote(this.dataDir)}`,
+          `exec node --import ${shellQuote(tsxLoaderPath)} ${shellQuote(cliPath)} "$@"`,
+          "",
+        ].join("\n");
+    await fs.writeFile(shimPath, body, "utf-8");
+    if (process.platform !== "win32") await fs.chmod(shimPath, 0o755);
+    return binDir;
+  }
+
+  private async loadMemorySummary(scope: string, query: string): Promise<string> {
+    if (!this.memoryTools) return "";
+    try {
+      const { summary } = await this.memoryTools.summarize({
+        scope,
+        query,
+        limit: 8,
+        maxChars: 1_200,
+      });
+      return summary;
+    } catch {
+      return "";
+    }
+  }
+
+  private async commitTaskMemory(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    candidateId: string,
+    summary: string,
+    outcome: string,
+  ): Promise<void> {
+    if (!this.memoryTools) return;
+    try {
+      const scopes = this.memoryScopesForTask(state, task, candidateId);
+      const byKey = new Map(scopes.map((scope) => [scope.key, scope]));
+      await Promise.all([
+        this.memoryTools.commit({
+          scope: byKey.get("agent")?.scope ?? `factory/agents/${String(task.workerType)}`,
+          text: `[${state.objectiveId}/${task.taskId}] ${summary}`,
+          tags: ["factory", "agent", String(task.workerType), outcome],
+        }),
+        this.memoryTools.commit({
+          scope: byKey.get("repo")?.scope ?? "factory/repo/shared",
+          text: `[${state.objectiveId}/${task.taskId}] ${summary}`,
+          tags: ["factory", "repo", outcome],
+        }),
+        this.memoryTools.commit({
+          scope: byKey.get("objective")?.scope ?? `factory/objectives/${state.objectiveId}`,
+          text: `[${task.taskId}] ${summary}`,
+          tags: ["factory", task.taskId, outcome],
+        }),
+        this.memoryTools.commit({
+          scope: byKey.get("task")?.scope ?? `factory/objectives/${state.objectiveId}/tasks/${task.taskId}`,
+          text: summary,
+          tags: ["factory", "task", outcome],
+        }),
+        this.memoryTools.commit({
+          scope: byKey.get("candidate")?.scope ?? `factory/objectives/${state.objectiveId}/candidates/${candidateId}`,
+          text: summary,
+          tags: ["factory", "candidate", candidateId, outcome],
+        }),
+      ]);
+    } catch {
+      // memory is auxiliary
+    }
+  }
+
+  private async commitIntegrationMemory(
+    state: FactoryState,
+    candidateId: string,
+    summary: string,
+    tags: ReadonlyArray<string>,
+  ): Promise<void> {
+    if (!this.memoryTools) return;
+    try {
+      await Promise.all([
+        this.memoryTools.commit({
+          scope: `factory/objectives/${state.objectiveId}`,
+          text: `[integration/${candidateId}] ${summary}`,
+          tags: ["factory", ...tags],
+        }),
+        this.memoryTools.commit({
+          scope: `factory/objectives/${state.objectiveId}/integration`,
+          text: summary,
+          tags: ["factory", ...tags],
+        }),
+      ]);
+    } catch {
+      // memory is auxiliary
+    }
+  }
+
+  private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
+    const root = path.join(process.cwd(), "skills");
+    const out: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const target = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await walk(target);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        if (entry.name === "SKILL.md" || entry.name.endsWith(".md")) out.push(target);
+      }
+    };
+    await walk(root);
+    return out.sort((a, b) => a.localeCompare(b));
+  }
+
+  private async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
+    const results: FactoryCheckResult[] = [];
+    for (const command of commands) {
+      const startedAt = Date.now();
+      try {
+        const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
+          cwd: workspacePath,
+          encoding: "utf-8",
+          env: process.env,
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        results.push({
+          command,
+          ok: true,
+          exitCode: 0,
+          stdout,
+          stderr,
+          startedAt,
+          finishedAt: Date.now(),
+        });
+      } catch (err) {
+        const failure = err as Error & { stdout?: string; stderr?: string; code?: number };
+        results.push({
+          command,
+          ok: false,
+          exitCode: typeof failure.code === "number" ? failure.code : 1,
+          stdout: failure.stdout ?? "",
+          stderr: failure.stderr ?? failure.message,
+          startedAt,
+          finishedAt: Date.now(),
+        });
+        break;
+      }
+    }
+    return results;
+  }
+
+  private async readTextTail(filePath: string | undefined, maxChars: number): Promise<string | undefined> {
+    if (!filePath) return undefined;
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const trimmed = raw.trim();
+      return trimmed ? tailText(trimmed, maxChars) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private makeId(prefix: string): string {
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+}

@@ -39,6 +39,7 @@ export type Store<B> = {
   readonly take: (stream: string, n: number) => Promise<Chain<B>>;
   readonly count: (stream: string) => Promise<number>;
   readonly head: (stream: string) => Promise<Receipt<B> | undefined>;
+  readonly version?: (stream: string) => Promise<string | undefined>;
 };
 
 // Branch metadata store

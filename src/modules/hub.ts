@@ -1,10 +1,4 @@
 import type { Decide, Reducer } from "../core/types.js";
-import type {
-  ObjectivePassStatus,
-  ObjectivePhase,
-  ObjectiveRebracketRecord,
-  ObjectiveRecord,
-} from "./hub-objective.js";
 
 export type AgentProfile = {
   readonly agentId: string;
@@ -59,22 +53,6 @@ export type Announcement = {
   readonly createdAt: number;
 };
 
-export type HubObjectiveSummary = ObjectiveRecord & {
-  readonly currentPassId?: string;
-  readonly currentJobId?: string;
-  readonly currentPassPhase?: ObjectivePhase;
-  readonly currentPassStatus?: ObjectivePassStatus;
-  readonly currentPassDispatchedAt?: number;
-  readonly frontierCandidateIds?: ReadonlyArray<string>;
-  readonly latestRebracket?: ObjectiveRebracketRecord;
-  readonly latestPlanSummary?: string;
-  readonly latestPlanHandoff?: string;
-  readonly latestBuildSummary?: string;
-  readonly latestBuildHandoff?: string;
-  readonly latestReviewSummary?: string;
-  readonly latestReviewHandoff?: string;
-};
-
 export type HubEvent =
   | {
       readonly type: "agent.registered";
@@ -104,10 +82,6 @@ export type HubEvent =
   | {
       readonly type: "announcement.created";
       readonly announcement: Announcement;
-    }
-  | {
-      readonly type: "objective.synced";
-      readonly objective: HubObjectiveSummary;
     };
 
 export type HubCmd = {
@@ -124,7 +98,6 @@ export type HubState = {
   readonly posts: Readonly<Record<string, BoardPost>>;
   readonly tasks: Readonly<Record<string, HubTask>>;
   readonly announcements: Readonly<Record<string, Announcement>>;
-  readonly objectives: Readonly<Record<string, HubObjectiveSummary>>;
 };
 
 export const initial: HubState = {
@@ -134,7 +107,6 @@ export const initial: HubState = {
   posts: {},
   tasks: {},
   announcements: {},
-  objectives: {},
 };
 
 export const decide: Decide<HubCmd, HubEvent> = (cmd) => [cmd.event];
@@ -201,14 +173,6 @@ export const reduce: Reducer<HubState, HubEvent> = (state, event) => {
         announcements: {
           ...state.announcements,
           [event.announcement.announcementId]: event.announcement,
-        },
-      };
-    case "objective.synced":
-      return {
-        ...state,
-        objectives: {
-          ...state.objectives,
-          [event.objective.objectiveId]: event.objective,
         },
       };
     default: {

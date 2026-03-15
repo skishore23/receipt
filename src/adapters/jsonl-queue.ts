@@ -154,14 +154,11 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   };
 
   const ensureIndexState = async (): Promise<JobState> => {
-    if (indexState) return indexState;
     indexState = await opts.runtime.state(opts.stream);
     return indexState;
   };
 
   const ensureJobState = async (jobId: string): Promise<JobState> => {
-    const cached = jobStateCache.get(jobId);
-    if (cached) return cached;
     const loaded = await opts.runtime.state(jobStream(jobId));
     jobStateCache.set(jobId, loaded);
     return loaded;

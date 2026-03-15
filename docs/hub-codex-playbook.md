@@ -1,63 +1,85 @@
-# Hub Codex Playbook
+# Hub Operations Playbook
 
-Use this playbook when working on the Receipt hub objective loop.
+Use this playbook when working on Hub after the factory cutover.
 
-## Core Model
+Hub is no longer an objective execution surface. Objectives, task DAGs, candidate review, integration, promotion, and factory debugging all live in `/factory`.
 
-- Git is the source of truth for code.
-- Receipt streams are the source of truth for objective state and job history.
-- Codex works inside hub-managed Git worktrees, not in the main checkout.
-- The objective loop is: `planner -> builder -> reviewer -> human merge`.
+You can still use Hub, but only for non-objective operations. If the work starts with "ship this objective" or "run this autonomous delivery flow," use `/factory` instead.
+
+## What Hub Owns
+
+- repo and commit exploration
+- workspace creation and cleanup
+- manual agent tasks against explicit workspaces
+- agent, channel, and post management
+- general debug state for workspaces, posts, and manual tasks
+
+```mermaid
+flowchart LR
+  User["Operator"] --> Hub["/hub"]
+  Hub --> Repo["Repo + commit explorer"]
+  Hub --> Ops["Agents / channels / posts"]
+  Hub --> WS["Workspaces + manual tasks"]
+  Hub --> FactoryLink["Link to /factory for objectives"]
+```
 
 ## Primary Code Paths
 
-- Hub workflow and objective reactor: [src/services/hub-service.ts](/Users/kishore/receipt/src/services/hub-service.ts)
-- Git and worktree management: [src/adapters/hub-git.ts](/Users/kishore/receipt/src/adapters/hub-git.ts)
-- Codex execution adapter: [src/adapters/codex-executor.ts](/Users/kishore/receipt/src/adapters/codex-executor.ts)
 - Hub HTTP/UI routes: [src/agents/hub.agent.ts](/Users/kishore/receipt/src/agents/hub.agent.ts)
-- Objective reducer and event model: [src/modules/hub-objective.ts](/Users/kishore/receipt/src/modules/hub-objective.ts)
-- Hub metadata reducer: [src/modules/hub.ts](/Users/kishore/receipt/src/modules/hub.ts)
+- Hub service: [src/services/hub-service.ts](/Users/kishore/receipt/src/services/hub-service.ts)
 - Hub UI: [src/views/hub.ts](/Users/kishore/receipt/src/views/hub.ts)
+- Git/worktree adapter: [src/adapters/hub-git.ts](/Users/kishore/receipt/src/adapters/hub-git.ts)
 - Hub smoke coverage: [tests/smoke/hub.test.ts](/Users/kishore/receipt/tests/smoke/hub.test.ts)
 
-## Git Hygiene
+## Current Routes
 
-- Do not edit the main checkout directly for objective work.
-- Do not invent a parallel code-state model outside Git.
-- Keep changes inside the assigned hub worktree unless the task is explicitly about source-branch promotion.
-- Builder may change tracked project files. Planner and reviewer should only write under `.receipt/`.
-- Leave the worktree clean for tracked project files when a pass finishes.
-- Completed objectives are expected to merge cleanly and remove their temporary worktrees.
-- If cleaning worktrees manually, never remove the currently active worktree and prefer hub-managed worktrees under `data/hub/worktrees/`.
+- `GET /hub`
+- `GET /hub/events`
+- `GET /hub/island/summary`
+- `GET /hub/island/commits`
+- `GET /hub/island/debug`
+- `GET /hub/api/state`
+- `GET|POST /hub/api/agents`
+- `GET|POST /hub/api/workspaces`
+- `GET /hub/api/workspaces/:id`
+- `POST /hub/api/workspaces/:id/remove`
+- `POST /hub/api/workspaces/:id/announce`
+- `GET|POST /hub/api/channels`
+- `GET|POST /hub/api/channels/:name/posts`
+- `POST /hub/api/posts/:id/replies`
+- `GET /hub/api/commits`
+- `GET /hub/api/commits/:hash`
+- `GET /hub/api/commits/:hash/children`
+- `GET /hub/api/commits/:hash/lineage`
+- `GET /hub/api/leaves`
+- `GET /hub/api/diff/:hashA/:hashB`
+- `GET|POST /hub/api/tasks`
+- `GET /hub/api/tasks/:id`
 
-## How To Inspect What Happened
+## Explicit Non-Goals
 
-- Objective detail API: `GET /hub/api/objectives/:id`
-- Dashboard state: `GET /hub/api/state`
-- Candidate Git diff: `git show <commit>` or `git diff <base> <commit>`
-- Worktree list: `git worktree list`
-- Hub pass artifacts in each worktree:
-  - `.receipt/hub/result.json`
-  - `.receipt/hub/*.stdout.log`
-  - `.receipt/hub/*.stderr.log`
-  - `.receipt/hub/*.last-message.md`
-- Receipt CLI for runtime inspection:
-  - `receipt jobs`
-  - `receipt trace <run-id-or-stream>`
-  - `receipt inspect <run-id-or-stream>`
-  - `receipt replay <run-id-or-stream>`
+- no `/hub/api/objectives*`
+- no Hub objective board/detail/live routes
+- no Hub objective SSE streams
+- no Hub compatibility projection types for factory objectives
 
-## Done Criteria
+## Operational Notes
 
-- The requested code change exists in the candidate branch.
-- Required checks passed.
-- Reviewer either approved or gave concrete changes requested.
-- Human merge fast-forwards the approved candidate into the source branch.
-- The objective is not actually done until that merge step succeeds.
+- Objective control belongs to `/factory`, not Hub.
+- Manual tasks in Hub operate only on explicit Hub workspaces.
+- Workspace cleanup and commit exploration still go through `HubGit`.
+- The default Hub shell should always make the `/factory` handoff obvious.
 
-## When Working On Codex Integration
+```mermaid
+sequenceDiagram
+  participant User
+  participant Hub
+  participant Git
+  participant Queue
 
-- Update prompt templates in [prompts/hub/planner.md](/Users/kishore/receipt/prompts/hub/planner.md), [prompts/hub/builder.md](/Users/kishore/receipt/prompts/hub/builder.md), and [prompts/hub/reviewer.md](/Users/kishore/receipt/prompts/hub/reviewer.md).
-- Update the Codex runner in [src/adapters/codex-executor.ts](/Users/kishore/receipt/src/adapters/codex-executor.ts).
-- Update objective orchestration in [src/services/hub-service.ts](/Users/kishore/receipt/src/services/hub-service.ts).
-- Prefer improving structured handoff, verification, and Git hygiene over adding more orchestration text.
+  User->>Hub: create workspace
+  Hub->>Git: create worktree
+  User->>Hub: enqueue manual task
+  Hub->>Queue: enqueue agent.run
+  User->>Hub: inspect commits / diff / workspaces
+```

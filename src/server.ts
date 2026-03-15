@@ -80,9 +80,10 @@ import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-
 import { HubService } from "./services/hub-service.js";
 import { HubServiceError } from "./services/hub-service.js";
 import {
-  createOpenAiHubOrchestrator,
-  createTestHubOrchestrator,
-} from "./services/hub-orchestrator.js";
+  createOpenAiFactoryOrchestrator,
+  createTestFactoryOrchestrator,
+} from "./services/factory-orchestrator.js";
+import { FactoryService } from "./services/factory-service.js";
 import {
   assertReceiptFileName,
   listReceiptFiles,
@@ -104,8 +105,8 @@ import { evaluateImprovementProposal } from "./engine/runtime/improvement-harnes
 const PORT = Number(process.env.PORT ?? 8787);
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
 const USE_INDEXED_STORE = process.env.RECEIPT_INDEXED_STORE === "1";
-const HUB_ORCHESTRATOR_MODE = process.env.HUB_ORCHESTRATOR_MODE === "enabled" ? "enabled" : "disabled";
-const HUB_ORCHESTRATOR_TEST_MODE = process.env.HUB_ORCHESTRATOR_TEST_MODE?.trim();
+const FACTORY_ORCHESTRATOR_MODE = process.env.FACTORY_ORCHESTRATOR_MODE === "enabled" ? "enabled" : "disabled";
+const FACTORY_ORCHESTRATOR_TEST_MODE = process.env.FACTORY_ORCHESTRATOR_TEST_MODE?.trim();
 
 // ============================================================================
 // Composition: Store -> Runtime
@@ -404,26 +405,35 @@ const delegationTools = createDelegationTools({
 });
 
 const hubCodexExecutor = new LocalCodexExecutor();
-const hubOrchestratorPromptPath = path.join(process.cwd(), "prompts", "hub", "orchestrator.md");
-const hubOrchestratorPrompt = fs.existsSync(hubOrchestratorPromptPath)
-  ? fs.readFileSync(hubOrchestratorPromptPath, "utf-8")
+const factoryOrchestratorPromptPath = path.join(process.cwd(), "prompts", "factory", "orchestrator.md");
+const factoryOrchestratorPrompt = fs.existsSync(factoryOrchestratorPromptPath)
+  ? fs.readFileSync(factoryOrchestratorPromptPath, "utf-8")
   : "";
-const hubOrchestrator = HUB_ORCHESTRATOR_TEST_MODE
-  ? createTestHubOrchestrator(HUB_ORCHESTRATOR_TEST_MODE)
-  : (HUB_ORCHESTRATOR_MODE === "enabled" && process.env.OPENAI_API_KEY
-    ? createOpenAiHubOrchestrator({
+const factoryOrchestrator = FACTORY_ORCHESTRATOR_TEST_MODE
+  ? createTestFactoryOrchestrator()
+  : (FACTORY_ORCHESTRATOR_MODE === "enabled" && process.env.OPENAI_API_KEY
+    ? createOpenAiFactoryOrchestrator({
       llmStructured,
-      systemPrompt: hubOrchestratorPrompt,
+      systemPrompt: factoryOrchestratorPrompt,
     })
     : undefined);
+const factoryService = new FactoryService({
+  dataDir: DATA_DIR,
+  queue,
+  jobRuntime,
+  sse,
+  codexExecutor: hubCodexExecutor,
+  orchestrator: factoryOrchestrator,
+  orchestratorMode: factoryOrchestrator ? "enabled" : "disabled",
+  memoryTools,
+  llmStructured,
+});
 const hubService = new HubService({
   dataDir: DATA_DIR,
   queue,
   jobRuntime,
   sse,
   codexExecutor: hubCodexExecutor,
-  orchestrator: hubOrchestrator,
-  orchestratorMode: hubOrchestrator ? "enabled" : "disabled",
   memoryTools,
 });
 
@@ -1235,6 +1245,10 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
         noRetry: true,
       };
     }
+    if (job.payload.kind === "factory.task.run") {
+      await factoryService.applyTaskWorkerResult(job.payload as never, normalizedResult);
+      await factoryService.reactObjective(String(job.payload.objectiveId ?? ""));
+    }
     return { ok: true, result: normalizedResult };
   };
 
@@ -1297,12 +1311,18 @@ const worker = new JobWorker({
     codex: async (job, ctx) => {
       await ctx.pullCommands(["steer", "follow_up"]);
       try {
-        const result = await hubService.runObjectivePass(job.payload, {
-          shouldAbort: async () => {
-            const aborts = await ctx.pullCommands(["abort"]);
-            return aborts.length > 0 || job.abortRequested === true;
-          },
-        });
+        const result = job.payload.kind === "factory.task.run"
+          ? await factoryService.runTask(job.payload, {
+            shouldAbort: async () => {
+              const aborts = await ctx.pullCommands(["abort"]);
+              return aborts.length > 0 || job.abortRequested === true;
+            },
+          })
+          : job.payload.kind === "factory.integration.validate"
+            ? await factoryService.runIntegrationValidation(job.payload)
+            : (() => {
+              throw new Error(`unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`);
+            })();
         return { ok: true, result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1425,6 +1445,7 @@ const routes = await loadAgentRoutes({
   helpers: {
     memoryTools,
     delegationTools,
+    factoryService,
     hubService,
   },
 });
@@ -1818,14 +1839,38 @@ app.get("/improvement", async () => {
 
 app.notFound(() => text(404, "Not found"));
 
-try {
-  fs.watch(DATA_DIR, { persistent: false }, () => {
-    sse.publish("receipt");
-  });
-} catch (err) {
-  console.warn("Receipt watcher failed:", err);
-}
+const receiptWatcher = (() => {
+  try {
+    return fs.watch(DATA_DIR, { persistent: false }, () => {
+      sse.publish("receipt");
+    });
+  } catch (err) {
+    console.warn("Receipt watcher failed:", err);
+    return undefined;
+  }
+})();
 
-serve({ fetch: app.fetch, port: PORT }, () => {
+const httpServer = serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`Receipt server listening on http://localhost:${PORT}`);
 });
+
+let shuttingDown = false;
+const shutdown = (signal: string): void => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Receipt server shutting down (${signal})`);
+  receiptWatcher?.close();
+  worker.stop();
+  for (const hb of heartbeats) hb.stop();
+  const forceExit = setTimeout(() => {
+    process.exit(0);
+  }, 2_000);
+  forceExit.unref();
+  httpServer.close(() => {
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
+};
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

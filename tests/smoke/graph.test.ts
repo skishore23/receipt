@@ -6,12 +6,24 @@ import {
   createGraphState,
   graphProjection,
   runnableNodes,
+  type GraphBuckets,
   type GraphNodeBase,
   type GraphState,
 } from "../../src/core/graph.ts";
 
-type TestNode = GraphNodeBase & {
+type TestStatus = "pending" | "ready" | "running" | "completed" | "blocked";
+
+type TestNode = GraphNodeBase<TestStatus> & {
   readonly title: string;
+};
+
+const buckets: GraphBuckets<TestStatus> = {
+  planned: ["pending"],
+  ready: ["ready"],
+  active: ["running"],
+  completed: ["completed"],
+  blocked: ["blocked"],
+  terminal: ["completed", "blocked"],
 };
 
 const withNodes = (
@@ -23,32 +35,32 @@ const withNodes = (
   nodes: Object.fromEntries(nodes.map((node) => [node.nodeId, node])),
 });
 
-test("graph: dependency activation and replay projection stay deterministic", () => {
-  const initial = withNodes(createGraphState<TestNode>("graph_demo", 1), [
+test("graph: dependency activation, multi-active execution, and replay projection stay deterministic", () => {
+  const initial = withNodes(createGraphState<TestNode>("graph_demo", 1, "active"), [
     {
       nodeId: "planner",
       title: "Planner",
       dependsOn: [],
-      status: "planned",
+      status: "pending",
     },
     {
       nodeId: "builder",
       title: "Builder",
       dependsOn: ["planner"],
-      status: "planned",
+      status: "pending",
     },
     {
       nodeId: "reviewer",
       title: "Reviewer",
       dependsOn: ["builder"],
-      status: "planned",
+      status: "pending",
     },
   ]);
 
-  assert.deepEqual(activatableNodes(initial).map((node) => node.nodeId), ["planner"]);
-  assert.deepEqual(runnableNodes(initial).map((node) => node.nodeId), []);
+  assert.deepEqual(activatableNodes(initial, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId), ["planner"]);
+  assert.deepEqual(runnableNodes(initial, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId), []);
 
-  const plannerReady = withNodes(createGraphState<TestNode>("graph_demo", 2), [
+  const plannerReady = withNodes(createGraphState<TestNode>("graph_demo", 2, "active"), [
     {
       nodeId: "planner",
       title: "Planner",
@@ -59,19 +71,19 @@ test("graph: dependency activation and replay projection stay deterministic", ()
       nodeId: "builder",
       title: "Builder",
       dependsOn: ["planner"],
-      status: "planned",
+      status: "pending",
     },
     {
       nodeId: "reviewer",
       title: "Reviewer",
       dependsOn: ["builder"],
-      status: "planned",
+      status: "pending",
     },
   ]);
 
-  assert.deepEqual(runnableNodes(plannerReady).map((node) => node.nodeId), ["planner"]);
+  assert.deepEqual(runnableNodes(plannerReady, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId), ["planner"]);
 
-  const plannerCompleted = withNodes(createGraphState<TestNode>("graph_demo", 3), [
+  const plannerCompleted = withNodes(createGraphState<TestNode>("graph_demo", 3, "active"), [
     {
       nodeId: "planner",
       title: "Planner",
@@ -82,20 +94,43 @@ test("graph: dependency activation and replay projection stay deterministic", ()
       nodeId: "builder",
       title: "Builder",
       dependsOn: ["planner"],
-      status: "planned",
+      status: "pending",
     },
     {
       nodeId: "reviewer",
       title: "Reviewer",
       dependsOn: ["builder"],
-      status: "planned",
+      status: "pending",
     },
   ]);
 
-  assert.deepEqual(activatableNodes(plannerCompleted).map((node) => node.nodeId), ["builder"]);
+  assert.deepEqual(activatableNodes(plannerCompleted, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId), ["builder"]);
 
-  const replayA = graphProjection(plannerCompleted);
-  const replayB = graphProjection(withNodes(createGraphState<TestNode>("graph_demo", 3), [
+  const parallelReady: GraphState<TestNode> = {
+    ...withNodes(createGraphState<TestNode>("graph_demo", 4, "active"), [
+      {
+        nodeId: "builder_a",
+        title: "Builder A",
+        dependsOn: [],
+        status: "ready",
+      },
+      {
+        nodeId: "builder_b",
+        title: "Builder B",
+        dependsOn: [],
+        status: "ready",
+      },
+    ]),
+    activeNodeIds: ["builder_a"],
+  };
+
+  assert.deepEqual(
+    runnableNodes(parallelReady, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId),
+    ["builder_b"],
+  );
+
+  const replayA = graphProjection(plannerCompleted, buckets);
+  const replayB = graphProjection(withNodes(createGraphState<TestNode>("graph_demo", 3, "active"), [
     {
       nodeId: "planner",
       title: "Planner",
@@ -106,15 +141,15 @@ test("graph: dependency activation and replay projection stay deterministic", ()
       nodeId: "builder",
       title: "Builder",
       dependsOn: ["planner"],
-      status: "planned",
+      status: "pending",
     },
     {
       nodeId: "reviewer",
       title: "Reviewer",
       dependsOn: ["builder"],
-      status: "planned",
+      status: "pending",
     },
-  ]));
+  ]), buckets);
 
   assert.deepEqual(replayA, replayB);
   assert.deepEqual(replayA.completed.map((node) => node.nodeId), ["planner"]);

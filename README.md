@@ -63,6 +63,7 @@ Queue streams:
 - [docs/receipt-production-rfc.md](./docs/receipt-production-rfc.md)
 - [docs/receipt-coding-runtime.md](./docs/receipt-coding-runtime.md)
 - [docs/receipt-cli-mvp-architecture.md](./docs/receipt-cli-mvp-architecture.md)
+- [docs/factory-on-receipt.md](./docs/factory-on-receipt.md)
 - [docs/agent-framework.md](./docs/agent-framework.md)
 - [docs/axiom-theorem-prover.md](./docs/axiom-theorem-prover.md)
 - [docs/axiom-public-prover.md](./docs/axiom-public-prover.md)
@@ -80,6 +81,34 @@ Queue streams:
 - [docs/api/streams.md](./docs/api/streams.md)
 - [docs/api/config.md](./docs/api/config.md)
 
+## Hub vs Factory
+
+`Factory` is the receipt-native objective execution system.
+
+Use `/factory` for:
+
+- creating objectives
+- task DAG decomposition
+- autonomous worker dispatch
+- candidate review
+- integration, validation, and promotion
+- objective debugging, receipts, and runtime control
+
+`Hub` still exists, but it is no longer the objective surface.
+
+Use `/hub` for:
+
+- repo and commit exploration
+- workspaces
+- manual tasks
+- agents, channels, and posts
+- operator/debug utilities that are not objective-specific
+
+Short version:
+
+- if you are running or debugging an autonomous software objective, use `Factory`
+- if you are doing manual repo/team/workspace operations, you can still use `Hub`
+
 ## Multi-agent context management
 
 In Receipt, rebracketing means dynamically changing merge parenthesization based on observed critique/patch interactions, not just trimming prompt history. This gives context management at composition-order level while preserving deterministic replay and auditability.
@@ -95,4 +124,6 @@ npm run test:smoke
 
 The server auto-loads route modules from `src/agents/*.agent.ts`.
 
-The Git-first hub is mounted at `/hub` and can be bootstrapped with the default team in [config/hub-agents.json](./config/hub-agents.json).
+The factory objective surface is mounted at `/factory` and is the only objective control surface in v1.
+
+Hub is mounted at `/hub` for repo/team/workspace/manual-task operations and can be bootstrapped with the default team in [config/hub-agents.json](./config/hub-agents.json).

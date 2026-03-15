@@ -37,6 +37,11 @@ const fileExists = async (file: string): Promise<boolean> => {
   }
 };
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 const readJsonl = async <B>(file: string): Promise<Chain<B>> => {
   if (!await fileExists(file)) return [];
 
@@ -74,6 +79,7 @@ export type StreamLocator = {
 export const createStreamLocator = (dir: string): StreamLocator => {
   fs.mkdirSync(dir, { recursive: true });
   const manifestPath = path.join(dir, STREAM_MANIFEST);
+  const lockPath = `${manifestPath}.lock`;
   let loaded: StreamManifest | null = null;
   let writeQueue = Promise.resolve();
 
@@ -83,24 +89,47 @@ export const createStreamLocator = (dir: string): StreamLocator => {
     byKey: {},
   });
 
-  const readManifest = async (): Promise<StreamManifest> => {
-    if (loaded) return loaded;
+  const readManifestFromDisk = async (): Promise<StreamManifest> => {
     if (!await fileExists(manifestPath)) {
-      loaded = emptyManifest();
-      return loaded;
+      return emptyManifest();
     }
     try {
       const raw = await fs.promises.readFile(manifestPath, "utf-8");
       const parsed = JSON.parse(raw) as Partial<StreamManifest>;
-      loaded = {
+      return {
         version: 1,
         byStream: parsed.byStream ?? {},
         byKey: parsed.byKey ?? {},
       };
-      return loaded;
     } catch {
-      loaded = emptyManifest();
-      return loaded;
+      return emptyManifest();
+    }
+  };
+
+  const readManifest = async (): Promise<StreamManifest> => {
+    if (loaded) return loaded;
+    loaded = await readManifestFromDisk();
+    return loaded;
+  };
+
+  const withManifestLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    for (;;) {
+      let handle: fs.promises.FileHandle | undefined;
+      try {
+        handle = await fs.promises.open(lockPath, "wx");
+        const result = await fn();
+        await handle.close();
+        await fs.promises.unlink(lockPath).catch(() => undefined);
+        return result;
+      } catch (err) {
+        await handle?.close().catch(() => undefined);
+        if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+          await sleep(10);
+          continue;
+        }
+        await fs.promises.unlink(lockPath).catch(() => undefined);
+        throw err;
+      }
     }
   };
 
@@ -117,27 +146,32 @@ export const createStreamLocator = (dir: string): StreamLocator => {
     if (existing) return existing;
 
     const run = async (): Promise<string> => {
-      const manifest = await readManifest();
-      const found = manifest.byStream[stream];
-      if (found) return found;
+      return withManifestLock(async () => {
+        const manifest = await readManifestFromDisk();
+        const found = manifest.byStream[stream];
+        if (found) {
+          loaded = manifest;
+          return found;
+        }
 
-      const base = sha256(stream).slice(0, 24);
-      let key = base;
-      let i = 0;
-      while (true) {
-        const owner = manifest.byKey[key];
-        if (!owner || owner === stream) break;
-        i += 1;
-        key = `${base}_${i}`;
-      }
+        const base = sha256(stream).slice(0, 24);
+        let key = base;
+        let i = 0;
+        while (true) {
+          const owner = manifest.byKey[key];
+          if (!owner || owner === stream) break;
+          i += 1;
+          key = `${base}_${i}`;
+        }
 
-      const next: StreamManifest = {
-        version: 1,
-        byStream: { ...manifest.byStream, [stream]: key },
-        byKey: { ...manifest.byKey, [key]: stream },
-      };
-      await persistManifest(next);
-      return key;
+        const next: StreamManifest = {
+          version: 1,
+          byStream: { ...manifest.byStream, [stream]: key },
+          byKey: { ...manifest.byKey, [key]: stream },
+        };
+        await persistManifest(next);
+        return key;
+      });
     };
 
     const current = writeQueue.then(run);
@@ -157,6 +191,15 @@ export const createStreamLocator = (dir: string): StreamLocator => {
 /** One .jsonl file per stream key under dir; stream names map via _streams.json */
 export const jsonlStore = <B>(dir: string): Store<B> => {
   const locator = createStreamLocator(dir);
+  const versionFor = async (stream: string): Promise<string | undefined> => {
+    const file = await locator.fileFor(stream);
+    try {
+      const stat = await fs.promises.stat(file);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return undefined;
+    }
+  };
   return {
     append: async (r) => appendJsonl(await locator.fileFor(r.stream), r),
     read: async (stream) => readJsonl<B>(await locator.fileFor(stream)),
@@ -166,6 +209,7 @@ export const jsonlStore = <B>(dir: string): Store<B> => {
       const chain = await readJsonl<B>(await locator.fileFor(stream));
       return chain.length > 0 ? chain[chain.length - 1] : undefined;
     },
+    version: versionFor,
   };
 };
 

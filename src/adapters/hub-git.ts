@@ -427,6 +427,59 @@ export class HubGit {
     };
   }
 
+  async ensureIntegrationWorkspace(
+    objectiveId: string,
+    baseHash: string,
+    opts?: { readonly resetToBase?: boolean },
+  ): Promise<HubGitWorkspace> {
+    await this.syncFromSource();
+    const workspaceId = `factory_integration_${safeBranchPart(objectiveId)}`;
+    const workspacePath = path.join(this.worktreesDir, workspaceId);
+    const branchName = `hub/integration/${workspaceId}`;
+    if (fs.existsSync(workspacePath)) {
+      if (opts?.resetToBase) {
+        const resolvedBase = await this.resolveCommit(baseHash);
+        await this.execGit(["merge", "--abort"], { cwd: workspacePath }).catch(() => undefined);
+        await this.execGit(["reset", "--hard", resolvedBase], { cwd: workspacePath });
+        await this.execGit(["clean", "-fd", "-e", ".receipt/"], { cwd: workspacePath }).catch(() => undefined);
+      }
+      await this.configureWorktreeIdentity(workspacePath);
+      return {
+        workspaceId,
+        baseHash,
+        branchName,
+        path: workspacePath,
+      };
+    }
+    return this.restoreWorkspace({
+      workspaceId,
+      branchName,
+      workspacePath,
+      baseHash,
+    });
+  }
+
+  async mergeCommitIntoWorkspace(workspacePath: string, commitHash: string, message: string): Promise<HubWorkspaceCommit> {
+    await this.ensureReady();
+    const status = await this.worktreeStatus(workspacePath);
+    if (!status.exists) throw new HubGitError(404, "workspace path is missing");
+    const resolved = await this.resolveCommit(commitHash);
+    try {
+      await this.execGit(["merge", "--no-ff", "-m", message, resolved], { cwd: workspacePath });
+    } catch (err) {
+      await this.execGit(["merge", "--abort"], { cwd: workspacePath }).catch(() => undefined);
+      const messageText = err instanceof Error ? err.message : String(err);
+      throw new HubGitError(409, `unable to merge ${shortCommit(resolved)} into workspace: ${messageText}`);
+    }
+    const head = clean(await this.execGit(["rev-parse", "HEAD"], { cwd: workspacePath }).catch(() => ""));
+    if (!head) throw new HubGitError(500, "unable to resolve workspace HEAD after merge");
+    this.invalidateGraph();
+    return {
+      hash: head,
+      branch: clean(await this.execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspacePath }).catch(() => "")) || undefined,
+    };
+  }
+
   async promoteCommit(commitHash: string): Promise<HubSourcePromotion> {
     await this.ensureReady();
     const source = await this.sourceStatus();

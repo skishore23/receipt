@@ -10,6 +10,13 @@ export type CodexRunInput = {
   readonly lastMessagePath: string;
   readonly stdoutPath: string;
   readonly stderrPath: string;
+  readonly objectiveId?: string;
+  readonly taskId?: string;
+  readonly candidateId?: string;
+  readonly integrationRef?: { readonly kind: string; readonly ref: string; readonly label?: string };
+  readonly contextRefs?: ReadonlyArray<{ readonly kind: string; readonly ref: string; readonly label?: string }>;
+  readonly skillBundlePaths?: ReadonlyArray<string>;
+  readonly repoSkillPaths?: ReadonlyArray<string>;
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
 };
@@ -59,10 +66,12 @@ export class LocalCodexExecutor implements CodexExecutor {
   }
 
   async run(input: CodexRunInput, control?: CodexRunControl): Promise<CodexRunResult> {
+    await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
     await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
     await fsp.mkdir(path.dirname(input.stdoutPath), { recursive: true });
     await fsp.mkdir(path.dirname(input.stderrPath), { recursive: true });
     await Promise.all([
+      fsp.writeFile(input.promptPath, input.prompt, "utf-8"),
       fsp.writeFile(input.stdoutPath, "", "utf-8"),
       fsp.writeFile(input.stderrPath, "", "utf-8"),
     ]);
