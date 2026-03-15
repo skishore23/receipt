@@ -213,7 +213,7 @@ export const shell = (stream: string): string => `<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Receipt</title>
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="/assets/htmx.min.js"></script>
   <style>
     :root { --bg: #0b0c10; --card: #12141a; --ink: #e8e8ea; --muted: #888; --line: rgba(255,255,255,.08); --ok: #37d67a; --bad: #ff4d4f; }
     * { box-sizing: border-box; }

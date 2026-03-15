@@ -77,8 +77,19 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const selectedObjectiveId = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("objective"));
 
-  const objectiveRedirect = (objectiveId?: string): Response =>
-    emptyHtml({ "HX-Redirect": objectiveId ? `/factory?objective=${encodeURIComponent(objectiveId)}` : "/factory" });
+  const objectiveRedirect = (req: Request, objectiveId?: string): Response => {
+    const location = objectiveId ? `/factory?objective=${encodeURIComponent(objectiveId)}` : "/factory";
+    if (req.headers.get("HX-Request") === "true") {
+      return emptyHtml({ "HX-Redirect": location });
+    }
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: location,
+        "Cache-Control": "no-store",
+      },
+    });
+  };
 
   return {
     id: "factory",
@@ -246,7 +257,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           });
           return created.objectiveId;
         },
-        (objectiveId) => objectiveRedirect(objectiveId)
+        (objectiveId) => objectiveRedirect(c.req.raw, objectiveId)
       ));
 
       app.post("/factory/ui/objectives/:id/react", async (c) => wrap(
@@ -254,7 +265,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           await service.reactObjective(c.req.param("id"));
           return c.req.param("id");
         },
-        (objectiveId) => objectiveRedirect(objectiveId)
+        (objectiveId) => objectiveRedirect(c.req.raw, objectiveId)
       ));
 
       app.post("/factory/ui/objectives/:id/promote", async (c) => wrap(
@@ -262,7 +273,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           await service.promoteObjective(c.req.param("id"));
           return c.req.param("id");
         },
-        (objectiveId) => objectiveRedirect(objectiveId)
+        (objectiveId) => objectiveRedirect(c.req.raw, objectiveId)
       ));
 
       app.post("/factory/ui/objectives/:id/cancel", async (c) => wrap(
@@ -271,7 +282,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           await service.cancelObjective(c.req.param("id"), optionalTrimmedString(body.reason));
           return c.req.param("id");
         },
-        (objectiveId) => objectiveRedirect(objectiveId)
+        (objectiveId) => objectiveRedirect(c.req.raw, objectiveId)
       ));
 
       app.post("/factory/ui/objectives/:id/archive", async (c) => wrap(
@@ -279,7 +290,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           await service.archiveObjective(c.req.param("id"));
           return undefined;
         },
-        () => objectiveRedirect(undefined)
+        () => objectiveRedirect(c.req.raw, undefined)
       ));
 
       app.post("/factory/ui/objectives/:id/cleanup", async (c) => wrap(
@@ -287,7 +298,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           await service.cleanupObjectiveWorkspaces(c.req.param("id"));
           return c.req.param("id");
         },
-        (objectiveId) => objectiveRedirect(objectiveId)
+        (objectiveId) => objectiveRedirect(c.req.raw, objectiveId)
       ));
     },
   };

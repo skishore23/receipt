@@ -347,7 +347,7 @@ export const axiomSimpleShell = (
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="/assets/htmx.min.js"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js"></script>
   <style>
     :root {

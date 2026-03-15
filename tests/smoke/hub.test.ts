@@ -182,12 +182,19 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
     const shellRes = await fetch(`${base}/factory`);
     assert.equal(shellRes.status, 200);
     const shellBody = await shellRes.text();
+    assert.match(shellBody, /<script src="\/assets\/htmx\.min\.js"><\/script>/);
     assert.match(shellBody, /id="factory-compose"/);
     assert.match(shellBody, /id="factory-board"/);
     assert.match(shellBody, /id="factory-objective"/);
     assert.match(shellBody, /id="factory-live"/);
     assert.match(shellBody, /id="factory-debug"/);
     assert.match(shellBody, /new EventSource\("\/factory\/events"\)/);
+    assert.match(shellBody, /action="\/factory\/ui\/objectives"/);
+    assert.match(shellBody, /method="post"/);
+
+    const htmxRes = await fetch(`${base}/assets/htmx.min.js`);
+    assert.equal(htmxRes.status, 200);
+    assert.match(htmxRes.headers.get("content-type") ?? "", /application\/javascript/);
 
     const createRes = await fetch(`${base}/factory/api/objectives`, {
       method: "POST",
@@ -243,10 +250,17 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
     const receiptsPayload = await receiptsRes.json() as { receipts: Array<{ type: string }> };
     assert.ok(receiptsPayload.receipts.some((receipt) => receipt.type === "objective.created"));
 
-    const promoteRes = await fetch(`${base}/factory/api/objectives/${created.objective.objectiveId}/promote`, {
+    const promoteFormRes = await fetch(`${base}/factory/ui/objectives/${created.objective.objectiveId}/promote`, {
       method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
     });
-    assert.equal(promoteRes.status, 200);
+    assert.equal(promoteFormRes.status, 303);
+    assert.equal(
+      promoteFormRes.headers.get("location"),
+      `/factory?objective=${created.objective.objectiveId}`,
+    );
+
     const completed = await waitForFactoryObjective(
       base,
       created.objective.objectiveId,

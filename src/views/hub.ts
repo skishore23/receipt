@@ -138,7 +138,7 @@ export const hubShell = (opts: {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hub</title>
-    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="/assets/htmx.min.js"></script>
     <style>
       :root { color-scheme: dark; --bg: #11141c; --panel: #171c27; --line: #313a4b; --text: #eef2f8; --muted: #97a4b8; --accent: #88d8ff; }
       * { box-sizing: border-box; }

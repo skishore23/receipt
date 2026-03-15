@@ -34,6 +34,8 @@ export const factoryComposeIsland = (model: FactoryComposeModel): string => `
     </div>
     <form
       class="factory-form"
+      action="/factory/ui/objectives"
+      method="post"
       hx-post="/factory/ui/objectives"
       hx-swap="none"
       hx-on::after-request="if (event.detail.successful) this.reset()">
@@ -49,6 +51,7 @@ export const factoryComposeIsland = (model: FactoryComposeModel): string => `
         <button type="submit">Launch Objective</button>
         <span>Source branch: <code>${esc(model.sourceBranch ?? model.defaultBranch)}</code></span>
       </div>
+      <div class="factory-muted">Launching an objective can take a few seconds while Factory writes receipts and computes the first task graph.</div>
       <div class="factory-note${model.sourceDirty ? " warn" : ""}">
         ${model.sourceDirty
           ? "Objective creation is blocked while the source repo has uncommitted changes unless you provide baseHash explicitly."
@@ -169,13 +172,13 @@ export const factoryObjectiveIsland = (detail: FactoryObjectiveDetail | undefine
           <p>${esc(detail.objectiveId)} · ${esc(detail.status)}</p>
         </div>
         <div class="factory-actions">
-          <form hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" hx-swap="none"><button type="submit">React</button></form>
+          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" hx-swap="none"><button type="submit">React</button></form>
           ${detail.integration.status === "ready_to_promote"
-            ? `<form hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" hx-swap="none"><button type="submit">Promote</button></form>`
+            ? `<form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" hx-swap="none"><button type="submit">Promote</button></form>`
             : ""}
-          <form hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" hx-swap="none"><button type="submit">Cleanup</button></form>
-          <form hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" hx-swap="none"><button type="submit">Archive</button></form>
-          <form hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" hx-swap="none"><button type="submit" class="danger">Cancel</button></form>
+          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" hx-swap="none"><button type="submit">Cleanup</button></form>
+          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" hx-swap="none"><button type="submit">Archive</button></form>
+          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" hx-swap="none"><button type="submit" class="danger">Cancel</button></form>
         </div>
       </div>
       <div class="factory-grid three">
@@ -280,7 +283,7 @@ export const factoryDebugIsland = (debug: FactoryDebugProjection | undefined): s
         </details>
         <details class="factory-detail">
           <summary>Integration worktree</summary>
-          <pre>${esc(JSON.stringify(debug.integrationWorktree, null, 2))}</pre>
+          <pre>${esc(JSON.stringify(debug.integrationWorktree ?? null, null, 2))}</pre>
         </details>
       </div>
     </section>
@@ -299,7 +302,7 @@ export const factoryShell = (opts: {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Factory</title>
-    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="/assets/htmx.min.js"></script>
     <script>
       (() => {
         const targets = [

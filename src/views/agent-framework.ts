@@ -48,8 +48,9 @@ export type FrameworkCoordinationModel = {
   readonly trail: ReadonlyArray<FrameworkTrailRow>;
 };
 
-export const esc = (s: string): string =>
-  s.replace(/&/g, "&amp;")
+export const esc = (value: unknown): string =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
