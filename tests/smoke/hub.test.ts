@@ -16,6 +16,8 @@ import { decide as decideJob, initial as initialJob, reduce as reduceJob, type J
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const truncateText = (value: string, max: number): string =>
+  value.length <= max ? value : `${value.slice(0, max - 3)}...`;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -651,12 +653,18 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(commitsHtml, /Recent Commits/);
     assert.match(commitsHtml, /Selected Commit/);
 
+    const longObjectivePrompt = [
+      "Create a tiny tracked file so the hub can verify planner, builder, reviewer, and approval.",
+      "Use this objective to confirm the right-hand detail pane starts with a compact preview instead of dumping the full narrative immediately.",
+      "Keep the worktree clean enough for merge verification once the candidate is ready.",
+    ].join(" ");
+
     const objectiveCreate = await fetch(`${base}/hub/api/objectives`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: "Exercise the codex-powered hub flow",
-        prompt: "Create a tiny tracked file so the hub can verify planner, builder, reviewer, and approval.",
+        prompt: longObjectivePrompt,
         checks: ["git rev-parse HEAD"],
         channel: "results",
       }),
@@ -729,11 +737,15 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     const selectedObjectiveRes = await fetch(`${base}/hub/island/objective?objective=${created.objective.objectiveId}`);
     assert.equal(selectedObjectiveRes.status, 200);
     const selectedObjectiveHtml = await selectedObjectiveRes.text();
+    const promptPreview = truncateText(longObjectivePrompt, 180);
     assert.match(selectedObjectiveHtml, /Planned/);
     assert.match(selectedObjectiveHtml, /Built/);
     assert.match(selectedObjectiveHtml, /Review/);
     assert.match(selectedObjectiveHtml, /Next Handoff/);
     assert.match(selectedObjectiveHtml, /Implemented builder pass 4\./);
+    assert.match(selectedObjectiveHtml, /class="detail-disclosure"/);
+    assert.match(selectedObjectiveHtml, /Show more/);
+    assert.ok(selectedObjectiveHtml.includes(promptPreview));
 
     const sourceHeadBeforeMerge = await git(repoDir, ["rev-parse", "HEAD"]);
 

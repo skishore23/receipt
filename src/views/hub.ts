@@ -84,6 +84,27 @@ const liveNarrative = (phase: string | undefined, status: string | undefined, el
   if (status === "running") return `${phaseLabel} is actively running in Codex${duration}.`;
   return `${phaseLabel} idle.`;
 };
+const renderLongText = (
+  value: string,
+  className = "detail-text",
+  previewLength = 160,
+): string => {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const formatted = esc(value).replaceAll("\n", "<br/>");
+  if (normalized.length <= previewLength && !value.includes("\n")) {
+    return `<div class="${className}">${formatted}</div>`;
+  }
+  return `
+    <details class="detail-disclosure">
+      <summary>
+        <span class="${className} detail-preview">${esc(truncate(normalized || value, previewLength))}</span>
+        <span class="detail-toggle-label detail-toggle-more">Show more</span>
+        <span class="detail-toggle-label detail-toggle-less">Show less</span>
+      </summary>
+      <div class="${className} detail-expanded">${formatted}</div>
+    </details>
+  `;
+};
 
 const archiveIcon = (): string => `
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true">
@@ -334,7 +355,7 @@ const renderObjectiveDetail = (model: HubObjectiveProjection): string => {
       <div class="detail-grid compact">
         <div>
           <div class="detail-label">Intent</div>
-          <div class="detail-text">${esc(objective.prompt)}</div>
+          ${renderLongText(objective.prompt, "detail-text", 180)}
         </div>
         <div>
           <div class="detail-label">Verification</div>
@@ -346,27 +367,26 @@ const renderObjectiveDetail = (model: HubObjectiveProjection): string => {
         </div>
         <div>
           <div class="detail-label">Next Handoff</div>
-          <div class="detail-text">${esc(objective.nextHandoff ?? "No active handoff.")}</div>
+          ${renderLongText(objective.nextHandoff ?? "No active handoff.", "detail-text", 140)}
         </div>
       </div>
       <div class="detail-stage-grid">
         <div class="detail-stage">
           <div class="detail-label">Planned</div>
-          <div class="detail-text">${esc(objective.latestPlanSummary ?? "Planner has not produced a durable plan yet.")}</div>
-          <div class="detail-note">${esc(objective.latestPlanHandoff ?? "No builder handoff recorded yet.")}</div>
+          ${renderLongText(objective.latestPlanSummary ?? "Planner has not produced a durable plan yet.", "detail-text", 140)}
+          ${renderLongText(objective.latestPlanHandoff ?? "No builder handoff recorded yet.", "detail-note", 140)}
         </div>
         <div class="detail-stage">
           <div class="detail-label">Built</div>
-          <div class="detail-text">${esc(objective.latestBuildSummary ?? "No candidate has been built yet.")}</div>
-          <div class="detail-note">
-            ${esc(objective.latestBuildHandoff ?? "No reviewer handoff recorded yet.")}
-            ${objective.latestCommitHash ? `<br/><span class="mono">candidate ${esc(shortHash(objective.latestCommitHash))}</span>` : ""}
-          </div>
+          ${renderLongText(objective.latestBuildSummary ?? "No candidate has been built yet.", "detail-text", 140)}
+          ${renderLongText(objective.latestBuildHandoff ?? "No reviewer handoff recorded yet.", "detail-note", 140)}
+          ${objective.latestCommitHash ? `<div class="detail-note detail-inline-meta"><span class="mono">candidate ${esc(shortHash(objective.latestCommitHash))}</span></div>` : ""}
         </div>
         <div class="detail-stage">
           <div class="detail-label">Review</div>
-          <div class="detail-text">${esc(objective.latestReviewOutcome ?? "pending")}${objective.latestReviewSummary ? `<br/>${esc(objective.latestReviewSummary)}` : ""}</div>
-          <div class="detail-note">${esc(objective.latestReviewHandoff ?? "No reviewer handoff recorded yet.")}</div>
+          <div class="detail-text">${esc(objective.latestReviewOutcome ?? "pending")}</div>
+          ${objective.latestReviewSummary ? renderLongText(objective.latestReviewSummary, "detail-text", 140) : ""}
+          ${renderLongText(objective.latestReviewHandoff ?? "No reviewer handoff recorded yet.", "detail-note", 140)}
         </div>
       </div>
       ${canMerge ? `
@@ -1159,6 +1179,45 @@ export const hubShell = (opts: {
       font-size: 11px;
       line-height: 1.45;
       overflow-wrap: anywhere;
+    }
+    .detail-disclosure {
+      display: grid;
+      gap: 8px;
+    }
+    .detail-disclosure summary {
+      cursor: pointer;
+    }
+    .detail-preview {
+      display: block;
+      margin: 0 0 5px;
+    }
+    .detail-toggle-label {
+      width: fit-content;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ink);
+      background: rgba(140,196,255,0.08);
+    }
+    .detail-toggle-less {
+      display: none;
+    }
+    .detail-disclosure[open] .detail-preview,
+    .detail-disclosure[open] .detail-toggle-more {
+      display: none;
+    }
+    .detail-disclosure[open] .detail-toggle-less {
+      display: inline-flex;
+    }
+    .detail-expanded {
+      padding-top: 2px;
+    }
+    .detail-inline-meta {
+      padding-top: 2px;
     }
     .detail-label {
       color: var(--muted);
