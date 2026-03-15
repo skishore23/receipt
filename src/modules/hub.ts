@@ -1,5 +1,10 @@
 import type { Decide, Reducer } from "../core/types.js";
-import type { ObjectivePassStatus, ObjectivePhase, ObjectiveRecord } from "./hub-objective.js";
+import type {
+  ObjectivePassStatus,
+  ObjectivePhase,
+  ObjectiveRebracketRecord,
+  ObjectiveRecord,
+} from "./hub-objective.js";
 
 export type AgentProfile = {
   readonly agentId: string;
@@ -60,6 +65,8 @@ export type HubObjectiveSummary = ObjectiveRecord & {
   readonly currentPassPhase?: ObjectivePhase;
   readonly currentPassStatus?: ObjectivePassStatus;
   readonly currentPassDispatchedAt?: number;
+  readonly frontierCandidateIds?: ReadonlyArray<string>;
+  readonly latestRebracket?: ObjectiveRebracketRecord;
   readonly latestPlanSummary?: string;
   readonly latestPlanHandoff?: string;
   readonly latestBuildSummary?: string;

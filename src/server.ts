@@ -80,6 +80,10 @@ import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-
 import { HubService } from "./services/hub-service.js";
 import { HubServiceError } from "./services/hub-service.js";
 import {
+  createOpenAiHubOrchestrator,
+  createTestHubOrchestrator,
+} from "./services/hub-orchestrator.js";
+import {
   assertReceiptFileName,
   listReceiptFiles,
   readReceiptFile,
@@ -100,6 +104,8 @@ import { evaluateImprovementProposal } from "./engine/runtime/improvement-harnes
 const PORT = Number(process.env.PORT ?? 8787);
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
 const USE_INDEXED_STORE = process.env.RECEIPT_INDEXED_STORE === "1";
+const HUB_ORCHESTRATOR_MODE = process.env.HUB_ORCHESTRATOR_MODE === "enabled" ? "enabled" : "disabled";
+const HUB_ORCHESTRATOR_TEST_MODE = process.env.HUB_ORCHESTRATOR_TEST_MODE?.trim();
 
 // ============================================================================
 // Composition: Store -> Runtime
@@ -398,12 +404,26 @@ const delegationTools = createDelegationTools({
 });
 
 const hubCodexExecutor = new LocalCodexExecutor();
+const hubOrchestratorPromptPath = path.join(process.cwd(), "prompts", "hub", "orchestrator.md");
+const hubOrchestratorPrompt = fs.existsSync(hubOrchestratorPromptPath)
+  ? fs.readFileSync(hubOrchestratorPromptPath, "utf-8")
+  : "";
+const hubOrchestrator = HUB_ORCHESTRATOR_TEST_MODE
+  ? createTestHubOrchestrator(HUB_ORCHESTRATOR_TEST_MODE)
+  : (HUB_ORCHESTRATOR_MODE === "enabled" && process.env.OPENAI_API_KEY
+    ? createOpenAiHubOrchestrator({
+      llmStructured,
+      systemPrompt: hubOrchestratorPrompt,
+    })
+    : undefined);
 const hubService = new HubService({
   dataDir: DATA_DIR,
   queue,
   jobRuntime,
   sse,
   codexExecutor: hubCodexExecutor,
+  orchestrator: hubOrchestrator,
+  orchestratorMode: hubOrchestrator ? "enabled" : "disabled",
   memoryTools,
 });
 

@@ -42,6 +42,54 @@ export type ObjectiveCheckResult = {
   readonly finishedAt: number;
 };
 
+export type ObjectiveCandidateStatus =
+  | "draft"
+  | "under_review"
+  | "approved"
+  | "changes_requested"
+  | "superseded"
+  | "merged"
+  | "blocked";
+
+export type ObjectiveCandidateScoreVector = Readonly<Record<string, number>>;
+
+export type ObjectiveCandidateRecord = {
+  readonly candidateId: string;
+  readonly seedPassId: string;
+  readonly baseCommit: string;
+  readonly parentCandidateId?: string;
+  readonly status: ObjectiveCandidateStatus;
+  readonly headCommit?: string;
+  readonly latestBuildPassId?: string;
+  readonly latestReviewPassId?: string;
+  readonly latestCheckResults: ReadonlyArray<ObjectiveCheckResult>;
+  readonly latestSummary?: string;
+  readonly latestHandoff?: string;
+  readonly latestDecision?: Extract<ObjectivePassOutcome, "approved" | "changes_requested">;
+  readonly touchedFiles: ReadonlyArray<string>;
+  readonly buildCount: number;
+  readonly reviewCount: number;
+  readonly retryCount: number;
+  readonly lastScore?: number;
+  readonly lastScoreVector?: ObjectiveCandidateScoreVector;
+  readonly lastScoreReason?: string;
+  readonly latestReason?: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly approvedAt?: number;
+  readonly supersededAt?: number;
+  readonly mergedAt?: number;
+};
+
+export type ObjectiveRebracketRecord = {
+  readonly frontierCandidateIds: ReadonlyArray<string>;
+  readonly selectedActionId?: string;
+  readonly reason: string;
+  readonly confidence?: number;
+  readonly source: "orchestrator" | "fallback";
+  readonly appliedAt: number;
+};
+
 export type ObjectivePassStatus =
   | "queued"
   | "completed"
@@ -60,11 +108,13 @@ export type ObjectivePassRecord = {
   readonly passId: string;
   readonly phase: ObjectivePhase;
   readonly passNumber: number;
+  readonly actionId?: string;
   readonly agentId: string;
   readonly jobId: string;
   readonly workspaceId: string;
   readonly workspacePath: string;
   readonly baseCommit: string;
+  readonly candidateId?: string;
   readonly status: ObjectivePassStatus;
   readonly dispatchedAt: number;
   readonly completedAt?: number;
@@ -87,11 +137,13 @@ export type ObjectiveGraphNodeRecord = {
   readonly title: string;
   readonly passId: string;
   readonly passNumber: number;
+  readonly actionId?: string;
   readonly agentId: string;
   readonly jobId: string;
   readonly workspaceId: string;
   readonly workspacePath: string;
   readonly baseCommit: string;
+  readonly candidateId?: string;
   readonly dependsOn: ReadonlyArray<string>;
   readonly inputRefs: Readonly<Record<string, GraphRef>>;
   readonly outputRefs: Readonly<Record<string, GraphRef>>;
@@ -117,6 +169,7 @@ export type ObjectiveRecord = {
   readonly archivedAt?: number;
   readonly currentPhase?: ObjectivePhase;
   readonly assignedAgentId?: string;
+  readonly awaitingCandidateId?: string;
   readonly latestCommitHash?: string;
   readonly latestSummary?: string;
   readonly blockedReason?: string;
@@ -129,7 +182,11 @@ export type ObjectiveState = ObjectiveRecord & {
   readonly currentPassId?: string;
   readonly passOrder: ReadonlyArray<string>;
   readonly passes: Readonly<Record<string, ObjectivePassRecord>>;
+  readonly candidates: Readonly<Record<string, ObjectiveCandidateRecord>>;
+  readonly candidateOrder: ReadonlyArray<string>;
+  readonly frontierCandidateIds: ReadonlyArray<string>;
   readonly latestCheckResults: ReadonlyArray<ObjectiveCheckResult>;
+  readonly latestRebracket?: ObjectiveRebracketRecord;
   readonly graph: ObjectiveGraphState;
 };
 
@@ -183,6 +240,65 @@ export type ObjectiveEvent =
       readonly status: Extract<GraphNodeStatus, "blocked" | "failed" | "canceled">;
       readonly reason: string;
       readonly completedAt: number;
+    }
+  | {
+      readonly type: "candidate.created";
+      readonly objectiveId: string;
+      readonly candidate: ObjectiveCandidateRecord;
+      readonly createdAt: number;
+    }
+  | {
+      readonly type: "candidate.scored";
+      readonly objectiveId: string;
+      readonly candidateId: string;
+      readonly score: number;
+      readonly scoreVector: ObjectiveCandidateScoreVector;
+      readonly reason: string;
+      readonly scoredAt: number;
+    }
+  | {
+      readonly type: "candidate.superseded";
+      readonly objectiveId: string;
+      readonly candidateId: string;
+      readonly reason: string;
+      readonly supersededAt: number;
+    }
+  | {
+      readonly type: "orchestrator.evidence.computed";
+      readonly objectiveId: string;
+      readonly frontierCandidateIds: ReadonlyArray<string>;
+      readonly actionIds: ReadonlyArray<string>;
+      readonly summary: string;
+      readonly computedAt: number;
+    }
+  | {
+      readonly type: "orchestrator.action.proposed";
+      readonly objectiveId: string;
+      readonly actionId: string;
+      readonly frontierCandidateIds: ReadonlyArray<string>;
+      readonly reason: string;
+      readonly confidence?: number;
+      readonly proposedAt: number;
+    }
+  | {
+      readonly type: "orchestrator.action.applied";
+      readonly objectiveId: string;
+      readonly actionId: string;
+      readonly frontierCandidateIds: ReadonlyArray<string>;
+      readonly reason: string;
+      readonly confidence?: number;
+      readonly source: "orchestrator" | "fallback";
+      readonly appliedAt: number;
+    }
+  | {
+      readonly type: "rebracket.applied";
+      readonly objectiveId: string;
+      readonly frontierCandidateIds: ReadonlyArray<string>;
+      readonly selectedActionId?: string;
+      readonly reason: string;
+      readonly confidence?: number;
+      readonly source: "orchestrator" | "fallback";
+      readonly appliedAt: number;
     }
   | {
       readonly type: "plan.ready";
@@ -239,12 +355,14 @@ export type ObjectiveEvent =
   | {
       readonly type: "objective.awaiting_confirmation";
       readonly objectiveId: string;
+      readonly candidateId: string;
       readonly summary: string;
       readonly createdAt: number;
     }
   | {
       readonly type: "objective.approved";
       readonly objectiveId: string;
+      readonly candidateId: string;
       readonly approvedAt: number;
     }
   | {
@@ -315,6 +433,9 @@ const initialRecord = (event: Extract<ObjectiveEvent, { type: "objective.created
   updatedAt: event.createdAt,
   passOrder: [],
   passes: {},
+  candidates: {},
+  candidateOrder: [],
+  frontierCandidateIds: [],
   latestCheckResults: [],
   graph: createGraphState<ObjectiveGraphNodeRecord>(event.objectiveId, event.createdAt),
 });
@@ -342,6 +463,54 @@ const updatePass = (
         ...patch,
       },
     },
+  };
+};
+
+const updateCandidate = (
+  state: ObjectiveState,
+  candidateId: string,
+  patch: Partial<ObjectiveCandidateRecord>,
+): ObjectiveState => {
+  const current = state.candidates[candidateId];
+  if (!current) return state;
+  return {
+    ...state,
+    candidates: {
+      ...state.candidates,
+      [candidateId]: {
+        ...current,
+        ...patch,
+      },
+    },
+  };
+};
+
+const upsertCandidate = (
+  state: ObjectiveState,
+  candidate: ObjectiveCandidateRecord,
+): ObjectiveState => ({
+  ...state,
+  candidates: {
+    ...state.candidates,
+    [candidate.candidateId]: candidate,
+  },
+  candidateOrder: state.candidateOrder.includes(candidate.candidateId)
+    ? state.candidateOrder
+    : [...state.candidateOrder, candidate.candidateId],
+});
+
+const activeCandidateStatus = (status: ObjectiveCandidateStatus): boolean =>
+  status !== "superseded" && status !== "merged" && status !== "blocked";
+
+const pruneFrontier = (state: ObjectiveState, frontierCandidateIds?: ReadonlyArray<string>): ObjectiveState => {
+  const source = frontierCandidateIds ?? state.frontierCandidateIds;
+  const next = source.filter((candidateId) => {
+    const candidate = state.candidates[candidateId];
+    return Boolean(candidate) && activeCandidateStatus(candidate.status);
+  });
+  return {
+    ...state,
+    frontierCandidateIds: next,
   };
 };
 
@@ -394,6 +563,9 @@ export const initialObjectiveState: ObjectiveState = {
   updatedAt: 0,
   passOrder: [],
   passes: {},
+  candidates: {},
+  candidateOrder: [],
+  frontierCandidateIds: [],
   latestCheckResults: [],
   graph: createGraphState<ObjectiveGraphNodeRecord>("", 0),
 };
@@ -410,12 +582,13 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         status: "queued",
       };
       const nextStatus = statusForPhase(pass.phase);
-      return {
+      let nextState: ObjectiveState = {
         ...state,
         status: nextStatus,
         lane: objectiveLaneForStatus(nextStatus),
         currentPhase: pass.phase,
         assignedAgentId: pass.agentId,
+        awaitingCandidateId: pass.phase === "reviewer" ? undefined : state.awaitingCandidateId,
         currentPassId: pass.passId,
         updatedAt: event.dispatchedAt,
         passOrder: state.passOrder.includes(pass.passId)
@@ -426,6 +599,16 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
           [pass.passId]: pass,
         },
       };
+      if (pass.candidateId) {
+        nextState = updateCandidate(nextState, pass.candidateId, {
+          status: pass.phase === "reviewer" ? "under_review" : "draft",
+          updatedAt: event.dispatchedAt,
+          latestReason: pass.phase === "reviewer"
+            ? "Queued reviewer pass."
+            : "Queued builder pass.",
+        });
+      }
+      return nextState;
     }
     case "graph.node.planned":
       return {
@@ -512,6 +695,59 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         },
       };
     }
+    case "candidate.created":
+      return {
+        ...pruneFrontier(
+          upsertCandidate(state, event.candidate),
+          [...state.frontierCandidateIds, event.candidate.candidateId],
+        ),
+        updatedAt: event.createdAt,
+      };
+    case "candidate.scored":
+      return updateCandidate(state, event.candidateId, {
+        lastScore: event.score,
+        lastScoreVector: event.scoreVector,
+        lastScoreReason: event.reason,
+        updatedAt: event.scoredAt,
+      });
+    case "candidate.superseded":
+      return {
+        ...pruneFrontier(updateCandidate(state, event.candidateId, {
+          status: "superseded",
+          latestReason: event.reason,
+          supersededAt: event.supersededAt,
+          updatedAt: event.supersededAt,
+        })),
+        updatedAt: event.supersededAt,
+      };
+    case "orchestrator.evidence.computed":
+      return {
+        ...state,
+        updatedAt: event.computedAt,
+      };
+    case "orchestrator.action.proposed":
+      return {
+        ...state,
+        updatedAt: event.proposedAt,
+      };
+    case "orchestrator.action.applied":
+      return {
+        ...state,
+        updatedAt: event.appliedAt,
+      };
+    case "rebracket.applied":
+      return {
+        ...pruneFrontier(state, event.frontierCandidateIds),
+        latestRebracket: {
+          frontierCandidateIds: event.frontierCandidateIds,
+          selectedActionId: event.selectedActionId,
+          reason: event.reason,
+          confidence: event.confidence,
+          source: event.source,
+          appliedAt: event.appliedAt,
+        },
+        updatedAt: event.appliedAt,
+      };
     case "plan.ready": {
       const next = updatePass(state, event.passId, {
         status: "completed",
@@ -527,7 +763,8 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
       };
     }
     case "candidate.ready": {
-      const next = updatePass(state, event.passId, {
+      const pass = state.passes[event.passId];
+      let next = updatePass(state, event.passId, {
         status: "completed",
         outcome: "candidate_ready",
         summary: event.summary,
@@ -536,6 +773,20 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         checkResults: event.checkResults,
         completedAt: event.completedAt,
       });
+      if (pass?.candidateId) {
+        next = updateCandidate(next, pass.candidateId, {
+          status: "draft",
+          headCommit: event.commitHash,
+          latestBuildPassId: event.passId,
+          latestCheckResults: event.checkResults,
+          latestSummary: event.summary,
+          latestHandoff: event.handoff,
+          latestDecision: undefined,
+          buildCount: (next.candidates[pass.candidateId]?.buildCount ?? 0) + 1,
+          touchedFiles: next.candidates[pass.candidateId]?.touchedFiles ?? [],
+          updatedAt: event.completedAt,
+        });
+      }
       return {
         ...updateGraphStatus(next, event.completedAt, next.graph.status),
         latestCommitHash: event.commitHash,
@@ -545,7 +796,8 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
       };
     }
     case "review.approved": {
-      const next = updatePass(state, event.passId, {
+      const pass = state.passes[event.passId];
+      let next = updatePass(state, event.passId, {
         status: "completed",
         outcome: "approved",
         summary: event.summary,
@@ -553,6 +805,19 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         commitHash: event.commitHash,
         completedAt: event.completedAt,
       });
+      if (pass?.candidateId) {
+        next = updateCandidate(next, pass.candidateId, {
+          status: "approved",
+          headCommit: event.commitHash,
+          latestReviewPassId: event.passId,
+          latestSummary: event.summary,
+          latestHandoff: event.handoff,
+          latestDecision: "approved",
+          reviewCount: (next.candidates[pass.candidateId]?.reviewCount ?? 0) + 1,
+          approvedAt: event.completedAt,
+          updatedAt: event.completedAt,
+        });
+      }
       return {
         ...updateGraphStatus(next, event.completedAt, next.graph.status),
         latestCommitHash: event.commitHash,
@@ -561,7 +826,8 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
       };
     }
     case "review.changes_requested": {
-      const next = updatePass(state, event.passId, {
+      const pass = state.passes[event.passId];
+      let next = updatePass(state, event.passId, {
         status: "completed",
         outcome: "changes_requested",
         summary: event.summary,
@@ -569,6 +835,20 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         commitHash: event.commitHash,
         completedAt: event.completedAt,
       });
+      if (pass?.candidateId) {
+        const current = next.candidates[pass.candidateId];
+        next = updateCandidate(next, pass.candidateId, {
+          status: "changes_requested",
+          headCommit: event.commitHash,
+          latestReviewPassId: event.passId,
+          latestSummary: event.summary,
+          latestHandoff: event.handoff,
+          latestDecision: "changes_requested",
+          reviewCount: (current?.reviewCount ?? 0) + 1,
+          retryCount: (current?.retryCount ?? 0) + 1,
+          updatedAt: event.completedAt,
+        });
+      }
       return {
         ...updateGraphStatus(next, event.completedAt, next.graph.status),
         latestCommitHash: event.commitHash,
@@ -577,6 +857,7 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
       };
     }
     case "blocked": {
+      const blockedPass = event.passId ? state.passes[event.passId] : undefined;
       const next = event.passId
         ? updatePass(state, event.passId, {
           status: "blocked",
@@ -586,7 +867,7 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
           completedAt: event.completedAt,
         })
         : state;
-      return {
+      const base: ObjectiveState = {
         ...next,
         status: "blocked",
         lane: "blocked",
@@ -599,6 +880,15 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
           updatedAt: event.completedAt,
         },
       };
+      if (blockedPass?.candidateId) {
+        return pruneFrontier(updateCandidate(base, blockedPass.candidateId, {
+          status: "blocked",
+          latestReason: event.reason,
+          latestSummary: event.summary,
+          updatedAt: event.completedAt,
+        }));
+      }
+      return base;
     }
     case "objective.resumed": {
       const nextStatus = statusForPhase(event.phase);
@@ -623,6 +913,8 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         status: "awaiting_confirmation",
         lane: "awaiting_confirmation",
         approvalState: "awaiting_confirmation",
+        awaitingCandidateId: event.candidateId,
+        latestCommitHash: state.candidates[event.candidateId]?.headCommit ?? state.latestCommitHash,
         latestSummary: event.summary,
         updatedAt: event.createdAt,
         graph: {
@@ -632,15 +924,20 @@ export const reduceObjective: Reducer<ObjectiveState, ObjectiveEvent> = (state, 
         },
       };
     case "objective.approved":
-      return {
+      return pruneFrontier(updateCandidate({
         ...state,
         approvalState: "approved",
+        awaitingCandidateId: event.candidateId,
         updatedAt: event.approvedAt,
         graph: {
           ...state.graph,
           updatedAt: event.approvedAt,
         },
-      };
+      }, event.candidateId, {
+        status: "merged",
+        mergedAt: event.approvedAt,
+        updatedAt: event.approvedAt,
+      }));
     case "objective.completed":
       return {
         ...state,

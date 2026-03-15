@@ -38,6 +38,8 @@ import {
   initialObjectiveState,
   objectiveLaneForStatus,
   reduceObjective,
+  type ObjectiveCandidateRecord,
+  type ObjectiveCandidateScoreVector,
   type ObjectiveCheckResult,
   type ObjectiveCmd,
   type ObjectiveEvent,
@@ -47,9 +49,20 @@ import {
   type ObjectivePassRecord,
   type ObjectivePhase,
   type ObjectiveRecord,
+  type ObjectiveRebracketRecord,
   type ObjectiveState,
   type ObjectiveStatus,
 } from "../modules/hub-objective.js";
+import {
+  fallbackHubOrchestratorDecision,
+  scoreTotal,
+  type HubOrchestrator,
+  type HubOrchestratorAction,
+  type HubOrchestratorActionType,
+  type HubOrchestratorCandidate,
+  type HubOrchestratorDecision,
+  type HubOrchestratorInput,
+} from "./hub-orchestrator.js";
 import { merge, type MergeDecision, type MergePolicy } from "../sdk/merge.js";
 
 const execFileAsync = promisify(execFile);
@@ -64,6 +77,8 @@ const DEFAULT_ROLE_AGENTS = [
 ] as const satisfies ReadonlyArray<Pick<AgentProfile, "agentId" | "displayName" | "memoryScope">>;
 const DEFAULT_MAX_ITERATIONS = 10;
 const DEFAULT_CHECKS = ["npm run build"] as const;
+const MAX_LIVE_CANDIDATES = 3;
+const MAX_BUILDER_REVISIONS = 2;
 const OBJECTIVE_AGENT_BY_PHASE: Readonly<Record<ObjectivePhase, string>> = {
   planner: "planner-1",
   builder: "builder-1",
@@ -175,6 +190,13 @@ export type ObjectivePassView = ObjectivePassRecord & {
   readonly elapsedMs?: number;
 };
 
+export type ObjectiveCandidateView = ObjectiveCandidateRecord & {
+  readonly latestCheckOk?: boolean;
+  readonly latestCheckCommand?: string;
+  readonly diffSummary?: string;
+  readonly divergenceFromSourceHead: boolean;
+};
+
 export type HubRepoProjection = {
   readonly repoRoot: string;
   readonly defaultBranch: string;
@@ -254,6 +276,9 @@ export type ObjectiveDetail = HubObjectiveCard & {
   readonly latestReviewSummary?: string;
   readonly latestReviewHandoff?: string;
   readonly nextHandoff?: string;
+  readonly frontierCandidateIds: ReadonlyArray<string>;
+  readonly candidates: ReadonlyArray<ObjectiveCandidateView>;
+  readonly latestRebracket?: ObjectiveRebracketRecord;
   readonly activePass?: ObjectivePassView;
   readonly graph: ObjectiveGraphProjection;
 };
@@ -339,6 +364,8 @@ type HubServiceOptions = {
   readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
   readonly sse: SseHub;
   readonly codexExecutor: CodexExecutor;
+  readonly orchestrator?: HubOrchestrator;
+  readonly orchestratorMode?: "disabled" | "enabled";
   readonly memoryTools?: MemoryTools;
   readonly repoRoot?: string;
   readonly promptDir?: string;
@@ -424,10 +451,21 @@ const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", 
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 
 type PlannedObjectiveNode = {
+  readonly actionId?: string;
+  readonly candidateId?: string;
+  readonly parentCandidateId?: string;
   readonly phase: ObjectivePhase;
   readonly baseCommit: string;
   readonly dependsOn: ReadonlyArray<string>;
   readonly inputRefs: Readonly<Record<string, GraphRef>>;
+};
+
+type HubActionPlan = {
+  readonly action: HubOrchestratorAction;
+  readonly plan?: PlannedObjectiveNode;
+  readonly promoteCandidateId?: string;
+  readonly supersedeCandidateId?: string;
+  readonly blockReason?: string;
 };
 
 const objectiveStream = (objectiveId: string): string => `${OBJECTIVE_STREAM_PREFIX}/${objectiveId}`;
@@ -449,6 +487,8 @@ export class HubService {
   private readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
   private readonly sse: SseHub;
   private readonly codexExecutor: CodexExecutor;
+  private readonly orchestrator?: HubOrchestrator;
+  private readonly orchestratorMode: "disabled" | "enabled";
   private readonly memoryTools?: MemoryTools;
   private readonly promptDir: string;
   private readonly hubRuntime: Runtime<HubCmd, HubEvent, HubState>;
@@ -461,6 +501,8 @@ export class HubService {
     this.jobRuntime = opts.jobRuntime;
     this.sse = opts.sse;
     this.codexExecutor = opts.codexExecutor;
+    this.orchestrator = opts.orchestrator;
+    this.orchestratorMode = opts.orchestratorMode ?? "disabled";
     this.memoryTools = opts.memoryTools;
     this.promptDir = opts.promptDir ?? path.join(process.cwd(), "prompts", "hub");
     this.hubRuntime = createRuntime<HubCmd, HubEvent, HubState>(
@@ -864,8 +906,9 @@ export class HubService {
     if (state.status !== "awaiting_confirmation") {
       throw new HubServiceError(409, "objective is not ready to merge");
     }
-    const candidateCommit = state.latestCommitHash;
-    if (!candidateCommit) {
+    const candidateId = state.awaitingCandidateId;
+    const candidateCommit = candidateId ? state.candidates[candidateId]?.headCommit : state.latestCommitHash;
+    if (!candidateCommit || !candidateId) {
       throw new HubServiceError(409, "objective has no candidate commit to merge");
     }
     let promoted;
@@ -891,6 +934,7 @@ export class HubService {
     await this.emitObjective(objectiveId, {
       type: "objective.approved",
       objectiveId,
+      candidateId,
       approvedAt,
     });
     await this.emitObjective(objectiveId, {
@@ -1306,6 +1350,15 @@ export class HubService {
       return;
     }
 
+    if (this.orchestratorMode === "enabled" && this.orchestrator) {
+      const orchestratorContext = await this.buildOrchestratorContext(state);
+      if (orchestratorContext) {
+        const resolved = await this.resolveOrchestratorDecision(state, orchestratorContext);
+        await this.applyOrchestratorDecision(state, orchestratorContext, resolved);
+        return;
+      }
+    }
+
     const nextNode = this.planNextObjectiveNode(state);
     if (!nextNode) {
       return;
@@ -1315,9 +1368,13 @@ export class HubService {
         .map((passId) => state.passes[passId])
         .reverse()
         .find((pass) => pass.phase === "reviewer" && pass.outcome === "approved");
+      if (!latestReview?.candidateId) {
+        throw new HubServiceError(500, "approved reviewer pass is missing candidateId");
+      }
       await this.emitObjective(objectiveId, {
         type: "objective.awaiting_confirmation",
         objectiveId,
+        candidateId: latestReview.candidateId,
         summary: latestReview?.summary ?? "Review approved. Awaiting confirmation.",
         createdAt: Date.now(),
       });
@@ -1337,6 +1394,30 @@ export class HubService {
   }
 
   private async planObjectiveNode(state: ObjectiveState, next: PlannedObjectiveNode): Promise<void> {
+    if (next.candidateId && !state.candidates[next.candidateId]) {
+      const createdAt = Date.now();
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.created",
+        objectiveId: state.objectiveId,
+        createdAt,
+        candidate: {
+          candidateId: next.candidateId,
+          seedPassId: this.plannerSeedPass(state)?.passId ?? "",
+          baseCommit: next.baseCommit,
+          parentCandidateId: next.parentCandidateId,
+          status: "draft",
+          latestCheckResults: [],
+          touchedFiles: [],
+          buildCount: 0,
+          reviewCount: 0,
+          retryCount: 0,
+          latestReason: "Candidate planned.",
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      state = await this.requireObjectiveState(state.objectiveId);
+    }
     const hubState = await this.hubRuntime.state(HUB_STREAM);
     const agent = this.resolvePhaseAgent(hubState, next.phase);
     const passNumber = state.passOrder.length + 1;
@@ -1363,11 +1444,13 @@ export class HubService {
       passId: `${state.objectiveId}_${next.phase}_${String(passNumber).padStart(2, "0")}`,
       phase: next.phase,
       passNumber,
+      actionId: next.actionId,
       agentId: agent.agentId,
       jobId: `job_hub_${state.objectiveId}_${next.phase}_${String(passNumber).padStart(2, "0")}`,
       workspaceId,
       workspacePath: workspace.path,
       baseCommit: next.baseCommit,
+      candidateId: next.candidateId,
       dispatchedAt: Date.now(),
       promptPath: files.promptPath,
       resultPath: files.resultPath,
@@ -1381,11 +1464,13 @@ export class HubService {
       title: `${pass.phase}-${String(pass.passNumber).padStart(2, "0")}`,
       passId: pass.passId,
       passNumber: pass.passNumber,
+      actionId: pass.actionId,
       agentId: pass.agentId,
       jobId: pass.jobId,
       workspaceId: pass.workspaceId,
       workspacePath: pass.workspacePath,
       baseCommit: pass.baseCommit,
+      candidateId: pass.candidateId,
       dependsOn: next.dependsOn,
       inputRefs: next.inputRefs,
       createdAt: pass.dispatchedAt,
@@ -1521,6 +1606,451 @@ export class HubService {
     }
   }
 
+  private activeCandidateIds(state: ObjectiveState): ReadonlyArray<string> {
+    const frontier = state.frontierCandidateIds
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is ObjectiveCandidateRecord => Boolean(candidate))
+      .filter((candidate) => !["superseded", "merged", "blocked"].includes(candidate.status));
+    if (frontier.length > 0) return frontier.map((candidate) => candidate.candidateId);
+    return state.candidateOrder
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is ObjectiveCandidateRecord => Boolean(candidate))
+      .filter((candidate) => !["superseded", "merged", "blocked"].includes(candidate.status))
+      .map((candidate) => candidate.candidateId);
+  }
+
+  private makeCandidateId(state: ObjectiveState): string {
+    return `candidate_${String(state.candidateOrder.length + 1).padStart(2, "0")}`;
+  }
+
+  private candidateScore(
+    candidate: ObjectiveCandidateRecord,
+    sourceHead?: string,
+  ): { readonly score: number; readonly vector: ObjectiveCandidateScoreVector; readonly reason: string } {
+    const latestCheck = candidate.latestCheckResults.find((check) => !check.ok) ?? candidate.latestCheckResults.at(-1);
+    const now = Date.now();
+    const ageHours = Math.max(0, (now - candidate.updatedAt) / 3_600_000);
+    const divergencePenalty = sourceHead && candidate.headCommit && sourceHead !== candidate.headCommit ? -4 : 0;
+    const vector: ObjectiveCandidateScoreVector = {
+      approved: candidate.status === "approved" ? 40 : 0,
+      review_ready: candidate.status === "draft" ? 16 : 0,
+      revise_ready: candidate.status === "changes_requested" ? 12 : 0,
+      checks_ok: latestCheck?.ok ? 8 : candidate.latestCheckResults.length > 0 ? -12 : 0,
+      retries: -(candidate.retryCount * 3),
+      divergence: divergencePenalty,
+      age: -Math.min(6, Math.floor(ageHours)),
+    };
+    const score = scoreTotal(vector);
+    const reason = candidate.status === "approved"
+      ? "approved candidate"
+      : candidate.status === "changes_requested"
+        ? "review feedback available"
+        : candidate.status === "draft"
+          ? "candidate ready for review"
+          : "candidate retained in frontier";
+    return { score, vector, reason };
+  }
+
+  private async buildOrchestratorCandidate(
+    candidate: ObjectiveCandidateRecord,
+    sourceHead?: string,
+  ): Promise<ObjectiveCandidateView> {
+    const latestCheck = candidate.latestCheckResults.find((check) => !check.ok) ?? candidate.latestCheckResults.at(-1);
+    let touchedFiles: ReadonlyArray<string> = candidate.touchedFiles;
+    let diffSummary: string | undefined;
+    if (candidate.headCommit) {
+      try {
+        const commit = await this.git.getCommit(candidate.headCommit);
+        touchedFiles = commit.touchedFiles ?? [];
+      } catch {
+        touchedFiles = candidate.touchedFiles;
+      }
+      try {
+        const diff = await this.git.diff(candidate.baseCommit, candidate.headCommit);
+        diffSummary = clipText(diff.replace(/\s+/g, " "), 400);
+      } catch {
+        diffSummary = undefined;
+      }
+    }
+    const scored = this.candidateScore(candidate, sourceHead);
+    return {
+      ...candidate,
+      latestCheckOk: latestCheck?.ok,
+      latestCheckCommand: latestCheck?.command,
+      touchedFiles,
+      diffSummary,
+      divergenceFromSourceHead: Boolean(sourceHead && candidate.headCommit && sourceHead !== candidate.headCommit),
+      lastScore: scored.score,
+      lastScoreVector: scored.vector,
+      lastScoreReason: scored.reason,
+    };
+  }
+
+  private plannerSeedPass(state: ObjectiveState): ObjectivePassRecord | undefined {
+    for (let index = state.passOrder.length - 1; index >= 0; index -= 1) {
+      const pass = state.passes[state.passOrder[index] ?? ""];
+      if (!pass || pass.phase !== "planner" || pass.outcome !== "plan_ready") continue;
+      return pass;
+    }
+    return undefined;
+  }
+
+  private buildActionPlans(
+    state: ObjectiveState,
+    plannerPass: ObjectivePassRecord,
+    frontierCandidateIds: ReadonlyArray<string>,
+  ): ReadonlyArray<HubActionPlan> {
+    const actions: HubActionPlan[] = [];
+    const frontierCandidates = frontierCandidateIds
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is ObjectiveCandidateRecord => Boolean(candidate));
+
+    if (frontierCandidates.length === 0) {
+      const candidateId = this.makeCandidateId(state);
+      actions.push({
+        action: {
+          actionId: `action_${candidateId}_build_seed`,
+          type: "spawn_builder_from_planner",
+          label: "Create the first implementation candidate from the planner seed.",
+          candidateId,
+          phase: "builder",
+          baseCommit: state.baseHash,
+          dependsOn: [plannerPass.passId],
+        },
+        plan: {
+          actionId: `action_${candidateId}_build_seed`,
+          candidateId,
+          phase: "builder",
+          baseCommit: state.baseHash,
+          dependsOn: [plannerPass.passId],
+          inputRefs: this.buildNodeInputRefs(state, state.baseHash, [plannerPass.passId]),
+        },
+      });
+      return actions;
+    }
+
+    for (const candidate of frontierCandidates) {
+      if (candidate.status === "draft" && candidate.headCommit && candidate.latestBuildPassId) {
+        actions.push({
+          action: {
+            actionId: `action_${candidate.candidateId}_review`,
+            type: "spawn_reviewer",
+            label: `Review candidate ${candidate.candidateId}.`,
+            candidateId: candidate.candidateId,
+            phase: "reviewer",
+            baseCommit: candidate.headCommit,
+            dependsOn: [candidate.latestBuildPassId],
+          },
+          plan: {
+            actionId: `action_${candidate.candidateId}_review`,
+            candidateId: candidate.candidateId,
+            phase: "reviewer",
+            baseCommit: candidate.headCommit,
+            dependsOn: [candidate.latestBuildPassId],
+            inputRefs: this.buildNodeInputRefs(state, candidate.headCommit, [candidate.latestBuildPassId]),
+          },
+        });
+      }
+      if (
+        candidate.status === "changes_requested"
+        && candidate.headCommit
+        && candidate.latestReviewPassId
+        && candidate.retryCount < MAX_BUILDER_REVISIONS
+      ) {
+        actions.push({
+          action: {
+            actionId: `action_${candidate.candidateId}_revise`,
+            type: "spawn_builder_revision",
+            label: `Revise candidate ${candidate.candidateId} from reviewer feedback.`,
+            candidateId: candidate.candidateId,
+            phase: "builder",
+            baseCommit: candidate.headCommit,
+            dependsOn: [candidate.latestReviewPassId],
+          },
+          plan: {
+            actionId: `action_${candidate.candidateId}_revise`,
+            candidateId: candidate.candidateId,
+            phase: "builder",
+            baseCommit: candidate.headCommit,
+            dependsOn: [candidate.latestReviewPassId],
+            inputRefs: this.buildNodeInputRefs(state, candidate.headCommit, [candidate.latestReviewPassId]),
+          },
+        });
+      }
+      if (candidate.status === "approved") {
+        actions.push({
+          action: {
+            actionId: `action_${candidate.candidateId}_promote`,
+            type: "promote_to_awaiting_confirmation",
+            label: `Promote candidate ${candidate.candidateId} to awaiting confirmation.`,
+            candidateId: candidate.candidateId,
+            dependsOn: [],
+          },
+          promoteCandidateId: candidate.candidateId,
+        });
+      }
+    }
+
+    if (frontierCandidates.length < MAX_LIVE_CANDIDATES) {
+      const candidateId = this.makeCandidateId(state);
+      actions.push({
+        action: {
+          actionId: `action_${candidateId}_branch`,
+          type: "spawn_alternative_builder_branch",
+          label: "Explore an alternative implementation branch from the planner seed.",
+          candidateId,
+          phase: "builder",
+          baseCommit: state.baseHash,
+          dependsOn: [plannerPass.passId],
+        },
+        plan: {
+          actionId: `action_${candidateId}_branch`,
+          candidateId,
+          phase: "builder",
+          baseCommit: state.baseHash,
+          dependsOn: [plannerPass.passId],
+          inputRefs: this.buildNodeInputRefs(state, state.baseHash, [plannerPass.passId]),
+        },
+      });
+    }
+
+    if (frontierCandidates.length > 1) {
+      for (const candidate of frontierCandidates.slice(1)) {
+        actions.push({
+          action: {
+            actionId: `action_${candidate.candidateId}_supersede`,
+            type: "supersede_candidate",
+            label: `Supersede candidate ${candidate.candidateId}.`,
+            candidateId: candidate.candidateId,
+            dependsOn: [],
+          },
+          supersedeCandidateId: candidate.candidateId,
+        });
+      }
+    }
+
+    if (actions.length === 0) {
+      actions.push({
+        action: {
+          actionId: "action_block_objective",
+          type: "block_objective",
+          label: "Block the objective because no safe next step is available.",
+          dependsOn: [],
+        },
+        blockReason: "No valid next action remained for the current candidate frontier.",
+      });
+    }
+
+    return actions;
+  }
+
+  private fallbackActionId(
+    input: HubOrchestratorInput,
+  ): string | undefined {
+    const byType = (type: HubOrchestratorActionType): string | undefined =>
+      input.actions.find((action) => action.type === type)?.actionId;
+    return (
+      byType("spawn_reviewer")
+      ?? byType("spawn_builder_revision")
+      ?? byType("promote_to_awaiting_confirmation")
+      ?? byType("spawn_builder_from_planner")
+      ?? byType("spawn_alternative_builder_branch")
+      ?? byType("reconcile_with_source_head")
+      ?? byType("supersede_candidate")
+      ?? byType("block_objective")
+    );
+  }
+
+  private async buildOrchestratorContext(
+    state: ObjectiveState,
+  ): Promise<{ readonly input: HubOrchestratorInput; readonly plans: ReadonlyMap<string, HubActionPlan> } | undefined> {
+    const plannerPass = this.plannerSeedPass(state);
+    if (!plannerPass) return undefined;
+    const sourceStatus = await this.git.sourceStatus().catch(() => ({ head: undefined }));
+    const frontierCandidateIds = this.activeCandidateIds(state);
+    const frontierCandidates = frontierCandidateIds
+      .map((candidateId) => state.candidates[candidateId])
+      .filter((candidate): candidate is ObjectiveCandidateRecord => Boolean(candidate));
+    const candidates = await Promise.all(
+      frontierCandidates.map((candidate) => this.buildOrchestratorCandidate(candidate, sourceStatus.head))
+    );
+    const actionPlans = this.buildActionPlans(state, plannerPass, frontierCandidateIds);
+    if (actionPlans.length === 0) return undefined;
+    return {
+      input: {
+        objectiveId: state.objectiveId,
+        title: state.title,
+        prompt: state.prompt,
+        baseHash: state.baseHash,
+        sourceHead: sourceStatus.head,
+        plannerPassId: plannerPass.passId,
+        frontierCandidateIds,
+        latestRebracket: state.latestRebracket,
+        maxFrontierSize: MAX_LIVE_CANDIDATES,
+        maxBuilderRevisions: MAX_BUILDER_REVISIONS,
+        candidates,
+        actions: actionPlans.map((plan) => plan.action),
+      },
+      plans: new Map(actionPlans.map((plan) => [plan.action.actionId, plan])),
+    };
+  }
+
+  private normalizeFrontierOrder(
+    state: ObjectiveState,
+    input: HubOrchestratorInput,
+    selectedAction: HubActionPlan,
+    decision: HubOrchestratorDecision,
+  ): ReadonlyArray<string> {
+    const candidateIds = new Set(input.candidates.map((candidate) => candidate.candidateId));
+    const superseded = new Set(decision.supersedeCandidateIds ?? []);
+    const ordered = [
+      ...(decision.frontierOrder ?? []),
+      ...input.frontierCandidateIds,
+      ...state.candidateOrder,
+    ].filter((candidateId) => candidateIds.has(candidateId) && !superseded.has(candidateId));
+    if (selectedAction.action.candidateId && !ordered.includes(selectedAction.action.candidateId) && !superseded.has(selectedAction.action.candidateId)) {
+      return [selectedAction.action.candidateId, ...ordered];
+    }
+    return [...new Set(ordered)];
+  }
+
+  private async resolveOrchestratorDecision(
+    state: ObjectiveState,
+    ctx: { readonly input: HubOrchestratorInput; readonly plans: ReadonlyMap<string, HubActionPlan> },
+  ): Promise<HubOrchestratorDecision & { readonly source: "orchestrator" | "fallback" }> {
+    const now = Date.now();
+    const summary = `frontier:${ctx.input.frontierCandidateIds.join(",") || "(empty)"} actions:${ctx.input.actions.map((action) => action.actionId).join(",")}`;
+    await this.emitObjective(state.objectiveId, {
+      type: "orchestrator.evidence.computed",
+      objectiveId: state.objectiveId,
+      frontierCandidateIds: ctx.input.frontierCandidateIds,
+      actionIds: ctx.input.actions.map((action) => action.actionId),
+      summary,
+      computedAt: now,
+    });
+    for (const candidate of ctx.input.candidates) {
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.scored",
+        objectiveId: state.objectiveId,
+        candidateId: candidate.candidateId,
+        score: candidate.lastScore ?? 0,
+        scoreVector: candidate.lastScoreVector ?? {},
+        reason: candidate.lastScoreReason ?? "deterministic score",
+        scoredAt: now,
+      });
+    }
+
+    const fallbackActionId = this.fallbackActionId(ctx.input);
+    if (!fallbackActionId) {
+      throw new HubServiceError(500, "hub orchestrator found no fallback action");
+    }
+    let decision = fallbackHubOrchestratorDecision(ctx.input, fallbackActionId, "deterministic fallback");
+    let source: "orchestrator" | "fallback" = "fallback";
+    if (this.orchestratorMode === "enabled" && this.orchestrator) {
+      try {
+        const proposed = await this.orchestrator.decide(ctx.input);
+        if (proposed.confidence >= 0.55 && ctx.plans.has(proposed.selectedActionId)) {
+          decision = proposed;
+          source = "orchestrator";
+        }
+      } catch {
+        source = "fallback";
+      }
+    }
+
+    const selectedPlan = ctx.plans.get(decision.selectedActionId) ?? ctx.plans.get(fallbackActionId);
+    if (!selectedPlan) {
+      throw new HubServiceError(500, `hub orchestrator selected unknown action ${decision.selectedActionId}`);
+    }
+    const frontierOrder = this.normalizeFrontierOrder(state, ctx.input, selectedPlan, decision);
+    await this.emitObjective(state.objectiveId, {
+      type: "orchestrator.action.proposed",
+      objectiveId: state.objectiveId,
+      actionId: selectedPlan.action.actionId,
+      frontierCandidateIds: frontierOrder,
+      reason: decision.reason,
+      confidence: decision.confidence,
+      proposedAt: Date.now(),
+    });
+    return {
+      ...decision,
+      selectedActionId: selectedPlan.action.actionId,
+      frontierOrder,
+      source,
+    };
+  }
+
+  private async applyOrchestratorDecision(
+    state: ObjectiveState,
+    ctx: { readonly input: HubOrchestratorInput; readonly plans: ReadonlyMap<string, HubActionPlan> },
+    decision: HubOrchestratorDecision & { readonly source: "orchestrator" | "fallback" },
+  ): Promise<void> {
+    const selected = ctx.plans.get(decision.selectedActionId);
+    if (!selected) {
+      throw new HubServiceError(500, `missing action plan for ${decision.selectedActionId}`);
+    }
+    const appliedAt = Date.now();
+    const supersedeIds = new Set([
+      ...(decision.supersedeCandidateIds ?? []),
+      ...(selected.supersedeCandidateId ? [selected.supersedeCandidateId] : []),
+    ]);
+    for (const candidateId of supersedeIds) {
+      if (!state.candidates[candidateId]) continue;
+      await this.emitObjective(state.objectiveId, {
+        type: "candidate.superseded",
+        objectiveId: state.objectiveId,
+        candidateId,
+        reason: decision.reason,
+        supersededAt: appliedAt,
+      });
+    }
+    await this.emitObjective(state.objectiveId, {
+      type: "rebracket.applied",
+      objectiveId: state.objectiveId,
+      frontierCandidateIds: decision.frontierOrder,
+      selectedActionId: selected.action.actionId,
+      reason: decision.reason,
+      confidence: decision.confidence,
+      source: decision.source,
+      appliedAt,
+    });
+    await this.emitObjective(state.objectiveId, {
+      type: "orchestrator.action.applied",
+      objectiveId: state.objectiveId,
+      actionId: selected.action.actionId,
+      frontierCandidateIds: decision.frontierOrder,
+      reason: decision.reason,
+      confidence: decision.confidence,
+      source: decision.source,
+      appliedAt,
+    });
+
+    if (selected.promoteCandidateId) {
+      await this.emitObjective(state.objectiveId, {
+        type: "objective.awaiting_confirmation",
+        objectiveId: state.objectiveId,
+        candidateId: selected.promoteCandidateId,
+        summary: decision.reason,
+        createdAt: appliedAt,
+      });
+      return;
+    }
+
+    if (selected.blockReason) {
+      await this.emitObjective(state.objectiveId, {
+        type: "blocked",
+        objectiveId: state.objectiveId,
+        summary: decision.reason,
+        reason: selected.blockReason,
+        completedAt: appliedAt,
+      });
+      return;
+    }
+
+    if (!selected.plan) return;
+    await this.planObjectiveNode(await this.requireObjectiveState(state.objectiveId), selected.plan);
+  }
+
   private planNextObjectiveNode(state: ObjectiveState): PlannedObjectiveNode | "awaiting_confirmation" | undefined {
     const completedNodes = graphProjection(state.graph).completed;
     const lastNode = completedNodes[completedNodes.length - 1];
@@ -1539,23 +2069,30 @@ export class HubService {
     const lastPass = state.passes[lastNode.passId];
     if (!lastPass) return undefined;
     if (lastPass.phase === "planner" && lastPass.outcome === "plan_ready") {
+      const candidateId = this.makeCandidateId(state);
       return {
+        actionId: `action_${candidateId}_build_seed`,
+        candidateId,
         phase: "builder",
         baseCommit: state.baseHash,
         dependsOn: [lastNode.nodeId],
         inputRefs: this.buildNodeInputRefs(state, state.baseHash, [lastNode.nodeId]),
       };
     }
-    if (lastPass.phase === "builder" && lastPass.outcome === "candidate_ready" && lastPass.commitHash) {
+    if (lastPass.phase === "builder" && lastPass.outcome === "candidate_ready" && lastPass.commitHash && lastPass.candidateId) {
       return {
+        actionId: `action_${lastPass.candidateId}_review`,
+        candidateId: lastPass.candidateId,
         phase: "reviewer",
         baseCommit: lastPass.commitHash,
         dependsOn: [lastNode.nodeId],
         inputRefs: this.buildNodeInputRefs(state, lastPass.commitHash, [lastNode.nodeId]),
       };
     }
-    if (lastPass.phase === "reviewer" && lastPass.outcome === "changes_requested" && lastPass.commitHash) {
+    if (lastPass.phase === "reviewer" && lastPass.outcome === "changes_requested" && lastPass.commitHash && lastPass.candidateId) {
       return {
+        actionId: `action_${lastPass.candidateId}_revise`,
+        candidateId: lastPass.candidateId,
         phase: "builder",
         baseCommit: lastPass.commitHash,
         dependsOn: [lastNode.nodeId],
@@ -1572,7 +2109,10 @@ export class HubService {
     const completedNodes = graphProjection(state.graph).completed;
     const lastNode = completedNodes[completedNodes.length - 1];
     const dependsOn = lastNode ? [lastNode.nodeId] : [];
+    const candidateId = state.awaitingCandidateId;
     return {
+      actionId: candidateId ? `action_${candidateId}_reconcile` : "action_reconcile",
+      candidateId,
       phase: "builder",
       baseCommit: targetBaseCommit,
       dependsOn,
@@ -1948,7 +2488,9 @@ export class HubService {
       title: state.title,
       phase: pass.phase,
       passNumber: pass.passNumber,
+      actionId: pass.actionId,
       agentId: agent.agentId,
+      candidateId: pass.candidateId,
       workspaceId: pass.workspaceId,
       baseCommit: pass.baseCommit,
       nodeId: pass.passId,
@@ -2185,6 +2727,13 @@ export class HubService {
         } satisfies ObjectivePassView;
       })
     );
+    const sourceStatus = await this.git.sourceStatus().catch(() => ({ head: undefined }));
+    const candidateViews = await Promise.all(
+      state.candidateOrder
+        .map((candidateId) => state.candidates[candidateId])
+        .filter((candidate): candidate is ObjectiveCandidateRecord => Boolean(candidate))
+        .map((candidate) => this.buildOrchestratorCandidate(candidate, sourceStatus.head))
+    );
     const latestPlan = [...passViews]
       .reverse()
       .find((pass) => pass.phase === "planner" && pass.outcome === "plan_ready");
@@ -2220,6 +2769,9 @@ export class HubService {
         builder: latestBuild,
         reviewer: latestReview,
       }),
+      frontierCandidateIds: state.frontierCandidateIds,
+      candidates: candidateViews,
+      latestRebracket: state.latestRebracket,
       activePass,
       graph: this.buildObjectiveGraphProjection(state),
     };
@@ -2255,6 +2807,7 @@ export class HubService {
       archivedAt: state.archivedAt,
       currentPhase: state.currentPhase,
       assignedAgentId: state.assignedAgentId,
+      awaitingCandidateId: state.awaitingCandidateId,
       latestCommitHash: state.latestCommitHash,
       latestSummary: state.latestSummary,
       blockedReason: state.blockedReason,
@@ -2272,6 +2825,8 @@ export class HubService {
       latestBuildHandoff: latestBuild?.handoff,
       latestReviewSummary: latestReview?.summary,
       latestReviewHandoff: latestReview?.handoff,
+      frontierCandidateIds: state.frontierCandidateIds,
+      latestRebracket: state.latestRebracket,
     };
   }
 

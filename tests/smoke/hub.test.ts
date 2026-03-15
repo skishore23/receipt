@@ -60,12 +60,18 @@ const waitForHttpOk = async (url: string, timeoutMs: number): Promise<void> => {
 
 const stopChild = async (child: ChildProcess): Promise<void> => {
   if (child.exitCode !== null) return;
+  if (typeof child.pid === "number") {
+    await execFileAsync("pkill", ["-TERM", "-P", String(child.pid)]).catch(() => undefined);
+  }
   child.kill("SIGTERM");
   await Promise.race([
     once(child, "exit"),
     sleep(5_000),
   ]);
   if (child.exitCode === null) {
+    if (typeof child.pid === "number") {
+      await execFileAsync("pkill", ["-KILL", "-P", String(child.pid)]).catch(() => undefined);
+    }
     child.kill("SIGKILL");
     await Promise.race([
       once(child, "exit"),
@@ -807,6 +813,93 @@ test("hub: objectives auto-run with codex and require human merge to finish the 
     assert.match(hiddenBoardHtml, /No objectives\./);
     assert.match(hiddenBoardHtml, /Select a card/);
     assert.doesNotMatch(hiddenBoardHtml, new RegExp(created.objective.objectiveId));
+  } finally {
+    await stopChild(child);
+  }
+});
+
+test("hub: enabled orchestrator branches the objective frontier and records rebracketing", { timeout: 180_000 }, async () => {
+  const port = await getFreePort();
+  const dataDir = await createTempDir("receipt-hub-orchestrator-data");
+  const repoDir = await createSourceRepo();
+  const fakeCodex = await createFakeCodexBin();
+  const tsxBin = path.join(
+    ROOT,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "tsx.cmd" : "tsx"
+  );
+
+  const child = spawn(tsxBin, ["src/server.ts"], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATA_DIR: dataDir,
+      HUB_REPO_ROOT: repoDir,
+      HUB_CODEX_BIN: fakeCodex,
+      HUB_ORCHESTRATOR_TEST_MODE: "branch-first",
+      OPENAI_API_KEY: "",
+      IMPROVEMENT_VALIDATE_CMD: "echo validate-ok",
+      IMPROVEMENT_HARNESS_CMD: "echo harness-ok",
+    },
+    stdio: "pipe",
+  });
+
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    await waitForHttpOk(`${base}/hub`, 30_000);
+
+    const objectiveCreate = await fetch(`${base}/hub/api/objectives`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Exercise the orchestrated branching hub flow",
+        prompt: "Create competing candidates so the orchestrator can branch and then pick one for human confirmation.",
+        checks: ["git rev-parse HEAD"],
+        channel: "results",
+      }),
+    });
+    assert.equal(objectiveCreate.status, 201);
+    const created = await objectiveCreate.json() as { objective: { objectiveId: string } };
+
+    await waitForObjectiveStatus(base, created.objective.objectiveId, ["awaiting_confirmation"], 120_000);
+
+    const objectiveDetailRes = await fetch(`${base}/hub/api/objectives/${created.objective.objectiveId}`);
+    assert.equal(objectiveDetailRes.status, 200);
+    const objectiveDetailPayload = await objectiveDetailRes.json() as {
+      objective: {
+        status: string;
+        latestReviewOutcome?: string;
+        frontierCandidateIds: string[];
+        latestRebracket?: { selectedActionId?: string; reason: string; source: string };
+        candidates: Array<{ candidateId: string; status: string }>;
+        passes: Array<{ phase: string; candidateId?: string }>;
+      };
+    };
+
+    assert.equal(objectiveDetailPayload.objective.status, "awaiting_confirmation");
+    assert.equal(objectiveDetailPayload.objective.latestReviewOutcome, "approved");
+    assert.ok(objectiveDetailPayload.objective.latestRebracket?.selectedActionId);
+    assert.match(objectiveDetailPayload.objective.latestRebracket?.reason ?? "", /test orchestrator chose|deterministic fallback/i);
+    assert.equal(objectiveDetailPayload.objective.latestRebracket?.source, "orchestrator");
+    assert.equal(objectiveDetailPayload.objective.candidates.length, 2);
+    assert.deepEqual(
+      objectiveDetailPayload.objective.passes.map((pass) => pass.phase),
+      ["planner", "builder", "builder", "reviewer", "reviewer"],
+    );
+    assert.deepEqual(
+      objectiveDetailPayload.objective.candidates.map((candidate) => candidate.status),
+      ["approved", "approved"],
+    );
+    assert.deepEqual(
+      objectiveDetailPayload.objective.frontierCandidateIds,
+      objectiveDetailPayload.objective.candidates.map((candidate) => candidate.candidateId),
+    );
+    assert.deepEqual(
+      objectiveDetailPayload.objective.passes.filter((pass) => pass.phase === "builder").map((pass) => pass.candidateId),
+      objectiveDetailPayload.objective.candidates.map((candidate) => candidate.candidateId),
+    );
   } finally {
     await stopChild(child);
   }
