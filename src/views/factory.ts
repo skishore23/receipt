@@ -436,7 +436,6 @@ export const factoryShell = (opts: {
           <h1>Factory</h1>
           <p>Receipt-native objective orchestration, debugging, and control. Hub no longer owns objective execution.</p>
         </div>
-        <a href="/hub">Open Hub</a>
       </header>
       ${opts.composeIsland}
       ${opts.boardIsland}

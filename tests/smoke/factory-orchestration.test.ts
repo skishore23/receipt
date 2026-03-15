@@ -238,8 +238,8 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
       await fs.writeFile(resultPath, JSON.stringify({
         outcome: "approved",
         summary: runs === 1
-          ? "Located the Factory page link source but intentionally made no repository changes."
-          : "Removed the link and produced a repository diff.",
+          ? "Located the Factory header link source but intentionally made no repository changes."
+          : "Removed the header link and produced a repository diff.",
         handoff: runs === 1
           ? "Proceed to the implementation task now that the link source is known."
           : "Ready for review.",
@@ -259,8 +259,8 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
   });
 
   const created = await service.createObjective({
-    title: "Locate the Factory view and Open Hub link source",
-    prompt: "Search the repo to find where the /factory page renders the Open Hub link and record the file path.",
+    title: "Locate the Factory header link source",
+    prompt: "Search the repo to find where the /factory page renders the legacy header link and record the file path.",
     checks: ["git status --short"],
   });
 
@@ -275,8 +275,8 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
       nodeId: "task_02",
       taskId: "task_02",
       taskKind: "planned",
-      title: "Remove the Open Hub link",
-      prompt: "Edit the Factory page so the Open Hub link is removed.",
+      title: "Remove the legacy header link",
+      prompt: "Edit the Factory page so the legacy header link is removed.",
       workerType: "codex",
       baseCommit: created.baseHash,
       dependsOn: ["task_01"],

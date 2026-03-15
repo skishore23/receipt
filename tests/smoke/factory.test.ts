@@ -23,7 +23,7 @@ import {
   type FactoryEvent,
 } from "../../src/modules/factory.ts";
 import { FactoryService } from "../../src/services/factory-service.ts";
-import { factoryObjectiveIsland } from "../../src/views/factory.ts";
+import { factoryObjectiveIsland, factoryShell } from "../../src/views/factory.ts";
 import type { BranchStore, Receipt, Store } from "../../src/core/types.ts";
 
 const stream = "factory/objectives/demo";
@@ -328,20 +328,20 @@ test("factory decomposition: search-only discovery steps collapse into implement
     const payload = {
       tasks: [
         {
-          title: "Locate the /factory view and Open Hub link source",
-          prompt: "Search the codebase to identify where the /factory page renders the Open Hub link and record the exact file path.",
+          title: "Locate the /factory header link source",
+          prompt: "Search the codebase to identify where the /factory page renders the legacy header link and record the exact file path.",
           workerType: "codex",
           dependsOn: [],
         },
         {
-          title: "Remove the Open Hub link from /factory",
-          prompt: "Edit the Factory page so the Open Hub link is no longer rendered.",
+          title: "Remove the legacy header link from /factory",
+          prompt: "Edit the Factory page so the legacy header link is no longer rendered.",
           workerType: "codex",
           dependsOn: ["task_01"],
         },
         {
           title: "Verify the /factory page still renders cleanly",
-          prompt: "Run the relevant checks and add or update coverage for the removed link if appropriate.",
+          prompt: "Run the relevant checks and add or update coverage for the removed header link if appropriate.",
           workerType: "codex",
           dependsOn: ["task_02"],
         },
@@ -364,15 +364,28 @@ test("factory decomposition: search-only discovery steps collapse into implement
 
   const created = await service.createObjective({
     title: "Collapse search-only decomposition",
-    prompt: "Remove the Open Hub link from the /factory page.",
+    prompt: "Remove the legacy header link from the /factory page.",
     checks: ["git status --short"],
   });
 
   const tasks = created.tasks.map((task) => ({ title: task.title, dependsOn: task.dependsOn }));
   assert.deepEqual(tasks, [
-    { title: "Remove the Open Hub link from /factory", dependsOn: [] },
+    { title: "Remove the legacy header link from /factory", dependsOn: [] },
     { title: "Verify the /factory page still renders cleanly", dependsOn: ["task_01"] },
   ]);
+});
+
+test("factory shell: hub shortcut link is not rendered", () => {
+  const markup = factoryShell({
+    composeIsland: '<section id="factory-compose"></section>',
+    boardIsland: '<section id="factory-board"></section>',
+    objectiveIsland: '<section id="factory-objective"></section>',
+    liveIsland: '<section id="factory-live"></section>',
+    debugIsland: '<section id="factory-debug"></section>',
+  });
+
+  assert.doesNotMatch(markup, /Open Hub/);
+  assert.doesNotMatch(markup, /href="\/hub"/);
 });
 
 test("factory objective island: blocked reasons are surfaced prominently", () => {
@@ -389,7 +402,7 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
     taskCount: 1,
     integrationStatus: "idle",
     latestCommitHash: undefined,
-    prompt: "Remove the Open Hub link from /factory.",
+    prompt: "Remove the legacy header link from /factory.",
     channel: "results",
     baseHash: "abc1234",
     checks: ["npm run build"],
@@ -408,7 +421,7 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
       nodeId: "task_01",
       taskId: "task_01",
       taskKind: "planned",
-      title: "Locate the link source",
+      title: "Locate the header link source",
       prompt: "Search the repo and record the file path.",
       workerType: "codex",
       baseCommit: "abc1234",
