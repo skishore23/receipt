@@ -90,16 +90,18 @@ import { SseHub } from "./framework/sse-hub.js";
 import { makeEventId, text } from "./framework/http.js";
 import { JobWorker, type JobHandler } from "./engine/runtime/job-worker.js";
 import { evaluateImprovementProposal } from "./engine/runtime/improvement-harness.js";
+import { resolveFactoryRuntimeConfig } from "./factory-cli/config.js";
 
 // ============================================================================
 // Config
 // ============================================================================
 
 const PORT = Number(process.env.PORT ?? 8787);
-const WORKSPACE_ROOT = process.env.RECEIPT_REPO_ROOT?.trim() || process.env.HUB_REPO_ROOT?.trim() || process.cwd();
-const DATA_DIR = (process.env.RECEIPT_DATA_DIR?.trim() || process.env.DATA_DIR) ?? path.join(process.cwd(), "data");
+const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(process.cwd());
+const WORKSPACE_ROOT = FACTORY_RUNTIME.repoRoot;
+const DATA_DIR = FACTORY_RUNTIME.dataDir;
 const USE_INDEXED_STORE = process.env.RECEIPT_INDEXED_STORE === "1";
-const FACTORY_ORCHESTRATOR_MODE = process.env.FACTORY_ORCHESTRATOR_MODE === "enabled" ? "enabled" : "disabled";
+const FACTORY_ORCHESTRATOR_MODE = FACTORY_RUNTIME.orchestratorMode;
 
 // ============================================================================
 // Composition: Store -> Runtime
@@ -404,7 +406,7 @@ const { service: factoryService } = createFactoryServiceRuntime({
   jobRuntime,
   sse,
   repoRoot: WORKSPACE_ROOT,
-  codexBin: process.env.RECEIPT_CODEX_BIN?.trim() || process.env.HUB_CODEX_BIN?.trim(),
+  codexBin: FACTORY_RUNTIME.codexBin,
   orchestratorMode: FACTORY_ORCHESTRATOR_MODE,
   memoryTools,
 });
@@ -1805,6 +1807,8 @@ const httpServer = Bun.serve({
   port: PORT,
 });
 console.log(`Receipt server listening on http://localhost:${PORT}`);
+console.log(`Receipt runtime root: ${WORKSPACE_ROOT}`);
+console.log(`Receipt data dir: ${DATA_DIR}${FACTORY_RUNTIME.configPath ? ` (from ${FACTORY_RUNTIME.configPath})` : ""}`);
 
 let shuttingDown = false;
 const shutdown = (signal: string): void => {

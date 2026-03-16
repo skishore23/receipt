@@ -12,6 +12,7 @@ import type { Flags } from "./cli.types.js";
 import { createRuntime } from "./core/runtime.js";
 import { runAgentLoop } from "./engine/runtime/agent-loop.js";
 import { handleFactoryCommand } from "./factory-cli/commands.js";
+import { resolveFactoryRuntimeConfig } from "./factory-cli/config.js";
 import { resolveBunRuntime } from "./lib/runtime-paths.js";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "./modules/job.js";
 
@@ -22,7 +23,8 @@ type ParsedArgs = {
 };
 
 const ROOT = process.cwd();
-const DATA_DIR = process.env.RECEIPT_DATA_DIR?.trim() || (process.env.DATA_DIR ?? path.join(ROOT, "data"));
+const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
+const DATA_DIR = FACTORY_RUNTIME.dataDir;
 const isInteractiveTerminal = (): boolean =>
   Boolean(process.stdin.isTTY && process.stdout.isTTY);
 

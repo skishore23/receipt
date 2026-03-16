@@ -58,8 +58,8 @@ const renderIntegrationSection = (detail: FactoryObjectiveDetail): string => {
           <span class="text-muted-foreground">Status</span>
           ${renderPill(int.status.replaceAll("_", " "), int.status)}
         </div>
-        ${int.branchName ? `<div class="flex gap-3"><span class="text-muted-foreground shrink-0">Branch</span><span class="font-mono min-w-0 break-all">${esc(int.branchName)}</span></div>` : ""}
-        ${int.activeCandidateId ? `<div class="flex gap-3"><span class="text-muted-foreground shrink-0">Candidate</span><span class="font-mono min-w-0 break-all">${esc(int.activeCandidateId)}</span></div>` : ""}
+        ${int.branchName ? `<div class="flex gap-3"><span class="text-muted-foreground shrink-0">Branch</span><span class="font-mono min-w-0">${esc(int.branchName)}</span></div>` : ""}
+        ${int.activeCandidateId ? `<div class="flex gap-3"><span class="text-muted-foreground shrink-0">Candidate</span><span class="font-mono min-w-0">${esc(int.activeCandidateId)}</span></div>` : ""}
         ${int.validationResults?.length ? `
           <div class="grid gap-1 mt-1">
             ${int.validationResults.map((check) => `
@@ -126,7 +126,7 @@ const renderDecisionSection = (
     <div class="context-section grid gap-2 p-4 border-b border-border">
       <div class="${labelUpper}">Latest Decision</div>
       <div class="${copySoft}">${esc(decision.summary)}</div>
-      <div class="${metaRow} break-all">${esc(decision.source)} · ${esc(formatTime(decision.at))}${decision.selectedActionId ? ` · ${esc(decision.selectedActionId)}` : ""}</div>
+      <div class="${metaRow}">${esc(decision.source)} · ${esc(formatTime(decision.at))}${decision.selectedActionId ? ` · ${esc(decision.selectedActionId)}` : ""}</div>
     </div>
   `;
 };
@@ -176,7 +176,7 @@ const renderWorktreeSection = (debug: FactoryDebugProjection): string => `
           <div class="grid gap-1 text-xs">
             <div class="flex gap-3">
               <span class="text-muted-foreground shrink-0">Branch</span>
-              <span class="font-mono min-w-0 break-all">${esc(debug.integrationWorktree.branch ?? "—")}</span>
+              <span class="font-mono min-w-0">${esc(debug.integrationWorktree.branch ?? "—")}</span>
             </div>
             <div class="flex gap-3">
               <span class="text-muted-foreground">State</span>
@@ -225,11 +225,11 @@ const renderJobsSection = (debug: FactoryDebugProjection): string => {
         ${allJobs.map((job) => `
           <div class="${cardInner} grid gap-1 min-w-0">
             <div class="${flexBetween}">
-              <span class="font-mono text-xs min-w-0 break-all">${esc(job.id)}</span>
+              <span class="font-mono text-xs min-w-0">${esc(job.id)}</span>
               <span class="shrink-0">${renderPill(job.status, job.status)}</span>
             </div>
             <div class="${mutedSm}">${esc(job.agentId)} · attempt ${job.attempt}/${job.maxAttempts}</div>
-            ${job.lastError ? `<div class="text-xs text-destructive break-all">${esc(job.lastError)}</div>` : ""}
+            ${job.lastError ? `<div class="text-xs text-destructive">${esc(job.lastError)}</div>` : ""}
           </div>
         `).join("")}
       </div>
@@ -257,7 +257,7 @@ export const factoryContextIsland = (
   }
 
   return `
-    <section id="factory-context" class="grid content-start" data-steer-status="">
+    <section id="factory-context" class="grid content-start [overflow-wrap:anywhere]" data-steer-status="">
       ${renderBudgetSection(detail)}
       ${renderIntegrationSection(detail)}
       ${renderDecisionSection(debug.latestDecision)}

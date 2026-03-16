@@ -110,8 +110,8 @@ export const renderParsedPolicy = (policy: Record<string, unknown>): string => {
     <div class="grid gap-1.5">
       ${rows.map(([key, val]) => `
         <div class="flex gap-3 text-xs">
-          <span class="text-muted-foreground font-mono shrink-0 break-all">${esc(key)}</span>
-          <span class="text-foreground font-mono min-w-0 break-all">${esc(String(val))}</span>
+          <span class="text-muted-foreground font-mono shrink-0">${esc(key)}</span>
+          <span class="text-foreground font-mono min-w-0">${esc(String(val))}</span>
         </div>
       `).join("")}
     </div>

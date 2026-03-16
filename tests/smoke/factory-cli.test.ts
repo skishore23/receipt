@@ -10,7 +10,7 @@ import { renderToString } from "ink";
 
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
 import { parseComposerDraft } from "../../src/factory-cli/composer.ts";
-import { loadFactoryConfig } from "../../src/factory-cli/config.ts";
+import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config.ts";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime.ts";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
 
@@ -148,6 +148,16 @@ test("factory cli: bun repos infer bun validation commands", async () => {
   };
   expect(initPayload.config.defaultChecks).toContain("bun run build");
   expect(initPayload.environment.sourceDirty).toBe(false);
+}, 120_000);
+
+test("factory runtime config: shared resolver follows .receipt/config.json", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+  const resolved = await resolveFactoryRuntimeConfig(repoDir);
+  expect(resolved.repoRoot).toBe(repoDir);
+  expect(resolved.dataDir).toBe(path.join(repoDir, ".receipt", "data"));
+  expect(resolved.configPath).toBe(path.join(repoDir, ".receipt", "config.json"));
 }, 120_000);
 
 test("factory cli: run promotes changes and inspect exposes debug data", async () => {
