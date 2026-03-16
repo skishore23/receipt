@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -19,7 +18,7 @@ import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/f
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI_PATH = path.join(ROOT, "src", "cli.ts");
-const TSX_LOADER = path.join(ROOT, "node_modules", "tsx", "dist", "loader.mjs");
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -50,6 +49,14 @@ const createSourceRepo = async (): Promise<string> => {
   return repoDir;
 };
 
+const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId,
+    reason: "startup",
+  });
+};
+
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
     jsonlStore<JobEvent>(dataDir),
@@ -77,11 +84,12 @@ const runReceiptCli = async (
   dataDir: string,
   args: ReadonlyArray<string>,
 ): Promise<unknown> => {
-  const { stdout } = await execFileAsync(process.execPath, ["--import", TSX_LOADER, CLI_PATH, ...args], {
+  const { stdout } = await execFileAsync(BUN, [CLI_PATH, ...args], {
     cwd: ROOT,
     env: {
       ...process.env,
       DATA_DIR: dataDir,
+      RECEIPT_DATA_DIR: dataDir,
     },
     encoding: "utf-8",
     maxBuffer: 16 * 1024 * 1024,
@@ -104,7 +112,7 @@ test("memory CLI: commit, read, search, summarize, and diff stay receipt-backed"
   const read = await runReceiptCli(dataDir, ["memory", "read", scope, "--limit", "2"]) as {
     entries: Array<{ text: string }>;
   };
-  assert.deepEqual(read.entries.map((entry) => entry.text), [
+  expect(read.entries.map((entry) => entry.text)).toEqual([
     "second shared fact about promotion",
     "first durable fact",
   ]);
@@ -112,21 +120,21 @@ test("memory CLI: commit, read, search, summarize, and diff stay receipt-backed"
   const search = await runReceiptCli(dataDir, ["memory", "search", scope, "--query", "shared fact", "--limit", "2"]) as {
     entries: Array<{ text: string }>;
   };
-  assert.equal(search.entries[0]?.text, "second shared fact about promotion");
+  expect(search.entries[0]?.text).toBe("second shared fact about promotion");
 
   const summary = await runReceiptCli(dataDir, ["memory", "summarize", scope, "--query", "promotion", "--max-chars", "180"]) as {
     summary: string;
   };
-  assert.match(summary.summary, /second shared fact about promotion/);
+  expect(summary.summary).toMatch(/second shared fact about promotion/);
 
   const diff = await runReceiptCli(dataDir, ["memory", "diff", scope, "--from-ts", String(second.entry.ts)]) as {
     entries: Array<{ text: string }>;
   };
-  assert.deepEqual(diff.entries.map((entry) => entry.text), ["second shared fact about promotion"]);
-  assert.ok(first.entry.ts < second.entry.ts);
+  expect(diff.entries.map((entry) => entry.text)).toEqual(["second shared fact about promotion"]);
+  expect(first.entry.ts < second.entry.ts).toBeTruthy();
 });
 
-test("factory worker packets expose a layered memory script for bounded recall and durable commits", { timeout: 120_000 }, async () => {
+test("factory worker packets expose a layered memory script for bounded recall and durable commits", async () => {
   const dataDir = await createTempDir("receipt-factory-memory");
   const repoDir = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
@@ -149,7 +157,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
 
       const factoryDir = path.join(input.workspacePath, ".receipt", "factory");
       const manifestName = (await fs.readdir(factoryDir)).find((name) => name.endsWith(".manifest.json"));
-      assert.ok(manifestName, "factory manifest missing");
+      expect(manifestName).toBeTruthy();
       const manifestPath = path.join(factoryDir, manifestName);
       const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
         readonly memory: {
@@ -159,7 +167,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
       const memoryScriptPath = manifest.memory.scriptPath;
 
       const runMemory = async (args: ReadonlyArray<string>): Promise<string> => {
-        const { stdout } = await execFileAsync(process.execPath, [memoryScriptPath, ...args], {
+        const { stdout } = await execFileAsync(BUN, [memoryScriptPath, ...args], {
           cwd: input.workspacePath,
           env: {
             ...process.env,
@@ -185,7 +193,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
       );
 
       const resultPathMatch = input.prompt.match(/Write JSON to (.+?) with:/);
-      assert.ok(resultPathMatch, "result path contract missing from prompt");
+      expect(resultPathMatch).toBeTruthy();
       const resultPath = resultPathMatch[1].trim();
       await fs.mkdir(path.dirname(resultPath), { recursive: true });
       await fs.writeFile(resultPath, JSON.stringify({
@@ -219,11 +227,13 @@ test("factory worker packets expose a layered memory script for bounded recall a
     prompt: "Implement the task using layered receipt-backed memory.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
+  const ready = await service.getObjective(created.objectiveId);
 
-  const task = created.tasks[0];
-  assert.ok(task?.jobId, "task dispatch should enqueue a job");
+  const task = ready.tasks[0];
+  expect(task?.jobId).toBeTruthy();
   const job = await queue.getJob(task.jobId!);
-  assert.ok(job, "queued factory task job missing");
+  expect(job).toBeTruthy();
   const payload = job.payload as FactoryTaskJobPayload;
 
   await memoryTools.commit({
@@ -267,7 +277,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
       readonly packPath: string;
     };
   };
-  assert.deepEqual(manifest.memory.scopes.map((scope) => scope.key), [
+  expect(manifest.memory.scopes.map((scope) => scope.key)).toEqual([
     "agent",
     "repo",
     "objective",
@@ -275,25 +285,25 @@ test("factory worker packets expose a layered memory script for bounded recall a
     "candidate",
     "integration",
   ]);
-  assert.equal(manifest.memory.scriptPath, payload.memoryScriptPath);
-  assert.equal(manifest.memory.configPath, payload.memoryConfigPath);
-  assert.equal(manifest.context.packPath, payload.contextPackPath);
+  expect(manifest.memory.scriptPath).toBe(payload.memoryScriptPath);
+  expect(manifest.memory.configPath).toBe(payload.memoryConfigPath);
+  expect(manifest.context.packPath).toBe(payload.contextPackPath);
 
   await service.runTask(job.payload);
 
   const promptBody = await fs.readFile(payload.promptPath, "utf-8");
-  assert.match(promptBody, /## Memory Access/);
-  assert.match(promptBody, new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} context`));
-  assert.match(promptBody, new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
-  assert.match(promptBody, new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} overview`));
+  expect(promptBody).toMatch(/## Memory Access/);
+  expect(promptBody).toMatch(new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} context`));
+  expect(promptBody).toMatch(new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
+  expect(promptBody).toMatch(new RegExp(`node ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} overview`));
 
-  assert.match(captured.context, /Objective: Scripted memory objective/);
-  assert.match(captured.context, /Dependencies:|Candidate lineage:|Recent receipts:/);
-  assert.match(captured.context, /Objective frontier:|Objective-wide receipts:/);
-  assert.match(captured.objective, /Frontier tasks:|Recent objective receipts:/);
-  assert.match(captured.overview, /Agent memory \(codex\)|Objective memory|Task memory/);
-  assert.match(captured.scope, /task memory: reuse the generated memory script/i);
-  assert.match(captured.search, /shared fact: promotion must wait for green integration/i);
+  expect(captured.context).toMatch(/Objective: Scripted memory objective/);
+  expect(captured.context).toMatch(/Dependencies:|Candidate lineage:|Recent receipts:/);
+  expect(captured.context).toMatch(/Objective frontier:|Objective-wide receipts:/);
+  expect(captured.objective).toMatch(/Frontier tasks:|Recent objective receipts:/);
+  expect(captured.overview).toMatch(/Agent memory \(codex\)|Objective memory|Task memory/);
+  expect(captured.scope).toMatch(/task memory: reuse the generated memory script/i);
+  expect(captured.search).toMatch(/shared fact: promotion must wait for green integration/i);
 
   const contextPack = JSON.parse(await fs.readFile(payload.contextPackPath, "utf-8")) as {
     readonly task: { readonly taskId: string; readonly candidateId: string };
@@ -305,22 +315,22 @@ test("factory worker packets expose a layered memory script for bounded recall a
       readonly recentObjectiveReceipts: Array<{ readonly type: string }>;
     };
   };
-  assert.equal(contextPack.task.taskId, task!.taskId);
-  assert.equal(contextPack.task.candidateId, payload.candidateId);
-  assert.ok(contextPack.relatedTasks.some((relatedTask) => relatedTask.taskId === task!.taskId && relatedTask.relations.includes("focus")));
-  assert.ok(contextPack.candidateLineage.some((candidate) => candidate.candidateId === payload.candidateId));
-  assert.ok(contextPack.recentReceipts.some((receipt) => receipt.type === "task.dispatched"));
-  assert.ok(contextPack.objectiveSlice.frontierTasks.some((frontierTask) => frontierTask.taskId === task!.taskId));
-  assert.ok(contextPack.objectiveSlice.recentObjectiveReceipts.length >= 1);
+  expect(contextPack.task.taskId).toBe(task!.taskId);
+  expect(contextPack.task.candidateId).toBe(payload.candidateId);
+  expect(contextPack.relatedTasks.some((relatedTask) => relatedTask.taskId === task!.taskId && relatedTask.relations.includes("focus"))).toBeTruthy();
+  expect(contextPack.candidateLineage.some((candidate) => candidate.candidateId === payload.candidateId)).toBeTruthy();
+  expect(contextPack.recentReceipts.some((receipt) => receipt.type === "task.dispatched")).toBeTruthy();
+  expect(contextPack.objectiveSlice.frontierTasks.some((frontierTask) => frontierTask.taskId === task!.taskId)).toBeTruthy();
+  expect(contextPack.objectiveSlice.recentObjectiveReceipts.length >= 1).toBeTruthy();
 
   const taskMemory = await memoryTools.read({
     scope: `factory/objectives/${created.objectiveId}/tasks/${task!.taskId}`,
     limit: 10,
   });
-  assert.ok(taskMemory.some((entry) => entry.text.includes("worker durable note from script")));
+  expect(taskMemory.some((entry) => entry.text.includes("worker durable note from script"))).toBeTruthy();
 
   const after = await service.getObjective(created.objectiveId);
   const afterTask = after.tasks.find((item) => item.taskId === task!.taskId);
-  assert.ok(afterTask?.candidate?.artifactRefs.memoryScript);
-  assert.ok(afterTask?.candidate?.artifactRefs.memoryConfig);
-});
+  expect(afterTask?.candidate?.artifactRefs.memoryScript).toBeTruthy();
+  expect(afterTask?.candidate?.artifactRefs.memoryConfig).toBeTruthy();
+}, 120_000);

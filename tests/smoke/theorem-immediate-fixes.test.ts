@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import {
@@ -54,23 +53,21 @@ test("theorem: structured retry recovers valid JSON on retry", async () => {
     retries: 1,
   });
 
-  assert.equal(result.parsed, true);
-  assert.equal(result.attempts, 2);
-  assert.equal(result.value.status, "valid");
-  assert.equal(calls, 2);
+  expect(result.parsed).toBe(true);
+  expect(result.attempts).toBe(2);
+  expect(result.value.status).toBe("valid");
+  expect(calls).toBe(2);
 });
 
 test("theorem: structured retry throws when parsing never succeeds", async () => {
-  await assert.rejects(
-    () =>
-      callWithStructuredRetries({
-        llmText: async () => "still not json",
-        user: "verify",
-        parse: parseVerifyPayload,
-        retries: 1,
-      }),
-    /structured parse failed/
-  );
+  await expect(
+    callWithStructuredRetries({
+      llmText: async () => "still not json",
+      user: "verify",
+      parse: parseVerifyPayload,
+      retries: 1,
+    })
+  ).rejects.toThrow(/structured parse failed/);
 });
 
 test("theorem: prompt compaction preserves merge sections instead of collapsing to head-tail only", () => {
@@ -97,15 +94,15 @@ test("theorem: prompt compaction preserves merge sections instead of collapsing 
   ].join("\n");
 
   const compacted = compactTheoremPrompt(prompt, 1_800);
-  assert.ok(compacted.length <= 1_800, `expected compacted prompt <= 1800 chars, got ${compacted.length}`);
-  assert.match(compacted, /Problem:/);
-  assert.match(compacted, /Left \(\(A o B\)\):/);
-  assert.match(compacted, /LEFT_HEAD/);
-  assert.match(compacted, /LEFT_TAIL/);
-  assert.match(compacted, /Right \(C\):/);
-  assert.match(compacted, /RIGHT_HEAD/);
-  assert.match(compacted, /RIGHT_TAIL/);
-  assert.match(compacted, /Return JSON only in this schema:/);
+  expect(compacted.length <= 1_800).toBeTruthy();
+  expect(compacted).toMatch(/Problem:/);
+  expect(compacted).toMatch(/Left \(\(A o B\)\):/);
+  expect(compacted).toMatch(/LEFT_HEAD/);
+  expect(compacted).toMatch(/LEFT_TAIL/);
+  expect(compacted).toMatch(/Right \(C\):/);
+  expect(compacted).toMatch(/RIGHT_HEAD/);
+  expect(compacted).toMatch(/RIGHT_TAIL/);
+  expect(compacted).toMatch(/Return JSON only in this schema:/);
 });
 
 test("theorem: round evidence gates rebracketing with branchThreshold", () => {
@@ -146,9 +143,9 @@ test("theorem: round evidence gates rebracketing with branchThreshold", () => {
   const lowThreshold = evaluateRoundRebracketEvidence(chain, 1, 1);
   const highThreshold = evaluateRoundRebracketEvidence(chain, 1, 5);
 
-  assert.equal(lowThreshold.shouldRebracket, true);
-  assert.equal(highThreshold.shouldRebracket, false);
-  assert.ok(lowThreshold.score > highThreshold.score - 0.0001);
+  expect(lowThreshold.shouldRebracket).toBe(true);
+  expect(highThreshold.shouldRebracket).toBe(false);
+  expect(lowThreshold.score > highThreshold.score - 0.0001).toBeTruthy();
 });
 
 test("theorem: summary uses contribute to pod-pair weights", () => {
@@ -180,10 +177,10 @@ test("theorem: summary uses contribute to pod-pair weights", () => {
   ];
 
   const weights = computeWeights(chain);
-  assert.equal(weights.get(pairKey("A", "B")), 1);
+  expect(weights.get(pairKey("A", "B"))).toBe(1);
 });
 
-test("theorem: structured phases run end-to-end with mocked JSON responses", { timeout: 120_000 }, async () => {
+test("theorem: structured phases run end-to-end with mocked JSON responses", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-structured-"));
   const oldPassK = process.env.THEOREM_PASS_K;
   process.env.THEOREM_PASS_K = "1";
@@ -258,19 +255,18 @@ test("theorem: structured phases run end-to-end with mocked JSON responses", { t
     });
 
     const chain = await runtime.chain(theoremRunStream("theorem", runId));
-    assert.ok(chain.some((r) => r.body.type === "solution.finalized"));
-    assert.ok(
-      chain.some((r) => r.body.type === "verification.report" && r.body.status === "valid"),
-      "expected valid verifier report"
-    );
+    expect(chain.some((r) => r.body.type === "solution.finalized")).toBeTruthy();
+    expect(
+      chain.some((r) => r.body.type === "verification.report" && r.body.status === "valid")
+    ).toBeTruthy();
   } finally {
     if (oldPassK === undefined) delete process.env.THEOREM_PASS_K;
     else process.env.THEOREM_PASS_K = oldPassK;
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
-test("theorem: explorer can delegate to axiom worker and merge the result into branch receipts", { timeout: 120_000 }, async () => {
+test("theorem: explorer can delegate to axiom worker and merge the result into branch receipts", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-axiom-"));
   const oldPassK = process.env.THEOREM_PASS_K;
   process.env.THEOREM_PASS_K = "1";
@@ -368,31 +364,27 @@ test("theorem: explorer can delegate to axiom worker and merge the result into b
     const mainChain = await runtime.chain(theoremRunStream("theorem", runId));
     const branchChain = await runtime.chain(`${theoremRunStream("theorem", runId)}/branches/explorer_a`);
 
-    assert.equal(axiomCalls, 1);
-    assert.ok(
-      mainChain.some((r) => r.body.type === "tool.called" && r.body.tool === "axiom.delegate"),
-      "expected axiom.delegate tool receipt on main theorem run"
-    );
-    assert.ok(
-      mainChain.some((r) => r.body.type === "subagent.merged" && /Main\.lean compiles/.test(r.body.summary)),
-      "expected merged Axiom worker summary"
-    );
-    assert.ok(
-      branchChain.some((r) => r.body.type === "attempt.proposed" && /AXIOM Worker:\nValidated Lean branch/.test(r.body.content)),
-      "expected explorer branch attempt to include Axiom summary"
-    );
-    assert.ok(
-      mainChain.some((r) => r.body.type === "solution.finalized"),
-      "expected theorem run to continue to finalization"
-    );
+    expect(axiomCalls).toBe(1);
+    expect(
+      mainChain.some((r) => r.body.type === "tool.called" && r.body.tool === "axiom.delegate")
+    ).toBeTruthy();
+    expect(
+      mainChain.some((r) => r.body.type === "subagent.merged" && /Main\.lean compiles/.test(r.body.summary))
+    ).toBeTruthy();
+    expect(
+      branchChain.some((r) => r.body.type === "attempt.proposed" && /AXIOM Worker:\nValidated Lean branch/.test(r.body.content))
+    ).toBeTruthy();
+    expect(
+      mainChain.some((r) => r.body.type === "solution.finalized")
+    ).toBeTruthy();
   } finally {
     if (oldPassK === undefined) delete process.env.THEOREM_PASS_K;
     else process.env.THEOREM_PASS_K = oldPassK;
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
-test("theorem: axiom-required policy completes only with final AXLE verify evidence", { timeout: 120_000 }, async () => {
+test("theorem: axiom-required policy completes only with final AXLE verify evidence", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-axiom-required-"));
   const oldPassK = process.env.THEOREM_PASS_K;
   process.env.THEOREM_PASS_K = "1";
@@ -521,28 +513,26 @@ test("theorem: axiom-required policy completes only with final AXLE verify evide
       r.body.type === "solution.finalized"
     );
 
-    assert.equal(axiomTasks.length, 1, "expected only the final AXLE verification delegation");
-    assert.ok(
-      axiomTasks.some((task) => task.includes("Use AXLE as the required ground-truth verifier")),
-      "expected forced verify AXLE task"
-    );
-    assert.equal(toolEvents.length, 1, "expected one axiom.delegate receipt");
-    assert.equal(finalStatus?.body.status, "completed");
-    assert.ok(
-      verifyReport?.body.content.includes("AXIOM Worker:\nAXLE tools: lean.verify"),
-      "expected verification report to include AXLE worker summary"
-    );
-    assert.equal(verifyReport?.body.status, "valid");
-    assert.equal(verifyReport?.body.evidence?.tool, "lean.verify");
-    assert.equal(finalSolution?.body.content, verifiedContent);
+    expect(axiomTasks.length).toBe(1);
+    expect(
+      axiomTasks.some((task) => task.includes("Use AXLE as the required ground-truth verifier"))
+    ).toBeTruthy();
+    expect(toolEvents.length).toBe(1);
+    expect(finalStatus?.body.status).toBe("completed");
+    expect(
+      verifyReport?.body.content.includes("AXIOM Worker:\nAXLE tools: lean.verify")
+    ).toBeTruthy();
+    expect(verifyReport?.body.status).toBe("valid");
+    expect(verifyReport?.body.evidence?.tool).toBe("lean.verify");
+    expect(finalSolution?.body.content).toBe(verifiedContent);
   } finally {
     if (oldPassK === undefined) delete process.env.THEOREM_PASS_K;
     else process.env.THEOREM_PASS_K = oldPassK;
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
-test("theorem: axiom-required policy fails when final AXLE evidence is only lean.check", { timeout: 120_000 }, async () => {
+test("theorem: axiom-required policy fails when final AXLE evidence is only lean.check", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-axiom-check-only-"));
   const oldPassK = process.env.THEOREM_PASS_K;
   process.env.THEOREM_PASS_K = "1";
@@ -642,17 +632,17 @@ test("theorem: axiom-required policy fails when final AXLE evidence is only lean
       r.body.type === "verification.report"
     );
 
-    assert.equal(finalStatus?.body.status, "failed");
-    assert.equal(verifyReport?.body.status, "needs");
-    assert.match(verifyReport?.body.content ?? "", /AXIOM verification evidence missing/i);
+    expect(finalStatus?.body.status).toBe("failed");
+    expect(verifyReport?.body.status).toBe("needs");
+    expect(verifyReport?.body.content ?? "").toMatch(/AXIOM verification evidence missing/i);
   } finally {
     if (oldPassK === undefined) delete process.env.THEOREM_PASS_K;
     else process.env.THEOREM_PASS_K = oldPassK;
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
-test("theorem: optional runs keep completed status when verifier returns needs", { timeout: 120_000 }, async () => {
+test("theorem: optional runs keep completed status when verifier returns needs", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-optional-needs-"));
   const oldPassK = process.env.THEOREM_PASS_K;
   process.env.THEOREM_PASS_K = "1";
@@ -735,13 +725,13 @@ test("theorem: optional runs keep completed status when verifier returns needs",
       r.body.type === "failure.report"
     );
 
-    assert.equal(result.status, "completed");
-    assert.equal(finalStatus?.body.status, "completed");
-    assert.match(finalStatus?.body.note ?? "", /Final verification failed:/);
-    assert.equal(failureReport, undefined);
+    expect(result.status).toBe("completed");
+    expect(finalStatus?.body.status).toBe("completed");
+    expect(finalStatus?.body.note ?? "").toMatch(/Final verification failed:/);
+    expect(failureReport).toBe(undefined);
   } finally {
     if (oldPassK === undefined) delete process.env.THEOREM_PASS_K;
     else process.env.THEOREM_PASS_K = oldPassK;
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);

@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { promisify } from "node:util";
 
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
@@ -44,6 +43,14 @@ const createSourceRepo = async (): Promise<string> => {
   return repoDir;
 };
 
+const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId,
+    reason: "startup",
+  });
+};
+
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
     jsonlStore<JobEvent>(dataDir),
@@ -73,11 +80,11 @@ const findLatestFactoryJob = async (
   const match = jobs
     .filter((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === objectiveId)
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  assert.ok(match, "factory task job not found");
+  expect(match).toBeTruthy();
   return match.payload as FactoryTaskJobPayload;
 };
 
-test("factory orchestrator: blocked tasks emit split/supersede mutation receipts at runtime", { timeout: 120_000 }, async () => {
+test("factory orchestrator: blocked tasks emit split/supersede mutation receipts at runtime", async () => {
   const dataDir = await createTempDir("receipt-factory-mutation");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -85,7 +92,7 @@ test("factory orchestrator: blocked tasks emit split/supersede mutation receipts
   const orchestrator: FactoryOrchestrator = {
     decide: async (input) => {
       const preferred = input.actions.find((action) => action.type === "split_task") ?? input.actions[0];
-      assert.ok(preferred, "no mutation action available");
+      expect(preferred).toBeTruthy();
       mutationChoices.push(preferred.actionId);
       return {
         selectedActionId: preferred.actionId,
@@ -100,7 +107,7 @@ test("factory orchestrator: blocked tasks emit split/supersede mutation receipts
       await fs.writeFile(input.stdoutPath, "", "utf-8");
       await fs.writeFile(input.stderrPath, "", "utf-8");
       const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
-      assert.ok(resultPath, "task result path missing");
+      expect(resultPath).toBeTruthy();
       await fs.writeFile(resultPath, JSON.stringify({
         outcome: "blocked",
         summary: "Blocked by missing dependency details.",
@@ -157,19 +164,20 @@ test("factory orchestrator: blocked tasks emit split/supersede mutation receipts
     prompt: "Implement the feature but adapt runtime orchestration if blocked.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const firstJob = await findLatestFactoryJob(queue, created.objectiveId);
   await service.runTask(firstJob);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.ok(mutationChoices.some((choice) => choice.startsWith("action_split_task_01")));
-  assert.equal(detail.latestRebracket?.selectedActionId, mutationChoices.at(-1));
-  assert.equal(detail.tasks.find((task) => task.taskId === "task_01")?.status, "superseded");
-  assert.ok(detail.tasks.some((task) => task.title === "Unblock implementation"));
-  assert.ok(detail.tasks.some((task) => task.title === "Finish implementation"));
-});
+  expect(mutationChoices.some((choice) => choice.startsWith("action_split_task_01"))).toBeTruthy();
+  expect(detail.latestRebracket?.selectedActionId).toBe(mutationChoices.at(-1));
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("superseded");
+  expect(detail.tasks.some((task) => task.title === "Unblock implementation")).toBeTruthy();
+  expect(detail.tasks.some((task) => task.title === "Finish implementation")).toBeTruthy();
+}, 120_000);
 
-test("factory candidate lineage: rework dispatch mints a fresh candidate id", { timeout: 120_000 }, async () => {
+test("factory candidate lineage: rework dispatch mints a fresh candidate id", async () => {
   const dataDir = await createTempDir("receipt-factory-candidate-lineage");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -182,7 +190,7 @@ test("factory candidate lineage: rework dispatch mints a fresh candidate id", { 
       await fs.writeFile(input.stderrPath, "", "utf-8");
       await fs.writeFile(path.join(input.workspacePath, "LINEAGE_TEST.txt"), `run ${runs}\n`, "utf-8");
       const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
-      assert.ok(resultPath, "task result path missing");
+      expect(resultPath).toBeTruthy();
       await fs.writeFile(resultPath, JSON.stringify({
         outcome: runs === 1 ? "changes_requested" : "approved",
         summary: runs === 1 ? "Need another pass before review can approve." : "Second pass is ready.",
@@ -207,19 +215,20 @@ test("factory candidate lineage: rework dispatch mints a fresh candidate id", { 
     prompt: "Keep revising until the candidate is approved.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const firstJob = await findLatestFactoryJob(queue, created.objectiveId);
-  assert.equal(firstJob.candidateId, "task_01_candidate_01");
+  expect(firstJob.candidateId).toBe("task_01_candidate_01");
   await service.runTask(firstJob);
 
   const secondJob = await findLatestFactoryJob(queue, created.objectiveId);
-  assert.equal(secondJob.candidateId, "task_01_candidate_02");
+  expect(secondJob.candidateId).toBe("task_01_candidate_02");
   const detail = await service.getObjective(created.objectiveId);
-  assert.ok(detail.candidates.some((candidate) => candidate.candidateId === "task_01_candidate_01" && candidate.status === "changes_requested"));
-  assert.ok(detail.candidates.some((candidate) => candidate.candidateId === "task_01_candidate_02"));
-});
+  expect(detail.candidates.some((candidate) => candidate.candidateId === "task_01_candidate_01" && candidate.status === "changes_requested")).toBeTruthy();
+  expect(detail.candidates.some((candidate) => candidate.candidateId === "task_01_candidate_02")).toBeTruthy();
+}, 120_000);
 
-test("factory no-diff discovery tasks are bypassed so downstream implementation can continue", { timeout: 120_000 }, async () => {
+test("factory no-diff discovery tasks are bypassed so downstream implementation can continue", async () => {
   const dataDir = await createTempDir("receipt-factory-no-diff-bypass");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -231,7 +240,7 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
       await fs.writeFile(input.stdoutPath, "", "utf-8");
       await fs.writeFile(input.stderrPath, "", "utf-8");
       const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
-      assert.ok(resultPath, "task result path missing");
+      expect(resultPath).toBeTruthy();
       if (runs >= 2) {
         await fs.writeFile(path.join(input.workspacePath, "IMPLEMENTED.txt"), `run ${runs}\n`, "utf-8");
       }
@@ -263,6 +272,7 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
     prompt: "Search the repo to find where the /factory page renders the legacy header link and record the file path.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const internals = service as unknown as {
     emitObjective(objectiveId: string, event: unknown): Promise<void>;
@@ -289,16 +299,16 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
   });
 
   const firstJob = await findLatestFactoryJob(queue, created.objectiveId);
-  assert.equal(firstJob.taskId, "task_01");
+  expect(firstJob.taskId).toBe("task_01");
   await service.runTask(firstJob);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.equal(detail.status, "executing");
-  assert.equal(detail.tasks.find((task) => task.taskId === "task_01")?.status, "superseded");
-  assert.equal(detail.tasks.find((task) => task.taskId === "task_02")?.status, "running");
+  expect(detail.status).toBe("executing");
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("superseded");
+  expect(detail.tasks.find((task) => task.taskId === "task_02")?.status).toBe("running");
   const nextJob = await findLatestFactoryJob(queue, created.objectiveId);
-  assert.equal(nextJob.taskId, "task_02");
-});
+  expect(nextJob.taskId).toBe("task_02");
+}, 120_000);
 
 test("factory optimistic mutation append: stale heads are rejected without mutating the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-stale-append");
@@ -320,6 +330,7 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
     prompt: "Verify optimistic mutation appends.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const internals = service as unknown as {
     currentHeadHash(objectiveId: string): Promise<string | undefined>;
@@ -327,7 +338,7 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
     emitObjectiveBatch(objectiveId: string, events: ReadonlyArray<unknown>, expectedPrev?: string): Promise<void>;
   };
   const staleHead = await internals.currentHeadHash(created.objectiveId);
-  assert.ok(staleHead, "missing objective head");
+  expect(staleHead).toBeTruthy();
 
   await internals.emitObjective(created.objectiveId, {
     type: "objective.blocked",
@@ -337,8 +348,7 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
     blockedAt: created.createdAt + 10,
   });
 
-  await assert.rejects(
-    internals.emitObjectiveBatch(created.objectiveId, [{
+  await expect(internals.emitObjectiveBatch(created.objectiveId, [{
       type: "task.added",
       objectiveId: created.objectiveId,
       createdAt: created.createdAt + 11,
@@ -358,13 +368,11 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
         createdAt: created.createdAt + 11,
         basedOn: staleHead,
       },
-    }], staleHead),
-    /advanced before applying a mutation/,
-  );
+    }], staleHead)).rejects.toThrow(/advanced before applying a mutation/);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.equal(detail.tasks.length, 1);
-  assert.equal(detail.tasks.some((task) => task.taskId === "task_02"), false);
+  expect(detail.tasks.length).toBe(1);
+  expect(detail.tasks.some((task) => task.taskId === "task_02")).toBe(false);
 });
 
 test("factory reconciliation spawning refreshes stale state and keeps task ids unique", async () => {
@@ -387,6 +395,7 @@ test("factory reconciliation spawning refreshes stale state and keeps task ids u
     prompt: "Ensure stale reconciliation spawns do not collide.",
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const createdAt = created.createdAt + 10;
   const internals = service as unknown as {
@@ -415,7 +424,7 @@ test("factory reconciliation spawning refreshes stale state and keeps task ids u
 
   const detail = await service.getObjective(created.objectiveId);
   const taskIds = detail.tasks.map((task) => task.taskId);
-  assert.ok(taskIds.includes("task_02"));
-  assert.ok(taskIds.includes("task_03"));
-  assert.equal(new Set(taskIds).size, taskIds.length);
+  expect(taskIds.includes("task_02")).toBeTruthy();
+  expect(taskIds.includes("task_03")).toBeTruthy();
+  expect(new Set(taskIds).size).toBe(taskIds.length);
 });

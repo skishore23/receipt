@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { promisify } from "node:util";
 
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
@@ -62,6 +61,14 @@ const createSourceRepo = async (): Promise<string> => {
   return repoDir;
 };
 
+const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId,
+    reason: "startup",
+  });
+};
+
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
     jsonlStore<JobEvent>(dataDir),
@@ -103,16 +110,16 @@ test("runtime cache: repeated state and chain reads reuse the in-process snapsho
     0,
   );
 
-  assert.equal(await runtime.state("demo"), 0);
-  assert.equal(await runtime.state("demo"), 0);
-  assert.equal(await runtime.chain("demo").then((chain) => chain.length), 0);
-  assert.equal(readCount, 1);
+  expect(await runtime.state("demo")).toBe(0);
+  expect(await runtime.state("demo")).toBe(0);
+  expect(await runtime.chain("demo").then((chain) => chain.length)).toBe(0);
+  expect(readCount).toBe(1);
 
   await runtime.execute("demo", { value: 2 });
 
-  assert.equal(await runtime.state("demo"), 2);
-  assert.equal(await runtime.chain("demo").then((chain) => chain.length), 1);
-  assert.equal(readCount, 1);
+  expect(await runtime.state("demo")).toBe(2);
+  expect(await runtime.chain("demo").then((chain) => chain.length)).toBe(1);
+  expect(readCount).toBe(1);
 });
 
 test("factory reducer: replay reconstructs task, candidate, and integration state deterministically", () => {
@@ -125,6 +132,7 @@ test("factory reducer: replay reconstructs task, candidate, and integration stat
       channel: "results",
       baseHash: "abc1234",
       checks: ["npm run build"],
+      checksSource: "explicit",
       policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
       createdAt: 1,
     },
@@ -247,13 +255,13 @@ test("factory reducer: replay reconstructs task, candidate, and integration stat
   const replayA = fold(chain, reduceFactory, initialFactoryState);
   const replayB = fold(chain, reduceFactory, initialFactoryState);
 
-  assert.deepEqual(replayA, replayB);
+  expect(replayA).toEqual(replayB);
   const projection = buildFactoryProjection(replayA);
-  assert.equal(projection.status, "completed");
-  assert.equal(projection.tasks[0]?.status, "approved");
-  assert.equal(projection.integration.status, "promoted");
-  assert.equal(replayA.candidates.task_01_candidate_01?.status, "approved");
-  assert.equal(replayA.integration.promotedCommit, "fedcba9");
+  expect(projection.status).toBe("completed");
+  expect(projection.tasks[0]?.status).toBe("approved");
+  expect(projection.integration.status).toBe("promoted");
+  expect(replayA.candidates.task_01_candidate_01?.status).toBe("approved");
+  expect(replayA.integration.promotedCommit).toBe("fedcba9");
 });
 
 test("factory decomposition: invalid dependency references are dropped and canonicalized", async () => {
@@ -306,15 +314,19 @@ test("factory decomposition: invalid dependency references are dropped and canon
     prompt: "Validate decomposition dependencies.",
     checks: ["git status --short"],
   });
+  expect(created.phase).toBe("preparing_repo");
+  expect(created.tasks.length).toBe(0);
 
-  const tasks = created.tasks.map((task) => ({ taskId: task.taskId, dependsOn: task.dependsOn }));
-  assert.deepEqual(tasks, [
+  await runObjectiveStartup(service, created.objectiveId);
+  const planned = await service.getObjective(created.objectiveId);
+  const tasks = planned.tasks.map((task) => ({ taskId: task.taskId, dependsOn: task.dependsOn }));
+  expect(tasks).toEqual([
     { taskId: "task_01", dependsOn: [] },
     { taskId: "task_02", dependsOn: ["task_01"] },
     { taskId: "task_03", dependsOn: ["task_02", "task_01"] },
   ]);
-  assert.equal(created.policy.concurrency.maxActiveTasks, 4);
-  assert.equal(created.budgetState.taskRunsUsed, 1);
+  expect(planned.policy.concurrency.maxActiveTasks).toBe(4);
+  expect(planned.repoProfile.status).toBe("ready");
 });
 
 test("factory decomposition: search-only discovery steps collapse into implementation tasks", async () => {
@@ -367,9 +379,12 @@ test("factory decomposition: search-only discovery steps collapse into implement
     prompt: "Remove the legacy header link from the /factory page.",
     checks: ["git status --short"],
   });
+  expect(created.phase).toBe("preparing_repo");
 
-  const tasks = created.tasks.map((task) => ({ title: task.title, dependsOn: task.dependsOn }));
-  assert.deepEqual(tasks, [
+  await runObjectiveStartup(service, created.objectiveId);
+  const planned = await service.getObjective(created.objectiveId);
+  const tasks = planned.tasks.map((task) => ({ title: task.title, dependsOn: task.dependsOn }));
+  expect(tasks).toEqual([
     { title: "Remove the legacy header link from /factory", dependsOn: [] },
     { title: "Verify the /factory page still renders cleanly", dependsOn: ["task_01"] },
   ]);
@@ -384,8 +399,8 @@ test("factory shell: hub shortcut link is not rendered", () => {
     debugIsland: '<section id="factory-debug"></section>',
   });
 
-  assert.doesNotMatch(markup, /Open Hub/);
-  assert.doesNotMatch(markup, /href="\/hub"/);
+  expect(markup).not.toMatch(/Open Hub/);
+  expect(markup).not.toMatch(/href="\/hub"/);
 });
 
 test("factory shell: objective detail lists use responsive grid layout", () => {
@@ -397,10 +412,10 @@ test("factory shell: objective detail lists use responsive grid layout", () => {
     debugIsland: '<section id="factory-debug"></section>',
   });
 
-  assert.match(markup, /\.factory-split \{ grid-template-columns: minmax\(0, 1\.4fr\) minmax\(280px, 1fr\); align-items: start; \}/);
-  assert.match(markup, /\.factory-item-list \{ grid-template-columns: repeat\(auto-fit, minmax\(280px, 1fr\)\); align-items: start; \}/);
-  assert.match(markup, /@media \(max-width: 1280px\) \{ \.factory-split \{ grid-template-columns: 1fr; \} \}/);
-  assert.match(markup, /@media \(max-width: 720px\) \{[\s\S]*?\.factory-item-list \{ grid-template-columns: 1fr; \}/);
+  expect(markup).toMatch(/\.factory-app \{\s*min-height: 100vh;\s*display: grid;\s*grid-template-columns: minmax\(280px, 340px\) minmax\(0, 1fr\) minmax\(320px, 380px\);/);
+  expect(markup).toMatch(/\.factory-task-grid/);
+  expect(markup).toMatch(/@media \(max-width: 1480px\) \{\s*\.factory-app \{\s*grid-template-columns: 300px minmax\(0, 1fr\);/);
+  expect(markup).toMatch(/@media \(max-width: 1080px\) \{\s*\.factory-app \{\s*grid-template-columns: 1fr;/);
 });
 
 test("factory objective island: blocked reasons are surfaced prominently", () => {
@@ -412,6 +427,22 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
     updatedAt: 10,
     latestSummary: "Blocked while waiting on a diff-producing task.",
     blockedReason: "factory task produced no tracked diff: located the file but changed nothing",
+    phase: "blocked",
+    scheduler: { slotState: "active" },
+    repoProfile: {
+      status: "ready",
+      inferredChecks: ["npm run build"],
+      generatedSkillRefs: [],
+      summary: "Repo profile ready.",
+    },
+    blockedExplanation: {
+      summary: "factory task produced no tracked diff: located the file but changed nothing",
+      taskId: "task_01",
+      receiptType: "task.blocked",
+      receiptHash: "hash_01",
+    },
+    latestDecision: undefined,
+    nextAction: "Review the blocking receipt and react or cancel the objective.",
     activeTaskCount: 0,
     readyTaskCount: 0,
     taskCount: 1,
@@ -458,12 +489,29 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
       validationResults: [],
       updatedAt: 10,
     },
+    recentReceipts: [{
+      type: "task.blocked",
+      hash: "hash_01",
+      ts: 10,
+      summary: "factory task produced no tracked diff: located the file but changed nothing",
+      taskId: "task_01",
+    }],
+    evidenceCards: [{
+      kind: "blocked",
+      title: "Blocked or conflicted",
+      summary: "factory task produced no tracked diff: located the file but changed nothing",
+      at: 10,
+      taskId: "task_01",
+      receiptHash: "hash_01",
+      receiptType: "task.blocked",
+    }],
+    activity: [],
     latestRebracket: undefined,
   });
 
-  assert.match(markup, /Why blocked:/);
-  assert.match(markup, /factory task produced no tracked diff/);
-  assert.match(markup, /Blocked tasks:/);
+  expect(markup).toMatch(/Why blocked/);
+  expect(markup).toMatch(/factory task produced no tracked diff/);
+  expect(markup).toMatch(/href="#receipt-hash_01"/);
 });
 
 test("factory objective island: tasks and candidates render inside isolated list containers", () => {
@@ -475,6 +523,17 @@ test("factory objective island: tasks and candidates render inside isolated list
     updatedAt: 10,
     latestSummary: "Task cards wrap correctly.",
     blockedReason: undefined,
+    phase: "executing",
+    scheduler: { slotState: "active" },
+    repoProfile: {
+      status: "ready",
+      inferredChecks: ["npm run build"],
+      generatedSkillRefs: [],
+      summary: "Repo profile ready.",
+    },
+    blockedExplanation: undefined,
+    latestDecision: undefined,
+    nextAction: "One task is ready to dispatch.",
     activeTaskCount: 1,
     readyTaskCount: 1,
     taskCount: 1,
@@ -526,10 +585,13 @@ test("factory objective island: tasks and candidates render inside isolated list
       validationResults: [],
       updatedAt: 10,
     },
+    recentReceipts: [],
+    evidenceCards: [],
+    activity: [],
     latestRebracket: undefined,
   });
 
-  assert.match(markup, /class="factory-item-list factory-task-list"/);
-  assert.match(markup, /Task title with enough length to wrap across lines/);
-  assert.match(markup, /class="factory-item-list factory-candidate-list">\s*<div class="factory-empty">No candidates\.<\/div>/);
+  expect(markup).toMatch(/class="factory-task-grid"/);
+  expect(markup).toMatch(/Task title with enough length to wrap across lines/);
+  expect(markup).toMatch(/class="factory-candidate-grid">\s*<div class="factory-empty">No candidates yet\.<\/div>/);
 });

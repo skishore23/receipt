@@ -60,8 +60,14 @@ export class LocalCodexExecutor implements CodexExecutor {
   private readonly env: NodeJS.ProcessEnv;
 
   constructor(opts: LocalCodexExecutorOptions = {}) {
-    this.bin = opts.bin?.trim() || process.env.HUB_CODEX_BIN?.trim() || "codex";
-    this.timeoutMs = Math.max(30_000, opts.timeoutMs ?? Number(process.env.HUB_CODEX_TIMEOUT_MS ?? 900_000));
+    this.bin = opts.bin?.trim()
+      || process.env.RECEIPT_CODEX_BIN?.trim()
+      || process.env.HUB_CODEX_BIN?.trim()
+      || "codex";
+    this.timeoutMs = Math.max(
+      30_000,
+      opts.timeoutMs ?? Number(process.env.RECEIPT_CODEX_TIMEOUT_MS ?? process.env.HUB_CODEX_TIMEOUT_MS ?? 900_000),
+    );
     this.env = opts.env ?? process.env;
   }
 

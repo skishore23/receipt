@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import { loadAgentRoutes } from "../../src/framework/agent-loader.ts";
 import type { AgentLoaderContext } from "../../src/framework/agent-types.ts";
@@ -87,11 +86,11 @@ const ctx: AgentLoaderContext = {
 test("agent loader auto-discovers route modules", async () => {
   const routes = await loadAgentRoutes(ctx);
   const ids = routes.map((route) => route.id).sort();
-  assert.equal(ids.includes("todo"), true);
-  assert.equal(ids.includes("axiom"), true);
-  assert.equal(ids.includes("axiom-simple"), true);
-  assert.equal(ids.includes("theorem"), true);
-  assert.equal(ids.includes("writer"), true);
-  assert.equal(ids.includes("agent"), true);
-  assert.equal(ids.includes("receipt-inspector"), true);
+  expect(ids.includes("todo")).toBe(true);
+  expect(ids.includes("axiom")).toBe(true);
+  expect(ids.includes("axiom-simple")).toBe(true);
+  expect(ids.includes("theorem")).toBe(true);
+  expect(ids.includes("writer")).toBe(true);
+  expect(ids.includes("agent")).toBe(true);
+  expect(ids.includes("receipt-inspector")).toBe(true);
 });

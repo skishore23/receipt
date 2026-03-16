@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import {
   createMemoryTools,
@@ -42,15 +41,15 @@ test("memory tools: commit/read/search/summarize/diff", async () => {
     });
 
     const read = await tools.read({ scope: "theorem.run.demo", limit: 10 });
-    assert.equal(read.length, 2);
+    expect(read.length).toBe(2);
 
     const search = await tools.search({
       scope: "theorem.run.demo",
       query: "base case",
       limit: 5,
     });
-    assert.equal(search.length, 1);
-    assert.match(search[0]?.text ?? "", /base case/i);
+    expect(search.length).toBe(1);
+    expect(search[0]?.text ?? "").toMatch(/base case/i);
 
     const summary = await tools.summarize({
       scope: "theorem.run.demo",
@@ -58,16 +57,15 @@ test("memory tools: commit/read/search/summarize/diff", async () => {
       limit: 5,
       maxChars: 500,
     });
-    assert.match(summary.summary, /induction/i);
+    expect(summary.summary).toMatch(/induction/i);
 
     const diff = await tools.diff({
       scope: "theorem.run.demo",
       fromTs: first.ts,
       toTs: Date.now(),
     });
-    assert.equal(diff.length, 2);
+    expect(diff.length).toBe(2);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
-

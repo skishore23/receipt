@@ -1,15 +1,19 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
-const tsx = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+const CLI = path.join(ROOT, "src", "cli.ts");
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 const run = (args: ReadonlyArray<string>): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> =>
   new Promise((resolve) => {
-    const child = spawn(tsx, ["src/cli.ts", ...args], { cwd: ROOT, env: { ...process.env, DATA_DIR: path.join(ROOT, "data") }, stdio: "pipe" });
+    const child = spawn(BUN, [CLI, ...args], {
+      cwd: ROOT,
+      env: { ...process.env, DATA_DIR: path.join(ROOT, "data"), RECEIPT_DATA_DIR: path.join(ROOT, "data") },
+      stdio: "pipe",
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf-8");
@@ -19,12 +23,12 @@ const run = (args: ReadonlyArray<string>): Promise<{ readonly code: number | nul
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 
-test("cli: help and jobs commands are available", { timeout: 60_000 }, async () => {
+test("cli: help and jobs commands are available", async () => {
   const help = await run(["help"]);
-  assert.equal(help.code, 0);
-  assert.equal(help.stdout.includes("receipt <command>"), true);
+  expect(help.code).toBe(0);
+  expect(help.stdout.includes("receipt <command>")).toBe(true);
 
   const jobs = await run(["jobs", "--limit", "1"]);
-  assert.equal(jobs.code, 0);
-  assert.equal(jobs.stdout.includes("\"jobs\""), true);
-});
+  expect(jobs.code).toBe(0);
+  expect(jobs.stdout.includes("\"jobs\"")).toBe(true);
+}, 60_000);

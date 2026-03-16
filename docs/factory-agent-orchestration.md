@@ -30,7 +30,8 @@ Everything durable around those model calls is receipt-backed and reducer-driven
 
 That means:
 
-- OpenAI proposes a task DAG at objective creation
+- objective creation returns immediately and a queued factory control job performs repo prep, planning, and the first react pass
+- OpenAI prepares a repo profile and proposes a task DAG during startup
 - OpenAI can also choose among legal orchestration actions and propose runtime task mutations when enabled
 - Codex does not decide the overall workflow; it executes one task at a time inside an isolated Git worktree
 - Git remains the code truth
@@ -101,9 +102,27 @@ In `src/server.ts`, Factory receives `llmStructured` and optionally an OpenAI-ba
 
 OpenAI is used in three places:
 
-### 1. Objective decomposition
+### 1. Repo preparation and objective planning
 
-When an objective is created, Factory calls `decomposeObjective(...)`.
+When an objective is created, Factory appends `objective.created`, returns immediately, and enqueues one control job with payload kind `factory.objective.control`.
+
+That control job:
+
+- acquires the repo execution slot or leaves the objective queued
+- generates or reuses a shared repo profile
+- asks OpenAI for a structured task decomposition
+- emits plan proposal/adoption receipts
+- then runs the first objective react pass
+
+Repo preparation is visible through:
+
+- `repo.profile.requested`
+- `repo.profile.generated`
+
+Planning is visible through:
+
+- `objective.plan.proposed`
+- `objective.plan.adopted`
 
 If `llmStructured` is available, it requests a structured task DAG:
 
@@ -136,6 +155,7 @@ If OpenAI is disabled, fails, or returns an invalid action, Factory uses a deter
 OpenAI does not:
 
 - edit code directly in the repo
+- hold the repo execution slot directly
 - manage Git worktrees
 - append arbitrary hidden state
 - bypass the reducer

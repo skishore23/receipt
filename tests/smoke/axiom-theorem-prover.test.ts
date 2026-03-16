@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import type { DelegationTools } from "../../src/adapters/delegation.ts";
@@ -62,11 +61,11 @@ const withStructured = (input: Omit<AxiomRunInput, "llmStructured">): AxiomRunIn
 
 test("normalizeAxiomConfig applies long-horizon defaults", () => {
   const config = normalizeAxiomConfig({});
-  assert.equal(config.maxIterations, AXIOM_DEFAULT_CONFIG.maxIterations);
-  assert.equal(config.memoryScope, "axiom");
-  assert.equal(config.autoRepair, true);
-  assert.equal(config.leanEnvironment, "lean-4.28.0");
-  assert.equal(config.localValidationMode, "off");
+  expect(config.maxIterations).toBe(AXIOM_DEFAULT_CONFIG.maxIterations);
+  expect(config.memoryScope).toBe("axiom");
+  expect(config.autoRepair).toBe(true);
+  expect(config.leanEnvironment).toBe("lean-4.28.0");
+  expect(config.localValidationMode).toBe("off");
 });
 
 test("runAxiom uses native structured actions when available", async () => {
@@ -135,11 +134,11 @@ test("runAxiom uses native structured actions when available", async () => {
       receipt.body.type === "validation.report" && receipt.body.gate === "model_json"
     );
 
-    assert.equal(textCalls, 0, "expected runAxiom to use native structured actions");
-    assert.equal(structuredCalls, 1, "expected a single structured final action");
-    assert.match(finalEvent?.body.content ?? "", /complete/);
-    assert.equal(jsonValidation?.body.ok, true);
-    assert.match(jsonValidation?.body.summary ?? "", /native structured action parsed/);
+    expect(textCalls).toBe(0);
+    expect(structuredCalls).toBe(1);
+    expect(finalEvent?.body.content ?? "").toMatch(/complete/);
+    expect(jsonValidation?.body.ok).toBe(true);
+    expect(jsonValidation?.body.summary ?? "").toMatch(/native structured action parsed/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -193,7 +192,7 @@ test("runAxiom uses lean file tools through the durable agent loop", async () =>
     const url = String(input);
     if (url.endsWith("/api/v1/check")) {
       const headers = new Headers(init?.headers);
-      assert.equal(headers.get("Authorization"), "Bearer test-key");
+      expect(headers.get("Authorization")).toBe("Bearer test-key");
       const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
       fetchCalls.push({ url, body });
       return new Response(JSON.stringify({
@@ -255,30 +254,30 @@ test("runAxiom uses lean file tools through the durable agent loop", async () =>
   try {
     await runAxiom(input);
 
-    assert.equal(fetchCalls.length, 1);
-    assert.equal(fetchCalls[0]?.url, "https://axle.example.test/api/v1/check");
-    assert.equal(fetchCalls[0]?.body.environment, "lean-4.28.0");
-    assert.match(String(fetchCalls[0]?.body.content ?? ""), /theorem foo/);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0]?.url).toBe("https://axle.example.test/api/v1/check");
+    expect(fetchCalls[0]?.body.environment).toBe("lean-4.28.0");
+    expect(String(fetchCalls[0]?.body.content ?? "")).toMatch(/theorem foo/);
 
     const runChain = await runtime.chain("agents/axiom/runs/axiom_demo");
-    assert.ok(runChain.some((receipt) => receipt.body.type === "run.configured"), "missing run.configured");
-    assert.ok(runChain.some((receipt) => receipt.body.type === "tool.called" && receipt.body.tool === "lean.check_file"), "missing lean.check_file call");
+    expect(runChain.some((receipt) => receipt.body.type === "run.configured")).toBeTruthy();
+    expect(runChain.some((receipt) => receipt.body.type === "tool.called" && receipt.body.tool === "lean.check_file")).toBeTruthy();
     const axleValidation = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "axle-check"
     );
-    assert.equal(axleValidation?.body.evidence?.tool, "lean.check_file");
-    assert.ok(axleValidation?.body.evidence?.candidateHash, "missing candidate hash on AXLE validation report");
+    expect(axleValidation?.body.evidence?.tool).toBe("lean.check_file");
+    expect(axleValidation?.body.evidence?.candidateHash).toBeTruthy();
 
     const configEvent = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "run.configured" }> } =>
       receipt.body.type === "run.configured"
     );
-    assert.equal(configEvent?.body.workflow.id, "axiom-v1");
-    assert.equal(configEvent?.body.config.extra?.leanEnvironment, "lean-4.28.0");
+    expect(configEvent?.body.workflow.id).toBe("axiom-v1");
+    expect(configEvent?.body.config.extra?.leanEnvironment).toBe("lean-4.28.0");
 
     const finalEvent = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "response.finalized" }> } =>
       receipt.body.type === "response.finalized"
     );
-    assert.match(finalEvent?.body.content ?? "", /Verified Main\.lean/);
+    expect(finalEvent?.body.content ?? "").toMatch(/Verified Main\.lean/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -420,30 +419,30 @@ test("runAxiom rejects text-only AXLE verify claims until lean.verify_file actua
   try {
     await runAxiom(input);
 
-    assert.equal(fetchCalls.length, 1);
-    assert.equal(fetchCalls[0]?.url, "https://axle.example.test/api/v1/verify_proof");
-    assert.match(String(fetchCalls[0]?.body.content ?? ""), /theorem foo/);
-    assert.match(String(fetchCalls[0]?.body.formal_statement ?? ""), /sorry/);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0]?.url).toBe("https://axle.example.test/api/v1/verify_proof");
+    expect(String(fetchCalls[0]?.body.content ?? "")).toMatch(/theorem foo/);
+    expect(String(fetchCalls[0]?.body.formal_statement ?? "")).toMatch(/sorry/);
 
     const runChain = await runtime.chain("agents/axiom/runs/axiom_verify_guard");
     const finalizerReject = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "finalizer"
     );
-    assert.equal(finalizerReject?.body.ok, false);
-    assert.match(finalizerReject?.body.summary ?? "", /requires AXLE verification/i);
+    expect(finalizerReject?.body.ok).toBe(false);
+    expect(finalizerReject?.body.summary ?? "").toMatch(/requires AXLE verification/i);
 
     const axleVerify = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "axle-verify"
     );
-    assert.equal(axleVerify?.body.ok, true);
-    assert.equal(axleVerify?.body.evidence?.tool, "lean.verify_file");
-    assert.ok(axleVerify?.body.evidence?.candidateHash, "missing candidate hash on AXLE verify report");
-    assert.ok(axleVerify?.body.evidence?.formalStatementHash, "missing formal statement hash on AXLE verify report");
+    expect(axleVerify?.body.ok).toBe(true);
+    expect(axleVerify?.body.evidence?.tool).toBe("lean.verify_file");
+    expect(axleVerify?.body.evidence?.candidateHash).toBeTruthy();
+    expect(axleVerify?.body.evidence?.formalStatementHash).toBeTruthy();
 
     const finalEvent = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "response.finalized" }> } =>
       receipt.body.type === "response.finalized"
     );
-    assert.match(finalEvent?.body.content ?? "", /Verified CompositionFacts\.lean with AXLE\./);
+    expect(finalEvent?.body.content ?? "").toMatch(/Verified CompositionFacts\.lean with AXLE\./);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -577,19 +576,19 @@ test("runAxiom keeps rejecting finalize when AXLE verification failed", async ()
     const axleVerify = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "axle-verify"
     );
-    assert.equal(axleVerify?.body.ok, false);
+    expect(axleVerify?.body.ok).toBe(false);
 
     const finalizerReject = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "finalizer"
     );
-    assert.equal(finalizerReject?.body.ok, false);
-    assert.match(finalizerReject?.body.summary ?? "", /verification ran and failed/i);
+    expect(finalizerReject?.body.ok).toBe(false);
+    expect(finalizerReject?.body.summary ?? "").toMatch(/verification ran and failed/i);
 
     const finalStatus = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "run.status" }> } =>
       receipt.body.type === "run.status"
     );
-    assert.equal(finalStatus?.body.status, "failed");
-    assert.match(finalStatus?.body.note ?? "", /iteration budget exhausted/i);
+    expect(finalStatus?.body.status).toBe("failed");
+    expect(finalStatus?.body.note ?? "").toMatch(/iteration budget exhausted/i);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -758,35 +757,32 @@ test("runAxiom exposes AXLE structure-editing content tools and records task hin
   try {
     await runAxiom(input);
 
-    assert.deepEqual(
-      fetchCalls.map((call) => call.url),
-      [
+    expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://axle.example.test/api/v1/rename",
         "https://axle.example.test/api/v1/theorem2lemma",
         "https://axle.example.test/api/v1/have2lemma",
         "https://axle.example.test/api/v1/have2sorry",
-      ]
-    );
+      ]);
 
     const runChain = await runtime.chain("agents/axiom/runs/axiom_structure_content");
     const configEvent = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "run.configured" }> } =>
       receipt.body.type === "run.configured"
     );
-    assert.equal(configEvent?.body.config.extra?.taskHints?.reason, "name_conflict");
+    expect(configEvent?.body.config.extra?.taskHints?.reason).toBe("name_conflict");
 
     const problemEvent = runChain.find((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "problem.set" }> } =>
       receipt.body.type === "problem.set"
     );
-    assert.match(problemEvent?.body.problem ?? "", /Task hints \(structured\)/);
-    assert.match(problemEvent?.body.problem ?? "", /lean\.rename, lean\.verify/);
+    expect(problemEvent?.body.problem ?? "").toMatch(/Task hints \(structured\)/);
+    expect(problemEvent?.body.problem ?? "").toMatch(/lean\.rename/);
 
     const observed = runChain.filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "tool.observed" }> } =>
       receipt.body.type === "tool.observed"
     );
-    assert.ok(observed.some((receipt) => receipt.body.tool === "lean.rename" && /theorem bar/.test(receipt.body.output)));
-    assert.ok(observed.some((receipt) => receipt.body.tool === "lean.theorem2lemma" && /lemma bar/.test(receipt.body.output)));
-    assert.ok(observed.some((receipt) => receipt.body.tool === "lean.have2lemma" && /lemma_names: baz\.h1/.test(receipt.body.output)));
-    assert.ok(observed.some((receipt) => receipt.body.tool === "lean.have2sorry" && /have h : 1 = 1 := sorry/.test(receipt.body.output)));
+    expect(observed.some((receipt) => receipt.body.tool === "lean.rename" && /theorem bar/.test(receipt.body.output))).toBeTruthy();
+    expect(observed.some((receipt) => receipt.body.tool === "lean.theorem2lemma" && /lemma bar/.test(receipt.body.output))).toBeTruthy();
+    expect(observed.some((receipt) => receipt.body.tool === "lean.have2lemma" && /lemma_names: baz\.h1/.test(receipt.body.output))).toBeTruthy();
+    expect(observed.some((receipt) => receipt.body.tool === "lean.have2sorry" && /have h : 1 = 1 := sorry/.test(receipt.body.output))).toBeTruthy();
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -923,19 +919,19 @@ test("runAxiom rewrites workspace files with AXLE structure-editing file tools",
   try {
     await runAxiom(input);
 
-    assert.match(await fs.readFile(path.join(workspaceRoot, "Rename.lean"), "utf-8"), /theorem bar/);
-    assert.match(await fs.readFile(path.join(workspaceRoot, "Lemmaize.lean"), "utf-8"), /lemma bar/);
-    assert.match(await fs.readFile(path.join(workspaceRoot, "HaveLemma.lean"), "utf-8"), /lemma baz\.h1/);
-    assert.match(await fs.readFile(path.join(workspaceRoot, "HaveSorry.lean"), "utf-8"), /have h : 1 = 1 := sorry/);
+    expect(await fs.readFile(path.join(workspaceRoot, "Rename.lean"), "utf-8")).toMatch(/theorem bar/);
+    expect(await fs.readFile(path.join(workspaceRoot, "Lemmaize.lean"), "utf-8")).toMatch(/lemma bar/);
+    expect(await fs.readFile(path.join(workspaceRoot, "HaveLemma.lean"), "utf-8")).toMatch(/lemma baz\.h1/);
+    expect(await fs.readFile(path.join(workspaceRoot, "HaveSorry.lean"), "utf-8")).toMatch(/have h : 1 = 1 := sorry/);
 
     const runChain = await runtime.chain("agents/axiom/runs/axiom_structure_file");
     const toolCalls = runChain.filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "tool.called" }> } =>
       receipt.body.type === "tool.called"
     );
-    assert.ok(toolCalls.some((receipt) => receipt.body.tool === "lean.rename_file"));
-    assert.ok(toolCalls.some((receipt) => receipt.body.tool === "lean.theorem2lemma_file"));
-    assert.ok(toolCalls.some((receipt) => receipt.body.tool === "lean.have2lemma_file"));
-    assert.ok(toolCalls.some((receipt) => receipt.body.tool === "lean.have2sorry_file"));
+    expect(toolCalls.some((receipt) => receipt.body.tool === "lean.rename_file")).toBeTruthy();
+    expect(toolCalls.some((receipt) => receipt.body.tool === "lean.theorem2lemma_file")).toBeTruthy();
+    expect(toolCalls.some((receipt) => receipt.body.tool === "lean.have2lemma_file")).toBeTruthy();
+    expect(toolCalls.some((receipt) => receipt.body.tool === "lean.have2sorry_file")).toBeTruthy();
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -1096,19 +1092,16 @@ test("runAxiom exposes lean.theorem2sorry_file through the durable agent loop", 
   try {
     await runAxiom(input);
 
-    assert.equal(fetchCalls[0]?.url, "https://axle.example.test/api/v1/theorem2sorry");
-    assert.deepEqual(fetchCalls[0]?.body.names, ["left_as_exercise"]);
-    assert.equal(fetchCalls[1]?.url, "https://axle.example.test/api/v1/check");
+    expect(fetchCalls[0]?.url).toBe("https://axle.example.test/api/v1/theorem2sorry");
+    expect(fetchCalls[0]?.body.names).toEqual(["left_as_exercise"]);
+    expect(fetchCalls[1]?.url).toBe("https://axle.example.test/api/v1/check");
 
     const rewritten = await fs.readFile(path.join(workspaceRoot, "Exercises.lean"), "utf-8");
-    assert.match(rewritten, /theorem left_as_exercise : 1 = 1 := sorry/);
-    assert.match(rewritten, /theorem keep_me : 2 = 2 := by/);
+    expect(rewritten).toMatch(/theorem left_as_exercise : 1 = 1 := sorry/);
+    expect(rewritten).toMatch(/theorem keep_me : 2 = 2 := by/);
 
     const runChain = await runtime.chain("agents/axiom/runs/axiom_theorem2sorry");
-    assert.ok(
-      runChain.some((receipt) => receipt.body.type === "tool.called" && receipt.body.tool === "lean.theorem2sorry_file"),
-      "missing lean.theorem2sorry_file call"
-    );
+    expect(runChain.some((receipt) => receipt.body.type === "tool.called" && receipt.body.tool === "lean.theorem2sorry_file")).toBeTruthy();
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
@@ -1260,13 +1253,13 @@ test("runAxiom enforces local Lean validation when required", async () => {
     const validationEvent = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "validation.report" }> } =>
       receipt.body.type === "validation.report" && receipt.body.gate === "local-lean"
     );
-    assert.equal(validationEvent?.body.ok, true);
-    assert.equal(validationEvent?.body.target, "Main.lean");
+    expect(validationEvent?.body.ok).toBe(true);
+    expect(validationEvent?.body.target).toBe("Main.lean");
 
     const finalEvent = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "response.finalized" }> } =>
       receipt.body.type === "response.finalized"
     );
-    assert.match(finalEvent?.body.content ?? "", /Local Lean validation passed on Main\.lean/);
+    expect(finalEvent?.body.content ?? "").toMatch(/Local Lean validation passed on Main\.lean/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;

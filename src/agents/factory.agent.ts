@@ -5,6 +5,7 @@ import {
   html,
   json,
   optionalTrimmedString,
+  requireTrimmedString,
   readRecordBody,
   text,
   trimmedString,
@@ -32,6 +33,13 @@ const parseChecks = (value: unknown): ReadonlyArray<string> | undefined => {
     return items.length ? items : undefined;
   }
   return undefined;
+};
+
+const deriveObjectiveTitle = (prompt: string): string => {
+  const compact = prompt.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  const sentence = compact.split(/[.!?]/)[0] ?? compact;
+  return sentence.slice(0, 96).trim();
 };
 
 const parsePolicy = (value: unknown): Record<string, unknown> | undefined => {
@@ -181,10 +189,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
           return {
             objective: await service.createObjective({
-              title: trimmedString(body.title),
+              title: trimmedString(body.title) ?? deriveObjectiveTitle(requireTrimmedString(body.prompt, "prompt required")),
               prompt: trimmedString(body.prompt),
               baseHash: optionalTrimmedString(body.baseHash),
-              checks: parseChecks(body.checks),
+              checks: parseChecks(body.validationCommands) ?? parseChecks(body.checks),
               channel: optionalTrimmedString(body.channel),
               policy: parsePolicy(body.policy),
             }),
@@ -248,10 +256,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
           const created = await service.createObjective({
-            title: trimmedString(body.title),
+            title: trimmedString(body.title) ?? deriveObjectiveTitle(requireTrimmedString(body.prompt, "prompt required")),
             prompt: trimmedString(body.prompt),
             baseHash: optionalTrimmedString(body.baseHash),
-            checks: parseChecks(body.checks),
+            checks: parseChecks(body.validationCommands) ?? parseChecks(body.checks),
             channel: optionalTrimmedString(body.channel),
             policy: parsePolicy(body.policy),
           });

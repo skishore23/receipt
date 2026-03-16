@@ -1,10 +1,11 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import test from "node:test";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 type CommandResult = {
   readonly code: number | null;
@@ -39,13 +40,14 @@ const runCommand = (command: string, args: readonly string[]): Promise<CommandRe
     });
   });
 
-test("smoke: project builds", { timeout: 180_000 }, async () => {
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = await runCommand(npmCmd, ["run", "build"]);
+test("smoke: project builds", async () => {
+  const result = await runCommand(BUN, ["run", "build"]);
 
-  assert.equal(
+  expect(
     result.code,
+  ).toBe(
     0,
-    `npm run build failed\nstdout:\n${result.stdout}\n\nstderr:\n${result.stderr}`
   );
-});
+  expect(fs.existsSync(path.join(ROOT, "dist", "prompts", "theorem.prompts.json"))).toBe(true);
+  expect(fs.existsSync(path.join(ROOT, "dist", "prompts", "factory", "orchestrator.md"))).toBe(true);
+}, 180_000);

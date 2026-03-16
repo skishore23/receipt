@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { evaluateImprovementProposal } from "../../src/engine/runtime/improvement-harness.ts";
 
@@ -31,11 +30,11 @@ test("improvement harness passes proposal context to validation commands", async
       cwd: dir,
     });
 
-    assert.equal(result.status, "passed");
+    expect(result.status).toBe("passed");
     const captured = JSON.parse(await fs.readFile(output, "utf-8")) as Record<string, string>;
-    assert.equal(captured.artifactType, "prompt_patch");
-    assert.equal(captured.target, "prompts/axiom.prompts.json");
-    assert.equal(captured.patch, patch);
+    expect(captured.artifactType).toBe("prompt_patch");
+    expect(captured.target).toBe("prompts/axiom.prompts.json");
+    expect(captured.patch).toBe(patch);
   } finally {
     if (originalCmd === undefined) delete process.env.IMPROVEMENT_VALIDATE_CMD;
     else process.env.IMPROVEMENT_VALIDATE_CMD = originalCmd;

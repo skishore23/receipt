@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import {
   axleHaveToLemma,
@@ -109,8 +108,9 @@ test("axle adapter routes structure-editing tools to the expected endpoints", as
       timeout_seconds: 45,
     }, { baseUrl, apiKey });
 
-    assert.deepEqual(
+    expect(
       calls.map((call) => ({ url: call.url, method: call.method, body: call.body })),
+    ).toEqual(
       [
         {
           url: "https://axle.example.test/api/v1/rename",
@@ -161,11 +161,11 @@ test("axle adapter routes structure-editing tools to the expected endpoints", as
         },
       ]
     );
-    assert.ok(calls.every((call) => call.auth === "Bearer test-key"));
-    assert.match(renamed.content, /theorem bar/);
-    assert.match(theoremAsLemma.content, /lemma foo/);
-    assert.deepEqual(liftedHave.lemma_names, ["lifted_have"]);
-    assert.match(haveAsSorry.content, /sorry/);
+    expect(calls.every((call) => call.auth === "Bearer test-key")).toBeTruthy();
+    expect(renamed.content).toMatch(/theorem bar/);
+    expect(theoremAsLemma.content).toMatch(/lemma foo/);
+    expect(liftedHave.lemma_names).toEqual(["lifted_have"]);
+    expect(haveAsSorry.content).toMatch(/sorry/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -215,11 +215,11 @@ test("axle verify retries import mismatch with ignore_imports and treats user_er
       timeout_seconds: 30,
     }, { baseUrl: "https://axle.example.test" });
 
-    assert.equal(result.okay, true);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0]?.url, "https://axle.example.test/api/v1/verify_proof");
-    assert.equal(calls[0]?.body.ignore_imports, undefined);
-    assert.equal(calls[1]?.body.ignore_imports, true);
+    expect(result.okay).toBe(true);
+    expect(calls.length).toBe(2);
+    expect(calls[0]?.url).toBe("https://axle.example.test/api/v1/verify_proof");
+    expect(calls[0]?.body.ignore_imports).toBe(undefined);
+    expect(calls[1]?.body.ignore_imports).toBe(true);
   } finally {
     globalThis.fetch = originalFetch;
   }

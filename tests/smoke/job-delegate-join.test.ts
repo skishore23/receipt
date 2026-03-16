@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -6,9 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
-import test from "node:test";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -67,17 +67,10 @@ const stopChild = async (child: ChildProcess): Promise<void> => {
 const isTerminal = (status: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
-test("job worker: delegated follow-up does not stall parent when concurrency=1", { timeout: 120_000 }, async () => {
+test("job worker: delegated follow-up does not stall parent when concurrency=1", async () => {
   const port = await getFreePort();
   const dataDir = await createTempDir("receipt-job-delegate-join");
-  const tsxBin = path.join(
-    ROOT,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "tsx.cmd" : "tsx"
-  );
-
-  const child = spawn(tsxBin, ["src/server.ts"], {
+  const child = spawn(BUN, ["src/server.ts"], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -116,10 +109,10 @@ test("job worker: delegated follow-up does not stall parent when concurrency=1",
         },
       }),
     });
-    assert.equal(enqueue.status, 202);
+    expect(enqueue.status).toBe(202);
     const queued = await enqueue.json() as { job?: { id?: string } };
     const parentJobId = queued.job?.id;
-    assert.ok(parentJobId, "expected parent job id");
+    expect(parentJobId).toBeTruthy();
 
     const followUp = await fetch(`${base}/jobs/${encodeURIComponent(parentJobId!)}/follow-up`, {
       method: "POST",
@@ -134,19 +127,19 @@ test("job worker: delegated follow-up does not stall parent when concurrency=1",
         },
       }),
     });
-    assert.equal(followUp.status, 202);
+    expect(followUp.status).toBe(202);
 
     const parentWait = await fetch(`${base}/jobs/${encodeURIComponent(parentJobId!)}/wait?timeoutMs=20000`);
-    assert.equal(parentWait.status, 200);
+    expect(parentWait.status).toBe(200);
     const parentJob = await parentWait.json() as { status: string };
-    assert.equal(parentJob.status, "completed");
+    expect(parentJob.status).toBe("completed");
 
     const deadline = Date.now() + 20_000;
     let subJobSeenTerminal = false;
     let lastJobs: Array<{ id: string; lane: string; status: string }> = [];
     while (Date.now() < deadline) {
       const jobsRes = await fetch(`${base}/jobs?limit=100`);
-      assert.equal(jobsRes.status, 200);
+      expect(jobsRes.status).toBe(200);
       const jobsJson = await jobsRes.json() as { jobs: Array<{ id: string; lane: string; status: string }> };
       lastJobs = jobsJson.jobs;
       subJobSeenTerminal = jobsJson.jobs.some((job) =>
@@ -158,10 +151,10 @@ test("job worker: delegated follow-up does not stall parent when concurrency=1",
       await sleep(250);
     }
 
-    assert.equal(
+    expect(
       subJobSeenTerminal,
+    ).toBe(
       true,
-      `expected delegated follow-up job to reach terminal state; jobs=${JSON.stringify(lastJobs)}`
     );
   } finally {
     await stopChild(child);
@@ -171,4 +164,4 @@ test("job worker: delegated follow-up does not stall parent when concurrency=1",
       console.error(stderr);
     }
   }
-});
+}, 120_000);

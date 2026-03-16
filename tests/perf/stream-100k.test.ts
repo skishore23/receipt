@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { performance } from "node:perf_hooks";
 
 import { createRuntime } from "../../src/core/runtime.ts";
@@ -22,7 +21,7 @@ type PerfCmd = {
 
 const nowMs = (): number => performance.now();
 
-test("perf: indexed store handles 100k receipts with bounded latencies", { timeout: 240_000 }, async () => {
+test("perf: indexed store handles 100k receipts with bounded latencies", async () => {
   const dataDir = await createTempDir("receipt-perf-100k");
   try {
     const store = jsonlIndexedStore<PerfEvent>(dataDir);
@@ -60,15 +59,14 @@ test("perf: indexed store handles 100k receipts with bounded latencies", { timeo
     const state = await runtime.state(stream);
     const stateMs = nowMs() - stateStart;
 
-    assert.ok(head, "head should exist");
-    assert.equal(count, total, "count mismatch");
-    assert.equal(state.count, total, "fold mismatch");
+    expect(head).toBeTruthy();
+    expect(count).toBe(total);
+    expect(state.count).toBe(total);
 
-    // Gates from the vNext plan
-    assert.ok(headMs < 10, `head latency too high: ${headMs.toFixed(2)}ms`);
-    assert.ok(countMs < 10, `count latency too high: ${countMs.toFixed(2)}ms`);
-    assert.ok(stateMs < 2000, `state fold latency too high: ${stateMs.toFixed(2)}ms`);
+    expect(headMs < 10).toBeTruthy();
+    expect(countMs < 10).toBeTruthy();
+    expect(stateMs < 2000).toBeTruthy();
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 240_000);

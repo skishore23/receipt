@@ -1,6 +1,6 @@
 # Receipt-Native Factory Core
 
-Status: Implemented factory baseline with live runtime mutation, candidate lineage, and recursive task-subgraph context packs  
+Status: Implemented factory v1.1 baseline with async objective startup, repo profiles, queued repo slots, live runtime mutation, candidate lineage, and recursive context packs  
 Audience: Engineering  
 Scope: Current factory implementation in this repo
 
@@ -24,6 +24,7 @@ Factory is the receipt-native software objective engine.
 
 It takes a high-level software objective and drives it through:
 
+- repo preparation and inferred validation defaults
 - decomposition into a task DAG
 - worker dispatch
 - candidate production and review
@@ -87,6 +88,17 @@ In practice that means:
 - reducer replay reconstructs factory state deterministically
 - Git remains the only durable representation of code content, worktrees, commits, and source-branch promotion
 - Hub reads projections from factory state instead of acting as a second objective state store
+- only one objective per repo holds the execution slot at a time; later objectives remain visibly queued until admitted
+
+## V1.1 Additions
+
+The current implementation adds a command-center layer on top of the original factory core:
+
+- objective creation is asynchronous and returns before repo prep and planning finish
+- repo preparation is explicit and visible through repo-profile receipts
+- planning is visible and durable through plan proposal/adoption receipts
+- compose defaults come from the shared repo profile when available
+- objective detail includes phase, queue state, latest decision, blocked explanation, evidence cards, and recent activity
 
 ## Architecture Diagram
 
@@ -288,7 +300,14 @@ sequenceDiagram
 
   User->>Factory: create objective
   Factory->>Factory: emit objective.created
-  Factory->>Factory: decompose + emit task.added*
+  Factory->>Factory: emit objective.slot.queued or objective.slot.admitted
+  Factory->>Queue: enqueue factory.objective.control
+  Queue->>Factory: lease control job
+  Factory->>Factory: emit repo.profile.requested
+  Factory->>Factory: emit repo.profile.generated
+  Factory->>Factory: emit objective.plan.proposed
+  Factory->>Factory: emit task.added*
+  Factory->>Factory: emit objective.plan.adopted
   Factory->>Factory: reactObjective()
   Factory->>Factory: emit task.ready
   Factory->>Git: create task worktree
@@ -308,6 +327,8 @@ sequenceDiagram
   Factory->>Factory: emit integration.promoted + objective.completed
   Factory->>Factory: update board/detail/live/debug projections
 ```
+
+Objective creation no longer waits for decomposition to finish. It returns immediately after the initial receipts are appended, and a queued control job performs repo prep, planning, and the first react pass.
 
 ## State Machines
 
@@ -381,6 +402,20 @@ stateDiagram-v2
   integrating --> failed
   promoting --> failed
 ```
+
+### Objective phase projection
+
+The UI uses a receipt-derived `phase` projection on top of the durable objective status:
+
+- `preparing_repo`
+- `planning_graph`
+- `waiting_for_slot`
+- `executing`
+- `integrating`
+- `promoting`
+- `blocked`
+
+This is a projection layer only. The durable reducer state still uses the core objective enums.
 
 ### Task and candidate lifecycle
 

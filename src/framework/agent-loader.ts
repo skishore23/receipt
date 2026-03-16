@@ -14,9 +14,9 @@ const exists = async (target: string): Promise<boolean> => {
 };
 
 const inferAgentsDir = async (): Promise<{ readonly dir: string; readonly suffix: string }> => {
-  const srcDir = path.join(process.cwd(), "src", "agents");
-  const distDir = path.join(process.cwd(), "dist", "agents");
   const here = fileURLToPath(import.meta.url);
+  const srcDir = fileURLToPath(new URL("../agents", import.meta.url));
+  const distDir = fileURLToPath(new URL("../../dist/agents", import.meta.url));
   const runningFromDist = here.includes(`${path.sep}dist${path.sep}`);
 
   if (runningFromDist && await exists(distDir)) {

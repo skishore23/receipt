@@ -2,13 +2,10 @@
 // Server - Hono transport + manifest-based routing
 // ============================================================================
 
-import "dotenv/config";
-
 import fs from "node:fs";
 import path from "node:path";
 
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
 
 import { jsonlStore, jsonBranchStore } from "./adapters/jsonl.js";
 import { jsonlIndexedStore } from "./adapters/jsonl-indexed.js";
@@ -79,11 +76,7 @@ import { runReceiptInspector } from "./agents/inspector.js";
 import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-recovery.js";
 import { HubService } from "./services/hub-service.js";
 import { HubServiceError } from "./services/hub-service.js";
-import {
-  createOpenAiFactoryOrchestrator,
-  createTestFactoryOrchestrator,
-} from "./services/factory-orchestrator.js";
-import { FactoryService } from "./services/factory-service.js";
+import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime.js";
 import {
   assertReceiptFileName,
   listReceiptFiles,
@@ -103,10 +96,10 @@ import { evaluateImprovementProposal } from "./engine/runtime/improvement-harnes
 // ============================================================================
 
 const PORT = Number(process.env.PORT ?? 8787);
-const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
+const WORKSPACE_ROOT = process.env.RECEIPT_REPO_ROOT?.trim() || process.env.HUB_REPO_ROOT?.trim() || process.cwd();
+const DATA_DIR = (process.env.RECEIPT_DATA_DIR?.trim() || process.env.DATA_DIR) ?? path.join(process.cwd(), "data");
 const USE_INDEXED_STORE = process.env.RECEIPT_INDEXED_STORE === "1";
 const FACTORY_ORCHESTRATOR_MODE = process.env.FACTORY_ORCHESTRATOR_MODE === "enabled" ? "enabled" : "disabled";
-const FACTORY_ORCHESTRATOR_TEST_MODE = process.env.FACTORY_ORCHESTRATOR_TEST_MODE?.trim();
 
 // ============================================================================
 // Composition: Store -> Runtime
@@ -405,28 +398,15 @@ const delegationTools = createDelegationTools({
 });
 
 const hubCodexExecutor = new LocalCodexExecutor();
-const factoryOrchestratorPromptPath = path.join(process.cwd(), "prompts", "factory", "orchestrator.md");
-const factoryOrchestratorPrompt = fs.existsSync(factoryOrchestratorPromptPath)
-  ? fs.readFileSync(factoryOrchestratorPromptPath, "utf-8")
-  : "";
-const factoryOrchestrator = FACTORY_ORCHESTRATOR_TEST_MODE
-  ? createTestFactoryOrchestrator()
-  : (FACTORY_ORCHESTRATOR_MODE === "enabled" && process.env.OPENAI_API_KEY
-    ? createOpenAiFactoryOrchestrator({
-      llmStructured,
-      systemPrompt: factoryOrchestratorPrompt,
-    })
-    : undefined);
-const factoryService = new FactoryService({
+const { service: factoryService } = createFactoryServiceRuntime({
   dataDir: DATA_DIR,
   queue,
   jobRuntime,
   sse,
-  codexExecutor: hubCodexExecutor,
-  orchestrator: factoryOrchestrator,
-  orchestratorMode: factoryOrchestrator ? "enabled" : "disabled",
+  repoRoot: WORKSPACE_ROOT,
+  codexBin: process.env.RECEIPT_CODEX_BIN?.trim() || process.env.HUB_CODEX_BIN?.trim(),
+  orchestratorMode: FACTORY_ORCHESTRATOR_MODE,
   memoryTools,
-  llmStructured,
 });
 const hubService = new HubService({
   dataDir: DATA_DIR,
@@ -443,7 +423,7 @@ const agentRunner = createAgentRunner({
   prompts: AGENT_PROMPTS, model: AGENT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
   runFn: runAgent as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
-  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd(), llmStructured },
+  extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const infraRunner = createAgentRunner({
@@ -452,7 +432,7 @@ const infraRunner = createAgentRunner({
   prompts: INFRA_PROMPTS, model: INFRA_MODEL,
   promptHash: INFRA_PROMPTS_HASH, promptPath: INFRA_PROMPTS_PATH,
   runFn: runInfra as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
-  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd(), llmStructured },
+  extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const axiomRunner = createAgentRunner({
@@ -461,7 +441,7 @@ const axiomRunner = createAgentRunner({
   prompts: AXIOM_PROMPTS, model: AXIOM_MODEL,
   promptHash: AXIOM_PROMPTS_HASH, promptPath: AXIOM_PROMPTS_PATH,
   runFn: runAxiom as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
-  extras: { memoryTools, delegationTools, workspaceRoot: process.cwd(), llmStructured },
+  extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const clipText = (value: string | undefined, max = 280): string | undefined => {
@@ -1308,37 +1288,7 @@ const worker = new JobWorker({
       await inspectorRunner(job.payload);
       return { ok: true, result: { runId: job.payload.runId as string | undefined, stream: INSPECTOR_STREAM } };
     },
-    codex: async (job, ctx) => {
-      await ctx.pullCommands(["steer", "follow_up"]);
-      try {
-        const result = job.payload.kind === "factory.task.run"
-          ? await factoryService.runTask(job.payload, {
-            shouldAbort: async () => {
-              const aborts = await ctx.pullCommands(["abort"]);
-              return aborts.length > 0 || job.abortRequested === true;
-            },
-          })
-          : job.payload.kind === "factory.integration.validate"
-            ? await factoryService.runIntegrationValidation(job.payload)
-            : (() => {
-              throw new Error(`unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`);
-            })();
-        return { ok: true, result };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const noRetry = err instanceof HubServiceError && err.status >= 400 && err.status < 500;
-        return {
-          ok: false,
-          error: message,
-          result: {
-            ...(typeof job.payload.objectiveId === "string" ? { objectiveId: job.payload.objectiveId } : {}),
-            status: "failed",
-            message,
-          },
-          noRetry,
-        };
-      }
-    },
+    ...createFactoryWorkerHandlers(factoryService),
   },
 });
 worker.start();
@@ -1850,9 +1800,11 @@ const receiptWatcher = (() => {
   }
 })();
 
-const httpServer = serve({ fetch: app.fetch, port: PORT }, () => {
-  console.log(`Receipt server listening on http://localhost:${PORT}`);
+const httpServer = Bun.serve({
+  fetch: app.fetch,
+  port: PORT,
 });
+console.log(`Receipt server listening on http://localhost:${PORT}`);
 
 let shuttingDown = false;
 const shutdown = (signal: string): void => {
@@ -1866,10 +1818,9 @@ const shutdown = (signal: string): void => {
     process.exit(0);
   }, 2_000);
   forceExit.unref();
-  httpServer.close(() => {
-    clearTimeout(forceExit);
-    process.exit(0);
-  });
+  httpServer.stop();
+  clearTimeout(forceExit);
+  process.exit(0);
 };
 
 process.on("SIGINT", () => shutdown("SIGINT"));

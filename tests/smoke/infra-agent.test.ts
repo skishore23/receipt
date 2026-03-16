@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import type { DelegationTools } from "../../src/adapters/delegation.ts";
@@ -57,8 +56,8 @@ const findLastEvent = <T extends AgentEvent["type"]>(
 
 test("normalizeInfraConfig defaults the memory scope to infra", () => {
   const config = normalizeInfraConfig({});
-  assert.equal(config.memoryScope, "infra");
-  assert.equal(config.workspace, ".");
+  expect(config.memoryScope).toBe("infra");
+  expect(config.workspace).toBe(".");
 });
 
 test("infra runner exposes aws.cli in prompts and executes a stubbed AWS CLI", async () => {
@@ -158,18 +157,18 @@ test("infra runner exposes aws.cli in prompts and executes a stubbed AWS CLI", a
     )?.body;
     const final = findLastEvent(runChain, "response.finalized");
 
-    assert.equal(result.status, "completed");
-    assert.equal(textCalls, 0);
-    assert.equal(structuredCalls, 2);
-    assert.match(systems[0] ?? "", /AWS/i);
-    assert.match(users[0] ?? "", /aws\.cli/);
-    assert.equal(configured?.workflow.id, "infra-v1");
-    assert.equal(configured?.config.memoryScope, "infra");
-    assert.equal(configured?.promptPath, "prompts/infra.prompts.json");
-    assert.match(toolCalled?.summary ?? "", /aws sts get-caller-identity -> exit 0/);
-    assert.equal(toolCalled?.error, undefined);
-    assert.match(observed?.output ?? "", /arn:aws:iam::123456789012:user\/test/);
-    assert.match(final?.content ?? "", /Caller identity inspected/);
+    expect(result.status).toBe("completed");
+    expect(textCalls).toBe(0);
+    expect(structuredCalls).toBe(2);
+    expect(systems[0] ?? "").toMatch(/AWS/i);
+    expect(users[0] ?? "").toMatch(/aws\.cli/);
+    expect(configured?.workflow.id).toBe("infra-v1");
+    expect(configured?.config.memoryScope).toBe("infra");
+    expect(configured?.promptPath).toBe("prompts/infra.prompts.json");
+    expect(toolCalled?.summary ?? "").toMatch(/aws sts get-caller-identity -> exit 0/);
+    expect(toolCalled?.error).toBe(undefined);
+    expect(observed?.output ?? "").toMatch(/arn:aws:iam::123456789012:user\/test/);
+    expect(final?.content ?? "").toMatch(/Caller identity inspected/);
   } finally {
     process.env.PATH = priorPath;
     await fs.rm(dir, { recursive: true, force: true });
@@ -274,11 +273,11 @@ test("infra runner resolves aws.cli cwd from config.workspace and relative overr
       )
       .map((receipt) => receipt.body.output ?? "");
 
-    assert.equal(result.status, "completed");
-    assert.equal(structuredCalls, 3);
-    assert.equal(observed.length, 2);
-    assert.match(observed[0] ?? "", new RegExp(`${escapeRegExp(configuredWorkspace)}\\s*$`));
-    assert.match(observed[1] ?? "", new RegExp(`${escapeRegExp(childWorkspace)}\\s*$`));
+    expect(result.status).toBe("completed");
+    expect(structuredCalls).toBe(3);
+    expect(observed.length).toBe(2);
+    expect(observed[0] ?? "").toMatch(new RegExp(`${escapeRegExp(configuredWorkspace)}\\s*$`));
+    expect(observed[1] ?? "").toMatch(new RegExp(`${escapeRegExp(childWorkspace)}\\s*$`));
   } finally {
     process.env.PATH = priorPath;
     await fs.rm(dir, { recursive: true, force: true });
@@ -358,9 +357,9 @@ test("infra runner reports a clean error when AWS CLI is unavailable", async () 
     )?.body;
     const final = findLastEvent(runChain, "response.finalized");
 
-    assert.equal(result.status, "completed");
-    assert.match(toolCalled?.error ?? "", /AWS CLI is not installed or not on PATH/);
-    assert.match(final?.content ?? "", /AWS CLI missing/);
+    expect(result.status).toBe("completed");
+    expect(toolCalled?.error ?? "").toMatch(/AWS CLI is not installed or not on PATH/);
+    expect(final?.content ?? "").toMatch(/AWS CLI missing/);
   } finally {
     process.env.PATH = priorPath;
     await fs.rm(dir, { recursive: true, force: true });

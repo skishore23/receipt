@@ -1,3 +1,4 @@
+import { cn } from "../lib/cn.js";
 import { esc, truncate } from "./agent-framework.js";
 import type {
   FactoryBoardProjection,
@@ -5,6 +6,7 @@ import type {
   FactoryDebugProjection,
   FactoryLiveProjection,
   FactoryObjectiveDetail,
+  FactoryTaskView,
 } from "../services/factory-service.js";
 
 const statusClass = (value: string): string => value.replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
@@ -23,296 +25,532 @@ const formatDuration = (ms: number | undefined): string => {
 const factoryQuery = (objectiveId?: string): string =>
   objectiveId ? `?objective=${encodeURIComponent(objectiveId)}` : "";
 
+// ── Style tokens ──────────────────────────────────────────────────────────────
+
+const modalCard = "bg-card border border-border rounded-lg shadow-panel";
+const kicker = "text-[11px] tracking-[0.14em] uppercase text-muted-foreground font-medium";
+const cardInner = "bg-muted/50 border border-border rounded-md p-3.5";
+const flexBetween = "flex items-start justify-between gap-3";
+const metaRow = "flex flex-wrap gap-2.5 text-muted-foreground text-xs font-mono";
+const titleSm = "text-sm font-semibold leading-tight";
+const gridStack = "grid gap-3";
+const emptyText = "text-muted-foreground text-[13px] italic";
+const mutedSm = "text-muted-foreground text-xs leading-relaxed";
+const labelUpper = "text-[11px] tracking-[0.12em] uppercase text-muted-foreground font-medium";
+const copySoft = "text-muted-foreground leading-normal text-sm whitespace-pre-wrap break-words";
+const btnPrimary = "rounded-md bg-primary text-primary-foreground font-medium py-2 px-3.5";
+const btnGhost = "rounded-md border border-border text-muted-foreground font-medium py-2 px-3.5";
+const btnDanger = "rounded-md border border-destructive/40 bg-destructive/10 text-destructive font-medium py-2 px-3.5";
+const formInput = "w-full rounded-md border border-border bg-background text-foreground text-sm py-2.5 px-3 placeholder:text-muted-foreground/60";
+const statLabel = "text-[11px] tracking-[0.1em] uppercase text-muted-foreground font-medium";
+const statValue = "text-lg font-mono font-semibold text-foreground";
+
+// ── Pill helpers ──────────────────────────────────────────────────────────────
+
+const pillBase = "inline-flex items-center gap-1 py-0.5 px-2 rounded-full border text-[10px] uppercase tracking-wider font-medium";
+
+const pillVariant = (kind: string): string => {
+  const k = statusClass(kind);
+  if (["blocked", "failed", "conflicted"].includes(k)) return "border-destructive/40 bg-destructive/10 text-destructive";
+  if (["ready_to_promote", "promoting", "promoted", "active"].includes(k)) return "border-primary/30 bg-primary/8 text-primary";
+  if (["queued", "planning_graph", "preparing_repo", "waiting_for_slot"].includes(k)) return "border-muted-foreground/20 bg-muted text-muted-foreground";
+  return "border-border bg-muted/40 text-muted-foreground";
+};
+
+const renderPill = (label: string, kind: string): string =>
+  `<span class="${cn(pillBase, pillVariant(kind))}">${esc(label)}</span>`;
+
+const renderDecision = (decision: FactoryObjectiveDetail["latestDecision"] | FactoryDebugProjection["latestDecision"] | undefined): string =>
+  decision
+    ? `
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Latest Decision</div>
+        <div class="${copySoft}">${esc(decision.summary)}</div>
+        <div class="${metaRow}">${esc(decision.source)} · ${esc(formatTime(decision.at))}${decision.selectedActionId ? ` · ${esc(decision.selectedActionId)}` : ""}</div>
+      </article>
+    `
+    : `
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Latest Decision</div>
+        <div class="${emptyText}">No orchestration decision yet.</div>
+      </article>
+    `;
+
+// ── Compose island ────────────────────────────────────────────────────────────
+
 export const factoryComposeIsland = (model: FactoryComposeModel): string => `
-  <section id="factory-compose" class="factory-panel">
-    <div class="factory-head">
-      <div>
-        <h2>Compose Objective</h2>
-        <p>Factory is the only objective control surface in v1.</p>
+  <section id="factory-compose" class="compose-overlay" aria-hidden="true">
+    <div class="${modalCard} w-[min(860px,calc(100vw-48px))] p-5 grid gap-4">
+      <div class="${flexBetween}">
+        <div>
+          <div class="${kicker}">New Objective</div>
+          <h2 class="m-0 text-2xl font-semibold leading-tight mt-1">Launch a Factory objective</h2>
+          <p class="m-0 text-muted-foreground text-sm leading-relaxed mt-1">Factory turns a repo objective into a task graph, worker passes, integration, validation, and promotion.</p>
+        </div>
+        <button type="button" class="${btnGhost}" data-compose-close>Close</button>
       </div>
-      <span>${model.objectiveCount} active</span>
+      <form
+        class="grid gap-3"
+        action="/factory/ui/objectives"
+        method="post"
+        hx-post="/factory/ui/objectives"
+        hx-swap="none"
+        hx-on::after-request="if (event.detail.successful) this.reset()">
+        <label class="grid gap-1.5">
+          <span class="${labelUpper}">Objective</span>
+          <textarea name="prompt" class="${formInput} min-h-[120px] resize-y" placeholder="Describe the change, acceptance criteria, and repository constraints." required></textarea>
+        </label>
+        <div class="form-grid-2">
+          <label class="grid gap-1.5">
+            <span class="${labelUpper}">Optional title</span>
+            <input name="title" class="${formInput}" placeholder="Factory derives one from the objective if you leave this blank." />
+          </label>
+          <label class="grid gap-1.5">
+            <span class="${labelUpper}">Channel</span>
+            <input name="channel" class="${formInput}" placeholder="results" value="results" />
+          </label>
+        </div>
+        <details class="${cardInner}">
+          <summary class="cursor-pointer list-none font-medium text-sm">Advanced</summary>
+          <div class="form-grid-2 mt-3">
+            <label class="grid gap-1.5">
+              <span class="${labelUpper}">Base commit</span>
+              <input name="baseHash" class="${formInput}" placeholder="optional base commit" />
+            </label>
+            <label class="grid gap-1.5">
+              <span class="${labelUpper}">Validation Commands</span>
+              <textarea name="validationCommands" class="${formInput} min-h-[100px] resize-y" placeholder="One command per line.">${esc(model.defaultValidationCommands.join("\n"))}</textarea>
+            </label>
+            <label class="grid gap-1.5">
+              <span class="${labelUpper}">Policy override</span>
+              <textarea name="policy" class="${formInput} min-h-[100px] resize-y" placeholder='Optional JSON policy override, e.g. {"promotion":{"autoPromote":false}}'></textarea>
+            </label>
+          </div>
+        </details>
+        <div class="flex justify-between items-center gap-3 flex-wrap">
+          <div class="flex items-center gap-2 flex-wrap">
+            ${renderPill(`${model.objectiveCount} objectives`, "count")}
+            ${renderPill(model.sourceBranch ?? model.defaultBranch, "branch")}
+            ${renderPill(model.repoProfile.status.replaceAll("_", " "), model.repoProfile.status)}
+          </div>
+          <button type="submit" class="${btnPrimary}">Launch Objective</button>
+        </div>
+        <div class="${cn("rounded-md text-sm p-3", model.sourceDirty ? "bg-warning/10 text-warning border border-warning/20" : "bg-muted/50 text-muted-foreground")}">
+          ${model.sourceDirty
+            ? "Objective creation is blocked while the source repo has uncommitted changes unless you provide a base commit."
+            : model.repoProfile.summary
+              ? esc(model.repoProfile.summary)
+              : "Factory will prepare repo defaults and generated skills on the first admitted objective."}
+        </div>
+      </form>
     </div>
-    <form
-      class="factory-form"
-      action="/factory/ui/objectives"
-      method="post"
-      hx-post="/factory/ui/objectives"
-      hx-swap="none"
-      hx-on::after-request="if (event.detail.successful) this.reset()">
-      <input name="title" placeholder="Receipt-native factory rollout" required />
-      <textarea name="prompt" placeholder="Describe the objective, acceptance criteria, and repository constraints." required></textarea>
-      <div class="factory-grid two">
-        <input name="channel" placeholder="results" value="results" />
-        <input name="baseHash" placeholder="optional base commit" />
-      </div>
-      <textarea name="checks" placeholder="One check per line. Example: npm run build">${esc(model.defaultPolicy.promotion.autoPromote ? "npm run build" : "")}</textarea>
-      <textarea name="policy" placeholder='Optional JSON policy override, e.g. {"promotion":{"autoPromote":false}}'></textarea>
-      <div class="factory-foot">
-        <button type="submit">Launch Objective</button>
-        <span>Source branch: <code>${esc(model.sourceBranch ?? model.defaultBranch)}</code></span>
-      </div>
-      <div class="factory-muted">Launching an objective can take a few seconds while Factory writes receipts and computes the first task graph.</div>
-      <div class="factory-note${model.sourceDirty ? " warn" : ""}">
-        ${model.sourceDirty
-          ? "Objective creation is blocked while the source repo has uncommitted changes unless you provide baseHash explicitly."
-          : "Objectives launch from committed Git history and carry explicit policy defaults in the receipt stream."}
-      </div>
-    </form>
   </section>
 `;
 
-const renderCard = (
+// ── Board island ──────────────────────────────────────────────────────────────
+
+const renderObjectiveCard = (
   card: FactoryBoardProjection["objectives"][number],
   activeId?: string,
 ): string => {
-  const summary = card.status === "blocked" && card.blockedReason
-    ? `Blocked: ${card.blockedReason}`
-    : card.latestSummary ?? card.blockedReason ?? "No summary yet.";
+  const summary = card.blockedExplanation?.summary ?? card.latestSummary ?? card.nextAction ?? "No activity yet.";
   return `
-  <a class="factory-card${card.objectiveId === activeId ? " active" : ""}" href="/factory${factoryQuery(card.objectiveId)}">
-    <div class="factory-card-top">
-      <span class="badge ${statusClass(card.status)}">${esc(card.status.replaceAll("_", " "))}</span>
-      <span>${esc(formatTime(card.updatedAt))}</span>
-    </div>
-    <div class="factory-card-title">${esc(truncate(card.title, 92))}</div>
-    <div class="factory-card-meta">
-      <span>${card.taskCount} tasks</span>
-      <span>${card.readyTaskCount} ready</span>
-      <span>integration ${esc(card.integrationStatus)}</span>
-    </div>
-    <div class="factory-card-summary">${esc(truncate(summary, 144))}</div>
-    <div class="factory-card-meta">
-      <span>${esc(card.lane)}</span>
-      <span>${esc(shortHash(card.latestCommitHash))}</span>
-    </div>
-  </a>
-`;
+    <a class="${cn(cardInner, "block no-underline", card.objectiveId === activeId && "border-primary/40 ring-1 ring-inset ring-primary/15")}" href="/factory${factoryQuery(card.objectiveId)}">
+      <div class="${flexBetween}">
+        <div class="flex gap-1.5 flex-wrap">
+          ${renderPill(card.phase.replaceAll("_", " "), card.phase)}
+          ${renderPill(card.scheduler.slotState, card.scheduler.slotState)}
+        </div>
+        <span class="${mutedSm} shrink-0">${esc(formatTime(card.updatedAt))}</span>
+      </div>
+      <div class="${titleSm} mt-2">${esc(truncate(card.title, 80))}</div>
+      <div class="text-muted-foreground text-xs mt-1">${esc(truncate(summary, 140))}</div>
+      <div class="${metaRow} mt-2">
+        <span>${card.taskCount} tasks</span>
+        <span>${card.activeTaskCount} active</span>
+        <span>${card.scheduler.queuePosition ? `q${card.scheduler.queuePosition}` : shortHash(card.latestCommitHash)}</span>
+      </div>
+    </a>
+  `;
 };
 
-const renderLane = (
+const renderBoardSection = (
   title: string,
+  body: string,
   cards: ReadonlyArray<FactoryBoardProjection["objectives"][number]>,
   activeId?: string,
 ): string => `
-  <section class="factory-lane">
-    <div class="factory-head">
-      <h3>${esc(title)}</h3>
-      <span>${cards.length}</span>
+  <section class="${gridStack}">
+    <div class="${flexBetween} border-b border-border pb-2">
+      <div>
+        <div class="text-xs font-semibold">${esc(title)}</div>
+        <div class="text-muted-foreground text-[11px]">${esc(body)}</div>
+      </div>
+      <span class="text-xs font-mono text-muted-foreground">${cards.length}</span>
     </div>
-    <div class="factory-lane-body">
-      ${cards.length ? cards.map((card) => renderCard(card, activeId)).join("") : `<div class="factory-empty">No objectives.</div>`}
+    <div class="${gridStack}">
+      ${cards.length ? cards.map((card) => renderObjectiveCard(card, activeId)).join("") : `<div class="${emptyText}">No objectives.</div>`}
     </div>
   </section>
 `;
 
 export const factoryBoardIsland = (board: FactoryBoardProjection): string => `
-  <section id="factory-board" class="factory-panel">
-    <div class="factory-head">
+  <section id="factory-board" class="rail-panel grid gap-4 p-4 content-start">
+    <div class="grid gap-3">
       <div>
-        <h2>Objective Board</h2>
-        <p>Receipt-backed objective lanes with no Hub compatibility layer.</p>
+        <div class="${kicker}">Command Center</div>
+        <h1 class="m-0 text-xl font-bold leading-tight mt-1">Factory</h1>
+        <p class="m-0 text-muted-foreground text-xs leading-relaxed mt-1">Objective orchestration with repo preparation, planning, evidence, and promotion.</p>
       </div>
-      <span>${board.objectives.length} objectives</span>
+      <button type="button" class="${btnPrimary} w-full" data-compose-open>New Objective</button>
     </div>
-    <div class="factory-board-grid">
-      ${renderLane("Planning", board.lanes.planning, board.selectedObjectiveId)}
-      ${renderLane("Executing", board.lanes.executing, board.selectedObjectiveId)}
-      ${renderLane("Integrating", board.lanes.integrating, board.selectedObjectiveId)}
-      ${renderLane("Promoting", board.lanes.promoting, board.selectedObjectiveId)}
-      ${renderLane("Blocked", board.lanes.blocked, board.selectedObjectiveId)}
-      ${renderLane("Completed", board.lanes.completed, board.selectedObjectiveId)}
+    ${renderBoardSection("Needs Attention", "Blocked or conflicted.", board.sections.needs_attention, board.selectedObjectiveId)}
+    ${renderBoardSection("Active", "Holding the execution slot.", board.sections.active, board.selectedObjectiveId)}
+    ${renderBoardSection("Queued", "Waiting for the slot.", board.sections.queued, board.selectedObjectiveId)}
+    ${renderBoardSection("Completed", "Finished or canceled.", board.sections.completed, board.selectedObjectiveId)}
+  </section>
+`;
+
+// ── Task / evidence / activity cards ──────────────────────────────────────────
+
+const renderTaskCard = (task: FactoryTaskView): string => `
+  <article class="${cardInner}">
+    <div class="${flexBetween}">
+      <div>
+        <strong class="font-mono text-xs">${esc(task.taskId)}</strong>
+        <div class="${mutedSm}">${esc(task.workerType)} · ${esc(task.taskKind)}</div>
+      </div>
+      ${renderPill(task.status.replaceAll("_", " "), task.status)}
+    </div>
+    <div class="${titleSm} mt-1">${esc(task.title)}</div>
+    ${task.dependsOn.length ? `<div class="${mutedSm}">Depends on ${esc(task.dependsOn.join(", "))}</div>` : ""}
+    ${task.latestSummary ? `<div class="${copySoft} mt-1">${esc(task.latestSummary)}</div>` : ""}
+    ${task.blockedReason ? `<div class="p-3 rounded-md bg-destructive/8 border border-destructive/20 text-destructive text-sm">${esc(task.blockedReason)}</div>` : ""}
+    <div class="${metaRow} mt-2">
+      ${task.candidateId ? `<span>${esc(task.candidateId)}</span>` : ""}
+      ${task.jobStatus ? `<span>${esc(task.jobStatus)}</span>` : ""}
+      ${task.elapsedMs ? `<span>${esc(formatDuration(task.elapsedMs))}</span>` : ""}
+      <span>${task.workspaceExists ? (task.workspaceDirty ? "dirty workspace" : "clean workspace") : "no workspace"}</span>
+    </div>
+  </article>
+`;
+
+const renderEvidenceCard = (card: FactoryObjectiveDetail["evidenceCards"][number]): string => `
+  <article class="${cardInner}" id="receipt-${esc(card.receiptHash ?? `${card.receiptType}-${card.at}`)}">
+    <div class="${flexBetween}">
+      ${renderPill(card.kind, card.kind)}
+      <span class="${mutedSm}">${esc(formatTime(card.at))}</span>
+    </div>
+    <div class="${titleSm} mt-1">${esc(card.title)}</div>
+    <div class="${copySoft} mt-1">${esc(card.summary)}</div>
+    <div class="${metaRow} mt-2">
+      <span>${esc(card.receiptType)}</span>
+      ${card.taskId ? `<span>${esc(card.taskId)}</span>` : ""}
+      ${card.candidateId ? `<span>${esc(card.candidateId)}</span>` : ""}
+    </div>
+  </article>
+`;
+
+const renderActivityEntry = (entry: FactoryObjectiveDetail["activity"][number]): string => `
+  <article class="${flexBetween} py-2 border-b border-border/50">
+    <div>
+      <div class="${titleSm}">${esc(entry.title)}</div>
+      <div class="text-muted-foreground text-xs">${esc(entry.summary)}</div>
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+      ${renderPill(entry.kind, entry.kind)}
+      <span class="${mutedSm} whitespace-nowrap">${esc(formatTime(entry.at))}</span>
+    </div>
+  </article>
+`;
+
+const renderReceiptTimeline = (receipts: ReadonlyArray<FactoryObjectiveDetail["recentReceipts"][number]>): string =>
+  receipts.length
+    ? receipts.map((receipt) => `
+        <article class="${cardInner}" id="receipt-${esc(receipt.hash)}">
+          <div class="${flexBetween}">
+            <strong class="font-mono text-xs">${esc(receipt.type)}</strong>
+            <span class="${mutedSm}">${esc(formatTime(receipt.ts))}</span>
+          </div>
+          <div class="${copySoft} mt-1">${esc(receipt.summary)}</div>
+          <div class="${metaRow} mt-2">
+            ${receipt.taskId ? `<span>${esc(receipt.taskId)}</span>` : ""}
+            ${receipt.candidateId ? `<span>${esc(receipt.candidateId)}</span>` : ""}
+            <span>${esc(shortHash(receipt.hash))}</span>
+          </div>
+        </article>
+      `).join("")
+    : `<div class="${emptyText}">No receipts yet.</div>`;
+
+// ── Tab panels ────────────────────────────────────────────────────────────────
+
+const renderOverview = (detail: FactoryObjectiveDetail): string => `
+  <section class="tab-panel" data-tab-panel="overview">
+    <div class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Objective</div>
+        <div class="${copySoft}">${esc(detail.prompt)}</div>
+      </article>
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Next Action</div>
+        <div class="${copySoft}">${esc(detail.nextAction ?? "No next action recorded yet.")}</div>
+      </article>
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Repo Profile</div>
+        <div class="${copySoft}">${esc(detail.repoProfile.summary || "Repo profile has not been generated yet.")}</div>
+        <div class="${metaRow}">
+          ${detail.repoProfile.inferredChecks.length
+            ? detail.repoProfile.inferredChecks.map((check) => `<span>${esc(check)}</span>`).join("")
+            : `<span>No inferred validation commands yet.</span>`}
+        </div>
+      </article>
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Policy</div>
+        <div class="${copySoft}">Concurrency ${detail.policy.concurrency.maxActiveTasks}, dispatch burst ${detail.policy.throttles.maxDispatchesPerReact}, auto-promote ${String(detail.policy.promotion.autoPromote)}.</div>
+      </article>
     </div>
   </section>
 `;
 
-const renderTask = (task: FactoryObjectiveDetail["tasks"][number]): string => `
-  <article class="factory-item">
-    <div class="factory-item-top">
-      <strong>${esc(task.taskId)}</strong>
-      <span class="badge ${statusClass(task.status)}">${esc(task.status)}</span>
-    </div>
-    <div class="factory-item-body">
-      <div>${esc(task.title)}</div>
-      <div class="factory-muted">${esc(task.workerType)} · kind ${esc(task.taskKind)}${task.sourceTaskId ? ` · source ${esc(task.sourceTaskId)}` : ""}</div>
-      ${task.dependsOn.length ? `<div class="factory-muted">depends on ${esc(task.dependsOn.join(", "))}</div>` : ""}
-      ${task.blockedReason ? `<div class="factory-note warn"><strong>Blocked:</strong> ${esc(task.blockedReason)}</div>` : ""}
-      ${task.latestSummary ? `<div>${esc(task.latestSummary)}</div>` : ""}
-      <div class="factory-tags">
-        ${task.candidateId ? `<span class="tag">${esc(task.candidateId)}</span>` : ""}
-        ${task.jobStatus ? `<span class="tag">${esc(task.jobStatus)}</span>` : ""}
-        <span class="tag">${task.workspaceExists ? (task.workspaceDirty ? "workspace dirty" : "workspace clean") : "workspace cleared"}</span>
-        ${task.elapsedMs ? `<span class="tag">${esc(formatDuration(task.elapsedMs))}</span>` : ""}
+const renderTasksTab = (detail: FactoryObjectiveDetail): string => `
+  <section class="tab-panel" data-tab-panel="tasks">
+    <div class="${flexBetween}">
+      <div>
+        <h3 class="m-0 text-sm font-semibold">Tasks</h3>
+        <p class="m-0 text-muted-foreground text-xs">Task graph, candidates, and active worker passes.</p>
       </div>
+      <span class="font-mono text-xs text-muted-foreground">${detail.tasks.length}</span>
     </div>
-  </article>
+    <div class="${gridStack}">
+      ${detail.tasks.length ? detail.tasks.map(renderTaskCard).join("") : `<div class="${emptyText}">No tasks adopted yet.</div>`}
+    </div>
+    <div class="${flexBetween} mt-4 pt-4 border-t border-border">
+      <div>
+        <h3 class="m-0 text-sm font-semibold">Candidates</h3>
+        <p class="m-0 text-muted-foreground text-xs">Candidate lineage and review status.</p>
+      </div>
+      <span class="font-mono text-xs text-muted-foreground">${detail.candidates.length}</span>
+    </div>
+    <div class="${gridStack}">
+      ${detail.candidates.length ? detail.candidates.map((candidate) => `
+        <article class="${cardInner}">
+          <div class="${flexBetween}">
+            <strong class="font-mono text-xs">${esc(candidate.candidateId)}</strong>
+            ${renderPill(candidate.status.replaceAll("_", " "), candidate.status)}
+          </div>
+          <div class="${mutedSm} mt-1">${esc(candidate.taskId)} · base ${esc(shortHash(candidate.baseCommit))}${candidate.headCommit ? ` · head ${esc(shortHash(candidate.headCommit))}` : ""}</div>
+          ${candidate.summary ? `<div class="${copySoft} mt-1">${esc(candidate.summary)}</div>` : ""}
+          ${candidate.latestReason ? `<div class="${mutedSm} mt-1">${esc(candidate.latestReason)}</div>` : ""}
+        </article>
+      `).join("") : `<div class="${emptyText}">No candidates yet.</div>`}
+    </div>
+  </section>
 `;
 
-const renderCandidate = (candidate: FactoryObjectiveDetail["candidates"][number]): string => `
-  <article class="factory-item compact">
-    <div class="factory-item-top">
-      <strong>${esc(candidate.candidateId)}</strong>
-      <span class="badge ${statusClass(candidate.status)}">${esc(candidate.status)}</span>
+const renderEvidenceTab = (detail: FactoryObjectiveDetail): string => `
+  <section class="tab-panel" data-tab-panel="evidence">
+    <div class="${flexBetween}">
+      <div>
+        <h3 class="m-0 text-sm font-semibold">Evidence</h3>
+        <p class="m-0 text-muted-foreground text-xs">Plan adoption, orchestration decisions, blocked receipts, merge decisions, and promotion receipts.</p>
+      </div>
+      <span class="font-mono text-xs text-muted-foreground">${detail.evidenceCards.length}</span>
     </div>
-    <div class="factory-item-body">
-      <div class="factory-muted">${esc(candidate.taskId)} · base ${esc(shortHash(candidate.baseCommit))}${candidate.headCommit ? ` · head ${esc(shortHash(candidate.headCommit))}` : ""}</div>
-      ${candidate.summary ? `<div>${esc(candidate.summary)}</div>` : ""}
-      ${candidate.latestReason ? `<div class="factory-muted">${esc(candidate.latestReason)}</div>` : ""}
+    <div class="${gridStack}">
+      ${detail.evidenceCards.length ? detail.evidenceCards.map(renderEvidenceCard).join("") : `<div class="${emptyText}">No evidence cards yet.</div>`}
     </div>
-  </article>
+    <div class="${flexBetween} mt-4 pt-4 border-t border-border">
+      <div>
+        <h3 class="m-0 text-sm font-semibold">Receipt Timeline</h3>
+        <p class="m-0 text-muted-foreground text-xs">Humanized recent receipts with links back to the exact event hash.</p>
+      </div>
+      <span class="font-mono text-xs text-muted-foreground">${detail.recentReceipts.length}</span>
+    </div>
+    <div class="${gridStack}">
+      ${renderReceiptTimeline(detail.recentReceipts)}
+    </div>
+  </section>
 `;
+
+const renderActivityTab = (detail: FactoryObjectiveDetail): string => `
+  <section class="tab-panel" data-tab-panel="activity">
+    <div class="${flexBetween}">
+      <div>
+        <h3 class="m-0 text-sm font-semibold">Activity</h3>
+        <p class="m-0 text-muted-foreground text-xs">Recent task transitions, jobs, and receipts for the selected objective.</p>
+      </div>
+      <span class="font-mono text-xs text-muted-foreground">${detail.activity.length}</span>
+    </div>
+    <div class="${gridStack}">
+      ${detail.activity.length ? detail.activity.map(renderActivityEntry).join("") : `<div class="${emptyText}">No activity yet.</div>`}
+    </div>
+  </section>
+`;
+
+// ── Objective island ──────────────────────────────────────────────────────────
 
 export const factoryObjectiveIsland = (detail: FactoryObjectiveDetail | undefined): string => {
   if (!detail) {
     return `
-      <section id="factory-objective" class="factory-panel">
-        <div class="factory-head"><h2>Objective Detail</h2><span>Select an objective</span></div>
-        <div class="factory-empty">Select an objective from the board to inspect tasks, candidates, integration state, and policy budgets.</div>
+      <section id="factory-objective" class="grid p-5 content-start">
+        <div class="min-h-[calc(100vh-40px)] grid place-items-center gap-3 text-center">
+          <div>
+            <div class="${kicker}">Factory Workspace</div>
+            <h2 class="m-0 text-2xl font-semibold leading-tight mt-2">Select an objective</h2>
+            <p class="m-0 text-muted-foreground text-sm leading-relaxed mt-1">The center workspace shows repo prep, planning, tasks, evidence, and activity for the selected objective.</p>
+            <button type="button" class="${btnPrimary} mt-4" data-compose-open>Create Objective</button>
+          </div>
+        </div>
       </section>
     `;
   }
-  const blockedTasks = detail.tasks.filter((task) => task.status === "blocked");
-  const blockedReason = detail.blockedReason ?? blockedTasks[0]?.blockedReason;
-  const blockedHint = blockedReason?.includes("no tracked diff")
-    ? "This task returned analysis without a committed repository change. React will bypass it only when downstream implementation tasks can safely continue."
-    : undefined;
+  const phase = detail.phase ?? (detail.status === "blocked" ? "blocked" : detail.status === "planning" ? "planning_graph" : detail.status === "decomposing" ? "preparing_repo" : detail.status === "integrating" ? "integrating" : "executing");
+  const slotState = detail.scheduler?.slotState ?? "active";
+  const integrationStatus = detail.integration?.status ?? detail.integrationStatus ?? "idle";
   return `
-    <section id="factory-objective" class="factory-panel">
-      <div class="factory-head">
-        <div>
-          <h2>${esc(detail.title)}</h2>
-          <p>${esc(detail.objectiveId)} · ${esc(detail.status)}</p>
-        </div>
-        <div class="factory-actions">
-          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" hx-swap="none"><button type="submit">React</button></form>
-          ${detail.integration.status === "ready_to_promote"
-            ? `<form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" hx-swap="none"><button type="submit">Promote</button></form>`
-            : ""}
-          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" hx-swap="none"><button type="submit">Cleanup</button></form>
-          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" hx-swap="none"><button type="submit">Archive</button></form>
-          <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" hx-swap="none"><button type="submit" class="danger">Cancel</button></form>
-        </div>
-      </div>
-      <div class="factory-grid three">
-        <div class="factory-stat"><span>Status</span><strong>${esc(detail.status)}</strong></div>
-        <div class="factory-stat"><span>Integration</span><strong>${esc(detail.integration.status)}</strong></div>
-        <div class="factory-stat"><span>Latest commit</span><strong>${esc(shortHash(detail.latestCommitHash))}</strong></div>
-        <div class="factory-stat"><span>Task runs</span><strong>${detail.budgetState.taskRunsUsed}/${detail.policy.budgets.maxTaskRuns}</strong></div>
-        <div class="factory-stat"><span>Reconciliation</span><strong>${detail.budgetState.reconciliationTasksUsed}/${detail.policy.budgets.maxReconciliationTasks}</strong></div>
-        <div class="factory-stat"><span>Elapsed</span><strong>${detail.budgetState.elapsedMinutes}m</strong></div>
-      </div>
-      ${blockedReason ? `
-        <div class="factory-note warn">
-          <strong>Why blocked:</strong> ${esc(blockedReason)}
-          ${blockedHint ? `<div class="factory-muted">${esc(blockedHint)}</div>` : ""}
-          ${blockedTasks.length
-            ? `<div class="factory-muted">Blocked tasks: ${esc(blockedTasks.map((task) => `${task.taskId}${task.blockedReason ? ` (${task.blockedReason})` : ""}`).join(" · "))}</div>`
-            : ""}
-        </div>
-      ` : ""}
-      ${detail.budgetState.policyBlockedReason ? `<div class="factory-note warn">${esc(detail.budgetState.policyBlockedReason)}</div>` : ""}
-      <details class="factory-detail">
-        <summary>Prompt and policy</summary>
-        <pre>${esc(detail.prompt)}</pre>
-        <pre>${esc(JSON.stringify(detail.policy, null, 2))}</pre>
-      </details>
-      <div class="factory-split">
-        <section class="factory-section">
-          <div class="factory-subhead">Tasks</div>
-          <div class="factory-item-list factory-task-list">
-            ${detail.tasks.map(renderTask).join("") || `<div class="factory-empty">No tasks.</div>`}
+    <section id="factory-objective" class="grid gap-4 p-5 content-start" data-objective-id="${esc(detail.objectiveId)}">
+      <header class="grid gap-3 pb-4 border-b border-primary/12">
+        <div class="${flexBetween} gap-4">
+          <div>
+            <div class="flex gap-1.5 flex-wrap">
+              ${renderPill(phase.replaceAll("_", " "), phase)}
+              ${renderPill(slotState, slotState)}
+              ${renderPill(integrationStatus.replaceAll("_", " "), integrationStatus)}
+            </div>
+            <h2 class="m-0 text-xl font-semibold leading-tight mt-2">${esc(detail.title)}</h2>
+            <p class="m-0 text-muted-foreground text-xs mt-1 font-mono">${esc(detail.objectiveId)}</p>
           </div>
-        </section>
-        <section class="factory-section">
-          <div class="factory-subhead">Candidates</div>
-          <div class="factory-item-list factory-candidate-list">
-            ${detail.candidates.map(renderCandidate).join("") || `<div class="factory-empty">No candidates.</div>`}
+          <div class="flex flex-wrap gap-2 justify-end shrink-0">
+            <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/react" hx-swap="none"><button type="submit" class="${btnGhost}">React</button></form>
+            ${detail.integration.status === "ready_to_promote"
+              ? `<form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/promote" hx-swap="none"><button type="submit" class="${btnPrimary}">Promote</button></form>`
+              : ""}
+            <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cleanup" hx-swap="none"><button type="submit" class="${btnGhost}">Cleanup</button></form>
+            <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/archive" hx-swap="none"><button type="submit" class="${btnGhost}">Archive</button></form>
+            <form action="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" method="post" hx-post="/factory/ui/objectives/${encodeURIComponent(detail.objectiveId)}/cancel" hx-swap="none"><button type="submit" class="${btnDanger}">Cancel</button></form>
           </div>
-        </section>
+        </div>
+        <p class="m-0 text-muted-foreground text-sm">${esc(detail.nextAction ?? "Factory is replaying receipts and waiting for the next control transition.")}</p>
+      </header>
+      ${detail.blockedExplanation
+        ? `
+          <a class="grid gap-1 p-3 rounded-md border border-warning/25 bg-warning/8 text-warning text-sm" href="#receipt-${esc(detail.blockedExplanation.receiptHash ?? "")}">
+            <strong>Why blocked</strong>
+            <span>${esc(detail.blockedExplanation.summary)}</span>
+          </a>
+        `
+        : ""}
+      <div class="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
+        <div class="grid gap-1"><span class="${statLabel}">Queue</span><span class="${statValue}">${esc(detail.scheduler.slotState)}${detail.scheduler.queuePosition ? ` · ${detail.scheduler.queuePosition}` : ""}</span></div>
+        <div class="grid gap-1"><span class="${statLabel}">Task Runs</span><span class="${statValue}">${detail.budgetState.taskRunsUsed}/${detail.policy.budgets.maxTaskRuns}</span></div>
+        <div class="grid gap-1"><span class="${statLabel}">Reconciliation</span><span class="${statValue}">${detail.budgetState.reconciliationTasksUsed}/${detail.policy.budgets.maxReconciliationTasks}</span></div>
+        <div class="grid gap-1"><span class="${statLabel}">Elapsed</span><span class="${statValue}">${detail.budgetState.elapsedMinutes}m</span></div>
+        <div class="grid gap-1"><span class="${statLabel}">Latest Commit</span><span class="${statValue}">${esc(shortHash(detail.latestCommitHash))}</span></div>
+      </div>
+      <nav class="flex border-b border-border sticky top-0 z-2 bg-background" data-objective-tabs>
+        <button type="button" class="tab-btn py-2.5 px-4 active" data-tab="overview">Overview</button>
+        <button type="button" class="tab-btn py-2.5 px-4" data-tab="tasks">Tasks</button>
+        <button type="button" class="tab-btn py-2.5 px-4" data-tab="evidence">Evidence</button>
+        <button type="button" class="tab-btn py-2.5 px-4" data-tab="activity">Activity</button>
+      </nav>
+      <div class="grid">
+        ${renderOverview(detail)}
+        ${renderTasksTab(detail)}
+        ${renderEvidenceTab(detail)}
+        ${renderActivityTab(detail)}
       </div>
     </section>
   `;
 };
 
+// ── Inspector islands ─────────────────────────────────────────────────────────
+
 export const factoryLiveIsland = (live: FactoryLiveProjection): string => `
-  <section id="factory-live" class="factory-panel">
-    <div class="factory-head">
+  <section id="factory-live" class="grid gap-3 p-4 content-start">
+    <div class="${flexBetween}">
       <div>
-        <h2>Live Console</h2>
-        <p>${live.selectedObjectiveId ? `${esc(live.objectiveTitle ?? live.selectedObjectiveId)} · ${esc(live.objectiveStatus ?? "idle")}` : "No selected objective"}</p>
+        <div class="${kicker}">Live</div>
+        <h3 class="m-0 text-sm font-semibold mt-0.5">${live.selectedObjectiveId ? esc(live.objectiveTitle ?? live.selectedObjectiveId) : "No objective selected"}</h3>
+        <p class="m-0 text-muted-foreground text-xs">${live.selectedObjectiveId ? `${esc(live.phase ?? "executing")} · ${esc(live.objectiveStatus ?? "idle")}` : "Select an objective to inspect live task output."}</p>
       </div>
-      <span>${live.activeTasks.length} active</span>
+      <span class="font-mono text-xs text-muted-foreground">${live.activeTasks.length}</span>
     </div>
-    ${live.activeTasks.length
-      ? live.activeTasks.map((task) => `
-          <article class="factory-item">
-            <div class="factory-item-top">
-              <strong>${esc(task.taskId)}</strong>
-              <span class="badge ${statusClass(task.jobStatus ?? task.status)}">${esc(task.jobStatus ?? task.status)}</span>
+    <div class="${gridStack}">
+      ${live.activeTasks.length
+        ? live.activeTasks.map((task) => `
+          <article class="${cardInner}">
+            <div class="${flexBetween}">
+              <strong class="font-mono text-xs">${esc(task.taskId)}</strong>
+              ${renderPill((task.jobStatus ?? task.status).replaceAll("_", " "), task.jobStatus ?? task.status)}
             </div>
-            <div class="factory-item-body">
-              <div>${esc(task.title)}</div>
-              <div class="factory-muted">${esc(task.workerType)} · ${esc(formatDuration(task.elapsedMs))}</div>
-              ${task.lastMessage ? `<pre>${esc(task.lastMessage)}</pre>` : ""}
-              ${task.stdoutTail ? `<pre>${esc(task.stdoutTail)}</pre>` : ""}
-              ${task.stderrTail ? `<pre class="error">${esc(task.stderrTail)}</pre>` : ""}
-            </div>
+            <div class="${titleSm} mt-1">${esc(task.title)}</div>
+            <div class="${mutedSm}">${esc(task.workerType)} · ${esc(formatDuration(task.elapsedMs))}</div>
+            ${task.lastMessage ? `<pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(task.lastMessage)}</pre>` : ""}
+            ${task.stdoutTail ? `<pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(task.stdoutTail)}</pre>` : ""}
+            ${task.stderrTail ? `<pre class="mt-2 whitespace-pre-wrap text-[11px] text-destructive overflow-x-auto">${esc(task.stderrTail)}</pre>` : ""}
           </article>
         `).join("")
-      : `<div class="factory-empty">No active tasks right now.</div>`}
-    <details class="factory-detail">
-      <summary>Recent jobs</summary>
-      <pre>${esc(JSON.stringify(live.recentJobs, null, 2))}</pre>
-    </details>
+        : `<div class="${emptyText}">No active task output right now.</div>`}
+    </div>
   </section>
 `;
 
 export const factoryDebugIsland = (debug: FactoryDebugProjection | undefined): string => {
   if (!debug) {
     return `
-      <section id="factory-debug" class="factory-panel">
-        <div class="factory-head"><h2>Debug</h2><span>Select an objective</span></div>
-        <div class="factory-empty">Debug surfaces appear once an objective is selected.</div>
+      <section id="factory-debug" class="grid gap-3 p-4 content-start">
+        <div>
+          <div class="${kicker}">Debug</div>
+          <h3 class="m-0 text-sm font-semibold mt-0.5">No objective selected</h3>
+          <p class="m-0 text-muted-foreground text-xs">Debug surfaces appear once an objective is selected.</p>
+        </div>
       </section>
     `;
   }
   return `
-    <section id="factory-debug" class="factory-panel">
-      <div class="factory-head">
+    <section id="factory-debug" class="grid gap-3 p-4 content-start">
+      <div class="${flexBetween}">
         <div>
-          <h2>Debug</h2>
-          <p>${esc(debug.objectiveId)} · ${esc(debug.status)}</p>
+          <div class="${kicker}">Debug</div>
+          <h3 class="m-0 text-sm font-semibold mt-0.5">${esc(debug.title)}</h3>
+          <p class="m-0 text-muted-foreground text-xs">${esc(debug.phase)} · ${esc(debug.scheduler.slotState)} · ${esc(debug.repoProfile.status)}</p>
         </div>
-        <span>${debug.activeJobs.length} live jobs</span>
+        <span class="font-mono text-xs text-muted-foreground">${debug.activeJobs.length}</span>
       </div>
-      <div class="factory-grid two">
-        <details class="factory-detail" open>
-          <summary>Policy and budget</summary>
-          <pre>${esc(JSON.stringify({ policy: debug.policy, budgetState: debug.budgetState }, null, 2))}</pre>
-        </details>
-        <details class="factory-detail" open>
-          <summary>Context packs</summary>
-          <pre>${esc(JSON.stringify(debug.latestContextPacks, null, 2))}</pre>
-        </details>
-        <details class="factory-detail">
-          <summary>Recent receipts</summary>
-          <pre>${esc(JSON.stringify(debug.recentReceipts, null, 2))}</pre>
-        </details>
-        <details class="factory-detail">
-          <summary>Jobs</summary>
-          <pre>${esc(JSON.stringify({ activeJobs: debug.activeJobs, lastJobs: debug.lastJobs }, null, 2))}</pre>
-        </details>
-        <details class="factory-detail">
-          <summary>Task worktrees</summary>
-          <pre>${esc(JSON.stringify(debug.taskWorktrees, null, 2))}</pre>
-        </details>
-        <details class="factory-detail">
-          <summary>Integration worktree</summary>
-          <pre>${esc(JSON.stringify(debug.integrationWorktree ?? null, null, 2))}</pre>
-        </details>
-      </div>
+      ${renderDecision(debug.latestDecision)}
+      <article class="${cardInner} grid gap-2">
+        <div class="${labelUpper}">Next Action</div>
+        <div class="${copySoft}">${esc(debug.nextAction ?? "No next action surfaced.")}</div>
+      </article>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Policy and budget</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify({ policy: debug.policy, budgetState: debug.budgetState }, null, 2))}</pre>
+      </details>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Repo profile</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify(debug.repoProfile, null, 2))}</pre>
+      </details>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Recent receipts</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify(debug.recentReceipts, null, 2))}</pre>
+      </details>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Jobs</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify({ activeJobs: debug.activeJobs, lastJobs: debug.lastJobs }, null, 2))}</pre>
+      </details>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Worktrees</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify({ taskWorktrees: debug.taskWorktrees, integrationWorktree: debug.integrationWorktree }, null, 2))}</pre>
+      </details>
+      <details class="${cardInner}">
+        <summary class="cursor-pointer list-none font-medium text-sm">Context packs</summary>
+        <pre class="mt-2 whitespace-pre-wrap text-[11px] text-muted-foreground overflow-x-auto">${esc(JSON.stringify(debug.latestContextPacks, null, 2))}</pre>
+      </details>
     </section>
   `;
 };
+
+// ── Shell ─────────────────────────────────────────────────────────────────────
 
 export const factoryShell = (opts: {
   readonly composeIsland: string;
@@ -326,6 +564,7 @@ export const factoryShell = (opts: {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Factory</title>
+    <link rel="stylesheet" href="/assets/factory.css" />
     <script src="/assets/htmx.min.js"></script>
     <script>
       (() => {
@@ -343,9 +582,7 @@ export const factoryShell = (opts: {
             return field.value !== field.defaultValue;
           }
           if (field instanceof HTMLTextAreaElement) return field.value !== field.defaultValue;
-          if (field instanceof HTMLSelectElement) {
-            return Array.from(field.options).some((option) => option.selected !== option.defaultSelected);
-          }
+          if (field instanceof HTMLSelectElement) return Array.from(field.options).some((option) => option.selected !== option.defaultSelected);
           return false;
         };
         const preserveComposeDraft = () => {
@@ -359,107 +596,90 @@ export const factoryShell = (opts: {
           const current = document.getElementById(id);
           if (!current) return;
           if (id === "factory-compose" && preserveComposeDraft()) return;
-          const res = await fetch(url, {
-            headers: { "HX-Request": "true" },
-            cache: "no-store",
-          });
+          const res = await fetch(url, { headers: { "HX-Request": "true" } });
           if (!res.ok) return;
-          const markup = (await res.text()).trim();
-          if (!markup) return;
-          const template = document.createElement("template");
-          template.innerHTML = markup;
-          const next = template.content.firstElementChild;
-          if (next) current.replaceWith(next);
+          current.outerHTML = await res.text();
+          applyObjectiveTabs();
+          bindComposeDrawer();
+          bindComposeTitleFallback();
         };
-        let timer = 0;
+        let refreshPending = false;
         const refresh = () => {
-          window.clearTimeout(timer);
-          timer = window.setTimeout(() => {
-            Promise.all(targets.map(([id, buildUrl]) => loadIsland(id, buildUrl()))).catch(() => undefined);
+          if (refreshPending) return;
+          refreshPending = true;
+          window.setTimeout(async () => {
+            refreshPending = false;
+            for (const [id, resolver] of targets) {
+              await loadIsland(id, resolver());
+            }
           }, 120);
         };
+        const applyObjectiveTabs = () => {
+          const objective = document.getElementById("factory-objective");
+          if (!objective) return;
+          const objectiveId = objective.getAttribute("data-objective-id") || "none";
+          const stored = window.sessionStorage.getItem("factory-tab:" + objectiveId) || "overview";
+          const tabs = objective.querySelectorAll("[data-tab]");
+          const panels = objective.querySelectorAll("[data-tab-panel]");
+          const activate = (tabName) => {
+            tabs.forEach((tab) => tab.classList.toggle("active", tab.getAttribute("data-tab") === tabName));
+            panels.forEach((panel) => {
+              panel.classList.toggle("active", panel.getAttribute("data-tab-panel") === tabName);
+            });
+            window.sessionStorage.setItem("factory-tab:" + objectiveId, tabName);
+          };
+          tabs.forEach((tab) => {
+            tab.addEventListener("click", () => activate(tab.getAttribute("data-tab") || "overview"));
+          });
+          activate(stored);
+        };
+        const bindComposeDrawer = () => {
+          const openButtons = document.querySelectorAll("[data-compose-open]");
+          const closeButtons = document.querySelectorAll("[data-compose-close]");
+          openButtons.forEach((button) => button.addEventListener("click", () => document.body.classList.add("compose-open")));
+          closeButtons.forEach((button) => button.addEventListener("click", () => document.body.classList.remove("compose-open")));
+        };
+        const deriveTitle = (prompt) => {
+          const text = (prompt || "").replace(/\\s+/g, " ").trim();
+          if (!text) return "";
+          const firstSentence = text.split(/[.!?]/)[0] || text;
+          return firstSentence.slice(0, 96).trim();
+        };
+        const bindComposeTitleFallback = () => {
+          const compose = document.getElementById("factory-compose");
+          if (!compose) return;
+          const form = compose.querySelector("form");
+          if (!(form instanceof HTMLFormElement)) return;
+          form.addEventListener("submit", () => {
+            const prompt = form.querySelector('textarea[name="prompt"]');
+            const title = form.querySelector('input[name="title"]');
+            if (prompt instanceof HTMLTextAreaElement && title instanceof HTMLInputElement && !title.value.trim()) {
+              title.value = deriveTitle(prompt.value);
+            }
+          });
+        };
         window.addEventListener("DOMContentLoaded", () => {
-          const events = new EventSource("/factory/events");
-          events.addEventListener("receipt-refresh", refresh);
-          events.addEventListener("job-refresh", refresh);
-          window.addEventListener("beforeunload", () => events.close(), { once: true });
-        }, { once: true });
+          applyObjectiveTabs();
+          bindComposeDrawer();
+          bindComposeTitleFallback();
+          const source = new EventSource("/factory/events");
+          source.addEventListener("message", refresh);
+          source.addEventListener("receipt", refresh);
+          source.addEventListener("jobs", refresh);
+        });
       })();
     </script>
-    <style>
-      :root { color-scheme: dark; --bg: #0f1117; --panel: #171b24; --panel-2: #1e2430; --line: #2f3848; --text: #edf1f8; --muted: #97a4b8; --accent: #84d4ff; --warn: #ffd27b; --danger: #ff8f8f; }
-      * { box-sizing: border-box; }
-      body { margin: 0; font-family: "IBM Plex Sans", system-ui, sans-serif; background: radial-gradient(circle at top, #1b2230 0%, var(--bg) 45%); color: var(--text); }
-      a { color: inherit; text-decoration: none; }
-      code, pre { font-family: "IBM Plex Mono", monospace; }
-      .factory-shell { max-width: 1500px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
-      .factory-shell > header { display: flex; justify-content: space-between; gap: 12px; align-items: end; }
-      .factory-shell h1, .factory-shell h2, .factory-shell h3 { margin: 0; }
-      .factory-shell p { margin: 4px 0 0; color: var(--muted); }
-      .factory-panel { border: 1px solid var(--line); background: rgba(23,27,36,0.9); border-radius: 18px; padding: 16px; display: grid; gap: 12px; }
-      .factory-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
-      .factory-grid { display: grid; gap: 12px; }
-      .factory-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .factory-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .factory-form, .factory-split, .factory-section, .factory-item-list { display: grid; gap: 12px; }
-      .factory-split { grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr); align-items: start; }
-      .factory-section { min-width: 0; align-content: start; }
-      .factory-item-list { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); align-items: start; }
-      .factory-board-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .factory-lane { border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: rgba(17,20,28,0.72); display: grid; gap: 12px; }
-      .factory-lane-body { display: grid; gap: 10px; }
-      .factory-card { border: 1px solid var(--line); border-radius: 12px; background: rgba(24,29,39,0.92); padding: 12px; display: grid; gap: 8px; }
-      .factory-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(132,212,255,0.25); }
-      .factory-card-top, .factory-card-meta, .factory-foot, .factory-actions { display: flex; gap: 8px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
-      .factory-item-top, .factory-tags { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
-      .factory-item-top { justify-content: space-between; }
-      .factory-tags { justify-content: flex-start; }
-      .factory-card-summary, .factory-muted { color: var(--muted); font-size: 13px; }
-      .factory-card-title { font-size: 15px; font-weight: 600; }
-      .factory-item, .factory-stat { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: rgba(18,22,30,0.74); min-width: 0; }
-      .factory-item.compact { padding: 10px; }
-      .factory-item { display: grid; gap: 10px; align-content: start; overflow: hidden; }
-      .factory-item-top > strong { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
-      .factory-item-body { display: grid; gap: 6px; min-width: 0; align-content: start; }
-      .factory-item-body > div, .factory-note, .tag { min-width: 0; overflow-wrap: anywhere; }
-      .factory-actions form { margin: 0; }
-      .factory-actions button, .factory-form button { cursor: pointer; border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: var(--panel-2); color: var(--text); }
-      .factory-actions .danger { border-color: rgba(255,143,143,0.45); color: var(--danger); }
-      .factory-form input, .factory-form textarea { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: rgba(10,13,19,0.85); color: var(--text); }
-      .factory-form textarea { min-height: 110px; resize: vertical; }
-      .factory-note { border: 1px solid rgba(132,212,255,0.25); border-radius: 12px; padding: 10px 12px; color: var(--muted); background: rgba(132,212,255,0.08); }
-      .factory-note.warn { border-color: rgba(255,210,123,0.35); color: var(--warn); background: rgba(255,210,123,0.08); }
-      .factory-empty { padding: 18px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); }
-      .factory-stat span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
-      .factory-stat strong { display: block; margin-top: 4px; font-size: 16px; }
-      .factory-subhead { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
-      .factory-detail { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: rgba(15,18,26,0.72); }
-      .factory-detail summary { cursor: pointer; font-weight: 600; }
-      .badge, .tag { border-radius: 999px; padding: 3px 8px; font-size: 11px; border: 1px solid var(--line); background: rgba(255,255,255,0.04); }
-      pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
-      pre.error { color: var(--danger); }
-      @media (max-width: 1280px) { .factory-split { grid-template-columns: 1fr; } }
-      @media (max-width: 1100px) { .factory-board-grid, .factory-grid.two, .factory-grid.three { grid-template-columns: 1fr; } }
-      @media (max-width: 720px) {
-        .factory-shell { padding: 16px; }
-        .factory-head { flex-direction: column; }
-        .factory-item-list { grid-template-columns: 1fr; }
-      }
-    </style>
   </head>
   <body>
-    <main class="factory-shell">
-      <header>
-        <div>
-          <h1>Factory</h1>
-          <p>Receipt-native objective orchestration, debugging, and control. Hub no longer owns objective execution.</p>
-        </div>
-      </header>
-      ${opts.composeIsland}
+    <div class="factory-layout">
       ${opts.boardIsland}
       ${opts.objectiveIsland}
-      ${opts.liveIsland}
-      ${opts.debugIsland}
-    </main>
+      <aside class="inspector-aside">
+        ${opts.liveIsland}
+        ${opts.debugIsland}
+      </aside>
+    </div>
+    ${opts.composeIsland}
   </body>
-</html>`;
+</html>
+`;

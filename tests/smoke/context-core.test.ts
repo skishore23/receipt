@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import { buildRankedContext } from "../../src/lib/memory.ts";
 import { buildMemorySlice } from "../../src/agents/theorem.memory.ts";
@@ -24,8 +23,8 @@ test("memory utils: ranked context keeps pinned entries and top scored items", (
     key: (item) => item.id,
   });
 
-  assert.deepEqual(result.items.map((item) => item.id), ["a", "b"]);
-  assert.equal(result.truncated, false);
+  expect(result.items.map((item) => item.id)).toEqual(["a", "b"]);
+  expect(result.truncated).toBe(false);
 });
 
 test("memory utils: context compaction truncates over budget", () => {
@@ -43,8 +42,8 @@ test("memory utils: context compaction truncates over budget", () => {
     maxItems: 2,
   });
 
-  assert.equal(result.truncated, true);
-  assert.ok(result.text.length <= 8);
+  expect(result.truncated).toBe(true);
+  expect(result.text.length <= 8).toBeTruthy();
 });
 
 const mkReceipt = (body: TheoremEvent, ts: number): Chain<TheoremEvent>[number] => ({
@@ -100,6 +99,6 @@ test("theorem memory: bracket-aware focus prefers target-adjacent summary", () =
     bracket: "(((A o B) o C) o D)",
   });
 
-  assert.match(slice.text, /Summary A path/);
-  assert.doesNotMatch(slice.text, /Summary C path/);
+  expect(slice.text).toMatch(/Summary A path/);
+  expect(slice.text).not.toMatch(/Summary C path/);
 });

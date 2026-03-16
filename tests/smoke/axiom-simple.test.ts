@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { runAxiomSimple, type AxiomSimpleWorkerLaunchInput, type AxiomSimpleWorkerOutcome } from "../../src/agents/axiom-simple.ts";
@@ -174,8 +173,8 @@ test("runAxiomSimple finalizes after an initially verified worker without repair
 
     const chain = await runtime.chain(runStream);
     const eventTypes = chain.map((receipt) => receipt.body.type);
-    assert.equal(eventTypes.includes("repair.started"), false);
-    assert.equal(eventTypes.includes("final.verify.completed"), true);
+    expect(eventTypes.includes("repair.started")).toBe(false);
+    expect(eventTypes.includes("final.verify.completed")).toBe(true);
 
     const winner = chain.find((receipt): receipt is typeof receipt & {
       readonly body: Extract<AxiomSimpleEvent, { readonly type: "winner.selected" }>;
@@ -187,9 +186,9 @@ test("runAxiomSimple finalizes after an initially verified worker without repair
       readonly body: Extract<AxiomSimpleEvent, { readonly type: "run.status" }>;
     } => receipt.body.type === "run.status");
 
-    assert.equal(winner?.body.workerId, "worker_direct");
-    assert.equal(finalVerify?.body.status, "verified");
-    assert.equal(finalStatus?.body.status, "completed");
+    expect(winner?.body.workerId).toBe("worker_direct");
+    expect(finalVerify?.body.status).toBe("verified");
+    expect(finalStatus?.body.status).toBe("completed");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -290,9 +289,9 @@ test("runAxiomSimple launches one repair loop and verifies the repaired candidat
       readonly body: Extract<AxiomSimpleEvent, { readonly type: "final.verify.completed" }>;
     } => receipt.body.type === "final.verify.completed");
 
-    assert.equal(repairStarted?.body.sourceWorkerId, "worker_decompose");
-    assert.equal(finalVerifyStarted?.body.sourceWorkerId, "worker_decompose_repair");
-    assert.equal(finalVerifyCompleted?.body.status, "verified");
+    expect(repairStarted?.body.sourceWorkerId).toBe("worker_decompose");
+    expect(finalVerifyStarted?.body.sourceWorkerId).toBe("worker_decompose_repair");
+    expect(finalVerifyCompleted?.body.status).toBe("verified");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

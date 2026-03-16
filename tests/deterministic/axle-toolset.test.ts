@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect, describe } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { createAxleToolset } from "../../src/agents/axiom/axle-tools.ts";
 import { normalizeAxiomConfig } from "../../src/agents/axiom/config.ts";
@@ -145,20 +144,20 @@ const assertReportGate = (
   tool: string
 ): NonNullable<AgentToolResult["reports"]>[number] => {
   const report = result.reports?.[0];
-  assert.ok(report, `missing validation report for ${tool}`);
-  assert.equal(report.gate, gate);
-  assert.equal(report.evidence?.tool, tool);
-  return report;
+  expect(report).toBeTruthy();
+  expect(report!.gate).toBe(gate);
+  expect(report!.evidence?.tool).toBe(tool);
+  return report!;
 };
 
 test("deterministic AXLE preflight exposes the full agent-facing tool surface", async () => {
   await withWorkspace("receipt-axle-surface", async ({ toolset }) => {
-    assert.deepEqual(Object.keys(toolset.tools).sort(), [...TOOL_NAMES].sort());
-    assert.deepEqual(Object.keys(toolset.specs).sort(), [...TOOL_NAMES].sort());
+    expect(Object.keys(toolset.tools).sort()).toEqual([...TOOL_NAMES].sort());
+    expect(Object.keys(toolset.specs).sort()).toEqual([...TOOL_NAMES].sort());
   });
 });
 
-test("deterministic AXLE preflight covers every content tool exposed to the agent", async (t) => {
+describe("deterministic AXLE preflight covers every content tool exposed to the agent", () => {
   const cases = [
     {
       tool: "lean.environments",
@@ -166,11 +165,11 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/v1/environments",
       response: [{ name: "lean-4.28.0", description: "Lean 4" }],
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body, undefined);
+        expect(body).toBe(undefined);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /lean-4.28.0 - Lean 4/);
-        assert.equal(result.summary, "environments: 1");
+        expect(result.output).toMatch(/lean-4.28.0 - Lean 4/);
+        expect(result.summary).toBe("environments: 1");
       },
     },
     {
@@ -179,15 +178,15 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/check",
       response: axleResult(MAIN_CONTENT),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
-        assert.equal(body?.environment, "lean-4.28.0");
-        assert.equal(body?.mathlib_linter, true);
-        assert.equal(body?.ignore_imports, true);
-        assert.equal(body?.timeout_seconds, 45);
+        expect(body?.content).toBe(MAIN_CONTENT);
+        expect(body?.environment).toBe("lean-4.28.0");
+        expect(body?.mathlib_linter).toBe(true);
+        expect(body?.ignore_imports).toBe(true);
+        expect(body?.timeout_seconds).toBe(45);
       },
       assertResult: (result: AgentToolResult) => {
         const report = assertReportGate(result, "axle-check", "lean.check");
-        assert.equal(report.evidence?.candidateHash, hashText(MAIN_CONTENT));
+        expect(report.evidence?.candidateHash).toBe(hashText(MAIN_CONTENT));
       },
     },
     {
@@ -203,16 +202,16 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/verify_proof",
       response: axleResult(MAIN_CONTENT),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
-        assert.equal(body?.formal_statement, FORMAL_CONTENT);
-        assert.deepEqual(body?.permitted_sorries, ["foo"]);
-        assert.equal(body?.mathlib_linter, true);
-        assert.equal(body?.use_def_eq, false);
-        assert.equal(body?.timeout_seconds, 61);
+        expect(body?.content).toBe(MAIN_CONTENT);
+        expect(body?.formal_statement).toBe(FORMAL_CONTENT);
+        expect(body?.permitted_sorries).toEqual(["foo"]);
+        expect(body?.mathlib_linter).toBe(true);
+        expect(body?.use_def_eq).toBe(false);
+        expect(body?.timeout_seconds).toBe(61);
       },
       assertResult: (result: AgentToolResult) => {
         const report = assertReportGate(result, "axle-verify", "lean.verify");
-        assert.equal(report.evidence?.formalStatementHash, hashText(FORMAL_CONTENT));
+        expect(report.evidence?.formalStatementHash).toBe(hashText(FORMAL_CONTENT));
       },
     },
     {
@@ -221,12 +220,12 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/repair_proofs",
       response: axleResult("theorem foo : 1 = 1 := by\n  simp\n", { repair_stats: { applied: 2 } }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.deepEqual(body?.repairs, ["split", "inline"]);
-        assert.deepEqual(body?.terminal_tactics, ["simp", "gring"]);
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.repairs).toEqual(["split", "inline"]);
+        expect(body?.terminal_tactics).toEqual(["simp", "gring"]);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /repair_stats:/);
+        expect(result.output).toMatch(/repair_stats:/);
       },
     },
     {
@@ -239,10 +238,10 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
         },
       }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
+        expect(body?.content).toBe(MAIN_CONTENT);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /documents: Demo\.foo/);
+        expect(result.output).toMatch(/documents: Demo\.foo/);
       },
     },
     {
@@ -251,11 +250,11 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/normalize",
       response: axleResult(MAIN_CONTENT, { normalize_stats: { rewrites: 3 } }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.normalizations, ["beta", "eta"]);
-        assert.equal(body?.failsafe, false);
+        expect(body?.normalizations).toEqual(["beta", "eta"]);
+        expect(body?.failsafe).toBe(false);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /normalize_stats:/);
+        expect(result.output).toMatch(/normalize_stats:/);
       },
     },
     {
@@ -264,12 +263,12 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/simplify_theorems",
       response: axleResult(MAIN_CONTENT, { simplification_stats: { rewrites: 1 } }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.deepEqual(body?.indices, [1, 2]);
-        assert.deepEqual(body?.simplifications, ["simp", "nlinarith"]);
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.indices).toEqual([1, 2]);
+        expect(body?.simplifications).toEqual(["simp", "nlinarith"]);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /simplification_stats:/);
+        expect(result.output).toMatch(/simplification_stats:/);
       },
     },
     {
@@ -278,12 +277,12 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/sorry2lemma",
       response: axleResult("lemma foo_obligation : 1 = 1 := by\n  sorry\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.equal(body?.extract_sorries, false);
-        assert.equal(body?.extract_errors, false);
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.extract_sorries).toBe(false);
+        expect(body?.extract_errors).toBe(false);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /lemma foo_obligation/);
+        expect(result.output).toMatch(/lemma foo_obligation/);
       },
     },
     {
@@ -292,10 +291,10 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/theorem2sorry",
       response: axleResult("theorem foo : 1 = 1 := by\n  sorry\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.indices, [0]);
+        expect(body?.indices).toEqual([0]);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /sorry/);
+        expect(result.output).toMatch(/sorry/);
       },
     },
     {
@@ -304,10 +303,10 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/rename",
       response: axleResult("import Mathlib\n\n theorem bar : 1 = 1 := by\n  rfl\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.declarations, { foo: "bar" });
+        expect(body?.declarations).toEqual({ foo: "bar" });
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /declarations: \{"foo":"bar"\}/);
+        expect(result.output).toMatch(/declarations: \{"foo":"bar"\}/);
       },
     },
     {
@@ -316,11 +315,11 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/theorem2lemma",
       response: axleResult(MAIN_CONTENT),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.equal(body?.target, "theorem");
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.target).toBe("theorem");
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /target: theorem/);
+        expect(result.output).toMatch(/target: theorem/);
       },
     },
     {
@@ -336,14 +335,14 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/have2lemma",
       response: axleResult("lemma lifted_have : 1 = 1 := by\n  rfl\n", { lemma_names: ["lifted_have"] }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.equal(body?.include_have_body, true);
-        assert.equal(body?.include_whole_context, false);
-        assert.equal(body?.reconstruct_callsite, true);
-        assert.equal(body?.verbosity, 2);
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.include_have_body).toBe(true);
+        expect(body?.include_whole_context).toBe(false);
+        expect(body?.reconstruct_callsite).toBe(true);
+        expect(body?.verbosity).toBe(2);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /lemma_names: lifted_have/);
+        expect(result.output).toMatch(/lemma_names: lifted_have/);
       },
     },
     {
@@ -352,10 +351,10 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/have2sorry",
       response: axleResult("have h : 1 = 1 := sorry\nexact h\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.indices, [0]);
+        expect(body?.indices).toEqual([0]);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /have h : 1 = 1 := sorry/);
+        expect(result.output).toMatch(/have h : 1 = 1 := sorry/);
       },
     },
     {
@@ -364,26 +363,26 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
       endpoint: "/api/v1/disprove",
       response: axleResult(MAIN_CONTENT, { disproved_theorems: ["foo"] }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
+        expect(body?.names).toEqual(["foo"]);
       },
       assertResult: (result: AgentToolResult) => {
-        assert.match(result.output, /disproved_theorems: foo/);
+        expect(result.output).toMatch(/disproved_theorems: foo/);
       },
     },
   ] as const;
 
   for (const spec of cases) {
-    await t.test(spec.tool, async () => {
+    test(spec.tool, async () => {
       await withWorkspace(`receipt-${spec.tool.replace(/[^a-z0-9]+/gi, "-")}`, async ({ toolset }) => {
         await withFetchStub(async (call) => {
-          assert.equal(call.auth, "Bearer test-key");
-          assert.equal(call.method, spec.tool === "lean.environments" ? "GET" : "POST");
-          assert.equal(call.pathname, spec.endpoint);
+          expect(call.auth).toBe("Bearer test-key");
+          expect(call.method).toBe(spec.tool === "lean.environments" ? "GET" : "POST");
+          expect(call.pathname).toBe(spec.endpoint);
           spec.assertBody(call.body);
           return spec.response;
         }, async (calls) => {
           const result = await toolset.tools[spec.tool](spec.input);
-          assert.equal(calls.length, 1);
+          expect(calls.length).toBe(1);
           spec.assertResult(result);
         });
       });
@@ -391,7 +390,7 @@ test("deterministic AXLE preflight covers every content tool exposed to the agen
   }
 });
 
-test("deterministic AXLE preflight covers every file-based tool exposed to the agent", async (t) => {
+describe("deterministic AXLE preflight covers every file-based tool exposed to the agent", () => {
   const cases = [
     {
       tool: "lean.check_file",
@@ -399,12 +398,12 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/check",
       response: axleResult(MAIN_CONTENT),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
-        assert.equal(body?.mathlib_linter, true);
+        expect(body?.content).toBe(MAIN_CONTENT);
+        expect(body?.mathlib_linter).toBe(true);
       },
       assertResult: async (result: AgentToolResult) => {
         const report = assertReportGate(result, "axle-check", "lean.check_file");
-        assert.equal(report.target, "Main.lean");
+        expect(report.target).toBe("Main.lean");
       },
     },
     {
@@ -413,14 +412,14 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/verify_proof",
       response: axleResult(MAIN_CONTENT),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
-        assert.equal(body?.formal_statement, FORMAL_CONTENT);
-        assert.equal(body?.use_def_eq, true);
+        expect(body?.content).toBe(MAIN_CONTENT);
+        expect(body?.formal_statement).toBe(FORMAL_CONTENT);
+        expect(body?.use_def_eq).toBe(true);
       },
       assertResult: async (result: AgentToolResult) => {
         const report = assertReportGate(result, "axle-verify", "lean.verify_file");
-        assert.equal(report.target, "Main.lean");
-        assert.equal(report.evidence?.formalStatementHash, hashText(FORMAL_CONTENT));
+        expect(report.target).toBe("Main.lean");
+        expect(report.evidence?.formalStatementHash).toBe(hashText(FORMAL_CONTENT));
       },
     },
     {
@@ -429,12 +428,12 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/repair_proofs",
       response: axleResult("theorem foo : 1 = 1 := by\n  simp\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
+        expect(body?.content).toBe(MAIN_CONTENT);
       },
       assertResult: async (result: AgentToolResult, workspaceRoot: string) => {
-        assert.match(result.output, /output_path: out\/Repair\.lean/);
+        expect(result.output).toMatch(/output_path: out\/Repair\.lean/);
         const written = await fs.readFile(path.join(workspaceRoot, "out/Repair.lean"), "utf-8");
-        assert.equal(written, "theorem foo : 1 = 1 := by\n  simp\n");
+        expect(written).toBe("theorem foo : 1 = 1 := by\n  simp\n");
       },
     },
     {
@@ -443,11 +442,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/normalize",
       response: axleResult("theorem foo : 1 = 1 := by\n  exact rfl\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.normalizations, ["beta"]);
+        expect(body?.normalizations).toEqual(["beta"]);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/Normalize.lean"), "utf-8");
-        assert.equal(written, "theorem foo : 1 = 1 := by\n  exact rfl\n");
+        expect(written).toBe("theorem foo : 1 = 1 := by\n  exact rfl\n");
       },
     },
     {
@@ -456,11 +455,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/simplify_theorems",
       response: axleResult("theorem foo : 1 = 1 := by\n  simpa\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.simplifications, ["simp"]);
+        expect(body?.simplifications).toEqual(["simp"]);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/Simplify.lean"), "utf-8");
-        assert.equal(written, "theorem foo : 1 = 1 := by\n  simpa\n");
+        expect(written).toBe("theorem foo : 1 = 1 := by\n  simpa\n");
       },
     },
     {
@@ -469,11 +468,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/sorry2lemma",
       response: axleResult("lemma foo_gap : 1 = 1 := by\n  sorry\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.extract_errors, false);
+        expect(body?.extract_errors).toBe(false);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/SorryToLemma.lean"), "utf-8");
-        assert.equal(written, "lemma foo_gap : 1 = 1 := by\n  sorry\n");
+        expect(written).toBe("lemma foo_gap : 1 = 1 := by\n  sorry\n");
       },
     },
     {
@@ -482,11 +481,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/theorem2sorry",
       response: axleResult("theorem foo : 1 = 1 := by\n  sorry\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.indices, [0]);
+        expect(body?.indices).toEqual([0]);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/TheoremToSorry.lean"), "utf-8");
-        assert.equal(written, "theorem foo : 1 = 1 := by\n  sorry\n");
+        expect(written).toBe("theorem foo : 1 = 1 := by\n  sorry\n");
       },
     },
     {
@@ -495,11 +494,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/rename",
       response: axleResult("import Mathlib\n\ntheorem bar : 1 = 1 := by\n  rfl\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.declarations, { foo: "bar" });
+        expect(body?.declarations).toEqual({ foo: "bar" });
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/Rename.lean"), "utf-8");
-        assert.match(written, /theorem bar/);
+        expect(written).toMatch(/theorem bar/);
       },
     },
     {
@@ -508,12 +507,12 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/theorem2lemma",
       response: axleResult("import Mathlib\n\nlemma foo : 1 = 1 := by\n  rfl\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
-        assert.equal(body?.target, "lemma");
+        expect(body?.names).toEqual(["foo"]);
+        expect(body?.target).toBe("lemma");
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/TheoremToLemma.lean"), "utf-8");
-        assert.match(written, /lemma foo/);
+        expect(written).toMatch(/lemma foo/);
       },
     },
     {
@@ -522,12 +521,12 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/have2lemma",
       response: axleResult("lemma lifted_have : 1 = 1 := by\n  rfl\n", { lemma_names: ["lifted_have"] }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.include_have_body, true);
+        expect(body?.include_have_body).toBe(true);
       },
       assertResult: async (result: AgentToolResult, workspaceRoot: string) => {
-        assert.match(result.output, /lemma_names: lifted_have/);
+        expect(result.output).toMatch(/lemma_names: lifted_have/);
         const written = await fs.readFile(path.join(workspaceRoot, "out/HaveToLemma.lean"), "utf-8");
-        assert.match(written, /lifted_have/);
+        expect(written).toMatch(/lifted_have/);
       },
     },
     {
@@ -536,11 +535,11 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/have2sorry",
       response: axleResult("have h : 1 = 1 := sorry\nexact h\n"),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
+        expect(body?.content).toBe(MAIN_CONTENT);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/HaveToSorry.lean"), "utf-8");
-        assert.match(written, /sorry/);
+        expect(written).toMatch(/sorry/);
       },
     },
     {
@@ -549,10 +548,10 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
       endpoint: "/api/v1/disprove",
       response: axleResult(MAIN_CONTENT, { disproved_theorems: ["foo"] }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.deepEqual(body?.names, ["foo"]);
+        expect(body?.names).toEqual(["foo"]);
       },
       assertResult: async (result: AgentToolResult) => {
-        assert.match(result.output, /disproved_theorems: foo/);
+        expect(result.output).toMatch(/disproved_theorems: foo/);
       },
     },
     {
@@ -565,27 +564,27 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
         },
       }),
       assertBody: (body: FetchCall["body"]) => {
-        assert.equal(body?.content, MAIN_CONTENT);
+        expect(body?.content).toBe(MAIN_CONTENT);
       },
       assertResult: async (_result: AgentToolResult, workspaceRoot: string) => {
         const written = await fs.readFile(path.join(workspaceRoot, "out/extracted/Demo_foo.lean"), "utf-8");
-        assert.equal(written, "theorem foo : 1 = 1 := by\n  rfl\n");
+        expect(written).toBe("theorem foo : 1 = 1 := by\n  rfl\n");
       },
     },
   ] as const;
 
   for (const spec of cases) {
-    await t.test(spec.tool, async () => {
+    test(spec.tool, async () => {
       await withWorkspace(`receipt-${spec.tool.replace(/[^a-z0-9]+/gi, "-")}`, async ({ workspaceRoot, toolset }) => {
         await withFetchStub(async (call) => {
-          assert.equal(call.auth, "Bearer test-key");
-          assert.equal(call.method, "POST");
-          assert.equal(call.pathname, spec.endpoint);
+          expect(call.auth).toBe("Bearer test-key");
+          expect(call.method).toBe("POST");
+          expect(call.pathname).toBe(spec.endpoint);
           spec.assertBody(call.body);
           return spec.response;
         }, async (calls) => {
           const result = await toolset.tools[spec.tool](spec.input);
-          assert.equal(calls.length, 1);
+          expect(calls.length).toBe(1);
           await spec.assertResult(result, workspaceRoot);
         });
       });
@@ -596,35 +595,35 @@ test("deterministic AXLE preflight covers every file-based tool exposed to the a
 test("deterministic AXLE preflight exercises repair-aware cycle tools before agent runs", async () => {
   await withWorkspace("receipt-axle-cycle", async ({ workspaceRoot, toolset }) => {
     await withFetchStub(async (call, index) => {
-      assert.equal(call.auth, "Bearer test-key");
+      expect(call.auth).toBe("Bearer test-key");
       if (index === 0) {
-        assert.equal(call.pathname, "/api/v1/verify_proof");
+        expect(call.pathname).toBe("/api/v1/verify_proof");
         return axleResult(MAIN_CONTENT, {
           okay: false,
           lean_messages: { errors: ["unsolved goals"], warnings: [], infos: [] },
         });
       }
       if (index === 1) {
-        assert.equal(call.pathname, "/api/v1/repair_proofs");
+        expect(call.pathname).toBe("/api/v1/repair_proofs");
         return axleResult("theorem foo : 1 = 1 := by\n  simpa\n", { repair_stats: { applied: 1 } });
       }
       if (index === 2) {
-        assert.equal(call.pathname, "/api/v1/verify_proof");
+        expect(call.pathname).toBe("/api/v1/verify_proof");
         return axleResult("theorem foo : 1 = 1 := by\n  simpa\n");
       }
       if (index === 3) {
-        assert.equal(call.pathname, "/api/v1/check");
+        expect(call.pathname).toBe("/api/v1/check");
         return axleResult(MAIN_CONTENT, {
           okay: false,
           lean_messages: { errors: ["type mismatch"], warnings: [], infos: [] },
         });
       }
       if (index === 4) {
-        assert.equal(call.pathname, "/api/v1/repair_proofs");
+        expect(call.pathname).toBe("/api/v1/repair_proofs");
         return axleResult("theorem foo : 1 = 1 := by\n  exact rfl\n", { repair_stats: { applied: 1 } });
       }
       if (index === 5) {
-        assert.equal(call.pathname, "/api/v1/check");
+        expect(call.pathname).toBe("/api/v1/check");
         return axleResult("theorem foo : 1 = 1 := by\n  exact rfl\n");
       }
       throw new Error(`Unexpected AXLE call #${index} to ${call.pathname}`);
@@ -633,18 +632,18 @@ test("deterministic AXLE preflight exercises repair-aware cycle tools before age
         content: MAIN_CONTENT,
         formal_statement: FORMAL_CONTENT,
       });
-      assert.equal(calls.length, 3);
-      assert.match(contentResult.output, /repaired: yes/);
-      assert.match(contentResult.output, /repair_stats: \{"applied":1\}/);
+      expect(calls.length).toBe(3);
+      expect(contentResult.output).toMatch(/repaired: yes/);
+      expect(contentResult.output).toMatch(/repair_stats: \{"applied":1\}/);
 
       const fileResult = await toolset.tools["lean.cycle_file"]({
         path: "Main.lean",
         outputPath: "out/Cycle.lean",
       });
-      assert.equal(calls.length, 6);
-      assert.match(fileResult.output, /repaired: yes/);
+      expect(calls.length).toBe(6);
+      expect(fileResult.output).toMatch(/repaired: yes/);
       const written = await fs.readFile(path.join(workspaceRoot, "out/Cycle.lean"), "utf-8");
-      assert.equal(written, "theorem foo : 1 = 1 := by\n  exact rfl\n");
+      expect(written).toBe("theorem foo : 1 = 1 := by\n  exact rfl\n");
     });
   });
 });

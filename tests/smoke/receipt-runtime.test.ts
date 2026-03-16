@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { createRuntime } from "../../src/core/runtime.ts";
 import { jsonBranchStore, jsonlStore, createStreamLocator } from "../../src/adapters/jsonl.ts";
@@ -48,9 +47,9 @@ test("runtime: plan validation rejects cycles and duplicate providers", () => {
   };
 
   const result = validatePlan(plan);
-  assert.equal(result.ok, false);
-  assert.match(result.errors.join("\n"), /provided by both/i);
-  assert.match(result.errors.join("\n"), /dependency cycle/i);
+  expect(result.ok).toBe(false);
+  expect(result.errors.join("\n")).toMatch(/provided by both/i);
+  expect(result.errors.join("\n")).toMatch(/dependency cycle/i);
 });
 
 test("runtime: emit eventId is idempotent and expectedPrev is enforced", async () => {
@@ -84,17 +83,16 @@ test("runtime: emit eventId is idempotent and expectedPrev is enforced", async (
     });
 
     const chain = await runtime.chain("demo");
-    assert.equal(chain.length, 1, "duplicate eventId should not append");
+    expect(chain.length).toBe(1);
 
-    await assert.rejects(
+    expect(
       runtime.execute("demo", {
         type: "emit",
         event: { type: "note", runId: "r1", text: "bad prev" },
         eventId: "evt-2",
         expectedPrev: "not-the-head",
       }),
-      /Expected prev hash/
-    );
+    ).rejects.toThrow(/Expected prev hash/);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
@@ -119,14 +117,14 @@ test("runtime: branch metadata is reconstructible from receipts only", async () 
     await runtime.fork("root/branches/a", 2, "root/branches/a/branches/b");
 
     const listed = await runtime.branches();
-    assert.ok(listed.some((b) => b.name === "root/branches/a"));
-    assert.ok(listed.some((b) => b.name === "root/branches/a/branches/b"));
+    expect(listed.some((b) => b.name === "root/branches/a")).toBeTruthy();
+    expect(listed.some((b) => b.name === "root/branches/a/branches/b")).toBeTruthy();
 
     const branchMetaStore = jsonlStore<{ type: "branch.meta.upsert"; branch: { name: string } }>(dataDir);
     const metaChain = await branchMetaStore.read("__meta/branches");
     const reconstructed = fold(metaChain, reduceBranchMeta, initialBranchMeta);
-    assert.ok(reconstructed.branches["root/branches/a"]);
-    assert.ok(reconstructed.branches["root/branches/a/branches/b"]);
+    expect(reconstructed.branches["root/branches/a"]).toBeTruthy();
+    expect(reconstructed.branches["root/branches/a/branches/b"]).toBeTruthy();
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
@@ -150,7 +148,7 @@ test("runtime: corrupted jsonl line fails explicitly", async () => {
     const file = await locator.fileFor(stream);
     await fs.appendFile(file, "{bad json line}\n", "utf-8");
 
-    await assert.rejects(store.read(stream), /Corrupt JSONL record/);
+    expect(store.read(stream)).rejects.toThrow(/Corrupt JSONL record/);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }

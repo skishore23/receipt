@@ -1,14 +1,15 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tsx = process.platform === "win32" ? "tsx.cmd" : "tsx";
-
 const args = process.argv.slice(2);
-const child = spawn(tsx, ["src/cli.ts", "new", ...args], {
+const bun = process.execPath && path.basename(process.execPath).toLowerCase().startsWith("bun")
+  ? process.execPath
+  : "bun";
+const child = spawn(bun, ["src/cli.ts", "new", ...args], {
   cwd: ROOT,
   env: process.env,
   stdio: "inherit",

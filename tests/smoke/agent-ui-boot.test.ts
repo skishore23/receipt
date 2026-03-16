@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { createRuntime } from "../../src/core/runtime.ts";
@@ -40,6 +39,7 @@ import { loadTheoremPrompts } from "../../src/prompts/theorem.ts";
 import { loadWriterPrompts } from "../../src/prompts/writer.ts";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -97,7 +97,7 @@ const stopChild = async (child: ChildProcess): Promise<void> => {
   clearTimeout(killTimer);
 };
 
-test("smoke: theorem/writer runs boot without API key", { timeout: 120_000 }, async () => {
+test("smoke: theorem/writer runs boot without API key", async () => {
   const dataDir = await createTempDir("receipt-smoke-agent-boot");
 
   try {
@@ -132,11 +132,10 @@ test("smoke: theorem/writer runs boot without API key", { timeout: 120_000 }, as
     });
 
     const theoremChain = await theoremRuntime.chain(theoremRunStream("theorem", theoremRunId));
-    assert.ok(theoremChain.some((r) => r.body.type === "run.configured"), "theorem run.configured missing");
-    assert.ok(
-      theoremChain.some((r) => r.body.type === "run.status" && r.body.status === "failed"),
-      "theorem failed status missing"
-    );
+    expect(theoremChain.some((r) => r.body.type === "run.configured")).toBeTruthy();
+    expect(
+      theoremChain.some((r) => r.body.type === "run.status" && r.body.status === "failed")
+    ).toBeTruthy();
 
     const writerRunId = `run_${Date.now()}_writer`;
     await runWriterGuild({
@@ -153,27 +152,19 @@ test("smoke: theorem/writer runs boot without API key", { timeout: 120_000 }, as
     });
 
     const writerChain = await writerRuntime.chain(writerRunStream("writer", writerRunId));
-    assert.ok(writerChain.some((r) => r.body.type === "run.configured"), "writer run.configured missing");
-    assert.ok(
-      writerChain.some((r) => r.body.type === "run.status" && r.body.status === "failed"),
-      "writer failed status missing"
-    );
+    expect(writerChain.some((r) => r.body.type === "run.configured")).toBeTruthy();
+    expect(
+      writerChain.some((r) => r.body.type === "run.status" && r.body.status === "failed")
+    ).toBeTruthy();
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
-test("smoke: theorem/writer/axiom/receipt UI routes boot", { timeout: 120_000 }, async () => {
+test("smoke: theorem/writer/axiom/receipt UI routes boot", async () => {
   const port = await getFreePort();
   const dataDir = await createTempDir("receipt-smoke-ui");
-  const tsxBin = path.join(
-    ROOT,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "tsx.cmd" : "tsx"
-  );
-
-  const child = spawn(tsxBin, ["src/server.ts"], {
+  const child = spawn(BUN, ["src/server.ts"], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -195,30 +186,30 @@ test("smoke: theorem/writer/axiom/receipt UI routes boot", { timeout: 120_000 },
     await waitForHttpOk(`${base}/receipt`, 30_000);
 
     const theoremRes = await fetch(`${base}/theorem`);
-    assert.equal(theoremRes.status, 200, `GET /theorem failed: ${theoremRes.status}`);
+    expect(theoremRes.status).toBe(200);
     const theoremHtml = await theoremRes.text();
-    assert.match(theoremHtml, /Receipt - Theorem Guild/);
+    expect(theoremHtml).toMatch(/Receipt - Theorem Guild/);
 
     const writerRes = await fetch(`${base}/writer`);
-    assert.equal(writerRes.status, 200, `GET /writer failed: ${writerRes.status}`);
+    expect(writerRes.status).toBe(200);
     const writerHtml = await writerRes.text();
-    assert.match(writerHtml, /Receipt - Writer Guild/);
+    expect(writerHtml).toMatch(/Receipt - Writer Guild/);
 
     const axiomRes = await fetch(`${base}/axiom`);
-    assert.equal(axiomRes.status, 200, `GET /axiom failed: ${axiomRes.status}`);
+    expect(axiomRes.status).toBe(200);
     const axiomHtml = await axiomRes.text();
-    assert.match(axiomHtml, /Receipt - Axiom Guild/);
-    assert.match(axiomHtml, /Run Axiom Guild/);
-    assert.match(axiomHtml, /agents%2Faxiom-guild|agents\/axiom-guild/);
+    expect(axiomHtml).toMatch(/Receipt - Axiom Guild/);
+    expect(axiomHtml).toMatch(/Run Axiom Guild/);
+    expect(axiomHtml).toMatch(/agents%2Faxiom-guild|agents\/axiom-guild/);
 
     const receiptRes = await fetch(`${base}/receipt`);
-    assert.equal(receiptRes.status, 200, `GET /receipt failed: ${receiptRes.status}`);
+    expect(receiptRes.status).toBe(200);
     const receiptHtml = await receiptRes.text();
-    assert.match(receiptHtml, /Receipt Inspector/);
+    expect(receiptHtml).toMatch(/Receipt Inspector/);
   } finally {
     await stopChild(child);
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 
-  assert.equal(stderr.includes("EADDRINUSE"), false, `server boot conflict: ${stderr}`);
-});
+  expect(stderr.includes("EADDRINUSE")).toBe(false);
+}, 120_000);

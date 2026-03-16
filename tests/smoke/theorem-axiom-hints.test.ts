@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import {
@@ -200,12 +199,12 @@ const runVerifyHintScenario = async (opts: {
       },
     });
 
-    assert.equal(delegateCalls.length, 1, "expected one required AXLE verification delegation");
+    expect(delegateCalls.length).toBe(1);
     const taskHints = readTaskHints(delegateCalls[0]?.config);
-    assert.equal(taskHints?.reason, opts.expectedReason);
-    assert.deepEqual(taskHints?.preferredTools, opts.expectedTools);
-    assert.equal(taskHints?.formalStatementPath, "FormalStatement.lean");
-    assert.deepEqual(readRequiredValidation(delegateCalls[0]?.config), {
+    expect(taskHints?.reason).toBe(opts.expectedReason);
+    expect(taskHints?.preferredTools).toEqual(opts.expectedTools);
+    expect(taskHints?.formalStatementPath).toBe("FormalStatement.lean");
+    expect(readRequiredValidation(delegateCalls[0]?.config)).toEqual({
       kind: "axle-verify",
       formalStatementPath: "FormalStatement.lean",
     });
@@ -213,14 +212,14 @@ const runVerifyHintScenario = async (opts: {
     const chain = await runtime.chain(theoremRunStream("agents/axiom-guild", runId));
     const delegateInput = readDelegateInput(chain);
     const inputHints = delegateInput?.hints as Record<string, unknown> | undefined;
-    assert.equal(inputHints?.reason, opts.expectedReason);
-    assert.deepEqual(inputHints?.preferredTools, opts.expectedTools);
+    expect(inputHints?.reason).toBe(opts.expectedReason);
+    expect(inputHints?.preferredTools).toEqual(opts.expectedTools);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 };
 
-test("theorem forwards explicit axiom_hints from structured explorer output to axiom.delegate", { timeout: 120_000 }, async () => {
+test("theorem forwards explicit axiom_hints from structured explorer output to axiom.delegate", async () => {
   await withPassKOne(async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-theorem-explicit-hints-"));
 
@@ -276,15 +275,15 @@ test("theorem forwards explicit axiom_hints from structured explorer output to a
         },
       });
 
-      assert.equal(delegateCalls.length, 2, "expected explorer and verifier AXLE delegations");
+      expect(delegateCalls.length).toBe(2);
       const taskHints = readTaskHints(delegateCalls[0]?.config);
-      assert.equal(taskHints?.reason, "name_conflict");
-      assert.deepEqual((taskHints?.preferredTools as string[] | undefined)?.slice(0, 2), ["lean.rename", "lean.theorem2lemma"]);
-      assert.equal(taskHints?.targetPath, "Main.lean");
-      assert.equal(taskHints?.formalStatementPath, "Main.sorry.lean");
-      assert.equal(taskHints?.declarationName, "foo");
-      assert.equal(readRequiredValidation(delegateCalls[0]?.config), undefined, "explorer AXLE task should not be verify-gated");
-      assert.deepEqual(readRequiredValidation(delegateCalls[1]?.config), {
+      expect(taskHints?.reason).toBe("name_conflict");
+      expect((taskHints?.preferredTools as string[] | undefined)?.slice(0, 2)).toEqual(["lean.rename", "lean.theorem2lemma"]);
+      expect(taskHints?.targetPath).toBe("Main.lean");
+      expect(taskHints?.formalStatementPath).toBe("Main.sorry.lean");
+      expect(taskHints?.declarationName).toBe("foo");
+      expect(readRequiredValidation(delegateCalls[0]?.config)).toBe(undefined);
+      expect(readRequiredValidation(delegateCalls[1]?.config)).toEqual({
         kind: "axle-verify",
         formalStatementPath: "FormalStatement.lean",
       });
@@ -292,15 +291,15 @@ test("theorem forwards explicit axiom_hints from structured explorer output to a
       const chain = await runtime.chain(theoremRunStream("agents/axiom-guild", runId));
       const delegateInput = readDelegateInput(chain);
       const inputHints = delegateInput?.hints as Record<string, unknown> | undefined;
-      assert.equal(inputHints?.reason, "name_conflict");
-      assert.deepEqual((inputHints?.preferredTools as string[] | undefined)?.slice(0, 2), ["lean.rename", "lean.theorem2lemma"]);
+      expect(inputHints?.reason).toBe("name_conflict");
+      expect((inputHints?.preferredTools as string[] | undefined)?.slice(0, 2)).toEqual(["lean.rename", "lean.theorem2lemma"]);
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true });
     }
   });
-});
+}, 120_000);
 
-test("theorem infers rename-first AXLE repair hints for required verification", { timeout: 120_000 }, async () => {
+test("theorem infers rename-first AXLE repair hints for required verification", async () => {
   await withPassKOne(async () => {
     await runVerifyHintScenario({
       label: "rename_hints",
@@ -317,9 +316,9 @@ test("theorem infers rename-first AXLE repair hints for required verification", 
       expectedTools: ["lean.rename", "lean.theorem2sorry", "lean.verify"],
     });
   });
-});
+}, 120_000);
 
-test("theorem infers decomposition-oriented AXLE repair hints for required verification", { timeout: 120_000 }, async () => {
+test("theorem infers decomposition-oriented AXLE repair hints for required verification", async () => {
   await withPassKOne(async () => {
     await runVerifyHintScenario({
       label: "decompose_hints",
@@ -336,9 +335,9 @@ test("theorem infers decomposition-oriented AXLE repair hints for required verif
       expectedTools: ["lean.theorem2lemma", "lean.theorem2sorry", "lean.verify"],
     });
   });
-});
+}, 120_000);
 
-test("theorem infers have-obligation AXLE repair hints for required verification", { timeout: 120_000 }, async () => {
+test("theorem infers have-obligation AXLE repair hints for required verification", async () => {
   await withPassKOne(async () => {
     await runVerifyHintScenario({
       label: "have_hints",
@@ -355,4 +354,4 @@ test("theorem infers have-obligation AXLE repair hints for required verification
       expectedTools: ["lean.have2lemma", "lean.have2sorry", "lean.theorem2sorry", "lean.verify"],
     });
   });
-});
+}, 120_000);

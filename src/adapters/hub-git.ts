@@ -116,6 +116,11 @@ const parseStatusFiles = (raw: string): ReadonlyArray<string> =>
       return renamed?.trim() || file;
     });
 
+const isOperationalPath = (file: string): boolean => {
+  const normalized = file.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  return normalized === ".receipt" || normalized.startsWith(".receipt/");
+};
+
 export class HubGit {
   readonly repoRoot: string;
   readonly bareDir: string;
@@ -216,7 +221,7 @@ export class HubGit {
     const statusRaw = await this.execGit(["status", "--porcelain=v1"], { cwd: this.repoRoot });
     const head = clean(await this.execGit(["rev-parse", "HEAD"], { cwd: this.repoRoot }).catch(() => ""));
     const branch = clean(await this.execGit(["branch", "--show-current"], { cwd: this.repoRoot }).catch(() => ""));
-    const changedFiles = parseStatusFiles(statusRaw);
+    const changedFiles = parseStatusFiles(statusRaw).filter((file) => !isOperationalPath(file));
     return {
       dirty: changedFiles.length > 0,
       head: head || undefined,

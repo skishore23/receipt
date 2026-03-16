@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
@@ -120,7 +119,7 @@ const mkHallLlm = () => async ({ system, user }: { system?: string; user: string
   return "{}";
 };
 
-test("axiom-guild queues one Hall-style orchestrator follow-up after final AXLE verification failure", { timeout: 120_000 }, async () => {
+test("axiom-guild queues one Hall-style orchestrator follow-up after final AXLE verification failure", async () => {
   await withPassKOne(async () => {
     const dir = await mkTempDir("receipt-axiom-guild-recovery");
 
@@ -186,12 +185,12 @@ test("axiom-guild queues one Hall-style orchestrator follow-up after final AXLE 
         },
       });
 
-      assert.equal(result.status, "failed");
-      assert.equal(result.failureClass, "axle_verify_failed");
-      assert.equal(result.failure?.failureClass, "axle_verify_failed");
-      assert.ok(delegateCalls.length >= 2, "expected exploratory and verifier AXLE delegations");
-      assert.equal((delegateCalls[0]?.config as Record<string, unknown> | undefined)?.requiredValidation, undefined);
-      assert.deepEqual((delegateCalls[delegateCalls.length - 1]?.config as Record<string, unknown> | undefined)?.requiredValidation, {
+      expect(result.status).toBe("failed");
+      expect(result.failureClass).toBe("axle_verify_failed");
+      expect(result.failure?.failureClass).toBe("axle_verify_failed");
+      expect(delegateCalls.length >= 2).toBeTruthy();
+      expect((delegateCalls[0]?.config as Record<string, unknown> | undefined)?.requiredValidation).toBe(undefined);
+      expect((delegateCalls[delegateCalls.length - 1]?.config as Record<string, unknown> | undefined)?.requiredValidation).toEqual({
         kind: "axle-verify",
         formalStatementPath: "HallFinite.sorry.lean",
       });
@@ -209,34 +208,34 @@ test("axiom-guild queues one Hall-style orchestrator follow-up after final AXLE 
         jobId: "job_hall_failed",
       });
 
-      assert.equal(recovery.failureClass, "axle_verify_failed");
-      assert.ok(recovery.followUpJobId, "expected follow-up job id");
-      assert.ok(recovery.followUpRunId, "expected follow-up run id");
+      expect(recovery.failureClass).toBe("axle_verify_failed");
+      expect(recovery.followUpJobId).toBeTruthy();
+      expect(recovery.followUpRunId).toBeTruthy();
 
       const followUpJob = await queue.getJob(recovery.followUpJobId!);
-      assert.ok(followUpJob, "expected queued follow-up job");
-      assert.equal(followUpJob?.agentId, "axiom-guild");
-      assert.equal(followUpJob?.payload.autoFollowUp, true);
-      assert.equal(followUpJob?.payload.followUpOfJobId, "job_hall_failed");
-      assert.equal(followUpJob?.payload.followUpOfRunId, runId);
-      assert.equal(followUpJob?.payload.failureClass, "axle_verify_failed");
-      assert.equal((followUpJob?.payload.failure as Record<string, unknown> | undefined)?.failureClass, "axle_verify_failed");
-      assert.match(String(followUpJob?.payload.problem ?? ""), /Hall's marriage theorem/i);
-      assert.match(String(followUpJob?.payload.problem ?? ""), /Structured terminal failure/i);
-      assert.match(String(followUpJob?.payload.problem ?? ""), /AXLE verification report/i);
-      assert.match(String(followUpJob?.payload.problem ?? ""), /matching lemma/i);
+      expect(followUpJob).toBeTruthy();
+      expect(followUpJob?.agentId).toBe("axiom-guild");
+      expect(followUpJob?.payload.autoFollowUp).toBe(true);
+      expect(followUpJob?.payload.followUpOfJobId).toBe("job_hall_failed");
+      expect(followUpJob?.payload.followUpOfRunId).toBe(runId);
+      expect(followUpJob?.payload.failureClass).toBe("axle_verify_failed");
+      expect((followUpJob?.payload.failure as Record<string, unknown> | undefined)?.failureClass).toBe("axle_verify_failed");
+      expect(String(followUpJob?.payload.problem ?? "")).toMatch(/Hall's marriage theorem/i);
+      expect(String(followUpJob?.payload.problem ?? "")).toMatch(/Structured terminal failure/i);
+      expect(String(followUpJob?.payload.problem ?? "")).toMatch(/AXLE verification report/i);
+      expect(String(followUpJob?.payload.problem ?? "")).toMatch(/matching lemma/i);
 
       const chain = await theoremRuntime.chain(theoremRunStream("agents/axiom-guild", runId));
       const finalStatus = chain.findLast((receipt): receipt is typeof receipt & { body: Extract<TheoremEvent, { type: "run.status" }> } =>
         receipt.body.type === "run.status"
       );
-      assert.equal(finalStatus?.body.status, "failed");
-      assert.match(finalStatus?.body.note ?? "", /Follow-up queued:/i);
+      expect(finalStatus?.body.status).toBe("failed");
+      expect(finalStatus?.body.note ?? "").toMatch(/Follow-up queued:/i);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
-});
+}, 120_000);
 
 test("axiom-guild follow-up recovery does not recurse for auto-followed runs", async () => {
   const dir = await mkTempDir("receipt-axiom-guild-no-recurse");
@@ -277,8 +276,8 @@ test("axiom-guild follow-up recovery does not recurse for auto-followed runs", a
       jobId: "job_auto_followed",
     });
 
-    assert.equal(recovery.followUpJobId, undefined);
-    assert.equal((await queue.listJobs()).length, 0);
+    expect(recovery.followUpJobId).toBe(undefined);
+    expect((await queue.listJobs()).length).toBe(0);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -314,8 +313,8 @@ test("axiom-guild follow-up recovery skips successful final verification", async
       jobId: "job_success",
     });
 
-    assert.equal(recovery.followUpJobId, undefined);
-    assert.equal((await queue.listJobs()).length, 0);
+    expect(recovery.followUpJobId).toBe(undefined);
+    expect((await queue.listJobs()).length).toBe(0);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

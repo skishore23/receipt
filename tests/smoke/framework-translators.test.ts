@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import type { Runtime } from "../../src/core/runtime.ts";
 import type { Branch, Chain } from "../../src/core/types.ts";
@@ -55,9 +54,9 @@ test("framework translators: todo command intent maps to emit + broadcast", () =
     cmd: { type: "add", text: "ship it" },
   });
 
-  assert.equal(ops.length, 2);
-  assert.equal(ops[0]?.type, "emit");
-  assert.equal(ops[1]?.type, "broadcast");
+  expect(ops.length).toBe(2);
+  expect(ops[0]?.type).toBe("emit");
+  expect(ops[1]?.type).toBe("broadcast");
 });
 
 test("framework translators: theorem run intent emits fork/append/enqueue/redirect on resume", () => {
@@ -76,7 +75,7 @@ test("framework translators: theorem run intent emits fork/append/enqueue/redire
   });
 
   const kinds = ops.map((op) => op.type);
-  assert.deepEqual(kinds, ["fork", "emit", "emit", "enqueue_job", "redirect"]);
+  expect(kinds).toEqual(["fork", "emit", "emit", "enqueue_job", "redirect"]);
 });
 
 test("framework translators: writer run intent emits fork/append/enqueue/redirect on resume", () => {
@@ -95,7 +94,7 @@ test("framework translators: writer run intent emits fork/append/enqueue/redirec
   });
 
   const kinds = ops.map((op) => op.type);
-  assert.deepEqual(kinds, ["fork", "emit", "enqueue_job", "redirect"]);
+  expect(kinds).toEqual(["fork", "emit", "enqueue_job", "redirect"]);
 });
 
 test("framework translators: theorem fresh run omits fork and append", () => {
@@ -113,7 +112,7 @@ test("framework translators: theorem fresh run omits fork and append", () => {
   });
 
   const kinds = ops.map((op) => op.type);
-  assert.deepEqual(kinds, ["enqueue_job", "redirect"]);
+  expect(kinds).toEqual(["enqueue_job", "redirect"]);
 });
 
 test("framework translators: theorem resume anchor follows the visible branch receipt", () => {
@@ -166,8 +165,8 @@ test("framework translators: theorem resume anchor follows the visible branch re
   ];
 
   const anchor = resolveTheoremResumeAnchor(displayChain, runStream, 5);
-  assert.equal(anchor?.stream, branchStream);
-  assert.equal(anchor?.hash, displayChain[4]?.hash);
+  expect(anchor?.stream).toBe(branchStream);
+  expect(anchor?.hash).toBe(displayChain[4]?.hash);
 });
 
 test("framework translators: agent run intent emits enqueue + redirect", () => {
@@ -179,11 +178,11 @@ test("framework translators: agent run intent emits enqueue + redirect", () => {
   });
 
   const kinds = ops.map((op) => op.type);
-  assert.deepEqual(kinds, ["enqueue_job", "redirect"]);
+  expect(kinds).toEqual(["enqueue_job", "redirect"]);
   const enqueue = ops[0];
-  assert.equal(enqueue?.type, "enqueue_job");
+  expect(enqueue?.type).toBe("enqueue_job");
   if (enqueue?.type === "enqueue_job") {
-    assert.equal(enqueue.job.agentId, "agent");
-    assert.equal(enqueue.job.singletonMode, "cancel");
+    expect(enqueue.job.agentId).toBe("agent");
+    expect(enqueue.job.singletonMode).toBe("cancel");
   }
 });

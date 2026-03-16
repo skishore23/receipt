@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,6 +22,9 @@ import {
   reduceFactory,
   type FactoryBudgetState,
   type FactoryCandidateRecord,
+  type FactoryObjectivePhase,
+  type FactoryObjectiveSlotState,
+  type FactoryRepoProfileRecord,
   type FactoryCheckResult,
   type FactoryCmd,
   type FactoryEvent,
@@ -38,6 +42,7 @@ import { createRuntime, type Runtime } from "../core/runtime.js";
 import { type GraphRef } from "../core/graph.js";
 import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString } from "../framework/http.js";
 import type { SseHub } from "../framework/sse-hub.js";
+import { resolveCliInvocation } from "../lib/runtime-paths.js";
 import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../modules/job.js";
 import {
   fallbackFactoryDecision,
@@ -52,8 +57,15 @@ const execFileAsync = promisify(execFile);
 const FACTORY_STREAM_PREFIX = "factory/objectives";
 const DEFAULT_CHECKS = ["npm run build"] as const;
 const FACTORY_DATA_DIR = ".receipt/factory";
+const FACTORY_SHARED_REPO_PROFILE_DIR = path.join("factory", "repo-profile");
 const AGENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "theorem", "writer", "inspector", "agent", "infra", "axiom"]);
+
+const resolveRepoRoot = (repoRoot?: string): string =>
+  repoRoot?.trim()
+  || process.env.RECEIPT_REPO_ROOT?.trim()
+  || process.env.HUB_REPO_ROOT?.trim()
+  || process.cwd();
 const DISCOVERY_ONLY_RE = /\b(search|locate|identify|inspect|find|trace|look\s+for|determine|record)\b/i;
 const DIFF_PRODUCING_RE = /\b(edit|change|update|remove|add|implement|write|modify|refactor|fix|test|verify|run|create)\b/i;
 
@@ -67,6 +79,28 @@ const requireNonEmpty = (value: unknown, message: string): string => {
     throw new FactoryServiceError(400, message);
   }
 };
+
+const fileExists = async (targetPath: string): Promise<boolean> => {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const repoUsesBun = async (
+  repoRoot: string,
+  packageJson: { readonly packageManager?: string } | undefined,
+): Promise<boolean> => {
+  const packageManager = packageJson?.packageManager?.trim().toLowerCase();
+  if (packageManager?.startsWith("bun@")) return true;
+  return await fileExists(path.join(repoRoot, "bun.lock"))
+    || await fileExists(path.join(repoRoot, "bun.lockb"));
+};
+
+const scriptCommand = (scriptName: string, bunFirst: boolean): string =>
+  `${bunFirst ? "bun" : "npm"} run ${scriptName}`;
 const clipText = (value: string | undefined, max = 280): string | undefined => {
   if (!value) return undefined;
   const trimmed = trimmedString(value);
@@ -94,26 +128,13 @@ const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
 const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "queued" || status === "leased" || status === "running";
 
-const factoryLane = (status: FactoryObjectiveStatus): FactoryObjectiveLane => {
-  switch (status) {
-    case "decomposing":
-    case "planning":
-      return "planning";
-    case "executing":
-      return "executing";
-    case "integrating":
-      return "integrating";
-    case "promoting":
-      return "promoting";
-    case "blocked":
-    case "failed":
-    case "canceled":
-      return "blocked";
-    case "completed":
-      return "completed";
-    default:
-      return "planning";
-  }
+const boardSectionForObjective = (
+  objective: Pick<FactoryObjectiveCard, "status" | "scheduler">,
+): FactoryBoardSection => {
+  if (objective.status === "completed" || objective.status === "canceled") return "completed";
+  if (objective.status === "blocked" || objective.status === "failed") return "needs_attention";
+  if (objective.scheduler.slotState === "queued") return "queued";
+  return "active";
 };
 
 const objectiveTaskStatusPriority = (status: FactoryTaskStatus): number => {
@@ -203,10 +224,30 @@ export type FactoryObjectiveCard = {
   readonly objectiveId: string;
   readonly title: string;
   readonly status: FactoryObjectiveStatus;
+  readonly phase: FactoryObjectivePhase;
+  readonly scheduler: {
+    readonly slotState: FactoryObjectiveSlotState;
+    readonly queuePosition?: number;
+  };
+  readonly repoProfile: FactoryRepoProfileRecord;
   readonly archivedAt?: number;
   readonly updatedAt: number;
   readonly latestSummary?: string;
   readonly blockedReason?: string;
+  readonly blockedExplanation?: {
+    readonly summary: string;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+    readonly receiptType?: string;
+    readonly receiptHash?: string;
+  };
+  readonly latestDecision?: {
+    readonly summary: string;
+    readonly at: number;
+    readonly source: "plan" | "orchestrator" | "fallback" | "system";
+    readonly selectedActionId?: string;
+  };
+  readonly nextAction?: string;
   readonly activeTaskCount: number;
   readonly readyTaskCount: number;
   readonly taskCount: number;
@@ -225,6 +266,32 @@ export type FactoryObjectiveDetail = FactoryObjectiveCard & {
   readonly tasks: ReadonlyArray<FactoryTaskView>;
   readonly candidates: ReadonlyArray<FactoryCandidateRecord>;
   readonly integration: FactoryState["integration"];
+  readonly recentReceipts: ReadonlyArray<{
+    readonly type: string;
+    readonly hash: string;
+    readonly ts: number;
+    readonly summary: string;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+  }>;
+  readonly evidenceCards: ReadonlyArray<{
+    readonly kind: "decision" | "plan" | "blocked" | "merge" | "promotion";
+    readonly title: string;
+    readonly summary: string;
+    readonly at: number;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+    readonly receiptHash?: string;
+    readonly receiptType: string;
+  }>;
+  readonly activity: ReadonlyArray<{
+    readonly kind: "task" | "job" | "receipt";
+    readonly title: string;
+    readonly summary: string;
+    readonly at: number;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+  }>;
   readonly latestRebracket?: FactoryState["latestRebracket"];
 };
 
@@ -234,19 +301,19 @@ export type FactoryComposeModel = {
   readonly sourceBranch?: string;
   readonly objectiveCount: number;
   readonly defaultPolicy: FactoryNormalizedObjectivePolicy;
+  readonly repoProfile: FactoryRepoProfileRecord;
+  readonly defaultValidationCommands: ReadonlyArray<string>;
 };
 
-export type FactoryObjectiveLane =
-  | "planning"
-  | "executing"
-  | "integrating"
-  | "promoting"
-  | "blocked"
+export type FactoryBoardSection =
+  | "needs_attention"
+  | "active"
+  | "queued"
   | "completed";
 
 export type FactoryBoardProjection = {
-  readonly objectives: ReadonlyArray<FactoryObjectiveCard & { readonly lane: FactoryObjectiveLane }>;
-  readonly lanes: Readonly<Record<FactoryObjectiveLane, ReadonlyArray<FactoryObjectiveCard & { readonly lane: FactoryObjectiveLane }>>>;
+  readonly objectives: ReadonlyArray<FactoryObjectiveCard & { readonly section: FactoryBoardSection }>;
+  readonly sections: Readonly<Record<FactoryBoardSection, ReadonlyArray<FactoryObjectiveCard & { readonly section: FactoryBoardSection }>>>;
   readonly selectedObjectiveId?: string;
 };
 
@@ -254,6 +321,7 @@ export type FactoryLiveProjection = {
   readonly selectedObjectiveId?: string;
   readonly objectiveTitle?: string;
   readonly objectiveStatus?: FactoryObjectiveStatus;
+  readonly phase?: FactoryObjectivePhase;
   readonly activeTasks: ReadonlyArray<FactoryTaskView>;
   readonly recentJobs: ReadonlyArray<QueueJob>;
 };
@@ -262,6 +330,14 @@ export type FactoryDebugProjection = {
   readonly objectiveId: string;
   readonly title: string;
   readonly status: FactoryObjectiveStatus;
+  readonly phase: FactoryObjectivePhase;
+  readonly scheduler: {
+    readonly slotState: FactoryObjectiveSlotState;
+    readonly queuePosition?: number;
+  };
+  readonly repoProfile: FactoryRepoProfileRecord;
+  readonly latestDecision?: FactoryObjectiveCard["latestDecision"];
+  readonly nextAction?: string;
   readonly policy: FactoryNormalizedObjectivePolicy;
   readonly budgetState: FactoryBudgetState;
   readonly recentReceipts: ReadonlyArray<{
@@ -338,6 +414,39 @@ type DecomposedTaskSpec = {
   readonly prompt: string;
   readonly workerType: FactoryWorkerType;
   readonly dependsOn: ReadonlyArray<string>;
+};
+
+type FactoryRepoProfileArtifact = {
+  readonly status: FactoryRepoProfileRecord["status"];
+  readonly generatedAt: number;
+  readonly repoSignature?: string;
+  readonly inferredChecks: ReadonlyArray<string>;
+  readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
+  readonly generatedSkillPaths: ReadonlyArray<string>;
+  readonly summary: string;
+};
+
+export type FactoryRepoProfileProgress = {
+  readonly step:
+    | "bootstrap"
+    | "cache"
+    | "scan"
+    | "infer_checks"
+    | "llm"
+    | "write_skills"
+    | "persist"
+    | "complete";
+  readonly message: string;
+};
+
+type FactoryRepoProfilePrepareOptions = {
+  readonly onProgress?: (progress: FactoryRepoProfileProgress) => void;
+};
+
+export type FactoryObjectiveControlJobPayload = {
+  readonly kind: "factory.objective.control";
+  readonly objectiveId: string;
+  readonly reason: "startup" | "admitted";
 };
 
 type FactoryMutationPlan = {
@@ -513,6 +622,16 @@ const mutationPlanSchema = z.object({
   ])).max(6).default([]),
 });
 
+const repoProfileSchema = z.object({
+  summary: z.string().min(1),
+  inferredChecks: z.array(z.string().min(1)).min(1).max(6).default(["npm run build"]),
+  generatedSkills: z.array(z.object({
+    slug: z.string().min(1).max(48),
+    title: z.string().min(1).max(120),
+    content: z.string().min(1),
+  })).max(4).default([]),
+});
+
 const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
   const normalized = (value ?? "codex").trim().toLowerCase() || "codex";
   return SUPPORTED_WORKER_TYPES.has(normalized) ? normalized : "codex";
@@ -548,7 +667,7 @@ export class FactoryService {
     this.llmStructured = opts.llmStructured;
     this.git = new HubGit({
       dataDir: opts.dataDir,
-      repoRoot: opts.repoRoot ?? process.env.HUB_REPO_ROOT ?? process.cwd(),
+      repoRoot: resolveRepoRoot(opts.repoRoot),
     });
     this.runtime = createRuntime<FactoryCmd, FactoryEvent, FactoryState>(
       jsonlStore<FactoryEvent>(opts.dataDir),
@@ -563,11 +682,34 @@ export class FactoryService {
     await this.git.ensureReady();
   }
 
+  async prepareRepoProfile(
+    opts: FactoryRepoProfilePrepareOptions = {},
+  ): Promise<FactoryRepoProfileRecord> {
+    opts.onProgress?.({
+      step: "bootstrap",
+      message: "Checking git repository and Factory workspace state",
+    });
+    await this.ensureBootstrap();
+    const artifact = await this.generateSharedRepoProfile(opts);
+    opts.onProgress?.({
+      step: "complete",
+      message: "Repository profile is ready",
+    });
+    return {
+      status: artifact.status,
+      generatedAt: artifact.generatedAt,
+      inferredChecks: artifact.inferredChecks,
+      generatedSkillRefs: artifact.generatedSkillRefs,
+      summary: artifact.summary,
+    };
+  }
+
   async createObjective(input: FactoryObjectiveInput): Promise<FactoryObjectiveDetail> {
     await this.ensureBootstrap();
     const title = requireNonEmpty(input.title, "title required");
     const prompt = requireNonEmpty(input.prompt, "prompt required");
     const checks = uniqueChecks(input.checks);
+    const checksSource = input.checks?.length ? "explicit" : "default";
     const channel = input.channel?.trim() || "results";
     const policy = normalizeFactoryObjectivePolicy(input.policy);
     const sourceStatus = await this.git.sourceStatus();
@@ -580,61 +722,43 @@ export class FactoryService {
     const objectiveId = this.makeId("objective");
     const baseHash = await this.git.resolveBaseHash(input.baseHash);
     const createdAt = Date.now();
-    await this.emitObjective(objectiveId, {
-      type: "objective.created",
-      objectiveId,
-      title,
-      prompt,
-      channel,
-      baseHash,
-      checks,
-      policy,
-      createdAt,
-    });
-    const taskSpecs = await this.decomposeObjective(title, prompt);
-    for (const spec of taskSpecs) {
-      const taskId = spec.taskId;
-      const task: FactoryTaskRecord = {
-        nodeId: taskId,
-        taskId,
-        taskKind: "planned",
-        title: spec.title,
-        prompt: spec.prompt,
-        workerType: normalizeWorkerType(spec.workerType),
-        baseCommit: baseHash,
-        dependsOn: spec.dependsOn,
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs: [
-          stateRef(`${objectiveStream(objectiveId)}:objective`, "objective"),
-          commitRef(baseHash, "base commit"),
-        ],
-        artifactRefs: {},
-        createdAt,
-      };
-      await this.emitObjective(objectiveId, {
-        type: "task.added",
+    const hasActiveSlot = await this.hasActiveObjectiveSlot();
+    await this.emitObjectiveBatch(objectiveId, [
+      {
+        type: "objective.created",
         objectiveId,
-        task,
+        title,
+        prompt,
+        channel,
+        baseHash,
+        checks,
+        checksSource,
+        policy,
         createdAt,
-      });
-    }
-    await this.reactObjective(objectiveId);
+      },
+      hasActiveSlot
+        ? {
+            type: "objective.slot.queued",
+            objectiveId,
+            queuedAt: createdAt + 1,
+          }
+        : {
+            type: "objective.slot.admitted",
+            objectiveId,
+            admittedAt: createdAt + 1,
+          },
+    ]);
+    await this.enqueueObjectiveControl(objectiveId, "startup");
     return this.getObjective(objectiveId);
   }
 
   async listObjectives(): Promise<ReadonlyArray<FactoryObjectiveCard>> {
-    await this.ensureBootstrap();
-    const streams = await this.discoverObjectiveStreams();
+    const states = await this.listObjectiveStates();
+    const queuePositions = this.queuePositionsForStates(states);
     const details = await Promise.all(
-      streams.map(async (stream) => {
-        const state = await this.runtime.state(stream);
-        return state.objectiveId ? this.toObjectiveCard(state) : undefined;
-      })
+      states.map((state) => this.buildObjectiveCard(state, queuePositions.get(state.objectiveId))),
     );
-    return details
-      .filter((detail): detail is FactoryObjectiveCard => Boolean(detail))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return details.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getObjectiveState(objectiveId: string): Promise<FactoryState> {
@@ -646,12 +770,16 @@ export class FactoryService {
 
   async getObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
-    return this.buildObjectiveDetail(state);
+    const states = await this.listObjectiveStates();
+    const queuePositions = this.queuePositionsForStates(states);
+    return this.buildObjectiveDetail(state, queuePositions.get(objectiveId));
   }
 
   async getObjectiveDebug(objectiveId: string): Promise<FactoryDebugProjection> {
     const state = await this.getObjectiveState(objectiveId);
-    return this.buildObjectiveDebug(state);
+    const states = await this.listObjectiveStates();
+    const queuePositions = this.queuePositionsForStates(states);
+    return this.buildObjectiveDebug(state, queuePositions.get(objectiveId));
   }
 
   async listObjectiveReceipts(
@@ -675,24 +803,26 @@ export class FactoryService {
       .filter((objective) => !objective.archivedAt)
       .map((objective) => ({
         ...objective,
-        lane: factoryLane(objective.status),
+        section: boardSectionForObjective(objective),
       }));
     const resolvedSelectedObjectiveId = this.resolveSelectedObjectiveId(objectives, selectedObjectiveId);
     return {
       objectives,
-      lanes: {
-        planning: objectives.filter((objective) => objective.lane === "planning"),
-        executing: objectives.filter((objective) => objective.lane === "executing"),
-        integrating: objectives.filter((objective) => objective.lane === "integrating"),
-        promoting: objectives.filter((objective) => objective.lane === "promoting"),
-        blocked: objectives.filter((objective) => objective.lane === "blocked"),
-        completed: objectives.filter((objective) => objective.lane === "completed"),
+      sections: {
+        needs_attention: objectives.filter((objective) => objective.section === "needs_attention"),
+        active: objectives.filter((objective) => objective.section === "active"),
+        queued: objectives.filter((objective) => objective.section === "queued"),
+        completed: objectives.filter((objective) => objective.section === "completed"),
       },
       selectedObjectiveId: resolvedSelectedObjectiveId,
     };
   }
 
   async buildComposeModel(): Promise<FactoryComposeModel> {
+    let repoProfile = await this.loadSharedRepoProfileArtifact();
+    if (!repoProfile && await this.repoProfileArtifactExists()) {
+      repoProfile = await this.generateSharedRepoProfile();
+    }
     const [sourceStatus, defaultBranch, objectives] = await Promise.all([
       this.git.sourceStatus(),
       this.git.defaultBranch(),
@@ -704,6 +834,13 @@ export class FactoryService {
       sourceBranch: sourceStatus.branch,
       objectiveCount: objectives.filter((objective) => !objective.archivedAt).length,
       defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      repoProfile: repoProfile ?? {
+        status: "missing",
+        inferredChecks: [],
+        generatedSkillRefs: [],
+        summary: "",
+      },
+      defaultValidationCommands: repoProfile?.inferredChecks?.length ? repoProfile.inferredChecks : [...DEFAULT_CHECKS],
     };
   }
 
@@ -729,6 +866,7 @@ export class FactoryService {
       selectedObjectiveId: objectiveId,
       objectiveTitle: detail.title,
       objectiveStatus: detail.status,
+      phase: detail.phase,
       activeTasks,
       recentJobs,
     };
@@ -757,6 +895,7 @@ export class FactoryService {
       canceledAt: Date.now(),
       reason,
     });
+    await this.rebalanceObjectiveSlots();
     return this.getObjective(objectiveId);
   }
 
@@ -797,15 +936,119 @@ export class FactoryService {
   }
 
   async resumeObjectives(): Promise<void> {
+    await this.rebalanceObjectiveSlots();
     const objectives = await this.listObjectives();
-    for (const objective of objectives.filter((item) => !["completed", "failed", "canceled"].includes(item.status))) {
-      await this.reactObjective(objective.objectiveId);
+    for (const objective of objectives.filter((item) => !["completed", "failed", "canceled"].includes(item.status) && item.scheduler.slotState === "active")) {
+      await this.enqueueObjectiveControl(objective.objectiveId, "admitted");
     }
   }
 
   private objectiveElapsedMinutes(state: FactoryState, now = Date.now()): number {
     if (!state.createdAt) return 0;
     return Math.max(0, Math.floor((now - state.createdAt) / 60_000));
+  }
+
+  private isTerminalObjectiveStatus(status: FactoryObjectiveStatus): boolean {
+    return status === "completed" || status === "failed" || status === "canceled";
+  }
+
+  private releasesObjectiveSlot(status: FactoryObjectiveStatus): boolean {
+    return this.isTerminalObjectiveStatus(status) || status === "blocked";
+  }
+
+  private async listObjectiveStates(): Promise<ReadonlyArray<FactoryState>> {
+    await this.ensureBootstrap();
+    const streams = await this.discoverObjectiveStreams();
+    const states = await Promise.all(
+      streams.map(async (stream) => this.runtime.state(stream)),
+    );
+    return states
+      .filter((state) => Boolean(state.objectiveId))
+      .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
+  }
+
+  private queuePositionsForStates(states: ReadonlyArray<FactoryState>): ReadonlyMap<string, number> {
+    const queued = states
+      .filter((state) =>
+        Boolean(state.objectiveId)
+        && !state.archivedAt
+        && !this.isTerminalObjectiveStatus(state.status)
+        && state.scheduler.slotState === "queued",
+      )
+      .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
+    return new Map(queued.map((state, index) => [state.objectiveId, index + 1] as const));
+  }
+
+  private deriveObjectivePhase(state: FactoryState): FactoryObjectivePhase {
+    if (state.status === "blocked" || state.status === "failed" || state.status === "canceled") return "blocked";
+    if (state.scheduler.slotState === "queued") return "waiting_for_slot";
+    if (state.status === "decomposing") return "preparing_repo";
+    if (state.status === "planning") return "planning_graph";
+    if (state.status === "integrating") return "integrating";
+    if (state.status === "promoting" || state.integration.status === "ready_to_promote" || state.integration.status === "promoting" || state.integration.status === "promoted") {
+      return "promoting";
+    }
+    return "executing";
+  }
+
+  private deriveLatestDecision(state: FactoryState): FactoryObjectiveCard["latestDecision"] | undefined {
+    if (state.latestRebracket) {
+      return {
+        summary: state.latestRebracket.reason,
+        at: state.latestRebracket.appliedAt,
+        source: state.latestRebracket.source,
+        selectedActionId: state.latestRebracket.selectedActionId,
+      };
+    }
+    if (state.plan.adoptedAt && state.plan.summary) {
+      return {
+        summary: state.plan.summary,
+        at: state.plan.adoptedAt,
+        source: "plan",
+      };
+    }
+    if (state.plan.proposedAt && state.plan.summary) {
+      return {
+        summary: state.plan.summary,
+        at: state.plan.proposedAt,
+        source: "plan",
+      };
+    }
+    if (state.integration.status === "ready_to_promote" && state.integration.lastSummary) {
+      return {
+        summary: state.integration.lastSummary,
+        at: state.integration.updatedAt,
+        source: "system",
+      };
+    }
+    return undefined;
+  }
+
+  private deriveNextAction(state: FactoryState, queuePosition?: number): string | undefined {
+    if (state.status === "blocked") return "Review the blocking receipt and react or cancel the objective.";
+    if (state.scheduler.slotState === "queued") {
+      return queuePosition
+        ? `Waiting for the repo execution slot (${queuePosition} in queue).`
+        : "Waiting for the repo execution slot.";
+    }
+    if (state.status === "decomposing") return "Preparing the repo profile and generated skill bundle.";
+    if (state.status === "planning") return "Adopting the first task graph.";
+    if (state.integration.status === "ready_to_promote" && !state.policy.promotion.autoPromote) {
+      return "Promote the integration branch into source when ready.";
+    }
+    if (state.integration.status === "conflicted") return "Resolve the integration conflict or let reconciliation tasks run.";
+    const readyCount = factoryReadyTasks(state).length;
+    if (readyCount > 0) {
+      return readyCount === 1
+        ? "One task is ready to dispatch."
+        : `${readyCount} tasks are ready to dispatch.`;
+    }
+    if (state.graph.activeNodeIds.length > 0) return "Wait for the active task pass to finish.";
+    if (state.integration.status === "queued" || state.integration.status === "merging" || state.integration.status === "validating") {
+      return "Wait for integration validation to finish.";
+    }
+    if (state.status === "completed") return "Objective is complete.";
+    return undefined;
   }
 
   private buildBudgetState(
@@ -852,10 +1095,424 @@ export class FactoryService {
     return objectives[0]?.objectiveId;
   }
 
+  private async hasActiveObjectiveSlot(): Promise<boolean> {
+    const states = await this.listObjectiveStates();
+    return states.some((state) =>
+      !state.archivedAt
+      && !this.releasesObjectiveSlot(state.status)
+      && state.scheduler.slotState === "active"
+      && !state.scheduler.releasedAt,
+    );
+  }
+
+  private async enqueueObjectiveControl(
+    objectiveId: string,
+    reason: FactoryObjectiveControlJobPayload["reason"],
+  ): Promise<void> {
+    const created = await this.queue.enqueue({
+      agentId: "factory",
+      lane: "collect",
+      sessionKey: `factory:objective:${objectiveId}`,
+      singletonMode: "allow",
+      maxAttempts: 2,
+      payload: {
+        kind: "factory.objective.control",
+        objectiveId,
+        reason,
+      } satisfies FactoryObjectiveControlJobPayload,
+    });
+    this.sse.publish("jobs", created.id);
+  }
+
+  async runObjectiveControl(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (payload.kind !== "factory.objective.control") {
+      throw new FactoryServiceError(400, "invalid factory control payload");
+    }
+    const objectiveId = requireNonEmpty(payload.objectiveId, "objectiveId required");
+    const reason = payload.reason === "admitted" ? "admitted" : "startup";
+    await this.ensureBootstrap();
+    await this.processObjectiveStartup(objectiveId, reason);
+    return {
+      objectiveId,
+      status: "completed",
+      reason,
+    };
+  }
+
+  private repoProfileDir(): string {
+    return path.join(this.dataDir, FACTORY_SHARED_REPO_PROFILE_DIR);
+  }
+
+  private repoProfileArtifactPath(): string {
+    return path.join(this.repoProfileDir(), "profile.json");
+  }
+
+  private repoProfileSkillsDir(): string {
+    return path.join(this.repoProfileDir(), "skills");
+  }
+
+  private async currentRepoProfileSignature(): Promise<string> {
+    const [packageJsonRaw, readmeRaw] = await Promise.all([
+      fs.readFile(path.join(this.git.repoRoot, "package.json"), "utf-8").catch(() => ""),
+      fs.readFile(path.join(this.git.repoRoot, "README.md"), "utf-8").catch(() => ""),
+    ]);
+    return createHash("sha256")
+      .update(this.git.repoRoot)
+      .update("\n--package.json--\n")
+      .update(packageJsonRaw)
+      .update("\n--README.md--\n")
+      .update(readmeRaw)
+      .digest("hex");
+  }
+
+  private async repoProfileArtifactExists(): Promise<boolean> {
+    try {
+      await fs.access(this.repoProfileArtifactPath());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async loadSharedRepoProfileArtifact(): Promise<FactoryRepoProfileArtifact | undefined> {
+    try {
+      const raw = await fs.readFile(this.repoProfileArtifactPath(), "utf-8");
+      const parsed = JSON.parse(raw) as FactoryRepoProfileArtifact;
+      if (!parsed || typeof parsed !== "object") return undefined;
+      if (!Array.isArray(parsed.inferredChecks) || !Array.isArray(parsed.generatedSkillPaths) || !Array.isArray(parsed.generatedSkillRefs)) {
+        return undefined;
+      }
+      const signature = await this.currentRepoProfileSignature();
+      if (typeof parsed.repoSignature !== "string" || parsed.repoSignature !== signature) {
+        return undefined;
+      }
+      return {
+        status: parsed.status,
+        generatedAt: parsed.generatedAt,
+        repoSignature: parsed.repoSignature,
+        inferredChecks: parsed.inferredChecks.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
+        generatedSkillRefs: parsed.generatedSkillRefs.filter((item): item is GraphRef => isRecord(item) && typeof item.kind === "string" && typeof item.ref === "string"),
+        generatedSkillPaths: parsed.generatedSkillPaths.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
+        summary: typeof parsed.summary === "string" ? parsed.summary : "",
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async inferRepoProfileFallback(): Promise<{
+    readonly summary: string;
+    readonly inferredChecks: ReadonlyArray<string>;
+    readonly generatedSkills: ReadonlyArray<{ readonly slug: string; readonly title: string; readonly content: string }>;
+  }> {
+    const packageJsonPath = path.join(this.git.repoRoot, "package.json");
+    const readmePath = path.join(this.git.repoRoot, "README.md");
+    const packageJsonRaw = await fs.readFile(packageJsonPath, "utf-8").catch(() => "");
+    const readmeRaw = await fs.readFile(readmePath, "utf-8").catch(() => "");
+    const packageJson = (() => {
+      if (!packageJsonRaw.trim()) return undefined;
+      try {
+        return JSON.parse(packageJsonRaw) as {
+          readonly name?: string;
+          readonly packageManager?: string;
+          readonly scripts?: Record<string, string>;
+        };
+      } catch {
+        return undefined;
+      }
+    })();
+    const scripts = packageJson?.scripts ?? {};
+    const bunFirst = await repoUsesBun(this.git.repoRoot, packageJson);
+    const inferredChecks = [
+      "build" in scripts ? scriptCommand("build", bunFirst) : undefined,
+      "test" in scripts ? scriptCommand("test", bunFirst) : undefined,
+      "lint" in scripts ? scriptCommand("lint", bunFirst) : undefined,
+    ].filter((item): item is string => Boolean(item));
+    const checks = inferredChecks.length ? inferredChecks : [...DEFAULT_CHECKS];
+    const summary = [
+      `Repo ${packageJson?.name ?? path.basename(this.git.repoRoot)} is prepared for Factory objectives.`,
+      bunFirst ? "Bun was detected as the package runner." : "npm-compatible scripts were detected for validation.",
+      Object.keys(scripts).length
+        ? `Primary scripts: ${Object.keys(scripts).slice(0, 8).join(", ")}.`
+        : "No package.json scripts were detected, so Factory will fall back to basic validation commands.",
+      readmeRaw.trim()
+        ? `README focus: ${clipText(readmeRaw.replace(/\s+/g, " "), 220) ?? ""}`
+        : "No README summary was available.",
+    ].join(" ");
+    return {
+      summary,
+      inferredChecks: checks,
+      generatedSkills: [{
+        slug: "repo-operating-notes",
+        title: "Repo Operating Notes",
+        content: [
+          "# Repo Operating Notes",
+          "",
+          summary,
+          "",
+          "## Validation Commands",
+          ...checks.map((check) => `- ${check}`),
+          "",
+          "## Factory Guidance",
+          "- Reuse existing repository conventions before introducing new build or test paths.",
+          "- Prefer the repository's current package manager and script names.",
+          "- Keep task changes aligned with committed Git history and objective integration flow.",
+        ].join("\n"),
+      }],
+    };
+  }
+
+  private async generateSharedRepoProfile(
+    opts: FactoryRepoProfilePrepareOptions = {},
+  ): Promise<FactoryRepoProfileArtifact> {
+    const existing = await this.loadSharedRepoProfileArtifact();
+    if (existing) {
+      opts.onProgress?.({
+        step: "cache",
+        message: "Reusing cached repository profile",
+      });
+      return existing;
+    }
+
+    opts.onProgress?.({
+      step: "scan",
+      message: "Reading package.json, README, and repository layout",
+    });
+    const fallback = await this.inferRepoProfileFallback();
+    const generatedAt = Date.now();
+    const repoSignature = await this.currentRepoProfileSignature();
+    let profile = fallback;
+    let status: FactoryRepoProfileRecord["status"] = "ready";
+
+    opts.onProgress?.({
+      step: "infer_checks",
+      message: `Detected validation commands: ${fallback.inferredChecks.join(" | ") || "none"}`,
+    });
+
+    if (this.llmStructured) {
+      opts.onProgress?.({
+        step: "llm",
+        message: "Generating repo summary and skills with OpenAI",
+      });
+      const topEntries = (await fs.readdir(this.git.repoRoot, { withFileTypes: true }).catch(() => []))
+        .map((entry) => ({
+          name: entry.name,
+          kind: entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other",
+        }))
+        .slice(0, 40);
+      const checkedInSkills = await this.collectCheckedInRepoSkillPaths();
+      const packageJsonRaw = await fs.readFile(path.join(this.git.repoRoot, "package.json"), "utf-8").catch(() => "");
+      const readmeRaw = await fs.readFile(path.join(this.git.repoRoot, "README.md"), "utf-8").catch(() => "");
+      try {
+        const { parsed } = await this.llmStructured({
+          schema: repoProfileSchema,
+          schemaName: "factory_repo_profile",
+          system: [
+            "You are preparing a software repo for Receipt Factory objectives.",
+            "Infer the best default validation commands for this repo.",
+            "Write a short repo summary and generate concise repo-specific skill markdown files that future code workers can use.",
+            "Do not invent commands that do not match the repository's likely tooling.",
+          ].join("\n"),
+          user: JSON.stringify({
+            repoRoot: this.git.repoRoot,
+            topEntries,
+            checkedInSkills,
+            packageJson: packageJsonRaw ? JSON.parse(packageJsonRaw) : undefined,
+            readme: clipText(readmeRaw.replace(/\s+/g, " "), 2_000),
+            fallback,
+          }, null, 2),
+        });
+        profile = {
+          summary: parsed.summary,
+          inferredChecks: parsed.inferredChecks.length ? parsed.inferredChecks : fallback.inferredChecks,
+          generatedSkills: parsed.generatedSkills.length ? parsed.generatedSkills : fallback.generatedSkills,
+        };
+      } catch {
+        status = "ready";
+      }
+    }
+
+    opts.onProgress?.({
+      step: "write_skills",
+      message: "Writing generated repository skills and notes",
+    });
+    await fs.mkdir(this.repoProfileSkillsDir(), { recursive: true });
+    const generatedSkillPaths: string[] = [];
+    const generatedSkillRefs: GraphRef[] = [];
+    for (const [index, skill] of profile.generatedSkills.entries()) {
+      const fileName = `${String(index + 1).padStart(2, "0")}-${skill.slug.replace(/[^a-z0-9._-]+/gi, "-").toLowerCase()}.md`;
+      const filePath = path.join(this.repoProfileSkillsDir(), fileName);
+      await fs.writeFile(filePath, skill.content.trimEnd() + "\n", "utf-8");
+      generatedSkillPaths.push(filePath);
+      generatedSkillRefs.push(artifactRef(filePath, skill.title));
+    }
+    const artifact: FactoryRepoProfileArtifact = {
+      status,
+      generatedAt,
+      repoSignature,
+      inferredChecks: profile.inferredChecks,
+      generatedSkillRefs,
+      generatedSkillPaths,
+      summary: profile.summary,
+    };
+    opts.onProgress?.({
+      step: "persist",
+      message: "Saving repository profile cache",
+    });
+    await fs.mkdir(this.repoProfileDir(), { recursive: true });
+    await fs.writeFile(this.repoProfileArtifactPath(), JSON.stringify(artifact, null, 2), "utf-8");
+    return artifact;
+  }
+
+  private async ensureRepoProfileForObjective(state: FactoryState): Promise<void> {
+    if (state.repoProfile.status === "ready" && state.repoProfile.generatedAt) return;
+    const requestedAt = Date.now();
+    await this.emitObjective(state.objectiveId, {
+      type: "repo.profile.requested",
+      objectiveId: state.objectiveId,
+      requestedAt,
+    });
+    const prior = await this.loadSharedRepoProfileArtifact();
+    const artifact = prior ?? await this.generateSharedRepoProfile();
+    await this.emitObjective(state.objectiveId, {
+      type: "repo.profile.generated",
+      objectiveId: state.objectiveId,
+      generatedAt: artifact.generatedAt,
+      status: artifact.status,
+      inferredChecks: artifact.inferredChecks,
+      generatedSkillRefs: artifact.generatedSkillRefs,
+      summary: artifact.summary,
+      source: prior ? "reused" : "generated",
+    });
+  }
+
+  private async planObjective(state: FactoryState): Promise<void> {
+    if (state.taskOrder.length > 0) return;
+    const { tasks, fallback } = await this.decomposeObjective(state.title, state.prompt);
+    const proposedAt = Date.now();
+    const summary = tasks.length === 1
+      ? `Adopted a single-task execution plan for ${state.title}.`
+      : `Adopted a ${tasks.length}-task graph for ${state.title}.`;
+    const taskRecords = tasks.map((spec, index) => {
+      const createdAt = proposedAt + index + 2;
+      const taskId = spec.taskId;
+      return {
+        nodeId: taskId,
+        taskId,
+        taskKind: "planned",
+        title: spec.title,
+        prompt: spec.prompt,
+        workerType: normalizeWorkerType(spec.workerType),
+        baseCommit: state.baseHash,
+        dependsOn: spec.dependsOn,
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [
+          stateRef(`${objectiveStream(state.objectiveId)}:objective`, "objective"),
+          commitRef(state.baseHash, "base commit"),
+        ],
+        artifactRefs: {},
+        createdAt,
+      } satisfies FactoryTaskRecord;
+    });
+    await this.emitObjectiveBatch(state.objectiveId, [
+      {
+        type: "objective.plan.proposed",
+        objectiveId: state.objectiveId,
+        taskCount: taskRecords.length,
+        summary: fallback ? `${summary} Factory used the deterministic fallback planner.` : summary,
+        fallback,
+        proposedAt,
+      },
+      ...taskRecords.map((task) => ({
+        type: "task.added" as const,
+        objectiveId: state.objectiveId,
+        task,
+        createdAt: task.createdAt,
+      })),
+      {
+        type: "objective.plan.adopted",
+        objectiveId: state.objectiveId,
+        taskIds: taskRecords.map((task) => task.taskId),
+        summary: fallback ? `${summary} Factory used the deterministic fallback planner.` : summary,
+        fallback,
+        adoptedAt: proposedAt + taskRecords.length + 2,
+      },
+    ]);
+  }
+
+  private async rebalanceObjectiveSlots(): Promise<void> {
+    const states = await this.listObjectiveStates();
+    for (const state of states) {
+      if (
+        state.scheduler.slotState === "active"
+        && !state.scheduler.releasedAt
+        && this.releasesObjectiveSlot(state.status)
+      ) {
+        await this.emitObjective(state.objectiveId, {
+          type: "objective.slot.released",
+          objectiveId: state.objectiveId,
+          releasedAt: Date.now(),
+          reason: `slot released after objective entered ${state.status}`,
+        });
+      }
+    }
+
+    const refreshed = await this.listObjectiveStates();
+    const active = refreshed.find((state) =>
+      !state.archivedAt
+      && !this.releasesObjectiveSlot(state.status)
+      && state.scheduler.slotState === "active"
+      && !state.scheduler.releasedAt,
+    );
+    if (active) return;
+
+    const next = refreshed.find((state) =>
+      !state.archivedAt
+      && !this.releasesObjectiveSlot(state.status)
+      && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt),
+    );
+    if (!next) return;
+    await this.emitObjective(next.objectiveId, {
+      type: "objective.slot.admitted",
+      objectiveId: next.objectiveId,
+      admittedAt: Date.now(),
+    });
+    await this.enqueueObjectiveControl(next.objectiveId, "admitted");
+  }
+
+  private async processObjectiveStartup(
+    objectiveId: string,
+    _reason: FactoryObjectiveControlJobPayload["reason"],
+  ): Promise<void> {
+    await this.rebalanceObjectiveSlots();
+    let state = await this.getObjectiveState(objectiveId);
+    if (this.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
+      await this.rebalanceObjectiveSlots();
+      return;
+    }
+    if (state.scheduler.slotState !== "active") return;
+    if (state.repoProfile.status !== "ready" || !state.repoProfile.generatedAt) {
+      await this.ensureRepoProfileForObjective(state);
+      state = await this.getObjectiveState(objectiveId);
+    }
+    if (state.taskOrder.length === 0) {
+      await this.planObjective(state);
+      state = await this.getObjectiveState(objectiveId);
+    }
+    await this.reactObjective(objectiveId);
+    await this.rebalanceObjectiveSlots();
+  }
+
   async reactObjective(objectiveId: string): Promise<void> {
+    await this.rebalanceObjectiveSlots();
     let state = await this.getObjectiveState(objectiveId);
 
-    if (["completed", "failed", "canceled"].includes(state.status)) return;
+    if (["completed", "failed", "canceled"].includes(state.status)) {
+      await this.rebalanceObjectiveSlots();
+      return;
+    }
+    if (state.scheduler.slotState === "queued") return;
 
     const elapsedBlockedReason = this.derivePolicyBlockedReason({
       ...state,
@@ -871,6 +1528,7 @@ export class FactoryService {
           blockedAt: Date.now(),
         });
       }
+      await this.rebalanceObjectiveSlots();
       return;
     }
 
@@ -961,6 +1619,7 @@ export class FactoryService {
         summary: state.integration.lastSummary ?? "Factory objective completed.",
         completedAt: Date.now(),
       });
+      await this.rebalanceObjectiveSlots();
       return;
     }
 
@@ -979,6 +1638,8 @@ export class FactoryService {
         summary: "Factory objective is blocked with no runnable tasks.",
         blockedAt: Date.now(),
       });
+      await this.rebalanceObjectiveSlots();
+      return;
     }
 
     if (
@@ -995,7 +1656,10 @@ export class FactoryService {
         summary: dispatchPolicyBlockedReason,
         blockedAt: Date.now(),
       });
+      await this.rebalanceObjectiveSlots();
+      return;
     }
+    await this.rebalanceObjectiveSlots();
   }
 
   async runTask(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
@@ -1999,6 +2663,7 @@ export class FactoryService {
           blockedAt: Date.now(),
         });
         await this.commitIntegrationMemory(state, candidateId, `Promotion blocked until the source branch is clean.`, ["integration", "blocked"]);
+        await this.rebalanceObjectiveSlots();
         return;
       }
       const freshBase = await this.git.resolveBaseHash();
@@ -2043,6 +2708,7 @@ export class FactoryService {
       summary: `Factory objective completed with ${shortHash(promoted.mergedHead)} on ${promoted.targetBranch}.`,
       completedAt: Date.now(),
     });
+    await this.rebalanceObjectiveSlots();
   }
 
   private async spawnReconciliationTask(
@@ -2104,7 +2770,203 @@ export class FactoryService {
     }
   }
 
-  private async buildObjectiveDetail(state: FactoryState): Promise<FactoryObjectiveDetail> {
+  private summarizedReceipts(
+    chain: ReadonlyArray<{ readonly body: FactoryEvent; readonly hash: string; readonly ts: number }>,
+    limit = 40,
+  ): ReadonlyArray<{
+    readonly type: string;
+    readonly hash: string;
+    readonly ts: number;
+    readonly summary: string;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+  }> {
+    return [...chain]
+      .slice(-Math.max(1, Math.min(limit, 200)))
+      .map((receipt) => {
+        const ref = this.receiptTaskOrCandidateId(receipt.body);
+        return {
+          type: receipt.body.type,
+          hash: receipt.hash,
+          ts: receipt.ts,
+          summary: this.summarizeReceipt(receipt.body),
+          taskId: ref.taskId,
+          candidateId: ref.candidateId,
+        };
+      });
+  }
+
+  private buildBlockedExplanation(
+    state: FactoryState,
+    receipts: ReadonlyArray<{
+      readonly type: string;
+      readonly hash: string;
+      readonly ts: number;
+      readonly summary: string;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+    }>,
+  ): FactoryObjectiveCard["blockedExplanation"] | undefined {
+    if (!state.blockedReason && state.status !== "blocked" && state.integration.status !== "conflicted") return undefined;
+    const match = [...receipts]
+      .reverse()
+      .find((receipt) =>
+        receipt.type === "objective.blocked"
+        || receipt.type === "task.blocked"
+        || receipt.type === "integration.conflicted"
+        || receipt.type === "candidate.conflicted",
+      );
+    if (!match) {
+      return state.blockedReason
+        ? { summary: state.blockedReason }
+        : undefined;
+    }
+    return {
+      summary: match.summary,
+      taskId: match.taskId,
+      candidateId: match.candidateId,
+      receiptType: match.type,
+      receiptHash: match.hash,
+    };
+  }
+
+  private buildEvidenceCards(
+    receipts: ReadonlyArray<{
+      readonly type: string;
+      readonly hash: string;
+      readonly ts: number;
+      readonly summary: string;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+    }>,
+  ): FactoryObjectiveDetail["evidenceCards"] {
+    return receipts
+      .filter((receipt) =>
+        receipt.type === "objective.plan.proposed"
+        || receipt.type === "objective.plan.adopted"
+        || receipt.type === "rebracket.applied"
+        || receipt.type === "objective.blocked"
+        || receipt.type === "task.blocked"
+        || receipt.type === "integration.conflicted"
+        || receipt.type === "merge.applied"
+        || receipt.type === "integration.ready_to_promote"
+        || receipt.type === "integration.promoted",
+      )
+      .slice(-12)
+      .map((receipt) => ({
+        kind:
+          receipt.type === "rebracket.applied" ? "decision"
+          : receipt.type.startsWith("objective.plan") ? "plan"
+          : receipt.type === "merge.applied" ? "merge"
+          : receipt.type === "integration.ready_to_promote" || receipt.type === "integration.promoted" ? "promotion"
+          : "blocked",
+        title:
+          receipt.type === "rebracket.applied" ? "Latest decision"
+          : receipt.type === "objective.plan.proposed" ? "Plan proposed"
+          : receipt.type === "objective.plan.adopted" ? "Plan adopted"
+          : receipt.type === "merge.applied" ? "Integration merge"
+          : receipt.type === "integration.ready_to_promote" ? "Ready to promote"
+          : receipt.type === "integration.promoted" ? "Promoted"
+          : "Blocked or conflicted",
+        summary: receipt.summary,
+        at: receipt.ts,
+        taskId: receipt.taskId,
+        candidateId: receipt.candidateId,
+        receiptHash: receipt.hash,
+        receiptType: receipt.type,
+      }));
+  }
+
+  private buildActivity(
+    tasks: ReadonlyArray<FactoryTaskView>,
+    jobs: ReadonlyArray<QueueJob>,
+    receipts: ReadonlyArray<{
+      readonly type: string;
+      readonly hash: string;
+      readonly ts: number;
+      readonly summary: string;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+    }>,
+  ): FactoryObjectiveDetail["activity"] {
+    const taskEntries = tasks
+      .filter((task) => task.startedAt || task.reviewingAt || task.completedAt)
+      .map((task) => ({
+        kind: "task" as const,
+        title: task.taskId,
+        summary: `${task.title} [${task.status}]`,
+        at: task.completedAt ?? task.reviewingAt ?? task.startedAt ?? task.createdAt,
+        taskId: task.taskId,
+        candidateId: task.candidateId,
+      }));
+    const jobEntries = jobs.slice(0, 10).map((job) => ({
+      kind: "job" as const,
+      title: job.id,
+      summary: `${job.agentId} ${job.status}`,
+      at: job.updatedAt,
+      taskId: typeof (job.payload as Record<string, unknown>).taskId === "string" ? String((job.payload as Record<string, unknown>).taskId) : undefined,
+      candidateId: typeof (job.payload as Record<string, unknown>).candidateId === "string" ? String((job.payload as Record<string, unknown>).candidateId) : undefined,
+    }));
+    const receiptEntries = receipts.slice(-12).map((receipt) => ({
+      kind: "receipt" as const,
+      title: receipt.type,
+      summary: receipt.summary,
+      at: receipt.ts,
+      taskId: receipt.taskId,
+      candidateId: receipt.candidateId,
+    }));
+    return [...taskEntries, ...jobEntries, ...receiptEntries]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 24);
+  }
+
+  private async buildObjectiveCard(
+    state: FactoryState,
+    queuePosition?: number,
+    receipts?: ReadonlyArray<{
+      readonly type: string;
+      readonly hash: string;
+      readonly ts: number;
+      readonly summary: string;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+    }>,
+  ): Promise<FactoryObjectiveCard> {
+    const projection = buildFactoryProjection(state);
+    const latestCandidate = projection.candidates.at(-1);
+    const resolvedReceipts = receipts ?? this.summarizedReceipts(await this.runtime.chain(objectiveStream(state.objectiveId)), 60);
+    const slotState = state.scheduler.slotState ?? "active";
+    return {
+      objectiveId: state.objectiveId,
+      title: state.title,
+      status: state.status,
+      phase: this.deriveObjectivePhase(state),
+      scheduler: {
+        slotState,
+        queuePosition,
+      },
+      repoProfile: state.repoProfile,
+      archivedAt: state.archivedAt,
+      updatedAt: state.updatedAt,
+      latestSummary: state.latestSummary,
+      blockedReason: state.blockedReason,
+      blockedExplanation: this.buildBlockedExplanation(state, resolvedReceipts),
+      latestDecision: this.deriveLatestDecision(state),
+      nextAction: this.deriveNextAction(state, queuePosition),
+      activeTaskCount: projection.activeTasks.length,
+      readyTaskCount: projection.readyTasks.length,
+      taskCount: projection.tasks.length,
+      integrationStatus: state.integration.status,
+      latestCommitHash: state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit,
+    };
+  }
+
+  private async buildObjectiveDetail(state: FactoryState, queuePosition?: number): Promise<FactoryObjectiveDetail> {
+    const [chain, jobs] = await Promise.all([
+      this.runtime.chain(objectiveStream(state.objectiveId)),
+      this.queue.listJobs({ limit: 80 }),
+    ]);
+    const receipts = this.summarizedReceipts(chain, 60);
     const tasks = await Promise.all(
       state.taskOrder.map(async (taskId) => {
         const task = state.graph.nodes[taskId];
@@ -2127,8 +2989,14 @@ export class FactoryService {
         } satisfies FactoryTaskView;
       })
     );
+    const objectiveJobs = jobs
+      .filter((job) => {
+        const payload = job.payload as Record<string, unknown>;
+        return payload.objectiveId === state.objectiveId;
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
     return {
-      ...this.toObjectiveCard(state),
+      ...await this.buildObjectiveCard(state, queuePosition, receipts),
       prompt: state.prompt,
       channel: state.channel,
       baseHash: state.baseHash,
@@ -2141,13 +3009,16 @@ export class FactoryService {
         .map((candidateId) => state.candidates[candidateId])
         .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate)),
       integration: state.integration,
+      recentReceipts: receipts,
+      evidenceCards: this.buildEvidenceCards(receipts),
+      activity: this.buildActivity(tasks, objectiveJobs, receipts),
       latestRebracket: state.latestRebracket,
     };
   }
 
-  private async buildObjectiveDebug(state: FactoryState): Promise<FactoryDebugProjection> {
+  private async buildObjectiveDebug(state: FactoryState, queuePosition?: number): Promise<FactoryDebugProjection> {
     const [detail, chain, jobs] = await Promise.all([
-      this.buildObjectiveDetail(state),
+      this.buildObjectiveDetail(state, queuePosition),
       this.runtime.chain(objectiveStream(state.objectiveId)),
       this.queue.listJobs({ limit: 80 }),
     ]);
@@ -2186,13 +3057,18 @@ export class FactoryService {
       objectiveId: state.objectiveId,
       title: state.title,
       status: state.status,
+      phase: detail.phase,
+      scheduler: detail.scheduler,
+      repoProfile: detail.repoProfile,
+      latestDecision: detail.latestDecision,
+      nextAction: detail.nextAction,
       policy: state.policy,
       budgetState: detail.budgetState,
-      recentReceipts: [...chain].slice(-40).map((receipt) => ({
-        type: receipt.body.type,
+      recentReceipts: this.summarizedReceipts(chain, 40).map((receipt) => ({
+        type: receipt.type,
         hash: receipt.hash,
         ts: receipt.ts,
-        summary: this.summarizeReceipt(receipt.body),
+        summary: receipt.summary,
       })),
       activeJobs,
       lastJobs: objectiveJobs.slice(0, 20),
@@ -2215,25 +3091,6 @@ export class FactoryService {
           memoryScriptPath: files.memoryScriptPath,
         };
       }),
-    };
-  }
-
-  private toObjectiveCard(state: FactoryState): FactoryObjectiveCard {
-    const projection = buildFactoryProjection(state);
-    const latestCandidate = projection.candidates.at(-1);
-    return {
-      objectiveId: state.objectiveId,
-      title: state.title,
-      status: state.status,
-      archivedAt: state.archivedAt,
-      updatedAt: state.updatedAt,
-      latestSummary: state.latestSummary,
-      blockedReason: state.blockedReason,
-      activeTaskCount: projection.activeTasks.length,
-      readyTaskCount: projection.readyTasks.length,
-      taskCount: projection.tasks.length,
-      integrationStatus: state.integration.status,
-      latestCommitHash: state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit,
     };
   }
 
@@ -2310,7 +3167,13 @@ export class FactoryService {
     return [...discovered];
   }
 
-  private async decomposeObjective(title: string, prompt: string): Promise<ReadonlyArray<DecomposedTaskSpec>> {
+  private async decomposeObjective(
+    title: string,
+    prompt: string,
+  ): Promise<{
+    readonly tasks: ReadonlyArray<DecomposedTaskSpec>;
+    readonly fallback: boolean;
+  }> {
     if (this.llmStructured) {
       try {
         const { parsed } = await this.llmStructured({
@@ -2327,18 +3190,26 @@ export class FactoryService {
           user: JSON.stringify({ title, prompt }, null, 2),
         });
         const normalized = this.normalizeDecomposedTasks(parsed.tasks);
-        if (normalized.length > 0) return normalized;
+        if (normalized.length > 0) {
+          return {
+            tasks: normalized,
+            fallback: false,
+          };
+        }
       } catch {
         // fall through to deterministic fallback
       }
     }
-    return [{
-      taskId: taskOrdinalId(0),
-      title: clipText(title, 120) ?? title,
-      prompt,
-      workerType: "codex",
-      dependsOn: [],
-    }];
+    return {
+      tasks: [{
+        taskId: taskOrdinalId(0),
+        title: clipText(title, 120) ?? title,
+        prompt,
+        workerType: "codex",
+        dependsOn: [],
+      }],
+      fallback: true,
+    };
   }
 
   private normalizeDecomposedTasks(
@@ -2654,6 +3525,20 @@ export class FactoryService {
 
   private summarizeReceipt(event: FactoryEvent): string {
     switch (event.type) {
+      case "repo.profile.requested":
+        return "Repo profile requested.";
+      case "repo.profile.generated":
+        return `Repo profile ${event.source === "reused" ? "reused" : "generated"}: ${event.summary}`;
+      case "objective.plan.proposed":
+        return `Plan proposed: ${event.summary}`;
+      case "objective.plan.adopted":
+        return `Plan adopted: ${event.summary}`;
+      case "objective.slot.queued":
+        return "Objective queued for the repo execution slot.";
+      case "objective.slot.admitted":
+        return "Objective admitted to the repo execution slot.";
+      case "objective.slot.released":
+        return `Objective released its slot: ${event.reason}`;
       case "task.added":
         return `${event.task.taskId} added: ${event.task.title}`;
       case "task.split":
@@ -3064,7 +3949,7 @@ export class FactoryService {
   private buildMemoryScriptSource(configPath: string): string {
     const normalizedConfigPath = configPath.replace(/\\/g, "\\\\");
     return [
-      "#!/usr/bin/env node",
+      "#!/usr/bin/env bun",
       `const fs = require("node:fs");`,
       `const { execFileSync } = require("node:child_process");`,
       `const config = JSON.parse(fs.readFileSync(${JSON.stringify(normalizedConfigPath)}, "utf-8"));`,
@@ -3454,21 +4339,21 @@ export class FactoryService {
   private async ensureWorkspaceReceiptCli(workspacePath: string): Promise<string> {
     const binDir = path.join(workspacePath, ".receipt", "bin");
     const shimPath = path.join(binDir, process.platform === "win32" ? "receipt.cmd" : "receipt");
-    const runtimeRoot = process.cwd();
-    const cliPath = path.join(runtimeRoot, "src", "cli.ts");
-    const tsxLoaderPath = path.join(runtimeRoot, "node_modules", "tsx", "dist", "loader.mjs");
+    const { command, args, entryPath } = resolveCliInvocation(import.meta.url);
     await fs.mkdir(binDir, { recursive: true });
     const body = process.platform === "win32"
       ? [
           "@echo off",
           `set "DATA_DIR=${this.dataDir}"`,
-          `node --import "${tsxLoaderPath}" "${cliPath}" %*`,
+          `set "RECEIPT_DATA_DIR=${this.dataDir}"`,
+          `"${command}" "${entryPath}" %*`,
           "",
         ].join("\r\n")
       : [
           "#!/bin/sh",
           `export DATA_DIR=${shellQuote(this.dataDir)}`,
-          `exec node --import ${shellQuote(tsxLoaderPath)} ${shellQuote(cliPath)} "$@"`,
+          `export RECEIPT_DATA_DIR=${shellQuote(this.dataDir)}`,
+          `exec ${shellQuote(command)} ${args.map((arg) => shellQuote(arg)).join(" ")} "$@"`,
           "",
         ].join("\n");
     await fs.writeFile(shimPath, body, "utf-8");
@@ -3559,8 +4444,8 @@ export class FactoryService {
     }
   }
 
-  private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
-    const root = path.join(process.cwd(), "skills");
+  private async collectCheckedInRepoSkillPaths(): Promise<ReadonlyArray<string>> {
+    const root = path.join(this.git.repoRoot, "skills");
     const out: string[] = [];
     const walk = async (dir: string): Promise<void> => {
       const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -3576,6 +4461,17 @@ export class FactoryService {
     };
     await walk(root);
     return out.sort((a, b) => a.localeCompare(b));
+  }
+
+  private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
+    const [checkedIn, sharedProfile] = await Promise.all([
+      this.collectCheckedInRepoSkillPaths(),
+      this.loadSharedRepoProfileArtifact(),
+    ]);
+    return [...new Set([
+      ...checkedIn,
+      ...(sharedProfile?.generatedSkillPaths ?? []),
+    ])].sort((a, b) => a.localeCompare(b));
   }
 
   private async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {

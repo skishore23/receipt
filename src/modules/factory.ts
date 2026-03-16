@@ -69,6 +69,17 @@ export type FactoryMutationAggressiveness =
   | "balanced"
   | "aggressive";
 
+export type FactoryObjectivePhase =
+  | "preparing_repo"
+  | "planning_graph"
+  | "waiting_for_slot"
+  | "executing"
+  | "integrating"
+  | "promoting"
+  | "blocked";
+
+export type FactoryObjectiveSlotState = "queued" | "active";
+
 export type FactoryObjectivePolicy = {
   readonly concurrency?: {
     readonly maxActiveTasks?: number;
@@ -121,6 +132,30 @@ export type FactoryBudgetState = {
   readonly lastMutationAt?: number;
   readonly lastDispatchAt?: number;
   readonly policyBlockedReason?: string;
+};
+
+export type FactorySchedulerRecord = {
+  readonly slotState?: FactoryObjectiveSlotState;
+  readonly queuedAt?: number;
+  readonly admittedAt?: number;
+  readonly releasedAt?: number;
+  readonly releaseReason?: string;
+};
+
+export type FactoryRepoProfileRecord = {
+  readonly status: "missing" | "generating" | "ready" | "stale" | "failed";
+  readonly generatedAt?: number;
+  readonly inferredChecks: ReadonlyArray<string>;
+  readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
+  readonly summary: string;
+};
+
+export type FactoryPlanRecord = {
+  readonly proposedAt?: number;
+  readonly adoptedAt?: number;
+  readonly summary?: string;
+  readonly fallback?: boolean;
+  readonly taskIds: ReadonlyArray<string>;
 };
 
 export type FactoryCheckResult = {
@@ -224,6 +259,7 @@ export type FactoryState = {
   readonly channel: string;
   readonly baseHash: string;
   readonly checks: ReadonlyArray<string>;
+  readonly checksSource: "explicit" | "default";
   readonly policy: FactoryNormalizedObjectivePolicy;
   readonly status: FactoryObjectiveStatus;
   readonly archivedAt?: number;
@@ -241,6 +277,9 @@ export type FactoryState = {
   readonly candidateOrder: ReadonlyArray<string>;
   readonly graph: FactoryGraphState;
   readonly integration: FactoryIntegrationRecord;
+  readonly scheduler: FactorySchedulerRecord;
+  readonly repoProfile: FactoryRepoProfileRecord;
+  readonly plan: FactoryPlanRecord;
   readonly latestEvidence?: FactoryActionEvidence;
   readonly latestRebracket?: FactoryRebracketRecord;
 };
@@ -530,8 +569,56 @@ export type FactoryEvent =
       readonly channel: string;
       readonly baseHash: string;
       readonly checks: ReadonlyArray<string>;
+      readonly checksSource: "explicit" | "default";
       readonly policy: FactoryNormalizedObjectivePolicy;
       readonly createdAt: number;
+    }
+  | {
+      readonly type: "repo.profile.requested";
+      readonly objectiveId: string;
+      readonly requestedAt: number;
+    }
+  | {
+      readonly type: "repo.profile.generated";
+      readonly objectiveId: string;
+      readonly generatedAt: number;
+      readonly status: FactoryRepoProfileRecord["status"];
+      readonly inferredChecks: ReadonlyArray<string>;
+      readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
+      readonly summary: string;
+      readonly source?: "generated" | "reused" | "fallback";
+    }
+  | {
+      readonly type: "objective.plan.proposed";
+      readonly objectiveId: string;
+      readonly taskCount: number;
+      readonly summary: string;
+      readonly fallback?: boolean;
+      readonly proposedAt: number;
+    }
+  | {
+      readonly type: "objective.plan.adopted";
+      readonly objectiveId: string;
+      readonly taskIds: ReadonlyArray<string>;
+      readonly summary: string;
+      readonly fallback?: boolean;
+      readonly adoptedAt: number;
+    }
+  | {
+      readonly type: "objective.slot.queued";
+      readonly objectiveId: string;
+      readonly queuedAt: number;
+    }
+  | {
+      readonly type: "objective.slot.admitted";
+      readonly objectiveId: string;
+      readonly admittedAt: number;
+    }
+  | {
+      readonly type: "objective.slot.released";
+      readonly objectiveId: string;
+      readonly releasedAt: number;
+      readonly reason: string;
     }
   | {
       readonly type: "task.added";
@@ -794,6 +881,7 @@ export const initialFactoryState: FactoryState = {
   channel: "results",
   baseHash: "",
   checks: [],
+  checksSource: "default",
   policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
   status: "decomposing",
   archivedAt: undefined,
@@ -809,6 +897,16 @@ export const initialFactoryState: FactoryState = {
   candidateOrder: [],
   graph: createGraphState<FactoryTaskRecord>("", 0, "active"),
   integration: emptyIntegration(0),
+  scheduler: {},
+  repoProfile: {
+    status: "missing",
+    inferredChecks: [],
+    generatedSkillRefs: [],
+    summary: "",
+  },
+  plan: {
+    taskIds: [],
+  },
 };
 
 export const decideFactory: Decide<FactoryCmd, FactoryEvent> = (cmd) => {
@@ -826,6 +924,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         channel: event.channel,
         baseHash: event.baseHash,
         checks: event.checks,
+        checksSource: event.checksSource,
         policy: event.policy,
         status: "decomposing",
         archivedAt: undefined,
@@ -841,6 +940,104 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         candidateOrder: [],
         graph: createGraphState<FactoryTaskRecord>(event.objectiveId, event.createdAt, "active"),
         integration: emptyIntegration(event.createdAt),
+        scheduler: {},
+        repoProfile: {
+          status: "missing",
+          inferredChecks: [],
+          generatedSkillRefs: [],
+          summary: "",
+        },
+        plan: {
+          taskIds: [],
+        },
+      };
+    case "repo.profile.requested":
+      return {
+        ...state,
+        updatedAt: event.requestedAt,
+        status: state.status === "blocked" ? state.status : "decomposing",
+        repoProfile: {
+          ...state.repoProfile,
+          status: "generating",
+        },
+      };
+    case "repo.profile.generated":
+      return {
+        ...state,
+        updatedAt: event.generatedAt,
+        checks: state.checksSource === "default" && event.inferredChecks.length > 0
+          ? event.inferredChecks
+          : state.checks,
+        repoProfile: {
+          status: event.status,
+          generatedAt: event.generatedAt,
+          inferredChecks: event.inferredChecks,
+          generatedSkillRefs: event.generatedSkillRefs,
+          summary: event.summary,
+        },
+      };
+    case "objective.plan.proposed":
+      return {
+        ...state,
+        status: state.status === "blocked" ? state.status : "planning",
+        updatedAt: event.proposedAt,
+        latestSummary: event.summary,
+        plan: {
+          ...state.plan,
+          proposedAt: event.proposedAt,
+          summary: event.summary,
+          fallback: event.fallback,
+        },
+      };
+    case "objective.plan.adopted":
+      return {
+        ...state,
+        status: state.status === "blocked" ? state.status : "planning",
+        updatedAt: event.adoptedAt,
+        latestSummary: event.summary,
+        plan: {
+          ...state.plan,
+          adoptedAt: event.adoptedAt,
+          taskIds: [...event.taskIds],
+          summary: event.summary,
+          fallback: event.fallback,
+        },
+      };
+    case "objective.slot.queued":
+      return {
+        ...state,
+        updatedAt: event.queuedAt,
+        scheduler: {
+          slotState: "queued",
+          queuedAt: event.queuedAt,
+          admittedAt: state.scheduler.admittedAt,
+          releasedAt: state.scheduler.releasedAt,
+          releaseReason: state.scheduler.releaseReason,
+        },
+      };
+    case "objective.slot.admitted":
+      return {
+        ...state,
+        updatedAt: event.admittedAt,
+        scheduler: {
+          slotState: "active",
+          queuedAt: state.scheduler.queuedAt,
+          admittedAt: event.admittedAt,
+          releasedAt: undefined,
+          releaseReason: undefined,
+        },
+      };
+    case "objective.slot.released":
+      return {
+        ...state,
+        updatedAt: event.releasedAt,
+        scheduler: {
+          slotState: state.scheduler.slotState,
+          queuedAt: state.scheduler.queuedAt,
+          admittedAt: state.scheduler.admittedAt,
+          releasedAt: event.releasedAt,
+          releaseReason: event.reason,
+        },
       };
     case "task.added": {
       const nextStatus: FactoryObjectiveStatus =

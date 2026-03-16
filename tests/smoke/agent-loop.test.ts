@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { createRuntime } from "../../src/core/runtime.ts";
@@ -87,16 +86,16 @@ test("agent loop emits control receipts and deterministic selection", async () =
 
     const chain = await runtime.chain(stream);
     const types = chain.map((r) => r.body.type);
-    assert.equal(types.includes("run.started"), true);
-    assert.equal(types.includes("action.selected"), true);
-    assert.equal(types.includes("action.completed"), true);
-    assert.equal(types.includes("goal.completed"), true);
-    assert.equal(types.includes("run.completed"), true);
+    expect(types.includes("run.started")).toBe(true);
+    expect(types.includes("action.selected")).toBe(true);
+    expect(types.includes("action.completed")).toBe(true);
+    expect(types.includes("goal.completed")).toBe(true);
+    expect(types.includes("run.completed")).toBe(true);
 
     const selected = chain
       .map((r) => r.body)
       .filter((e): e is Event & { actionIds: ReadonlyArray<string> } => e.type === "action.selected" && Array.isArray(e.actionIds));
-    assert.equal(selected[0]?.actionIds?.[0], "first");
+    expect(selected[0]?.actionIds?.[0]).toBe("first");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

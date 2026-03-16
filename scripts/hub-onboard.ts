@@ -22,7 +22,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_CONFIG = path.join(ROOT, "config", "hub-agents.json");
 
 const usage = (): never => {
-  console.error("usage: tsx scripts/hub-onboard.ts [--url http://127.0.0.1:8787] [--file config/hub-agents.json]");
+  console.error("usage: bun scripts/hub-onboard.ts [--url http://127.0.0.1:8787] [--file config/hub-agents.json]");
   process.exit(1);
 };
 

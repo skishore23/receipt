@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import {
   reduce,
@@ -45,8 +44,7 @@ test("self-improvement module: lifecycle transitions", () => {
   ]);
 
   const proposal = state.proposals.p1;
-  assert.ok(proposal);
-  assert.equal(proposal?.status, "reverted");
-  assert.equal(proposal?.validation?.status, "passed");
+  expect(proposal).toBeTruthy();
+  expect(proposal?.status).toBe("reverted");
+  expect(proposal?.validation?.status).toBe("passed");
 });
-

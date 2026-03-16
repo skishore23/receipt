@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 
@@ -40,6 +39,6 @@ test("docs: HTTP API reference covers all public route handlers", async () => {
     const [method, ...parts] = endpoint.split(" ");
     const route = parts.join(" ");
     const headingPattern = new RegExp(`^###\\s+${escapeRegex(method)}\\s+${escapeRegex(route)}\\s*$`, "m");
-    assert.match(documented, headingPattern, `missing endpoint documentation for ${endpoint}`);
+    expect(documented).toMatch(headingPattern);
   }
 });

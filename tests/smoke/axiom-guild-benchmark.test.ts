@@ -1,7 +1,6 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
-import test from "node:test";
 
 import {
   AXIOM_GUILD_BENCHMARKS,
@@ -20,14 +19,14 @@ const structuredFromText = <T extends { system?: string; user: string }>(llmText
 
 test("axiom-guild benchmark registry includes infinitely_many_primes", () => {
   const item = getAxiomGuildBenchmarkCase("infinitely_many_primes");
-  assert.ok(item);
-  assert.equal(item?.theoremName, "infinitely_many_primes");
-  assert.equal(AXIOM_GUILD_BENCHMARKS.length >= 1, true);
+  expect(item).toBeTruthy();
+  expect(item?.theoremName).toBe("infinitely_many_primes");
+  expect(AXIOM_GUILD_BENCHMARKS.length >= 1).toBe(true);
 });
 
 test("axiom-guild benchmark runner requires final queued AXLE verify evidence", async () => {
   const benchmark = getAxiomGuildBenchmarkCase("infinitely_many_primes");
-  assert.ok(benchmark, "missing axiom-guild benchmark case");
+  expect(benchmark).toBeTruthy();
 
   const referenceContent = await fs.readFile(path.join(process.cwd(), benchmark!.referenceFile), "utf-8");
   const theoremToSorryContent = referenceContent.replace(
@@ -64,8 +63,8 @@ test("axiom-guild benchmark runner requires final queued AXLE verify evidence", 
     }
 
     if (url.endsWith("/api/v1/verify_proof")) {
-      assert.equal(body.formal_statement, theoremToSorryContent);
-      assert.equal(body.content, referenceContent);
+      expect(body.formal_statement).toBe(theoremToSorryContent);
+      expect(body.content).toBe(referenceContent);
       return new Response(JSON.stringify({
         okay: true,
         content: referenceContent,
@@ -160,12 +159,12 @@ test("axiom-guild benchmark runner requires final queued AXLE verify evidence", 
       llmStructured: structuredFromText(llmText),
     });
 
-    assert.equal(result.passed, true);
-    assert.equal(result.benchmarkId, "infinitely_many_primes");
-    assert.equal(result.checks.every((check) => check.ok), true);
-    assert.equal(axiomVerifyCalls >= 2, true, "expected queued Axiom verify tool call plus final response");
-    assert.equal(fetchCalls[0]?.url, "https://axle.example.test/api/v1/theorem2sorry");
-    assert.equal(fetchCalls.some((call) => call.url === "https://axle.example.test/api/v1/verify_proof"), true);
+    expect(result.passed).toBe(true);
+    expect(result.benchmarkId).toBe("infinitely_many_primes");
+    expect(result.checks.every((check) => check.ok)).toBe(true);
+    expect(axiomVerifyCalls >= 2).toBe(true);
+    expect(fetchCalls[0]?.url).toBe("https://axle.example.test/api/v1/theorem2sorry");
+    expect(fetchCalls.some((call) => call.url === "https://axle.example.test/api/v1/verify_proof")).toBe(true);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;

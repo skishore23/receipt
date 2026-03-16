@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { zodTextFormat } from "openai/helpers/zod";
 
@@ -149,11 +148,11 @@ test("agent workspace config scopes tools to configured subdirectory", async () 
       .map((receipt) => receipt.body)
       .filter((event): event is Extract<AgentEvent, { type: "tool.called" }> => event.type === "tool.called");
 
-    assert.equal(toolObserved.some((event) => event.output.includes("TOP_SECRET")), false, "tool output leaked outside workspace content");
+    expect(toolObserved.some((event) => event.output.includes("TOP_SECRET"))).toBe(false);
 
     const readCall = toolCalled.find((event) => event.tool === "read");
-    assert.ok(readCall, "expected read tool call");
-    assert.ok(readCall.error, "expected read tool call to fail outside configured workspace");
+    expect(readCall).toBeTruthy();
+    expect(readCall.error).toBeTruthy();
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -214,12 +213,12 @@ test("agent emits structured failure receipts when native structured output is i
       receipt.body.type === "run.status"
     );
 
-    assert.equal(result.status, "failed");
-    assert.equal(result.failure?.failureClass, "model_json_parse");
-    assert.ok(failureReport, "expected terminal failure receipt");
-    assert.equal(failureReport?.body.failure.failureClass, "model_json_parse");
-    assert.match(failureReport?.body.failure.message ?? "", /model final action missing text/i);
-    assert.equal(finalStatus?.body.status, "failed");
+    expect(result.status).toBe("failed");
+    expect(result.failure?.failureClass).toBe("model_json_parse");
+    expect(failureReport).toBeTruthy();
+    expect(failureReport?.body.failure.failureClass).toBe("model_json_parse");
+    expect(failureReport?.body.failure.message ?? "").toMatch(/model final action missing text/i);
+    expect(finalStatus?.body.status).toBe("failed");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -283,12 +282,12 @@ test("agent uses native structured actions when available", async () => {
       };
       if (structuredCalls === 1) {
         const actionSchema = jsonSchema.properties?.action;
-        assert.deepEqual(actionSchema?.required, ["type", "name", "input", "text"]);
-        assert.equal(actionSchema?.properties?.name?.anyOf?.some((branch) => branch.type === "null"), true);
-        assert.equal(actionSchema?.properties?.text?.anyOf?.some((branch) => branch.type === "null"), true);
-        assert.equal(actionSchema?.properties?.input?.type, "string");
-        assert.equal("propertyNames" in (actionSchema?.properties?.input ?? {}), false);
-        assert.equal("additionalProperties" in (actionSchema?.properties?.input ?? {}), false);
+        expect(actionSchema?.required).toEqual(["type", "name", "input", "text"]);
+        expect(actionSchema?.properties?.name?.anyOf?.some((branch) => branch.type === "null")).toBe(true);
+        expect(actionSchema?.properties?.text?.anyOf?.some((branch) => branch.type === "null")).toBe(true);
+        expect(actionSchema?.properties?.input?.type).toBe("string");
+        expect("propertyNames" in (actionSchema?.properties?.input ?? {})).toBe(false);
+        expect("additionalProperties" in (actionSchema?.properties?.input ?? {})).toBe(false);
       }
       if (structuredCalls === 1) {
         return {
@@ -338,14 +337,13 @@ test("agent uses native structured actions when available", async () => {
       receipt.body.type === "validation.report" && receipt.body.gate === "model_json"
     );
 
-    assert.equal(textCalls, 0, "expected native structured actions to avoid text fallback");
-    assert.equal(structuredCalls, 2, "expected one structured action per iteration");
-    assert.match(readObserved?.body.output ?? "", /hello/);
-    assert.match(final?.body.content ?? "", /complete/);
-    assert.ok(
-      jsonValidationEvents.some((receipt) => receipt.body.ok === true && /native structured action parsed/.test(receipt.body.summary)),
-      "expected native structured action validation receipt"
-    );
+    expect(textCalls).toBe(0);
+    expect(structuredCalls).toBe(2);
+    expect(readObserved?.body.output ?? "").toMatch(/hello/);
+    expect(final?.body.content ?? "").toMatch(/complete/);
+    expect(
+      jsonValidationEvents.some((receipt) => receipt.body.ok === true && /native structured action parsed/.test(receipt.body.summary))
+    ).toBeTruthy();
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -425,14 +423,13 @@ test("agent fails fast when native structured action fails", async () => {
       receipt.body.type === "validation.report" && receipt.body.gate === "model_json"
     );
 
-    assert.equal(result.status, "failed");
-    assert.equal(structuredCalls, 1, "expected native structured path to fail on the first iteration");
-    assert.equal(textCalls, 0, "expected text fallback to remain unused");
-    assert.equal(finalStatus?.body.status, "failed");
-    assert.ok(
-      jsonValidationEvents.some((receipt) => receipt.body.ok === false && /native structured action failed/.test(receipt.body.summary)),
-      "expected native structured failure receipt"
-    );
+    expect(result.status).toBe("failed");
+    expect(structuredCalls).toBe(1);
+    expect(textCalls).toBe(0);
+    expect(finalStatus?.body.status).toBe("failed");
+    expect(
+      jsonValidationEvents.some((receipt) => receipt.body.ok === false && /native structured action failed/.test(receipt.body.summary))
+    ).toBeTruthy();
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

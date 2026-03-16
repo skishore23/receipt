@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import {
   activatableNodes,
@@ -57,8 +56,8 @@ test("graph: dependency activation, multi-active execution, and replay projectio
     },
   ]);
 
-  assert.deepEqual(activatableNodes(initial, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId), ["planner"]);
-  assert.deepEqual(runnableNodes(initial, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId), []);
+  expect(activatableNodes(initial, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId)).toEqual(["planner"]);
+  expect(runnableNodes(initial, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId)).toEqual([]);
 
   const plannerReady = withNodes(createGraphState<TestNode>("graph_demo", 2, "active"), [
     {
@@ -81,7 +80,7 @@ test("graph: dependency activation, multi-active execution, and replay projectio
     },
   ]);
 
-  assert.deepEqual(runnableNodes(plannerReady, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId), ["planner"]);
+  expect(runnableNodes(plannerReady, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId)).toEqual(["planner"]);
 
   const plannerCompleted = withNodes(createGraphState<TestNode>("graph_demo", 3, "active"), [
     {
@@ -104,7 +103,7 @@ test("graph: dependency activation, multi-active execution, and replay projectio
     },
   ]);
 
-  assert.deepEqual(activatableNodes(plannerCompleted, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId), ["builder"]);
+  expect(activatableNodes(plannerCompleted, { planned: buckets.planned, completed: buckets.completed }).map((node) => node.nodeId)).toEqual(["builder"]);
 
   const parallelReady: GraphState<TestNode> = {
     ...withNodes(createGraphState<TestNode>("graph_demo", 4, "active"), [
@@ -124,8 +123,9 @@ test("graph: dependency activation, multi-active execution, and replay projectio
     activeNodeIds: ["builder_a"],
   };
 
-  assert.deepEqual(
+  expect(
     runnableNodes(parallelReady, { ready: buckets.ready, completed: buckets.completed }).map((node) => node.nodeId),
+  ).toEqual(
     ["builder_b"],
   );
 
@@ -151,7 +151,7 @@ test("graph: dependency activation, multi-active execution, and replay projectio
     },
   ]), buckets);
 
-  assert.deepEqual(replayA, replayB);
-  assert.deepEqual(replayA.completed.map((node) => node.nodeId), ["planner"]);
-  assert.deepEqual(replayA.planned.map((node) => node.nodeId), ["builder", "reviewer"]);
+  expect(replayA).toEqual(replayB);
+  expect(replayA.completed.map((node) => node.nodeId)).toEqual(["planner"]);
+  expect(replayA.planned.map((node) => node.nodeId)).toEqual(["builder", "reviewer"]);
 });

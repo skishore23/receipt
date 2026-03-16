@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import { theoremMergePolicy } from "../../src/engine/merge/theorem-policy.ts";
 import { pickBestBracket } from "../../src/agents/theorem.rebracket.ts";
@@ -29,5 +28,5 @@ test("theorem merge policy: chooses same bracket as pickBestBracket", () => {
     .map((candidate) => ({ candidate, score: theoremMergePolicy.score(candidate, evidence, { chain, round: 1, branchThreshold: 1, currentBracket: undefined }) }));
   const decision = theoremMergePolicy.choose(scored);
 
-  assert.equal(decision.candidateId, expected);
+  expect(decision.candidateId).toBe(expected);
 });

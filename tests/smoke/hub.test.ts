@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn, type ChildProcess, execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -7,10 +7,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { promisify } from "node:util";
-import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const BUN = process.env.BUN_BIN?.trim() || "bun";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -93,7 +93,7 @@ const createSourceRepo = async (): Promise<string> => {
 const createFakeCodexBin = async (): Promise<string> => {
   const dir = await createTempDir("receipt-fake-codex");
   const bin = path.join(dir, process.platform === "win32" ? "codex.cmd" : "codex");
-  const script = `#!/usr/bin/env node
+  const script = `#!/usr/bin/env bun
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
@@ -150,13 +150,7 @@ const startServer = async (): Promise<{
   const dataDir = await createTempDir("receipt-hub-route-data");
   const repoDir = await createSourceRepo();
   const fakeCodex = await createFakeCodexBin();
-  const tsxBin = path.join(
-    ROOT,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "tsx.cmd" : "tsx",
-  );
-  const child = spawn(tsxBin, ["src/server.ts"], {
+  const child = spawn(BUN, ["src/server.ts"], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -176,25 +170,25 @@ const startServer = async (): Promise<{
   return { base, child };
 };
 
-test("factory routes: shell, policy, debug, and explicit promote work end to end", { timeout: 120_000 }, async () => {
+test("factory routes: shell, policy, debug, and explicit promote work end to end", async () => {
   const { base, child } = await startServer();
   try {
     const shellRes = await fetch(`${base}/factory`);
-    assert.equal(shellRes.status, 200);
+    expect(shellRes.status).toBe(200);
     const shellBody = await shellRes.text();
-    assert.match(shellBody, /<script src="\/assets\/htmx\.min\.js"><\/script>/);
-    assert.match(shellBody, /id="factory-compose"/);
-    assert.match(shellBody, /id="factory-board"/);
-    assert.match(shellBody, /id="factory-objective"/);
-    assert.match(shellBody, /id="factory-live"/);
-    assert.match(shellBody, /id="factory-debug"/);
-    assert.match(shellBody, /new EventSource\("\/factory\/events"\)/);
-    assert.match(shellBody, /action="\/factory\/ui\/objectives"/);
-    assert.match(shellBody, /method="post"/);
+    expect(shellBody).toMatch(/<script src="\/assets\/htmx\.min\.js"><\/script>/);
+    expect(shellBody).toMatch(/id="factory-compose"/);
+    expect(shellBody).toMatch(/id="factory-board"/);
+    expect(shellBody).toMatch(/id="factory-objective"/);
+    expect(shellBody).toMatch(/id="factory-live"/);
+    expect(shellBody).toMatch(/id="factory-debug"/);
+    expect(shellBody).toMatch(/new EventSource\("\/factory\/events"\)/);
+    expect(shellBody).toMatch(/action="\/factory\/ui\/objectives"/);
+    expect(shellBody).toMatch(/method="post"/);
 
     const htmxRes = await fetch(`${base}/assets/htmx.min.js`);
-    assert.equal(htmxRes.status, 200);
-    assert.match(htmxRes.headers.get("content-type") ?? "", /application\/javascript/);
+    expect(htmxRes.status).toBe(200);
+    expect(htmxRes.headers.get("content-type") ?? "").toMatch(/application\/javascript/);
 
     const createRes = await fetch(`${base}/factory/api/objectives`, {
       method: "POST",
@@ -209,7 +203,7 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
         },
       }),
     });
-    assert.equal(createRes.status, 201);
+    expect(createRes.status).toBe(201);
     const created = await createRes.json() as {
       objective: {
         objectiveId: string;
@@ -220,9 +214,9 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
         };
       };
     };
-    assert.equal(created.objective.policy.promotion.autoPromote, false);
-    assert.equal(created.objective.policy.throttles.maxDispatchesPerReact, 1);
-    assert.equal(created.objective.policy.concurrency.maxActiveTasks, 4);
+    expect(created.objective.policy.promotion.autoPromote).toBe(false);
+    expect(created.objective.policy.throttles.maxDispatchesPerReact).toBe(1);
+    expect(created.objective.policy.concurrency.maxActiveTasks).toBe(4);
 
     const readyToPromote = await waitForFactoryObjective(
       base,
@@ -230,10 +224,10 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
       (objective) => objective.integration && (objective.integration as { status?: string }).status === "ready_to_promote",
       60_000,
     );
-    assert.notEqual(readyToPromote.status, "completed");
+    expect(readyToPromote.status).not.toBe("completed");
 
     const debugRes = await fetch(`${base}/factory/api/objectives/${created.objective.objectiveId}/debug`);
-    assert.equal(debugRes.status, 200);
+    expect(debugRes.status).toBe(200);
     const debugPayload = await debugRes.json() as {
       debug: {
         policy: { promotion: { autoPromote: boolean } };
@@ -241,23 +235,24 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
         recentReceipts: Array<{ type: string }>;
       };
     };
-    assert.equal(debugPayload.debug.policy.promotion.autoPromote, false);
-    assert.equal(debugPayload.debug.budgetState.taskRunsUsed, 1);
-    assert.ok(debugPayload.debug.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote"));
+    expect(debugPayload.debug.policy.promotion.autoPromote).toBe(false);
+    expect(debugPayload.debug.budgetState.taskRunsUsed).toBe(1);
+    expect(debugPayload.debug.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote")).toBeTruthy();
 
     const receiptsRes = await fetch(`${base}/factory/api/objectives/${created.objective.objectiveId}/receipts?limit=50`);
-    assert.equal(receiptsRes.status, 200);
+    expect(receiptsRes.status).toBe(200);
     const receiptsPayload = await receiptsRes.json() as { receipts: Array<{ type: string }> };
-    assert.ok(receiptsPayload.receipts.some((receipt) => receipt.type === "objective.created"));
+    expect(receiptsPayload.receipts.some((receipt) => receipt.type === "objective.created")).toBeTruthy();
 
     const promoteFormRes = await fetch(`${base}/factory/ui/objectives/${created.objective.objectiveId}/promote`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       redirect: "manual",
     });
-    assert.equal(promoteFormRes.status, 303);
-    assert.equal(
+    expect(promoteFormRes.status).toBe(303);
+    expect(
       promoteFormRes.headers.get("location"),
+    ).toBe(
       `/factory?objective=${created.objective.objectiveId}`,
     );
 
@@ -267,41 +262,42 @@ test("factory routes: shell, policy, debug, and explicit promote work end to end
       (objective) => objective.status === "completed",
       30_000,
     );
-    assert.equal((completed.integration as { status?: string }).status, "promoted");
+    expect((completed.integration as { status?: string }).status).toBe("promoted");
   } finally {
     await stopChild(child);
   }
-});
+}, 120_000);
 
-test("hub routes: objective APIs are removed while repo, workspace, and manual task APIs remain", { timeout: 120_000 }, async () => {
+test("hub routes: objective APIs are removed while repo, workspace, and manual task APIs remain", async () => {
   const { base, child } = await startServer();
   try {
     const shellRes = await fetch(`${base}/hub`);
-    assert.equal(shellRes.status, 200);
+    expect(shellRes.status).toBe(200);
     const shellBody = await shellRes.text();
-    assert.match(shellBody, /Open Factory/);
+    expect(shellBody).toMatch(/Open Factory/);
 
     const legacyObjectiveShellRes = await fetch(`${base}/hub?objective=objective_legacy`, {
       redirect: "manual",
     });
-    assert.equal(legacyObjectiveShellRes.status, 302);
-    assert.equal(
+    expect(legacyObjectiveShellRes.status).toBe(302);
+    expect(
       legacyObjectiveShellRes.headers.get("location"),
+    ).toBe(
       "/factory?objective=objective_legacy",
     );
 
     const objectiveApiRes = await fetch(`${base}/hub/api/objectives`);
-    assert.equal(objectiveApiRes.status, 404);
+    expect(objectiveApiRes.status).toBe(404);
     const objectiveIslandRes = await fetch(`${base}/hub/island/objective`);
-    assert.equal(objectiveIslandRes.status, 404);
+    expect(objectiveIslandRes.status).toBe(404);
 
     const stateRes = await fetch(`${base}/hub/api/state`);
-    assert.equal(stateRes.status, 200);
+    expect(stateRes.status).toBe(200);
     const statePayload = await stateRes.json() as Record<string, unknown>;
-    assert.ok(!("objectives" in statePayload));
+    expect(!("objectives" in statePayload)).toBeTruthy();
 
     const workspacesRes = await fetch(`${base}/hub/api/workspaces`);
-    assert.equal(workspacesRes.status, 200);
+    expect(workspacesRes.status).toBe(200);
 
     const workspaceCreateRes = await fetch(`${base}/hub/api/workspaces`, {
       method: "POST",
@@ -310,7 +306,7 @@ test("hub routes: objective APIs are removed while repo, workspace, and manual t
         agentId: "builder-1",
       }),
     });
-    assert.equal(workspaceCreateRes.status, 201);
+    expect(workspaceCreateRes.status).toBe(201);
     const workspaceCreate = await workspaceCreateRes.json() as {
       workspace: { workspaceId: string };
     };
@@ -324,8 +320,8 @@ test("hub routes: objective APIs are removed while repo, workspace, and manual t
         prompt: "Inspect the workspace and report its status.",
       }),
     });
-    assert.equal(taskCreateRes.status, 201);
+    expect(taskCreateRes.status).toBe(201);
   } finally {
     await stopChild(child);
   }
-});
+}, 120_000);

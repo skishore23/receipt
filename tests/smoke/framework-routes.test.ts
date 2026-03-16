@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
@@ -80,7 +79,7 @@ const stopChild = async (child: ChildProcess): Promise<void> => {
   clearTimeout(killTimer);
 };
 
-test("framework routes: status parity for core endpoints", { timeout: 120_000 }, async () => {
+test("framework routes: status parity for core endpoints", async () => {
   const port = await getFreePort();
   const dataDir = await createTempDir("receipt-framework-routes");
   const seedRuntime = createRuntime<JobCmd, JobEvent, JobState>(
@@ -110,14 +109,7 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
     followUpRunId: "run_follow_up_seed",
     failureClass: "axle_verify_failed",
   });
-  const tsxBin = path.join(
-    ROOT,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "tsx.cmd" : "tsx"
-  );
-
-  const child = spawn(tsxBin, ["src/server.ts"], {
+  const child = spawn("bun", ["src/server.ts"], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -155,32 +147,32 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
     );
 
     const notFound = await fetch(`${base}/not-real`);
-    assert.equal(notFound.status, 404);
-    assert.equal(await notFound.text(), "Not found");
+    expect(notFound.status).toBe(404);
+    expect(await notFound.text()).toBe("Not found");
 
     const badCmd = await fetch(`${base}/cmd?stream=todo`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(badCmd.status, 400);
-    assert.equal(await badCmd.text(), "bad");
+    expect(badCmd.status).toBe(400);
+    expect(await badCmd.text()).toBe("bad");
 
     const inspectMissingFile = await fetch(`${base}/receipt/inspect`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(inspectMissingFile.status, 400);
-    assert.equal(await inspectMissingFile.text(), "file required");
+    expect(inspectMissingFile.status).toBe(400);
+    expect(await inspectMissingFile.text()).toBe("file required");
 
     const inspectUnknownFile = await fetch(`${base}/receipt/inspect`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "file=missing.jsonl",
     });
-    assert.equal(inspectUnknownFile.status, 404);
-    assert.equal(await inspectUnknownFile.text(), "file not found");
+    expect(inspectUnknownFile.status).toBe(404);
+    expect(await inspectUnknownFile.text()).toBe("file not found");
 
     const inspectPathTraversal = await fetch(`${base}/agents/inspector/jobs`, {
       method: "POST",
@@ -192,7 +184,7 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         },
       }),
     });
-    assert.equal(inspectPathTraversal.status, 400);
+    expect(inspectPathTraversal.status).toBe(400);
 
     const inspectRunId = `inspect_${Date.now()}`;
     const inspectEnqueue = await fetch(`${base}/agents/inspector/jobs`, {
@@ -216,12 +208,12 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         },
       }),
     });
-    assert.equal(inspectEnqueue.status, 202);
+    expect(inspectEnqueue.status).toBe(202);
     const inspectQueued = await inspectEnqueue.json() as { job?: { id?: string } };
-    assert.ok(inspectQueued.job?.id, "expected inspector job id");
+    expect(inspectQueued.job?.id).toBeTruthy();
 
     const inspectSettled = await fetch(`${base}/jobs/${encodeURIComponent(inspectQueued.job.id!)}/wait?timeoutMs=30000`);
-    assert.equal(inspectSettled.status, 200);
+    expect(inspectSettled.status).toBe(200);
 
     const inspectorDeadline = Date.now() + 10_000;
     let inspectorChat = "";
@@ -231,7 +223,7 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       if (inspectorChat.includes("Inspector integration check")) break;
       await sleep(250);
     }
-    assert.equal(inspectorChat.includes("Inspector integration check"), true, "expected inspector chat to reflect queued inspector run");
+    expect(inspectorChat.includes("Inspector integration check")).toBe(true);
 
     const resumeRunId = `resume_${Date.now()}`;
     const resumeStream = theoremRunStream("agents/axiom-guild", resumeRunId);
@@ -248,9 +240,8 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "append=Continue",
     });
-    assert.equal(axiomResume.status, 200);
-    assert.match(
-      axiomResume.headers.get("HX-Redirect") ?? "",
+    expect(axiomResume.status).toBe(200);
+    expect(axiomResume.headers.get("HX-Redirect") ?? "").toMatch(
       new RegExp(`^/axiom\\?stream=agents%2Faxiom-guild&run=${encodeURIComponent(resumeRunId)}&branch=`)
     );
 
@@ -259,56 +250,56 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(theoremBad.status, 400);
-    assert.equal(await theoremBad.text(), "problem required");
+    expect(theoremBad.status).toBe(400);
+    expect(await theoremBad.text()).toBe("problem required");
 
     const writerBad = await fetch(`${base}/writer/run?stream=writer`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(writerBad.status, 400);
-    assert.equal(await writerBad.text(), "problem required");
+    expect(writerBad.status).toBe(400);
+    expect(await writerBad.text()).toBe("problem required");
 
     const axiomSimplePage = await fetch(`${base}/axiom-simple?stream=${encodeURIComponent("agents/axiom-simple")}`);
-    assert.equal(axiomSimplePage.status, 200);
+    expect(axiomSimplePage.status).toBe(200);
 
     const axiomSimpleBad = await fetch(`${base}/axiom-simple/run?stream=${encodeURIComponent("agents/axiom-simple")}`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(axiomSimpleBad.status, 400);
-    assert.equal(await axiomSimpleBad.text(), "problem required");
+    expect(axiomSimpleBad.status).toBe(400);
+    expect(await axiomSimpleBad.text()).toBe("problem required");
 
     const axiomSimpleStream = await fetch(`${base}/axiom-simple/stream?stream=${encodeURIComponent("agents/axiom-simple")}`);
-    assert.equal(axiomSimpleStream.status, 200);
-    assert.equal(axiomSimpleStream.headers.get("content-type"), "text/event-stream");
+    expect(axiomSimpleStream.status).toBe(200);
+    expect(axiomSimpleStream.headers.get("content-type")).toBe("text/event-stream");
     await axiomSimpleStream.body?.cancel();
 
     const agentRemoved = await fetch(`${base}/autopilot?stream=agent`);
-    assert.equal(agentRemoved.status, 404);
+    expect(agentRemoved.status).toBe(404);
 
     const monitorPage = await fetch(`${base}/monitor?stream=agent`);
-    assert.equal(monitorPage.status, 200);
+    expect(monitorPage.status).toBe(200);
     const monitorHtml = await monitorPage.text();
-    assert.match(monitorHtml, /General Agent/);
-    assert.match(monitorHtml, /Infrastructure Agent/);
-    assert.match(monitorHtml, /Theorem Guild/);
-    assert.match(monitorHtml, /Proof Guild/);
-    assert.match(monitorHtml, /Axiom Simple/);
-    assert.match(monitorHtml, /Lean Worker/);
+    expect(monitorHtml).toMatch(/General Agent/);
+    expect(monitorHtml).toMatch(/Infrastructure Agent/);
+    expect(monitorHtml).toMatch(/Theorem Guild/);
+    expect(monitorHtml).toMatch(/Proof Guild/);
+    expect(monitorHtml).toMatch(/Axiom Simple/);
+    expect(monitorHtml).toMatch(/Lean Worker/);
 
     const monitorStream = await fetch(`${base}/monitor/stream?stream=${encodeURIComponent("agents/axiom-guild")}`, {
     });
-    assert.equal(monitorStream.status, 200);
-    assert.equal(monitorStream.headers.get("content-type"), "text/event-stream");
+    expect(monitorStream.status).toBe(200);
+    expect(monitorStream.headers.get("content-type")).toBe("text/event-stream");
     const monitorReader = monitorStream.body?.getReader();
-    assert.ok(monitorReader, "expected monitor stream reader");
+    expect(monitorReader).toBeTruthy();
     const monitorInit = `${await readChunk(monitorReader!)}${await readChunk(monitorReader!)}${await readChunk(monitorReader!)}`;
-    assert.match(monitorInit, /event: theorem-refresh/);
-    assert.match(monitorInit, /event: receipt-refresh/);
-    assert.match(monitorInit, /event: job-refresh/);
+    expect(monitorInit).toMatch(/event: theorem-refresh/);
+    expect(monitorInit).toMatch(/event: receipt-refresh/);
+    expect(monitorInit).toMatch(/event: job-refresh/);
     await monitorReader!.cancel();
 
     const monitorBad = await fetch(`${base}/monitor/run?stream=agent`, {
@@ -316,16 +307,16 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(monitorBad.status, 400);
-    assert.equal(await monitorBad.text(), "problem required");
+    expect(monitorBad.status).toBe(400);
+    expect(await monitorBad.text()).toBe("problem required");
 
     const axiomBad = await fetch(`${base}/axiom/run?stream=axiom`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "",
     });
-    assert.equal(axiomBad.status, 400);
-    assert.equal(await axiomBad.text(), "problem required");
+    expect(axiomBad.status).toBe(400);
+    expect(await axiomBad.text()).toBe("problem required");
 
     const enqueue = await fetch(`${base}/agents/writer/jobs`, {
       method: "POST",
@@ -340,9 +331,9 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         },
       }),
     });
-    assert.equal(enqueue.status, 202);
+    expect(enqueue.status).toBe(202);
     const queued = await enqueue.json() as { job?: { id?: string } };
-    assert.ok(queued.job?.id, "expected job id");
+    expect(queued.job?.id).toBeTruthy();
 
     const agentEnqueue = await fetch(`${base}/agents/agent/jobs`, {
       method: "POST",
@@ -357,9 +348,9 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         },
       }),
     });
-    assert.equal(agentEnqueue.status, 202);
+    expect(agentEnqueue.status).toBe(202);
     const agentQueued = await agentEnqueue.json() as { job?: { id?: string } };
-    assert.ok(agentQueued.job?.id, "expected agent job id");
+    expect(agentQueued.job?.id).toBeTruthy();
 
     const infraEnqueue = await fetch(`${base}/agents/infra/jobs`, {
       method: "POST",
@@ -374,38 +365,38 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         },
       }),
     });
-    assert.equal(infraEnqueue.status, 202);
+    expect(infraEnqueue.status).toBe(202);
     const infraQueued = await infraEnqueue.json() as { job?: { id?: string } };
-    assert.ok(infraQueued.job?.id, "expected infra job id");
+    expect(infraQueued.job?.id).toBeTruthy();
 
     const jobsIsland = await fetch(`${base}/monitor/island/jobs?job=${encodeURIComponent(agentQueued.job.id!)}`);
-    assert.equal(jobsIsland.status, 200);
+    expect(jobsIsland.status).toBe(200);
     const jobsIslandHtml = await jobsIsland.text();
-    assert.equal(jobsIslandHtml.includes("data-selected-job-id"), true);
-    assert.equal(jobsIslandHtml.includes("General Agent"), true);
+    expect(jobsIslandHtml.includes("data-selected-job-id")).toBe(true);
+    expect(jobsIslandHtml.includes("General Agent")).toBe(true);
 
     const infraJobsIsland = await fetch(`${base}/monitor/island/jobs?job=${encodeURIComponent(infraQueued.job.id!)}`);
-    assert.equal(infraJobsIsland.status, 200);
+    expect(infraJobsIsland.status).toBe(200);
     const infraJobsIslandHtml = await infraJobsIsland.text();
-    assert.equal(infraJobsIslandHtml.includes("Infrastructure Agent"), true);
+    expect(infraJobsIslandHtml.includes("Infrastructure Agent")).toBe(true);
 
     const jobIsland = await fetch(`${base}/monitor/island/job?stream=agent&job=${encodeURIComponent(agentQueued.job.id!)}`);
-    assert.equal(jobIsland.status, 200);
+    expect(jobIsland.status).toBe(200);
     const jobIslandHtml = await jobIsland.text();
-    assert.equal(jobIslandHtml.includes("Steer Job"), true);
-    assert.equal(jobIslandHtml.includes("General Agent"), true);
+    expect(jobIslandHtml.includes("Steer Job")).toBe(true);
+    expect(jobIslandHtml.includes("General Agent")).toBe(true);
 
     const infraJobIsland = await fetch(`${base}/monitor/island/job?stream=agents/infra&job=${encodeURIComponent(infraQueued.job.id!)}`);
-    assert.equal(infraJobIsland.status, 200);
+    expect(infraJobIsland.status).toBe(200);
     const infraJobIslandHtml = await infraJobIsland.text();
-    assert.equal(infraJobIslandHtml.includes("Infrastructure Agent"), true);
+    expect(infraJobIslandHtml.includes("Infrastructure Agent")).toBe(true);
 
     const seededJobIsland = await fetch(`${base}/monitor/island/job?stream=agents/axiom-guild&job=${encodeURIComponent(seededFailedJob.id)}`);
-    assert.equal(seededJobIsland.status, 200);
+    expect(seededJobIsland.status).toBe(200);
     const seededJobHtml = await seededJobIsland.text();
-    assert.equal(seededJobHtml.includes("Follow-up Job"), true);
-    assert.equal(seededJobHtml.includes("job_follow_up_seed"), true);
-    assert.equal(seededJobHtml.includes("Failure Class"), true);
+    expect(seededJobHtml.includes("Follow-up Job")).toBe(true);
+    expect(seededJobHtml.includes("job_follow_up_seed")).toBe(true);
+    expect(seededJobHtml.includes("Failure Class")).toBe(true);
 
     const steerCmd = await fetch(`${base}/monitor/job/${encodeURIComponent(agentQueued.job.id!)}/steer?stream=agent&job=${encodeURIComponent(agentQueued.job.id!)}`, {
       method: "POST",
@@ -415,7 +406,7 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       },
       body: "problem=Retarget+scope",
     });
-    assert.equal(steerCmd.status, 202);
+    expect(steerCmd.status).toBe(202);
 
     const followUpCmd = await fetch(`${base}/monitor/job/${encodeURIComponent(agentQueued.job.id!)}/follow-up?stream=agent&job=${encodeURIComponent(agentQueued.job.id!)}`, {
       method: "POST",
@@ -425,7 +416,7 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       },
       body: "note=Add+validation",
     });
-    assert.equal(followUpCmd.status, 202);
+    expect(followUpCmd.status).toBe(202);
 
     const abortCmd = await fetch(`${base}/monitor/job/${encodeURIComponent(agentQueued.job.id!)}/abort?stream=agent&job=${encodeURIComponent(agentQueued.job.id!)}`, {
       method: "POST",
@@ -435,24 +426,24 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
       },
       body: "reason=route+test",
     });
-    assert.equal(abortCmd.status, 202);
+    expect(abortCmd.status).toBe(202);
 
     const jobStatus = await fetch(`${base}/jobs/${encodeURIComponent(queued.job!.id!)}`);
-    assert.equal(jobStatus.status, 200);
+    expect(jobStatus.status).toBe(200);
 
     const memCommit = await fetch(`${base}/memory/test/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: "remember this event", tags: ["test"] }),
     });
-    assert.equal(memCommit.status, 201);
+    expect(memCommit.status).toBe(201);
 
     const memSearch = await fetch(`${base}/memory/test/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "remember" }),
     });
-    assert.equal(memSearch.status, 200);
+    expect(memSearch.status).toBe(200);
 
     const proposal = await fetch(`${base}/improvement/proposals`, {
       method: "POST",
@@ -463,41 +454,41 @@ test("framework routes: status parity for core endpoints", { timeout: 120_000 },
         patch: "{\"note\":\"safe\"}",
       }),
     });
-    assert.equal(proposal.status, 201);
+    expect(proposal.status).toBe(201);
     const proposalJson = await proposal.json() as { proposalId?: string };
-    assert.ok(proposalJson.proposalId, "expected proposalId");
+    expect(proposalJson.proposalId).toBeTruthy();
 
     const validate = await fetch(`${base}/improvement/${encodeURIComponent(proposalJson.proposalId!)}/validate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "passed", report: "ok" }),
     });
-    assert.equal(validate.status, 200);
+    expect(validate.status).toBe(200);
 
     const approve = await fetch(`${base}/improvement/${encodeURIComponent(proposalJson.proposalId!)}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    assert.equal(approve.status, 200);
+    expect(approve.status).toBe(200);
 
     const apply = await fetch(`${base}/improvement/${encodeURIComponent(proposalJson.proposalId!)}/apply`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    assert.equal(apply.status, 200);
+    expect(apply.status).toBe(200);
 
     const revert = await fetch(`${base}/improvement/${encodeURIComponent(proposalJson.proposalId!)}/revert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "test rollback" }),
     });
-    assert.equal(revert.status, 200);
+    expect(revert.status).toBe(200);
   } finally {
     await stopChild(child);
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 
-  assert.equal(stderr.includes("EADDRINUSE"), false, `server boot conflict: ${stderr}`);
-});
+  expect(stderr.includes("EADDRINUSE")).toBe(false);
+}, 120_000);

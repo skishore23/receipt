@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
@@ -29,27 +28,27 @@ test("jsonl queue: lease/retry/wait lifecycle", async () => {
       maxAttempts: 2,
     });
     const jobChain = await runtime.chain(`jobs/${job.id}`);
-    assert.equal(jobChain.length > 0, true, "per-job stream should contain lifecycle receipts");
+    expect(jobChain.length > 0).toBe(true);
 
     const lease1 = await queue.leaseNext({ workerId: "w1", leaseMs: 5_000 });
-    assert.ok(lease1, "expected first lease");
-    assert.equal(lease1?.id, job.id);
-    assert.equal(lease1?.attempt, 1);
+    expect(lease1).toBeTruthy();
+    expect(lease1?.id).toBe(job.id);
+    expect(lease1?.attempt).toBe(1);
 
     const duplicate = await queue.leaseNext({ workerId: "w2", leaseMs: 5_000 });
-    assert.equal(duplicate, undefined, "should not double-lease same queued item");
+    expect(duplicate).toBe(undefined);
 
     await queue.fail(job.id, "w1", "transient");
     const afterFail = await queue.getJob(job.id);
-    assert.equal(afterFail?.status, "queued");
+    expect(afterFail?.status).toBe("queued");
 
     const lease2 = await queue.leaseNext({ workerId: "w2", leaseMs: 5_000 });
-    assert.ok(lease2, "expected retry lease");
-    assert.equal(lease2?.attempt, 2);
+    expect(lease2).toBeTruthy();
+    expect(lease2?.attempt).toBe(2);
 
     await queue.complete(job.id, "w2", { ok: true });
     const settled = await queue.waitForJob(job.id, 1_000, 25);
-    assert.equal(settled?.status, "completed");
+    expect(settled?.status).toBe("completed");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -77,24 +76,24 @@ test("jsonl queue: steer/follow-up/abort command lanes", async () => {
       command: "steer",
       payload: { config: { rounds: 1 } },
     });
-    assert.ok(steer);
-    assert.equal(steer?.lane, "steer");
+    expect(steer).toBeTruthy();
+    expect(steer?.lane).toBe("steer");
 
     const follow = await queue.queueCommand({
       jobId: job.id,
       command: "follow_up",
       payload: { note: "tighten proof" },
     });
-    assert.ok(follow);
-    assert.equal(follow?.lane, "follow_up");
+    expect(follow).toBeTruthy();
+    expect(follow?.lane).toBe("follow_up");
 
     const commands = await queue.consumeCommands(job.id, ["steer", "follow_up"]);
-    assert.equal(commands.length, 2);
+    expect(commands.length).toBe(2);
 
     const abort = await queue.queueCommand({ jobId: job.id, command: "abort" });
-    assert.ok(abort);
+    expect(abort).toBeTruthy();
     const canceled = await queue.getJob(job.id);
-    assert.equal(canceled?.status, "canceled");
+    expect(canceled?.status).toBe("canceled");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -133,11 +132,11 @@ test("jsonl queue: failed jobs retain terminal result metadata", async () => {
     });
 
     const failed = await queue.getJob(job.id);
-    assert.equal(failed?.status, "failed");
-    assert.equal(failed?.result?.followUpJobId, "job_retry_1");
-    assert.equal(failed?.result?.followUpRunId, "run_retry_1");
-    assert.equal(failed?.result?.failureClass, "axle_verify_failed");
-    assert.equal((failed?.result?.failure as Record<string, unknown> | undefined)?.failureClass, "axle_verify_failed");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.result?.followUpJobId).toBe("job_retry_1");
+    expect(failed?.result?.followUpRunId).toBe("run_retry_1");
+    expect(failed?.result?.failureClass).toBe("axle_verify_failed");
+    expect((failed?.result?.failure as Record<string, unknown> | undefined)?.failureClass).toBe("axle_verify_failed");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -161,7 +160,7 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
       singletonMode: "cancel",
       payload: { msg: "first" },
     });
-    assert.equal(first.status, "queued");
+    expect(first.status).toBe("queued");
 
     const second = await queue.enqueue({
       agentId: "writer",
@@ -169,9 +168,9 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
       singletonMode: "cancel",
       payload: { msg: "second" },
     });
-    assert.equal(second.status, "queued");
+    expect(second.status).toBe("queued");
     const firstAfter = await queue.getJob(first.id);
-    assert.equal(firstAfter?.status, "canceled");
+    expect(firstAfter?.status).toBe("canceled");
 
     const third = await queue.enqueue({
       agentId: "writer",
@@ -179,7 +178,7 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
       singletonMode: "cancel",
       payload: { msg: "third" },
     });
-    assert.equal(third.status, "queued");
+    expect(third.status).toBe("queued");
 
     const steerTarget = await queue.enqueue({
       agentId: "writer",
@@ -193,9 +192,9 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
       singletonMode: "steer",
       payload: { note: "new message" },
     });
-    assert.equal(steered.id, steerTarget.id);
+    expect(steered.id).toBe(steerTarget.id);
     const commands = await queue.consumeCommands(steerTarget.id, ["steer"]);
-    assert.equal(commands.length, 1);
+    expect(commands.length).toBe(1);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -227,7 +226,7 @@ test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => 
     });
 
     const fromAuthoritative = await queue.getJob("legacy_only");
-    assert.equal(fromAuthoritative, undefined);
+    expect(fromAuthoritative).toBe(undefined);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

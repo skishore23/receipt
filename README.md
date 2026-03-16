@@ -90,8 +90,10 @@ Queue streams:
 Use `/factory` for:
 
 - creating objectives
+- repo preparation and inferred validation defaults
 - task DAG decomposition
 - autonomous worker dispatch
+- per-repo objective queueing and slot admission
 - candidate review
 - integration, validation, and promotion
 - objective debugging, receipts, and runtime control

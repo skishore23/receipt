@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import path from "node:path";
+
+import { packagePath } from "../lib/runtime-paths.js";
 
 const readJson = <T>(file: string): T =>
   JSON.parse(fs.readFileSync(file, "utf-8")) as T;
@@ -8,7 +9,7 @@ export const loadPromptConfig = <T extends Record<string, unknown>>(opts: {
   readonly name: string;
   readonly tag: string;
 }): T => {
-  const baseFile = path.join(process.cwd(), "prompts", `${opts.name}.prompts.json`);
+  const baseFile = packagePath(import.meta.url, "prompts", `${opts.name}.prompts.json`);
   if (!fs.existsSync(baseFile)) {
     throw new Error(`[${opts.tag}] Missing prompt file ${baseFile}`);
   }

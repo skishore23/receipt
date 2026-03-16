@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import { THEOREM_TEAM } from "../../src/agents/theorem.ts";
 import { fold, receipt } from "../../src/core/chain.ts";
@@ -55,20 +54,20 @@ test("theorem side panel expands rebracket pods and merge order", () => {
     team
   );
 
-  assert.match(html, /\(Explorer A o \(Explorer B o \(Explorer C o Critic Pod\)\)\)/);
-  assert.match(html, /Raw: \(A o \(B o \(C o D\)\)\)/);
-  assert.match(html, /Lemma Miner, Skeptic, Verifier, Synthesizer/);
-  assert.match(html, /1\. Merge Explorer C \+ Critic Pod/);
-  assert.match(html, /2\. Merge Explorer B \+ previous result/);
-  assert.match(html, /3\. Merge Explorer A \+ previous result/);
-  assert.match(html, /Decider: orchestrator each round\. Ranking: causal score, parallel tie-break, stability, lexical\./);
+  expect(html).toMatch(/\(Explorer A o \(Explorer B o \(Explorer C o Critic Pod\)\)\)/);
+  expect(html).toMatch(/Raw: \(A o \(B o \(C o D\)\)\)/);
+  expect(html).toMatch(/Lemma Miner, Skeptic, Verifier, Synthesizer/);
+  expect(html).toMatch(/1\. Merge Explorer C \+ Critic Pod/);
+  expect(html).toMatch(/2\. Merge Explorer B \+ previous result/);
+  expect(html).toMatch(/3\. Merge Explorer A \+ previous result/);
+  expect(html).toMatch(/Decider: orchestrator each round\. Ranking: causal score, parallel tie-break, stability, lexical\./);
 });
 
 test("theorem chat expands rebracket events with friendly copy", () => {
   const html = theoremChatHtml(mkChain());
 
-  assert.match(html, /Rebracketed to \(Explorer A o \(Explorer B o \(Explorer C o Critic Pod\)\)\) \(score 2\.00\)\./);
-  assert.match(html, /Raw: \(A o \(B o \(C o D\)\)\)/);
+  expect(html).toMatch(/Rebracketed to \(Explorer A o \(Explorer B o \(Explorer C o Critic Pod\)\)\) \(score 2\.00\)\./);
+  expect(html).toMatch(/Raw: \(A o \(B o \(C o D\)\)\)/);
 });
 
 test("theorem chat renders a DAG with memory highlights", () => {
@@ -115,16 +114,16 @@ test("theorem chat renders a DAG with memory highlights", () => {
 
   const html = theoremChatHtml(chain);
 
-  assert.match(html, /Workflow DAG/);
-  assert.match(html, /Current merge: \(\(Explorer A o Explorer B\) o \(Explorer C o Critic Pod\)\)/);
-  assert.match(html, /Raw: \(\(A o B\) o \(C o D\)\)/);
-  assert.match(html, /Memory focus: merge · 2 items · Explorer B, Critic Pod/);
-  assert.match(html, /Memory highlight = pods and merge links in the latest shared memory slice/);
-  assert.match(html, /class="mermaid dag-mermaid"/);
-  assert.match(html, /flowchart TD/);
-  assert.match(html, /pod_b\[&quot;Explorer B&quot;\]/);
-  assert.match(html, /class pod_b,merge_1,pod_d,merge_2,merge_3,stage_summary memoryNode;/);
-  assert.match(html, /linkStyle 1,3,4,5,6 stroke:#6ef3a0,stroke-width:4px;/);
+  expect(html).toMatch(/Workflow DAG/);
+  expect(html).toMatch(/Current merge: \(\(Explorer A o Explorer B\) o \(Explorer C o Critic Pod\)\)/);
+  expect(html).toMatch(/Raw: \(\(A o B\) o \(C o D\)\)/);
+  expect(html).toMatch(/Memory focus: merge · 2 items · Explorer B, Critic Pod/);
+  expect(html).toMatch(/Memory highlight = pods and merge links in the latest shared memory slice/);
+  expect(html).toMatch(/class="mermaid dag-mermaid"/);
+  expect(html).toMatch(/flowchart TD/);
+  expect(html).toMatch(/pod_b\[&quot;Explorer B&quot;\]/);
+  expect(html).toMatch(/class pod_b,merge_1,pod_d,merge_2,merge_3,stage_summary memoryNode;/);
+  expect(html).toMatch(/linkStyle 1,3,4,5,6 stroke:#6ef3a0,stroke-width:4px;/);
 });
 
 test("theorem chat shows receipt-backed node attribution for pods and merges", () => {
@@ -265,16 +264,16 @@ test("theorem chat shows receipt-backed node attribution for pods and merges", (
 
   const html = theoremChatHtml(chain);
 
-  assert.match(html, /Receipt-backed owners for pods, merges, verify, and final proof/);
-  assert.match(html, /Critic Pod/);
-  assert.match(html, /Lemma Miner, Skeptic, Verifier/);
-  assert.match(html, /3 receipts · latest Verifier applied patch/);
-  assert.match(html, /Merge 1/);
-  assert.match(html, /Merge Explorer A \+ Explorer B/);
-  assert.match(html, /Merge 2/);
-  assert.match(html, /Merge Explorer C \+ Critic Pod/);
-  assert.match(html, /Verification valid via lean\.verify/);
-  assert.match(html, /Finalized proof \(0\.61\)/);
+  expect(html).toMatch(/Receipt-backed owners for pods, merges, verify, and final proof/);
+  expect(html).toMatch(/Critic Pod/);
+  expect(html).toMatch(/Lemma Miner, Skeptic, Verifier/);
+  expect(html).toMatch(/3 receipts · latest Verifier applied patch/);
+  expect(html).toMatch(/Merge 1/);
+  expect(html).toMatch(/Merge Explorer A \+ Explorer B/);
+  expect(html).toMatch(/Merge 2/);
+  expect(html).toMatch(/Merge Explorer C \+ Critic Pod/);
+  expect(html).toMatch(/Verification valid via lean\.verify/);
+  expect(html).toMatch(/Finalized proof \(0\.61\)/);
 });
 
 test("theorem side panel shows AXLE verify status, link, and derived curl", () => {
@@ -367,13 +366,13 @@ test("theorem side panel shows AXLE verify status, link, and derived curl", () =
     team
   );
 
-  assert.match(html, /Verification run: yes/);
-  assert.match(html, /https:\/\/axle\.axiommath\.ai\/api\/v1\/verify_proof/);
-  assert.match(html, /curl -s -X POST https:\/\/axle\.axiommath\.ai\/api\/v1\/verify_proof/);
-  assert.match(html, /Final environment: lean-4\.28\.0/);
-  assert.match(html, /&quot;environment&quot;:&quot;lean-4\.28\.0&quot;/);
-  assert.match(html, /&quot;ignore_imports&quot;:true/);
-  assert.match(html, /sum_range_id/);
-  assert.match(html, /sorry/);
-  assert.match(html, /derived from persisted axle verification evidence for this run/i);
+  expect(html).toMatch(/Verification run: yes/);
+  expect(html).toMatch(/https:\/\/axle\.axiommath\.ai\/api\/v1\/verify_proof/);
+  expect(html).toMatch(/curl -s -X POST https:\/\/axle\.axiommath\.ai\/api\/v1\/verify_proof/);
+  expect(html).toMatch(/Final environment: lean-4\.28\.0/);
+  expect(html).toMatch(/&quot;environment&quot;:&quot;lean-4\.28\.0&quot;/);
+  expect(html).toMatch(/&quot;ignore_imports&quot;:true/);
+  expect(html).toMatch(/sum_range_id/);
+  expect(html).toMatch(/sorry/);
+  expect(html).toMatch(/derived from persisted axle verification evidence for this run/i);
 });

@@ -1,0 +1,31 @@
+{
+  "repoRoot": ".",
+  "dataDir": ".receipt/data",
+  "codexBin": "/Users/kishore/.nvm/versions/node/v20.14.0/bin/codex",
+  "orchestratorMode": "enabled",
+  "defaultChecks": [
+    "bun run build",
+    "bun run verify"
+  ],
+  "defaultPolicy": {
+    "concurrency": {
+      "maxActiveTasks": 4
+    },
+    "budgets": {
+      "maxTaskRuns": 50,
+      "maxCandidatePassesPerTask": 4,
+      "maxReconciliationTasks": 8,
+      "maxObjectiveMinutes": 1440
+    },
+    "throttles": {
+      "maxDispatchesPerReact": 4,
+      "mutationCooldownMs": 15000
+    },
+    "mutation": {
+      "aggressiveness": "balanced"
+    },
+    "promotion": {
+      "autoPromote": true
+    }
+  }
+}

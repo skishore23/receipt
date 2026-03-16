@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { test, expect } from "bun:test";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { promisify } from "node:util";
 
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
@@ -49,6 +48,14 @@ const createSourceRepo = async (): Promise<string> => {
   return repoDir;
 };
 
+const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId,
+    reason: "startup",
+  });
+};
+
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
     jsonlStore<JobEvent>(dataDir),
@@ -67,7 +74,7 @@ const latestFactoryJob = async (
   const match = jobs
     .filter((job) => job.payload.kind === kind && job.payload.objectiveId === objectiveId)
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  assert.ok(match, `missing ${kind} job`);
+  expect(match).toBeTruthy();
   return match;
 };
 
@@ -99,7 +106,7 @@ const createFactoryService = async (opts?: {
         await fs.writeFile(input.stderrPath, "", "utf-8");
         await fs.writeFile(path.join(input.workspacePath, "POLICY_TEST.txt"), `${codexOutcome}\n`, "utf-8");
         const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
-        assert.ok(resultPath, "task result path missing");
+        expect(resultPath).toBeTruthy();
         await fs.writeFile(resultPath, JSON.stringify({
           outcome: codexOutcome,
           summary: codexOutcome === "approved"
@@ -152,11 +159,13 @@ test("factory policy: dispatch burst is capped and defaults are normalized per o
     },
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
+  const ready = await service.getObjective(created.objectiveId);
 
-  assert.equal(created.policy.concurrency.maxActiveTasks, 4);
-  assert.equal(created.policy.throttles.maxDispatchesPerReact, 1);
-  assert.equal(created.activeTaskCount, 1);
-  assert.equal(created.readyTaskCount, 2);
+  expect(ready.policy.concurrency.maxActiveTasks).toBe(4);
+  expect(ready.policy.throttles.maxDispatchesPerReact).toBe(1);
+  expect(ready.activeTaskCount).toBe(1);
+  expect(ready.readyTaskCount).toBe(2);
 });
 
 test("factory policy: maxTaskRuns blocks further dispatch and surfaces a deterministic reason", async () => {
@@ -170,13 +179,14 @@ test("factory policy: maxTaskRuns blocks further dispatch and surfaces a determi
     },
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const job = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
   await service.runTask(job.payload as FactoryTaskJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.equal(detail.status, "blocked");
-  assert.match(detail.budgetState.policyBlockedReason ?? "", /maxTaskRuns/);
+  expect(detail.status).toBe("blocked");
+  expect(detail.budgetState.policyBlockedReason ?? "").toMatch(/maxTaskRuns/);
 });
 
 test("factory policy: maxCandidatePassesPerTask blocks rework after the configured cap", async () => {
@@ -190,13 +200,14 @@ test("factory policy: maxCandidatePassesPerTask blocks rework after the configur
     },
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const job = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
   await service.runTask(job.payload as FactoryTaskJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.equal(detail.tasks[0]?.status, "blocked");
-  assert.match(detail.tasks[0]?.blockedReason ?? "", /maxCandidatePassesPerTask/);
+  expect(detail.tasks[0]?.status).toBe("blocked");
+  expect(detail.tasks[0]?.blockedReason ?? "").toMatch(/maxCandidatePassesPerTask/);
 });
 
 test("factory policy: autoPromote false stops at ready_to_promote until promotion is explicit", async () => {
@@ -210,6 +221,7 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
     },
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
@@ -217,12 +229,12 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
-  assert.equal(detail.integration.status, "ready_to_promote");
-  assert.notEqual(detail.status, "completed");
+  expect(detail.integration.status).toBe("ready_to_promote");
+  expect(detail.status).not.toBe("completed");
 
   const promoted = await service.promoteObjective(created.objectiveId);
-  assert.equal(promoted.status, "completed");
-  assert.equal(promoted.integration.status, "promoted");
+  expect(promoted.status).toBe("completed");
+  expect(promoted.integration.status).toBe("promoted");
 });
 
 test("factory policy: reconciliation spawning respects maxReconciliationTasks", async () => {
@@ -235,8 +247,10 @@ test("factory policy: reconciliation spawning respects maxReconciliationTasks", 
     },
     checks: ["git status --short"],
   });
+  await runObjectiveStartup(service, created.objectiveId);
 
   const state = await service.getObjectiveState(created.objectiveId);
+  const planned = await service.getObjective(created.objectiveId);
   const stateWithCandidate = buildState([
     {
       type: "objective.created",
@@ -246,10 +260,11 @@ test("factory policy: reconciliation spawning respects maxReconciliationTasks", 
       channel: created.channel,
       baseHash: created.baseHash,
       checks: created.checks,
+      checksSource: "explicit",
       policy: created.policy,
       createdAt: created.createdAt,
     },
-    ...created.tasks.map((task) => ({
+    ...planned.tasks.map((task) => ({
       type: "task.added" as const,
       objectiveId: created.objectiveId,
       createdAt: task.createdAt,
@@ -261,7 +276,7 @@ test("factory policy: reconciliation spawning respects maxReconciliationTasks", 
       createdAt: created.createdAt + 1,
       candidate: {
         candidateId: "task_01_candidate_01",
-        taskId: created.tasks[0]!.taskId,
+        taskId: planned.tasks[0]!.taskId,
         status: "approved",
         baseCommit: created.baseHash,
         checkResults: [],
@@ -276,9 +291,9 @@ test("factory policy: reconciliation spawning respects maxReconciliationTasks", 
   }).spawnReconciliationTask(stateWithCandidate, "task_01_candidate_01", "force reconciliation");
 
   const after = await service.getObjective(created.objectiveId);
-  assert.equal(after.status, "blocked");
-  assert.match(after.blockedReason ?? "", /maxReconciliationTasks/);
-  assert.equal(after.tasks.length, state.taskOrder.length);
+  expect(after.status).toBe("blocked");
+  expect(after.blockedReason ?? "").toMatch(/maxReconciliationTasks/);
+  expect(after.tasks.length).toBe(state.taskOrder.length);
 });
 
 test("factory mutation policy: aggressiveness and cooldown gate semantic mutation actions", async () => {
@@ -333,6 +348,7 @@ test("factory mutation policy: aggressiveness and cooldown gate semantic mutatio
     channel: "results",
     baseHash: "abc1234",
     checks: ["npm run build"],
+    checksSource: "explicit",
     policy: normalizeFactoryObjectivePolicy(),
     createdAt: baseCreatedAt,
   },
@@ -367,6 +383,7 @@ test("factory mutation policy: aggressiveness and cooldown gate semantic mutatio
       channel: "results",
       baseHash: "abc1234",
       checks: ["npm run build"],
+      checksSource: "explicit",
       policy: normalizeFactoryObjectivePolicy({
         mutation: { aggressiveness: "aggressive" },
       }),
@@ -430,13 +447,13 @@ test("factory mutation policy: aggressiveness and cooldown gate semantic mutatio
       mutation: { aggressiveness: "conservative" },
     }),
   });
-  assert.ok(conservativeActions.length > 0);
-  assert.ok(conservativeActions.every((action) => action.type === "reassign_task" || action.type === "unblock_task"));
+  expect(conservativeActions.length > 0).toBeTruthy();
+  expect(conservativeActions.every((action) => action.type === "reassign_task" || action.type === "unblock_task")).toBeTruthy();
 
   const aggressiveActions = await (aggressiveService as unknown as {
     buildMutationActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>>;
   }).buildMutationActions(aggressiveState);
-  assert.ok(aggressiveActions.some((action) => action.type === "update_dependencies"));
+  expect(aggressiveActions.some((action) => action.type === "update_dependencies")).toBeTruthy();
 
   const offActions = await (conservativeService as unknown as {
     buildMutationActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>>;
@@ -446,10 +463,10 @@ test("factory mutation policy: aggressiveness and cooldown gate semantic mutatio
       mutation: { aggressiveness: "off" },
     }),
   });
-  assert.deepEqual(offActions, []);
+  expect(offActions).toEqual([]);
 
   const cooldownActions = await (aggressiveService as unknown as {
     buildMutationActions(state: FactoryState): Promise<ReadonlyArray<FactoryAction>>;
   }).buildMutationActions(cooldownState);
-  assert.deepEqual(cooldownActions, []);
+  expect(cooldownActions).toEqual([]);
 });

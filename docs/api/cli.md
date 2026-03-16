@@ -2,9 +2,9 @@
 
 Binary entrypoint: `receipt` (maps to `dist/cli.js`).
 
-If not installed globally, run through npm scripts:
+If not installed globally, run through Bun:
 ```bash
-npm run cli -- <command> [args]
+bun run cli -- <command> [args]
 ```
 
 ## Commands
@@ -23,7 +23,7 @@ receipt new release-notes --template assistant-tool
 ```
 
 ### receipt dev
-- Purpose: run `tsx watch src/server.ts`.
+- Purpose: run `bun --watch src/server.ts`.
 - Flags: none.
 - Output: streams server logs to stdout/stderr.
 - Example:

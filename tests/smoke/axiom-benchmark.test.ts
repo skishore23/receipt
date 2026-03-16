@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { test, expect } from "bun:test";
 
 import { AXIOM_BENCHMARKS, getAxiomBenchmarkCase, runAxiomBenchmarkCase } from "../../src/evals/axiom-benchmark.ts";
 
@@ -14,14 +13,14 @@ const structuredFromText = <T extends { system?: string; user: string }>(llmText
 
 test("axiom benchmark registry includes the starter theorem", () => {
   const item = getAxiomBenchmarkCase("list_length_append_nat");
-  assert.ok(item);
-  assert.equal(item?.theoremName, "list_length_append_nat");
-  assert.equal(AXIOM_BENCHMARKS.length >= 1, true);
+  expect(item).toBeTruthy();
+  expect(item?.theoremName).toBe("list_length_append_nat");
+  expect(AXIOM_BENCHMARKS.length >= 1).toBe(true);
 });
 
 test("axiom benchmark runner passes for the starter theorem with AXLE validation", async () => {
   const benchmark = getAxiomBenchmarkCase("list_length_append_nat");
-  assert.ok(benchmark, "missing benchmark case");
+  expect(benchmark).toBeTruthy();
 
   const originalFetch = globalThis.fetch;
   const originalApiUrl = process.env.AXLE_API_URL;
@@ -97,10 +96,10 @@ test("axiom benchmark runner passes for the starter theorem with AXLE validation
       llmStructured: structuredFromText(llmText),
     });
 
-    assert.equal(result.passed, true);
-    assert.equal(result.benchmarkId, "list_length_append_nat");
-    assert.match(result.finalResponse ?? "", /validated with AXLE/i);
-    assert.equal(result.checks.every((check) => check.ok), true);
+    expect(result.passed).toBe(true);
+    expect(result.benchmarkId).toBe("list_length_append_nat");
+    expect(result.finalResponse ?? "").toMatch(/validated with AXLE/i);
+    expect(result.checks.every((check) => check.ok)).toBe(true);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiUrl === undefined) delete process.env.AXLE_API_URL;
