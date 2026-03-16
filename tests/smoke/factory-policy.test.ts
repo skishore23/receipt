@@ -104,7 +104,7 @@ const createFactoryService = async (opts?: {
         await fs.writeFile(input.promptPath, input.prompt, "utf-8");
         await fs.writeFile(input.stdoutPath, "", "utf-8");
         await fs.writeFile(input.stderrPath, "", "utf-8");
-        await fs.writeFile(path.join(input.workspacePath, "POLICY_TEST.txt"), `${codexOutcome}\n`, "utf-8");
+        await fs.writeFile(path.join(input.workspacePath, "POLICY_TEST.txt"), `${codexOutcome}:${input.candidateId ?? "candidate"}\n`, "utf-8");
         const resultPath = input.prompt.match(/Write JSON to (.+?) with:/)?.[1]?.trim();
         expect(resultPath).toBeTruthy();
         await fs.writeFile(resultPath, JSON.stringify({
@@ -133,6 +133,9 @@ const createFactoryService = async (opts?: {
 
 const buildState = (events: ReadonlyArray<FactoryEvent>): FactoryState =>
   events.reduce(reduceFactory, initialFactoryState);
+
+const inheritedFailureCommand =
+  "printf 'ENOENT: no such file or directory, open %s/InfinitelyManyPrimes.lean\\n' \"$PWD\" >&2; exit 1";
 
 test("factory policy: dispatch burst is capped and defaults are normalized per objective", async () => {
   const { service } = await createFactoryService({
@@ -210,6 +213,32 @@ test("factory policy: maxCandidatePassesPerTask blocks rework after the configur
   expect(detail.tasks[0]?.blockedReason ?? "").toMatch(/maxCandidatePassesPerTask/);
 });
 
+test("factory policy: repeated identical check failures are treated as inherited instead of endless rework", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Inherited failure objective",
+    prompt: "Keep progress moving when verify only reproduces the same inherited failure.",
+    checks: [inheritedFailureCommand],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const firstJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(firstJob.payload as FactoryTaskJobPayload);
+
+  let detail = await service.getObjective(created.objectiveId);
+  expect(detail.candidates.find((candidate) => candidate.candidateId === "task_01_candidate_01")?.status).toBe("changes_requested");
+
+  const secondJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  expect(secondJob.payload.candidateId).toBe("task_01_candidate_02");
+  await service.runTask(secondJob.payload as FactoryTaskJobPayload);
+
+  detail = await service.getObjective(created.objectiveId);
+  const approved = detail.candidates.find((candidate) => candidate.candidateId === "task_01_candidate_02");
+  expect(["approved", "integrated"]).toContain(approved?.status);
+  expect(approved?.summary ?? "").toMatch(/inherited failure/i);
+});
+
 test("factory policy: autoPromote false stops at ready_to_promote until promotion is explicit", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
 
@@ -235,6 +264,33 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   const promoted = await service.promoteObjective(created.objectiveId);
   expect(promoted.status).toBe("completed");
   expect(promoted.integration.status).toBe("promoted");
+});
+
+test("factory policy: integration validation can pass through inherited failures without reconciliation churn", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Inherited integration failure objective",
+    prompt: "Do not spawn reconciliation work when integration only reproduces inherited failures.",
+    policy: {
+      promotion: { autoPromote: false },
+    },
+    checks: [inheritedFailureCommand],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const firstTaskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(firstTaskJob.payload as FactoryTaskJobPayload);
+  const secondTaskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(secondTaskJob.payload as FactoryTaskJobPayload);
+
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.integration.status).toBe("ready_to_promote");
+  expect(detail.integration.lastSummary ?? "").toMatch(/inherited failures/i);
+  expect(detail.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
 });
 
 test("factory policy: reconciliation spawning respects maxReconciliationTasks", async () => {

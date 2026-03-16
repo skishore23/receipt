@@ -127,6 +127,8 @@ const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "queued" || status === "leased" || status === "running";
+const ansiRe = /\x1b\[[0-9;]*m/g;
+const salientFailureLineRe = /(fail|error|enoent|eperm|expected|received|exited with code|unable to|no such file|missing)/i;
 
 const boardSectionForObjective = (
   objective: Pick<FactoryObjectiveCard, "status" | "scheduler">,
@@ -1803,16 +1805,27 @@ export class FactoryService {
     });
 
     if (failedCheck) {
+      const classification = this.classifyFailedCheck(state, failedCheck);
+      const inheritedOnly = classification.inherited;
+      const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
+        inheritedOnly && outcome === "approved" ? "approved" : "changes_requested";
+      const reviewSummary = inheritedOnly
+        ? `${summary} (checks only reproduced an inherited failure in ${failedCheck.command})`
+        : `Verification failed: ${failedCheck.command}`;
+      const reviewHandoff = inheritedOnly
+        ? `${handoff}\n\n${this.inheritedFailureNote(failedCheck, classification)}`
+        : handoff;
       await this.emitObjective(payload.objectiveId, {
         type: "candidate.reviewed",
         objectiveId: payload.objectiveId,
         candidateId: payload.candidateId,
         taskId: payload.taskId,
-        status: "changes_requested",
-        summary: `Verification failed: ${failedCheck.command}`,
-        handoff,
+        status: reviewStatus,
+        summary: reviewSummary,
+        handoff: reviewHandoff,
         reviewedAt: completedAt,
       });
+      await this.commitTaskMemory(state, task, payload.candidateId, reviewSummary, reviewStatus);
       return;
     }
 
@@ -1849,6 +1862,28 @@ export class FactoryService {
     await fs.writeFile(parsed.stdoutPath, results.map((result) => result.stdout).join("\n"), "utf-8");
     await fs.writeFile(parsed.stderrPath, results.map((result) => result.stderr).join("\n"), "utf-8");
     if (failed) {
+      const classification = this.classifyFailedCheck(state, failed);
+      if (classification.inherited) {
+        const head = await this.git.worktreeStatus(parsed.workspacePath);
+        const summary = `Integration checks only reproduced inherited failures for ${parsed.candidateId}.`;
+        await this.emitObjective(parsed.objectiveId, {
+          type: "integration.ready_to_promote",
+          objectiveId: parsed.objectiveId,
+          candidateId: parsed.candidateId,
+          headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
+          validationResults: results,
+          summary,
+          readyAt: Date.now(),
+        });
+        await this.commitIntegrationMemory(
+          state,
+          parsed.candidateId,
+          `${summary}\n\n${this.inheritedFailureNote(failed, classification)}`,
+          ["integration", "ready_to_promote", "inherited_failures"],
+        );
+        await this.reactObjective(parsed.objectiveId);
+        return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
+      }
       await this.commitIntegrationMemory(state, parsed.candidateId, `Integration validation failed: ${failed.command}`, ["integration", "failed"]);
       await this.emitObjective(parsed.objectiveId, {
         type: "integration.conflicted",
@@ -4238,6 +4273,7 @@ export class FactoryService {
     task: FactoryTaskRecord,
     payload: FactoryTaskJobPayload,
   ): Promise<string> {
+    const objectiveStreamRef = objectiveStream(state.objectiveId);
     const dependencySummaries = task.dependsOn
       .map((depId) => state.graph.nodes[depId])
       .filter((dep): dep is FactoryTaskRecord => Boolean(dep))
@@ -4266,6 +4302,20 @@ export class FactoryService {
       `## Checks`,
       state.checks.map((check) => `- ${check}`).join("\n") || "- none",
       ``,
+      `## Bootstrap Context`,
+      `The prompt is bootstrap only. Read AGENTS.md and skills/factory-receipt-worker/SKILL.md before making code, retry, review, or inherited-failure claims.`,
+      `Current packet files:`,
+      `- Manifest: ${payload.manifestPath}`,
+      `- Context Pack: ${payload.contextPackPath}`,
+      `- Memory Script: ${payload.memoryScriptPath}`,
+      `- Memory Config: ${payload.memoryConfigPath}`,
+      `- Result Path: ${payload.resultPath}`,
+      `Current objective inspection:`,
+      `- receipt factory inspect ${state.objectiveId} --json --panel debug`,
+      `- receipt factory inspect ${state.objectiveId} --json --panel receipts`,
+      `- receipt inspect ${objectiveStreamRef}`,
+      `- receipt trace ${objectiveStreamRef}`,
+      ``,
       `## Context Refs`,
       payload.contextRefs.map((ref) => `- ${ref.kind}: ${ref.label ?? ref.ref}`).join("\n") || "- none",
       ``,
@@ -4286,6 +4336,10 @@ export class FactoryService {
       `- node ${payload.memoryScriptPath} search repo "${task.title}" 6`,
       `- node ${payload.memoryScriptPath} commit task "short durable note"`,
       `The script is the primary memory interface. It compacts receipt-backed memory across agent, repo, objective, task, candidate, and integration scopes, renders the focused recursive subgraph, and exposes a bounded objective-wide slice from ${payload.contextPackPath}.`,
+      ``,
+      `## Shared Context Boundary`,
+      `Shared by default: current worktree files, .receipt/factory packet files, checked-in repo skills, current-objective receipts, and scoped memory reachable through receipt.`,
+      `Not automatically shared: arbitrary cross-objective receipt discovery, other task worktrees, or uncommitted source changes outside this worktree.`,
       ``,
       `## Bootstrap Memory Summary`,
       `Use this short summary only as a starting hint. Pull deeper context through the memory script and write durable notes back through it.`,
@@ -4530,6 +4584,115 @@ export class FactoryService {
       }
     }
     return results;
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private normalizeFailureText(raw: string): string {
+    const worktreePrefix = `${this.git.worktreesDir.replace(/\\/g, "/")}/`;
+    const repoRoot = this.git.repoRoot.replace(/\\/g, "/");
+    const worktreePathRe = new RegExp(`${this.escapeRegex(worktreePrefix)}[^/\\s'":)]+`, "g");
+    return raw
+      .replace(/\r\n/g, "\n")
+      .replace(ansiRe, "")
+      .replace(worktreePathRe, "<worktree>")
+      .replaceAll(repoRoot, "<repo>")
+      .replace(/task_\d+_candidate_\d+/g, "<candidate>")
+      .replace(/objective_[a-z0-9_]+/gi, "<objective>")
+      .replace(/\bworker_\d+\b/g, "worker")
+      .replace(/\b\d+(?:\.\d+)?ms\b/g, "<ms>")
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trimEnd())
+      .join("\n")
+      .trim();
+  }
+
+  private checkFailureExcerpt(check: FactoryCheckResult): string {
+    const combined = this.normalizeFailureText(`${check.stderr}\n${check.stdout}`);
+    const lines = combined
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !line.startsWith("$ "))
+      .filter((line) => !/^bun test v/i.test(line))
+      .filter((line) => !/^\(pass\)/i.test(line));
+    const salient = lines.filter((line) => salientFailureLineRe.test(line));
+    const source = salient.length > 0 ? salient : lines;
+    return source.slice(0, 12).join("\n").slice(0, 2_000);
+  }
+
+  private checkFailureSignature(check: FactoryCheckResult): {
+    readonly digest: string;
+    readonly excerpt: string;
+  } {
+    const excerpt = this.checkFailureExcerpt(check);
+    const digest = createHash("sha256")
+      .update(`${check.command}\n${check.exitCode ?? "null"}\n${excerpt}`)
+      .digest("hex")
+      .slice(0, 12);
+    return { digest, excerpt };
+  }
+
+  private priorFailureSignatureMap(state: FactoryState): ReadonlyMap<string, { readonly source: string; readonly excerpt: string }> {
+    const signatures = new Map<string, { readonly source: string; readonly excerpt: string }>();
+    for (const candidateId of state.candidateOrder) {
+      const candidate = state.candidates[candidateId];
+      if (!candidate) continue;
+      for (const check of candidate.checkResults) {
+        if (check.ok) continue;
+        const { digest, excerpt } = this.checkFailureSignature(check);
+        if (!signatures.has(digest)) {
+          signatures.set(digest, {
+            source: `${candidate.taskId}/${candidate.candidateId}`,
+            excerpt,
+          });
+        }
+      }
+    }
+    for (const check of state.integration.validationResults) {
+      if (check.ok) continue;
+      const { digest, excerpt } = this.checkFailureSignature(check);
+      if (!signatures.has(digest)) {
+        signatures.set(digest, {
+          source: `integration/${state.integration.activeCandidateId ?? "unknown"}`,
+          excerpt,
+        });
+      }
+    }
+    return signatures;
+  }
+
+  private classifyFailedCheck(
+    state: FactoryState,
+    check: FactoryCheckResult,
+  ): {
+    readonly inherited: boolean;
+    readonly digest: string;
+    readonly excerpt: string;
+    readonly source?: string;
+  } {
+    const { digest, excerpt } = this.checkFailureSignature(check);
+    const prior = this.priorFailureSignatureMap(state).get(digest);
+    return {
+      inherited: Boolean(prior),
+      digest,
+      excerpt,
+      source: prior?.source,
+    };
+  }
+
+  private inheritedFailureNote(check: FactoryCheckResult, classification: {
+    readonly digest: string;
+    readonly source?: string;
+  }): string {
+    return [
+      `Deterministic review note: ${check.command} matched a prior failure signature.`,
+      `signature=${classification.digest}`,
+      classification.source ? `source=${classification.source}` : undefined,
+      `This failure is treated as inherited, not as a new regression from the current candidate.`,
+    ].filter(Boolean).join(" ");
   }
 
   private async readTextTail(filePath: string | undefined, maxChars: number): Promise<string | undefined> {

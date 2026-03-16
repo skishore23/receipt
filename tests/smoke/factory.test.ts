@@ -22,7 +22,7 @@ import {
   type FactoryEvent,
 } from "../../src/modules/factory.ts";
 import { FactoryService } from "../../src/services/factory-service.ts";
-import { factoryStreamIsland, factoryShell } from "../../src/views/factory/index.ts";
+import { factoryStreamIsland, factoryShell, type FactoryObjectiveDetail } from "../../src/views/factory/index.ts";
 import type { BranchStore, Receipt, Store } from "../../src/core/types.ts";
 
 const stream = "factory/objectives/demo";
@@ -419,7 +419,7 @@ test("factory shell: uses 3-column layout with HTMX SSE", () => {
 });
 
 test("factory objective island: blocked reasons are surfaced prominently", () => {
-  const detail = {
+  const detail: FactoryObjectiveDetail = {
     objectiveId: "objective_demo",
     title: "Blocked objective",
     status: "blocked" as const,
@@ -508,7 +508,7 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
     activity: [] as readonly never[],
     latestRebracket: undefined,
   };
-  const markup = factoryStreamIsland(detail as any, undefined);
+  const markup = factoryStreamIsland(detail, undefined);
 
   expect(markup).toMatch(/Blocked/);
   expect(markup).toMatch(/factory task produced no tracked diff/);
@@ -516,7 +516,7 @@ test("factory objective island: blocked reasons are surfaced prominently", () =>
 });
 
 test("factory stream island: renders stream with objective detail", () => {
-  const detail = {
+  const detail: FactoryObjectiveDetail = {
     objectiveId: "objective_demo",
     title: "Responsive task cards",
     status: "active" as const,
@@ -591,7 +591,7 @@ test("factory stream island: renders stream with objective detail", () => {
     activity: [] as readonly never[],
     latestRebracket: undefined,
   };
-  const markup = factoryStreamIsland(detail as any, undefined);
+  const markup = factoryStreamIsland(detail, undefined);
 
   expect(markup).toMatch(/id="factory-stream"/);
   expect(markup).toMatch(/Responsive task cards/);
