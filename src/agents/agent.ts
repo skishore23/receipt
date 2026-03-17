@@ -336,7 +336,7 @@ const BASE_TOOL_SPECS: Readonly<Record<string, string>> = {
   "memory.diff": '{"scope"?: string, "fromTs": number, "toTs"?: number} — List memory entries within a timestamp range.',
   "agent.delegate": '{"agentId": string, "task": string, "config"?: object, "timeoutMs"?: number} — Delegate a sub-task to a specialized agent (theorem, writer, agent, axiom, inspector). Blocks until complete or timeout.',
   "agent.status": '{"jobId": string} — Check status and result of a previously delegated job.',
-  "agent.inspect": '{"file": string, "maxChars"?: number} — Read a receipt chain file to inspect another agent\'s event history.',
+  "agent.inspect": '{"file": string, "maxChars"?: number} — Read another agent\'s event history by bare .jsonl filename or by stream id such as agents/factory/<repoKey>/<profileId>.',
   "skill.read": '{"name": string} — Get the full parameter spec for any tool by name.',
 };
 

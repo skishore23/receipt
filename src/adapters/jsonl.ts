@@ -73,6 +73,8 @@ const appendJsonl = async <B>(file: string, r: Receipt<B>): Promise<void> => {
 export type StreamLocator = {
   readonly fileFor: (stream: string) => Promise<string>;
   readonly keyFor: (stream: string) => Promise<string>;
+  readonly existingKeyFor: (stream: string) => Promise<string | undefined>;
+  readonly fileForExisting: (stream: string) => Promise<string | undefined>;
   readonly streamForKey: (key: string) => Promise<string | undefined>;
 };
 
@@ -180,12 +182,18 @@ export const createStreamLocator = (dir: string): StreamLocator => {
   };
 
   const keyFor = async (stream: string): Promise<string> => ensureStreamKey(stream);
+  const existingKeyFor = async (stream: string): Promise<string | undefined> =>
+    (await readManifest()).byStream[stream];
   const fileFor = async (stream: string): Promise<string> =>
     path.join(dir, `${await ensureStreamKey(stream)}.jsonl`);
+  const fileForExisting = async (stream: string): Promise<string | undefined> => {
+    const key = await existingKeyFor(stream);
+    return key ? path.join(dir, `${key}.jsonl`) : undefined;
+  };
   const streamForKey = async (key: string): Promise<string | undefined> =>
     (await readManifest()).byKey[key];
 
-  return { fileFor, keyFor, streamForKey };
+  return { fileFor, keyFor, existingKeyFor, fileForExisting, streamForKey };
 };
 
 /** One .jsonl file per stream key under dir; stream names map via _streams.json */

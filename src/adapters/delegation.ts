@@ -2,7 +2,10 @@
 // Delegation Tools - framework-level agent-to-agent delegation primitives
 // ============================================================================
 
-import { readReceiptFile, buildReceiptContext } from "./receipt-tools.js";
+import path from "node:path";
+
+import { createStreamLocator } from "./jsonl.js";
+import { assertReceiptFileName, buildReceiptContext, readReceiptFile } from "./receipt-tools.js";
 
 export type DelegationDeps = {
   readonly enqueue: (opts: {
@@ -51,67 +54,86 @@ const truncate = (text: string, limit: number): { readonly text: string; readonl
   return { text: `${text.slice(0, limit - 3)}...`, truncated: true };
 };
 
-export const createDelegationTools = (deps: DelegationDeps): DelegationTools => ({
-  "agent.delegate": async (input) => {
-    const agentId = requireString(input, "agentId");
-    const task = requireString(input, "task");
-    const timeoutMs = requireNumber(input, "timeoutMs", 120_000);
+const hasPathSeparator = (value: string): boolean =>
+  value.includes("/") || value.includes("\\");
 
-    const configInput = input.config;
-    if (configInput !== undefined && (typeof configInput !== "object" || !configInput || Array.isArray(configInput))) {
-      throw new Error("config must be an object when provided");
-    }
-    const config = (configInput ?? {}) as Record<string, unknown>;
+export const createDelegationTools = (deps: DelegationDeps): DelegationTools => {
+  const locator = createStreamLocator(deps.dataDir);
+  return {
+    "agent.delegate": async (input) => {
+      const agentId = requireString(input, "agentId");
+      const task = requireString(input, "task");
+      const timeoutMs = requireNumber(input, "timeoutMs", 120_000);
 
-    const job = await deps.enqueue({
-      agentId,
-      payload: {
-        kind: `${agentId}.run`,
-        problem: task,
-        config,
-        isSubAgent: true,
-      },
-    });
+      const configInput = input.config;
+      if (configInput !== undefined && (typeof configInput !== "object" || !configInput || Array.isArray(configInput))) {
+        throw new Error("config must be an object when provided");
+      }
+      const config = (configInput ?? {}) as Record<string, unknown>;
 
-    const settled = await deps.waitForJob(job.id, timeoutMs);
+      const job = await deps.enqueue({
+        agentId,
+        payload: {
+          kind: `${agentId}.run`,
+          problem: task,
+          config,
+          isSubAgent: true,
+        },
+      });
 
-    const resultText = settled.result
-      ? JSON.stringify(settled.result)
-      : settled.lastError ?? settled.status;
+      const settled = await deps.waitForJob(job.id, timeoutMs);
 
-    const clipped = truncate(resultText, 4_000);
-    return {
-      output: `job ${job.id} ${settled.status}: ${clipped.text}`,
-      summary: `delegated to ${agentId}: ${settled.status}`,
-    };
-  },
+      const resultText = settled.result
+        ? JSON.stringify(settled.result)
+        : settled.lastError ?? settled.status;
 
-  "agent.status": async (input) => {
-    const jobId = requireString(input, "jobId");
-    const job = await deps.getJob(jobId);
-    const output = JSON.stringify({
-      id: job.id,
-      status: job.status,
-      result: job.result,
-      lastError: job.lastError,
-    });
-    return { output, summary: `job ${jobId}: ${job.status}` };
-  },
+      const clipped = truncate(resultText, 4_000);
+      return {
+        output: `job ${job.id} ${settled.status}: ${clipped.text}`,
+        summary: `delegated to ${agentId}: ${settled.status}`,
+      };
+    },
 
-  "agent.inspect": async (input) => {
-    const file = requireString(input, "file");
-    const maxChars = requireNumber(input, "maxChars", 4_000);
+    "agent.status": async (input) => {
+      const jobId = requireString(input, "jobId");
+      const job = await deps.getJob(jobId);
+      const output = JSON.stringify({
+        id: job.id,
+        status: job.status,
+        result: job.result,
+        lastError: job.lastError,
+      });
+      return { output, summary: `job ${jobId}: ${job.status}` };
+    },
 
-    const records = await readReceiptFile(deps.dataDir, file);
-    if (records.length === 0) {
-      return { output: "(empty chain)", summary: `${file}: 0 records` };
-    }
+    "agent.inspect": async (input) => {
+      const file = requireString(input, "file");
+      const maxChars = requireNumber(input, "maxChars", 4_000);
+      const existingStreamFile = await locator.fileForExisting(file);
+      let fileName = existingStreamFile ? path.basename(existingStreamFile) : undefined;
 
-    const context = buildReceiptContext(records, maxChars);
-    const clipped = truncate(context, maxChars);
-    return {
-      output: clipped.text,
-      summary: `${file}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
-    };
-  },
-});
+      if (!fileName && hasPathSeparator(file)) {
+        throw new Error(`unknown receipt stream '${file}'. Use a known stream id or a bare .jsonl filename.`);
+      }
+
+      if (!fileName) {
+        if (!file.endsWith(".jsonl")) {
+          throw new Error(`receipt reference '${file}' must be a bare .jsonl filename or a known stream id.`);
+        }
+        fileName = assertReceiptFileName(file);
+      }
+
+      const records = await readReceiptFile(deps.dataDir, fileName);
+      if (records.length === 0) {
+        return { output: "(empty chain)", summary: `${file}: 0 records` };
+      }
+
+      const context = buildReceiptContext(records, maxChars);
+      const clipped = truncate(context, maxChars);
+      return {
+        output: clipped.text,
+        summary: `${file}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
+      };
+    },
+  };
+};
