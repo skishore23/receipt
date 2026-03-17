@@ -24,6 +24,12 @@ const formatTs = (ts?: number): string =>
 const shortHash = (hash?: string): string =>
   hash ? hash.slice(0, 10) : "";
 
+const displayLabel = (value?: string): string => {
+  const text = value?.trim();
+  if (!text) return "";
+  return text.replace(/[_-]+/g, " ");
+};
+
 type Tone = "neutral" | "info" | "success" | "warning" | "danger";
 
 const toneForValue = (value?: string): Tone => {
@@ -94,7 +100,13 @@ const statPill = (label: string, value: string): string => `<div class="rounded-
 </div>`;
 
 const objectiveSummaryLine = (status: string, phase: string, slotState?: string): string =>
-  [status, phase, slotState].filter(Boolean).join(" · ");
+  [status, phase, slotState].map(displayLabel).filter(Boolean).join(" · ");
+
+const objectiveMetaPill = (label: string, value?: string, tone: Tone = "neutral"): string => {
+  const text = displayLabel(value);
+  if (!text) return "";
+  return `<span class="${badgeBaseClass} ${badgeToneClass(tone)} px-2.5 py-1 text-[10px] tracking-[0.14em]">${esc(`${label} ${text}`)}</span>`;
+};
 
 export type FactoryChatProfileNav = {
   readonly id: string;
@@ -314,19 +326,22 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
     ? "border-sky-300/30 bg-sky-300/10 shadow-[0_16px_48px_rgba(56,189,248,0.12)]"
     : "border-white/10 bg-black/10 hover:border-white/15 hover:bg-white/[0.05]";
   return `<a class="block min-w-0 overflow-hidden rounded-[24px] border px-4 py-4 transition ${selectedClass}" href="${href}">
-    <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="flex items-start gap-3">
       <div class="min-w-0 flex-1">
-        <div class="max-w-full break-words text-sm font-semibold leading-6 text-zinc-100">${esc(objective.title)}</div>
-        <div class="mt-2 text-xs text-zinc-500">${esc(objectiveSummaryLine(objective.status, objective.phase, objective.slotState))}</div>
+        <div class="min-w-0 text-sm font-semibold leading-6 text-zinc-100 [display:-webkit-box] overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">${esc(objective.title)}</div>
       </div>
-      <div class="shrink-0 max-w-full">${badge(objective.status)}</div>
+      <div class="shrink-0 max-w-full">${badge(displayLabel(objective.status), toneForValue(objective.status))}</div>
     </div>
-    ${objective.summary ? `<div class="mt-3 max-h-[3rem] overflow-hidden break-words text-sm leading-6 text-zinc-400">${esc(objective.summary)}</div>` : ""}
+    <div class="mt-3 flex flex-wrap gap-2">
+      ${objectiveMetaPill("phase", objective.phase, toneForValue(objective.phase))}
+      ${objectiveMetaPill("slot", objective.slotState, toneForValue(objective.slotState))}
+      ${objective.integrationStatus ? objectiveMetaPill("integration", objective.integrationStatus, toneForValue(objective.integrationStatus)) : ""}
+    </div>
+    ${objective.summary ? `<div class="mt-3 [display:-webkit-box] overflow-hidden break-words text-sm leading-6 text-zinc-400 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">${esc(objective.summary)}</div>` : ""}
     <div class="mt-4 flex flex-wrap overflow-hidden gap-2">
       ${typeof objective.activeTaskCount === "number" ? `<span class="inline-flex min-w-0 max-w-full items-center justify-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-center text-[11px] uppercase tracking-[0.16em] text-zinc-400 whitespace-normal leading-4">${esc(`${objective.activeTaskCount} active`)}</span>` : ""}
       ${typeof objective.readyTaskCount === "number" ? `<span class="inline-flex min-w-0 max-w-full items-center justify-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-center text-[11px] uppercase tracking-[0.16em] text-zinc-400 whitespace-normal leading-4">${esc(`${objective.readyTaskCount} ready`)}</span>` : ""}
       ${typeof objective.taskCount === "number" ? `<span class="inline-flex min-w-0 max-w-full items-center justify-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-center text-[11px] uppercase tracking-[0.16em] text-zinc-400 whitespace-normal leading-4">${esc(`${objective.taskCount} total`)}</span>` : ""}
-      ${objective.integrationStatus ? `<div class="max-w-full">${badge(`integration ${objective.integrationStatus}`, toneForValue(objective.integrationStatus))}</div>` : ""}
     </div>
     ${objective.updatedAt ? `<div class="mt-3 text-xs text-zinc-500">Updated ${esc(formatTs(objective.updatedAt))}</div>` : ""}
   </a>`;
@@ -504,7 +519,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
 <body class="overflow-x-hidden lg:h-screen lg:overflow-hidden" data-profile="${esc(model.activeProfileId)}" data-objective="${esc(model.objectiveId ?? "")}">
   <div class="relative min-h-screen bg-background text-foreground lg:h-screen">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(110,231,183,0.14),transparent_28%),radial-gradient(circle_at_top_right,rgba(96,165,250,0.16),transparent_30%),linear-gradient(180deg,rgba(8,10,14,0.94),rgba(8,10,14,1))]"></div>
-    <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[280px_minmax(0,1fr)_360px]">
+    <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)_360px]">
       <aside class="order-2 min-w-0 border-t border-white/10 bg-black/30 lg:order-none lg:min-h-0 lg:border-r lg:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto lg:h-screen lg:max-h-none">
           <div id="factory-sidebar" hx-get="/factory/island/sidebar?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">

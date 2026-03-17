@@ -543,6 +543,45 @@ test("factory sidebar island: renders left rail navigation", () => {
   expect(markup).toMatch(/1 active/);
 });
 
+test("factory sidebar island: humanizes objective slot labels and avoids repeating status in the compact meta row", () => {
+  const markup = factorySidebarIsland({
+    activeProfileId: "software",
+    activeProfileLabel: "Software",
+    profiles: [
+      { id: "generalist", label: "Generalist", selected: false },
+      { id: "software", label: "Software", selected: true },
+    ],
+    objectives: [{
+      objectiveId: "objective_waiting",
+      title: "Fix iteration-3 issue",
+      status: "decomposing",
+      phase: "queued",
+      summary: "Waiting for the repo execution slot (1 in queue).",
+      updatedAt: 10,
+      selected: true,
+      slotState: "waiting_for_slot",
+      activeTaskCount: 0,
+      readyTaskCount: 0,
+      taskCount: 2,
+      integrationStatus: "queued",
+    }],
+    jobs: [],
+    selectedObjective: {
+      objectiveId: "objective_waiting",
+      title: "Fix iteration-3 issue",
+      status: "decomposing",
+      phase: "queued",
+      summary: "Waiting for the repo execution slot (1 in queue).",
+      debugLink: "/factory/api/objectives/objective_waiting/debug",
+      receiptsLink: "/factory/api/objectives/objective_waiting/receipts?limit=50",
+    },
+  });
+
+  expect(markup).toMatch(/slot waiting for slot/);
+  expect(markup).toMatch(/phase queued/);
+  expect(markup).not.toMatch(/decomposing · queued · waiting_for_slot/);
+});
+
 test("factory inspector island: renders selected objective controls and recent jobs", () => {
   const longJobId = "job_with_a_name_that_used_to_force_the_recent_jobs_card_past_the_inspector_width_when_it_rendered";
   const markup = factoryInspectorIsland({
