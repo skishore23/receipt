@@ -678,7 +678,19 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           ctx.sse.publish("jobs", created.id);
           const location = `/factory?profile=${encodeURIComponent(resolved.root.id)}${objectiveId ? `&objective=${encodeURIComponent(objectiveId)}` : ""}&job=${encodeURIComponent(created.id)}&run=${encodeURIComponent(runId)}`;
           if (c.req.header("HX-Request") === "true") {
-            return emptyHtml({ "HX-Redirect": location });
+            return emptyHtml({
+              "HX-Replace-Url": location,
+              "HX-Trigger": JSON.stringify({
+                "factory-run-started": {
+                  profileId: resolved.root.id,
+                  profileLabel: resolved.root.label,
+                  objectiveId: objectiveId ?? "",
+                  jobId: created.id,
+                  runId,
+                  location,
+                },
+              }),
+            });
           }
           return new Response(null, {
             status: 303,

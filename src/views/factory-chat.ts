@@ -7,7 +7,6 @@ const md = new MiniGFM();
 const panelClass = "rounded-[28px] border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(0,0,0,0.34)] backdrop-blur-2xl";
 const softPanelClass = "rounded-[24px] border border-white/10 bg-black/20 backdrop-blur-xl";
 const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500";
-const subduedCopyClass = "text-sm leading-6 text-zinc-400";
 const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4";
 const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
 const inputClass = "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-emerald-300/40 focus:bg-white/[0.06]";
@@ -301,10 +300,10 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
     : `<section class="${panelClass} px-6 py-6 text-center">
       <div class="mx-auto max-w-2xl">
         <div class="text-base font-semibold text-zinc-100">${esc(model.activeProfileLabel)} is ready.</div>
-        <div class="mt-3 text-sm leading-6 text-zinc-400">Ask for status, planning, debugging, Codex work, or an end-to-end Factory objective. The active profile decides whether to respond directly or queue work.</div>
+        <div class="mt-3 text-sm leading-6 text-zinc-400">Start with status, plan, debug, or dispatch.</div>
       </div>
     </section>`;
-  return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}">
+  return `<div class="chat-stack mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}">
     ${body}
   </div>`;
 };
@@ -322,7 +321,7 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
       </div>
       <div class="shrink-0 max-w-full">${badge(objective.status)}</div>
     </div>
-    ${objective.summary ? `<div class="mt-3 break-words text-sm leading-6 text-zinc-400">${esc(objective.summary)}</div>` : ""}
+    ${objective.summary ? `<div class="mt-3 max-h-[3rem] overflow-hidden break-words text-sm leading-6 text-zinc-400">${esc(objective.summary)}</div>` : ""}
     <div class="mt-4 flex flex-wrap overflow-hidden gap-2">
       ${typeof objective.activeTaskCount === "number" ? `<span class="inline-flex min-w-0 max-w-full items-center justify-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-center text-[11px] uppercase tracking-[0.16em] text-zinc-400 whitespace-normal leading-4">${esc(`${objective.activeTaskCount} active`)}</span>` : ""}
       ${typeof objective.readyTaskCount === "number" ? `<span class="inline-flex min-w-0 max-w-full items-center justify-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-center text-[11px] uppercase tracking-[0.16em] text-zinc-400 whitespace-normal leading-4">${esc(`${objective.readyTaskCount} ready`)}</span>` : ""}
@@ -359,7 +358,6 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
         </div>
         <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">FX</div>
       </div>
-      <div class="mt-4 ${subduedCopyClass}">Switch profiles, jump between objectives, and keep the chat focused on the selected stream.</div>
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
@@ -410,7 +408,7 @@ const renderJobRow = (job: FactoryChatJobNav): string => `<div class="rounded-[2
   <div class="flex flex-wrap items-start justify-between gap-3">
     <div class="min-w-0">
       <div class="truncate text-sm font-semibold text-zinc-100">${esc(job.agentId)} · ${esc(job.jobId)}</div>
-      <div class="mt-2 text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
+      <div class="mt-2 max-h-[3rem] overflow-hidden text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
     </div>
     ${badge(job.status)}
   </div>
@@ -436,7 +434,6 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
         </div>
         ${badge(model.activeProfileId, "neutral")}
       </div>
-      <div class="mt-4 ${subduedCopyClass}">The profile can answer directly, inspect Receipt memory, queue agents, run Codex, and dispatch objectives from this chat.</div>
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
@@ -478,7 +475,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
             ${renderObjectiveActions(objective)}
           </div>
         </div>
-      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick an objective from the left rail to see details, queue position, actions, debug links, and recent work.</div>`}
+      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick an objective from the left rail to inspect it.</div>`}
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
@@ -493,7 +490,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
 };
 
 export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doctype html>
-<html>
+<html class="h-full">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -504,21 +501,21 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
   <link rel="stylesheet" href="/assets/factory.css" />
   <script src="/assets/htmx.min.js"></script>
 </head>
-<body data-profile="${esc(model.activeProfileId)}" data-objective="${esc(model.objectiveId ?? "")}">
-  <div class="relative min-h-screen overflow-hidden bg-background text-foreground">
+<body class="overflow-x-hidden lg:h-screen lg:overflow-hidden" data-profile="${esc(model.activeProfileId)}" data-objective="${esc(model.objectiveId ?? "")}">
+  <div class="relative min-h-screen bg-background text-foreground lg:h-screen">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(110,231,183,0.14),transparent_28%),radial-gradient(circle_at_top_right,rgba(96,165,250,0.16),transparent_30%),linear-gradient(180deg,rgba(8,10,14,0.94),rgba(8,10,14,1))]"></div>
-    <div class="relative flex min-h-screen flex-col lg:grid lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_360px]">
-      <aside class="order-2 min-w-0 border-t border-white/10 bg-black/30 lg:order-none lg:border-r lg:border-t-0">
-        <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto lg:sticky lg:top-0 lg:max-h-screen">
+    <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[280px_minmax(0,1fr)_360px]">
+      <aside class="order-2 min-w-0 border-t border-white/10 bg-black/30 lg:order-none lg:min-h-0 lg:border-r lg:border-t-0">
+        <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto lg:h-screen lg:max-h-none">
           <div id="factory-sidebar" hx-get="/factory/island/sidebar?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
             ${factoryRailIsland(model.sidebar)}
           </div>
         </div>
       </aside>
-      <main class="order-1 min-w-0 bg-black/20 lg:order-none">
-        <div class="flex min-h-screen flex-col">
+      <main class="order-1 min-w-0 bg-black/20 lg:order-none lg:min-h-0">
+        <div class="flex min-h-screen flex-col lg:h-screen lg:min-h-0">
           <header class="border-b border-white/10 bg-black/20 backdrop-blur-xl">
-            <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 px-4 py-4 md:px-8 xl:px-10">
+            <div class="mx-auto flex w-full max-w-4xl flex-wrap items-center gap-4 px-4 py-4 md:px-8 xl:px-10">
               <div class="min-w-0">
                 <div class="${sectionLabelClass}">Factory chat</div>
                 <div class="mt-3 flex flex-wrap items-center gap-2">
@@ -527,21 +524,20 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
                   ${model.objectiveId ? badge(`objective ${model.objectiveId}`, "info") : badge("no objective selected", "neutral")}
                 </div>
               </div>
-              <div class="max-w-md text-sm leading-6 text-zinc-400">A chat-first Factory shell with the controls moved into the side rails so the center column stays focused.</div>
             </div>
           </header>
-          <section id="factory-chat-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto">
+          <section id="factory-chat-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <div id="factory-chat" hx-get="/factory/island/chat?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:700ms" hx-swap="innerHTML">
               ${factoryChatIsland(model.chat)}
             </div>
           </section>
           <section class="border-t border-white/10 bg-black/35 px-3 py-3 backdrop-blur-2xl sm:px-4">
-            <div class="mx-auto w-full max-w-5xl px-1 md:px-4 xl:px-6">
+            <div class="mx-auto w-full max-w-4xl px-1 md:px-4 xl:px-6">
               <form class="${panelClass} px-4 py-4" action="/factory/run" method="post" hx-post="/factory/run" hx-swap="none">
                 <input type="hidden" name="profile" value="${esc(model.activeProfileId)}" />
                 <input type="hidden" name="objective" value="${esc(model.objectiveId ?? "")}" />
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <textarea id="factory-prompt" class="min-h-[96px] w-full resize-y border-0 bg-transparent px-1 py-1 text-[15px] leading-7 text-zinc-100 outline-none placeholder:text-zinc-500" name="problem" placeholder="Ask for status, planning, Codex work, debugging, or an end-to-end Factory objective." required></textarea>
+                <textarea id="factory-prompt" class="max-h-40 min-h-[72px] w-full resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-[15px] leading-7 text-zinc-100 outline-none placeholder:text-zinc-500" name="problem" placeholder="Message Factory" required rows="1"></textarea>
                 <div class="mt-4 flex flex-col gap-4 border-t border-white/10 pt-4 md:flex-row md:items-end md:justify-between">
                   <div class="flex flex-wrap gap-2">
                     <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Summarize the current Factory status and the next best action.">Status</button>
@@ -550,8 +546,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
                     <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Dispatch a Factory objective and keep delivery moving until there is a concrete result.">Dispatch</button>
                   </div>
                   <div class="flex flex-wrap items-center gap-3">
-                    <div class="text-xs text-zinc-500">The active profile decides whether to answer directly, inspect receipts, run Codex, or queue work.</div>
-                    <button class="${primaryButtonClass}" type="submit">Send</button>
+                    <button class="${primaryButtonClass}" data-send-label="Send" type="submit">Send</button>
                   </div>
                 </div>
               </form>
@@ -559,8 +554,8 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
           </section>
         </div>
       </main>
-      <aside class="order-3 min-w-0 border-t border-white/10 bg-black/30 xl:border-l xl:border-t-0">
-        <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto xl:sticky xl:top-0 xl:max-h-screen">
+      <aside class="order-3 min-w-0 border-t border-white/10 bg-black/30 xl:min-h-0 xl:border-l xl:border-t-0">
+        <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto xl:h-screen xl:max-h-none">
           <div id="factory-inspector" hx-get="/factory/island/inspector?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
             ${factoryInspectorIsland(model.sidebar)}
           </div>
@@ -571,6 +566,8 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
   <script>
     (function () {
       let source = null;
+      let pendingRunScroll = false;
+      let shouldStickToBottom = true;
       const refresh = function () {
         document.body.dispatchEvent(new CustomEvent("factory-refresh", { bubbles: true }));
       };
@@ -587,9 +584,35 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         if (sidebar) sidebar.setAttribute("hx-get", "/factory/island/sidebar" + query);
         if (inspector) inspector.setAttribute("hx-get", "/factory/island/inspector" + query);
       };
-      const scrollChatToBottom = function () {
+      const isNearBottom = function () {
         const scroll = document.getElementById("factory-chat-scroll");
-        if (scroll) scroll.scrollTop = scroll.scrollHeight;
+        if (!(scroll instanceof HTMLElement)) return true;
+        return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
+      };
+      const scrollChatToBottom = function (behavior) {
+        const scroll = document.getElementById("factory-chat-scroll");
+        if (!(scroll instanceof HTMLElement)) return;
+        if (typeof scroll.scrollTo === "function") {
+          scroll.scrollTo({ top: scroll.scrollHeight, behavior: behavior || "auto" });
+        } else {
+          scroll.scrollTop = scroll.scrollHeight;
+        }
+        shouldStickToBottom = true;
+      };
+      const clearPrompt = function () {
+        const input = document.getElementById("factory-prompt");
+        if (!(input instanceof HTMLTextAreaElement)) return;
+        input.value = "";
+        input.focus();
+      };
+      const setRunPending = function (pending) {
+        document.querySelectorAll('form[action="/factory/run"]').forEach(function (form) {
+          if (!(form instanceof HTMLFormElement)) return;
+          const submit = form.querySelector('button[type="submit"]');
+          if (!(submit instanceof HTMLButtonElement)) return;
+          submit.disabled = pending;
+          submit.textContent = pending ? "Sending..." : (submit.getAttribute("data-send-label") || "Send");
+        });
       };
       const syncProfile = function () {
         const chat = document.querySelector("#factory-chat .chat-stack");
@@ -642,14 +665,62 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         updateIslandUrls();
         connect();
         syncObjective();
-        window.requestAnimationFrame(scrollChatToBottom);
+        const scroll = document.getElementById("factory-chat-scroll");
+        if (scroll instanceof HTMLElement) {
+          scroll.addEventListener("scroll", function () {
+            shouldStickToBottom = isNearBottom();
+          }, { passive: true });
+        }
+        window.requestAnimationFrame(function () {
+          scrollChatToBottom("auto");
+        });
+      });
+      document.body.addEventListener("factory-run-started", function (event) {
+        const detail = event && typeof event.detail === "object" && event.detail ? event.detail : {};
+        const nextProfile = typeof detail.profileId === "string" && detail.profileId
+          ? detail.profileId
+          : (document.body.dataset.profile || "generalist");
+        const nextObjective = typeof detail.objectiveId === "string" ? detail.objectiveId : "";
+        document.body.dataset.profile = nextProfile;
+        document.body.dataset.objective = nextObjective;
+        document.querySelectorAll(profileInputSelector).forEach(function (node) {
+          node.value = nextProfile;
+        });
+        document.querySelectorAll(objectiveInputSelector).forEach(function (node) {
+          node.value = nextObjective;
+        });
+        document.querySelectorAll("[data-profile-label]").forEach(function (node) {
+          node.textContent = typeof detail.profileLabel === "string" && detail.profileLabel ? detail.profileLabel : nextProfile;
+        });
+        updateIslandUrls();
+        connect();
+        pendingRunScroll = true;
+        setRunPending(false);
+        clearPrompt();
+        refresh();
+      });
+      document.addEventListener("htmx:beforeRequest", function (event) {
+        const detail = event && event.detail;
+        const elt = detail && detail.elt;
+        if (!elt || !(elt instanceof HTMLElement)) return;
+        if (elt.tagName === "FORM" && elt.getAttribute("action") === "/factory/run") {
+          pendingRunScroll = true;
+          shouldStickToBottom = true;
+          setRunPending(true);
+        }
       });
       document.addEventListener("htmx:afterSwap", function (event) {
         const target = event && event.target;
         if (!(target instanceof HTMLElement)) return;
         if (target.id === "factory-chat") {
           syncProfile();
-          window.requestAnimationFrame(scrollChatToBottom);
+          if (pendingRunScroll || shouldStickToBottom) {
+            const behavior = pendingRunScroll ? "smooth" : "auto";
+            window.requestAnimationFrame(function () {
+              scrollChatToBottom(behavior);
+            });
+          }
+          pendingRunScroll = false;
         }
         if (target.id === "factory-sidebar" || target.id === "factory-inspector") syncObjective();
       });
@@ -657,6 +728,10 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         const detail = event && event.detail;
         const elt = detail && detail.elt;
         if (!elt || !(elt instanceof HTMLElement)) return;
+        if (elt.tagName === "FORM" && elt.getAttribute("action") === "/factory/run") {
+          if (detail.failed) setRunPending(false);
+          return;
+        }
         if (detail.failed) return;
         if (elt.tagName === "FORM") refresh();
       });

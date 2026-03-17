@@ -441,6 +441,8 @@ test("factory shell: renders chat-first UI without the legacy dashboard", () => 
   expect(markup).toMatch(/id="factory-sidebar"/);
   expect(markup).toMatch(/id="factory-inspector"/);
   expect(markup).toMatch(/new EventSource\("\/factory\/events\?profile=/);
+  expect(markup).toMatch(/factory-run-started/);
+  expect(markup).toMatch(/Message Factory/);
   expect(markup).toMatch(/action="\/factory\/run"/);
   expect(markup).not.toMatch(/id="factory-board"/);
   expect(markup).not.toMatch(/id="factory-stream"/);
