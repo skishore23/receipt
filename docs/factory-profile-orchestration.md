@@ -2,11 +2,11 @@
 
 Status: Current implementation guide  
 Audience: Engineering and repo customizers  
-Scope: How `/factory/chat` uses profiles as the operator-facing orchestration layer, how profiles are resolved, how work is dispatched, and how this layer is customized per repo
+Scope: How `/factory` uses profiles as the operator-facing chat/thread orchestration layer, how profiles are resolved, how work is dispatched, and how this layer is customized per repo
 
 ## Purpose
 
-This document explains the current profile-based orchestration model behind `/factory/chat`.
+This document explains the current profile-based orchestration model behind `/factory`.
 
 It covers:
 
@@ -14,7 +14,7 @@ It covers:
 - how the active profile is selected
 - how profile instructions become the system prompt
 - how profile-scoped tools drive orchestration
-- how the `/factory/chat` web surface maps to profile state
+- how the `/factory` web surface maps to profile state
 - how repos can customize the behavior safely
 
 This document is about the profile layer on top of the Receipt-native Factory core. It complements:
@@ -24,9 +24,9 @@ This document is about the profile layer on top of the Receipt-native Factory co
 
 ## The Short Version
 
-`/factory` is now Mission Control and `/factory/chat` is the profile chat surface.
+`/factory` is the chat-first orchestration surface where the operator talks to a selected Factory profile and moves between general chat and thread-scoped chat. `/factory/control` is the secondary work-details surface.
 
-`/factory/chat` is the chat-first orchestration surface where the operator talks to a selected Factory profile. That profile is a repo-customizable package made of:
+The main `/factory` chat surface is backed by a repo-customizable profile package made of:
 
 - `profiles/<id>/PROFILE.md`
 - `profiles/<id>/profile.json`
@@ -62,7 +62,7 @@ Profiles do not replace Factory state. They provide a customizable front door in
 
 ```mermaid
 flowchart LR
-  Operator["Operator"] --> UI["/factory/chat web UI"]
+  Operator["Operator"] --> UI["/factory web UI"]
   UI --> Route["factory route\nsrc/agents/factory.agent.ts"]
   Route --> Resolver["profile resolver\nsrc/services/factory-chat-profiles.ts"]
   Resolver --> Profiles["profiles/<id>/PROFILE.md\nprofiles/<id>/profile.json"]
@@ -159,7 +159,7 @@ The loop is intentionally constrained:
 
 ### Factory route and UI
 
-The `/factory/chat` route in `src/agents/factory.agent.ts` turns profile state into the chat shell.
+The `/factory` route in `src/agents/factory.agent.ts` turns profile state into the chat shell.
 
 The current shell exposes:
 
@@ -401,7 +401,7 @@ Recommended pattern:
 - return the live handle
 - tell the operator what to ask next
 
-This matches the current Factory chat runtime and avoids turning `/factory/chat` into a blocking synchronous shell.
+This matches the current Factory chat runtime and avoids turning `/factory` into a blocking synchronous shell.
 
 ### Capability minimization
 
@@ -414,15 +414,15 @@ This makes profile behavior easier to reason about and reduces accidental orches
 ```mermaid
 sequenceDiagram
   participant Operator
-  participant UI as /factory/chat
+  participant UI as /factory
   participant Route as factory.agent.ts
   participant Resolver as profile resolver
   participant Runner as runFactoryChat
   participant Queue
   participant Factory
 
-  Operator->>UI: open /factory/chat or submit prompt
-  UI->>Route: GET /factory/chat or POST /factory/run
+  Operator->>UI: open /factory or submit prompt
+  UI->>Route: GET /factory or POST /factory/run
   Route->>Resolver: resolve profile
   Resolver-->>Route: root profile + imports + allowlist + prompt hash
   Route->>Queue: enqueue factory.run job
@@ -442,8 +442,8 @@ sequenceDiagram
 - `src/agents/factory-chat.ts`
   - profile-aware agent runner, tool registry, async orchestration tools
 - `src/agents/factory.agent.ts`
-  - `/factory/chat` route, profile-aware shell model, UI islands, events
-  - `/factory` Mission Control route, execution focus model, live output, objective-scoped events
+  - `/factory` route, profile-aware shell model, UI islands, events
+  - `/factory/control` route, execution focus model, live output, objective-scoped events
 - `profiles/generalist/PROFILE.md`
   - current default operator-facing behavior
 - `profiles/generalist/profile.json`
@@ -467,7 +467,7 @@ The profile layer is customizable, but the system still keeps strong boundaries:
 
 ## Practical Takeaway
 
-The current `/factory/chat` design is a customizable orchestration shell built around profiles, while `/factory` is Mission Control for durable objective state.
+The current `/factory` design is a customizable orchestration shell built around profiles, while `/factory/control` exposes advanced durable state for the selected thread.
 
 If you want to adapt Factory behavior for a team or repo, the first place to customize is not the reducer or the UI. It is the profile layer:
 

@@ -100,10 +100,10 @@ export const createFactoryCliRuntime = (
   const queue = jsonlQueue({
     runtime: jobRuntime,
     stream: "jobs",
-    onJobChange: (jobIds) => {
+    onJobChange: (jobs) => {
       notify({
         type: "queue_changed",
-        jobIds,
+        jobIds: jobs.map((job) => job.id),
         at: Date.now(),
       });
     },

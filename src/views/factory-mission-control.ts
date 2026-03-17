@@ -314,7 +314,7 @@ const renderObjectiveLink = (
   currentPanel: FactoryMissionPanel,
   objective: FactoryMissionObjectiveNav,
 ): string => {
-  const href = `/factory${controlQuery({
+  const href = `/factory/control${controlQuery({
     objectiveId: objective.objectiveId,
     panel: currentPanel,
     focusKind: "mission",
@@ -358,7 +358,7 @@ export const factoryMissionRailIsland = (model: FactoryMissionShellModel): strin
       <div class="mt-4 grid gap-3">
         ${items.length > 0
           ? items.map((objective) => renderObjectiveLink(model.panel, objective)).join("")
-          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No missions.</div>`}
+          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No threads.</div>`}
       </div>
     </section>`;
   };
@@ -368,10 +368,10 @@ export const factoryMissionRailIsland = (model: FactoryMissionShellModel): strin
       <div class="flex items-start justify-between gap-3">
         <div>
           <div class="${sectionLabelClass}">Factory</div>
-          <div class="mt-3 text-lg font-semibold text-white">Mission Control</div>
-          <div class="mt-2 text-sm leading-6 text-zinc-400">Durable delivery state, live execution, and operator controls.</div>
+          <div class="mt-3 text-lg font-semibold text-white">Work Details</div>
+          <div class="mt-2 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and controls for Factory threads.</div>
         </div>
-        <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">MC</div>
+        <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">WD</div>
       </div>
     </section>
     ${sectionMarkup("needs_attention")}
@@ -392,7 +392,7 @@ const panelTabs = (model: FactoryMissionShellModel): string => {
   ];
   return `<div class="flex flex-wrap gap-2">
     ${tabs.map((tab) => {
-      const href = `/factory${controlQuery({
+      const href = `/factory/control${controlQuery({
         objectiveId: model.objectiveId,
         panel: tab.panel,
         focusKind: model.focusKind,
@@ -456,7 +456,7 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
   <section class="${panelClass} px-5 py-5">
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <div class="${sectionLabelClass}">Mission</div>
+        <div class="${sectionLabelClass}">Thread</div>
         <div class="mt-2 text-2xl font-semibold text-white">${esc(selected.title)}</div>
         <div class="mt-3 flex flex-wrap gap-2">
           ${badge(selected.status)}
@@ -465,11 +465,11 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
           ${selected.integrationStatus ? badge(selected.integrationStatus) : ""}
         </div>
       </div>
-      <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Open Mission Thread</a>
+      <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Thread</a>
     </div>
     ${selected.summary ? `<div class="mt-5 text-sm leading-7 text-zinc-300">${esc(selected.summary)}</div>` : ""}
     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      ${statPill("Mission", selected.objectiveId)}
+      ${statPill("Integration", selected.integrationStatus ?? "unknown")}
       ${statPill("Tasks", `${selected.activeTaskCount} active / ${selected.readyTaskCount} ready / ${selected.taskCount} total`)}
       ${statPill("Repo profile", selected.repoProfileStatus ?? "unknown")}
       ${statPill("Commit", shortHash(selected.latestCommitHash) || "none")}
@@ -490,7 +490,7 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
     </div>` : ""}
   </section>
   <section class="${panelClass} px-5 py-5">
-    <div class="${sectionLabelClass}">Mission prompt</div>
+    <div class="${sectionLabelClass}">Thread prompt</div>
     <pre class="mt-3 whitespace-pre-wrap text-sm leading-7 text-zinc-300 [overflow-wrap:anywhere]">${esc(selected.prompt)}</pre>
   </section>
   <section class="${panelClass} px-5 py-5">
@@ -538,7 +538,7 @@ const renderExecutionPanel = (selected: FactoryMissionSelectedModel): string => 
     <div class="mt-4 grid gap-3">
       ${selected.runs.length > 0
         ? selected.runs.map(renderRunCard).join("")
-        : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No profile runs yet for this mission.</div>`}
+        : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No profile runs yet for this thread.</div>`}
     </div>
   </section>
   <section class="${panelClass} px-5 py-5">
@@ -564,7 +564,7 @@ export const factoryMissionLiveOutputIsland = (input: {
   readonly snapshot?: FactoryLiveOutputSnapshot;
 }): string => {
   const query = input.objectiveId && input.focusKind && input.focusId
-    ? `/factory/island/live-output${controlQuery({
+    ? `/factory/control/island/live-output${controlQuery({
         objectiveId: input.objectiveId,
         focusKind: input.focusKind,
         focusId: input.focusId,
@@ -608,7 +608,7 @@ const renderLivePanel = (model: FactoryMissionShellModel, selected: FactoryMissi
   return `<div class="space-y-6">
     <section class="${panelClass} px-5 py-5">
       <div class="${sectionLabelClass}">Live execution</div>
-      <div class="mt-3 text-sm leading-6 text-zinc-300">Mission Control streams worktree output for the focused task or job. Select a task/job in Execution or use the focused item in the inspector.</div>
+      <div class="mt-3 text-sm leading-6 text-zinc-300">Work Details streams worktree output for the focused task or job. Select a task/job in Execution or use the focused item in the inspector.</div>
       ${selected.focus.kind === "run" ? `<div class="mt-4 rounded-[22px] border border-white/10 bg-black/20 px-4 py-4 text-sm leading-6 text-zinc-300">
         Run focus does not have worktree logs here. Open the profile thread for this run instead.
         <div class="mt-3"><a class="${ghostButtonClass}" href="${esc(selected.focus.chatLink)}">Open Run Thread</a></div>
@@ -678,7 +678,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
       <div class="flex flex-wrap items-center gap-3">
         ${panelTabs(model)}
       </div>
-      ${emptyState("No mission selected", "Pick a mission from the rail or describe a new one below.")}
+      ${emptyState("No thread selected", "Pick a thread from the rail to inspect execution, logs, and receipts.")}
     </div>`;
   }
   const selected = model.selected;
@@ -694,7 +694,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
   return `<div class="space-y-6 px-4 pb-8 pt-6 md:px-8 xl:px-10">
     <div class="flex flex-wrap items-center justify-between gap-4">
       <div>
-        <div class="${sectionLabelClass}">Mission Control</div>
+        <div class="${sectionLabelClass}">Work Details</div>
         <div class="mt-2 text-2xl font-semibold text-white">${esc(selected.title)}</div>
       </div>
       ${panelTabs(model)}
@@ -705,7 +705,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
 
 const renderMissionFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "mission" }>): string => `<div class="space-y-5">
   <div>
-    <div class="${sectionLabelClass}">Mission</div>
+    <div class="${sectionLabelClass}">Thread</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.title)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
       ${badge(focus.status)}
@@ -760,7 +760,7 @@ const renderRunFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind
     </div>
   </div>` : ""}
   <div class="flex flex-wrap gap-2">
-    <a class="${primaryButtonClass}" href="${esc(focus.chatLink)}">Open In Chat</a>
+    <a class="${primaryButtonClass}" href="${esc(focus.chatLink)}">Open in Thread</a>
   </div>
 </div>`;
 
@@ -777,7 +777,7 @@ const renderJobControls = (focus: Extract<FactoryMissionFocusModel, { readonly k
       <div><button class="${ghostButtonClass}" type="submit">Add Note</button></div>
     </form>
     <form action="/factory/job/${encoded}/abort" method="post" hx-post="/factory/job/${encoded}/abort" hx-swap="none">
-      <input type="hidden" name="reason" value="abort requested from /factory mission control" />
+      <input type="hidden" name="reason" value="abort requested from /factory/control" />
       <button class="${dangerButtonClass}" type="submit">Abort Job</button>
     </form>
   </div>`;
@@ -862,8 +862,8 @@ const renderObjectiveActions = (selected: FactoryMissionSelectedModel): string =
   return `<div class="grid gap-3">
     ${actionCard({
       action: "react",
-      label: "Resume mission",
-      description: "Re-evaluate this mission and dispatch the next eligible work.",
+      label: "Keep working",
+      description: "Re-evaluate this thread and dispatch the next eligible work.",
       buttonClass: primaryButtonClass,
     })}
     ${actionCard({
@@ -874,21 +874,21 @@ const renderObjectiveActions = (selected: FactoryMissionSelectedModel): string =
     })}
     ${actionCard({
       action: "cleanup",
-      label: "Remove workspaces",
-      description: "Delete mission worktrees and integration workspaces from disk.",
+      label: "Remove worktrees",
+      description: "Delete this thread's task worktrees and integration workspace from disk.",
       buttonClass: ghostButtonClass,
     })}
     ${actionCard({
       action: "cancel",
-      label: "Cancel mission",
-      description: "Stop active jobs and mark this mission as canceled.",
+      label: "Stop thread",
+      description: "Stop active jobs and mark this thread as canceled.",
       buttonClass: dangerButtonClass,
-      hiddenReason: "cancel requested from /factory mission control",
+      hiddenReason: "cancel requested from /factory/control",
     })}
     ${actionCard({
       action: "archive",
-      label: "Archive record",
-      description: "Hide this mission from the main list without deleting its receipts.",
+      label: "Archive thread",
+      description: "Hide this thread from the main list without deleting its receipts.",
       buttonClass: ghostButtonClass,
     })}
   </div>`;
@@ -899,7 +899,7 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
     return `<div class="space-y-5 px-4 py-5 md:px-5">
       <section class="${railCardClass}">
         <div class="${sectionLabelClass}">Focused item</div>
-        <div class="mt-4 text-sm leading-6 text-zinc-500">Pick a mission from the rail to inspect state, focus runs/jobs/tasks, and send operator guidance.</div>
+        <div class="mt-4 text-sm leading-6 text-zinc-500">Pick a thread from the rail to inspect state, focus runs/jobs/tasks, and send operator guidance.</div>
       </section>
     </div>`;
   }
@@ -925,8 +925,8 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Mission actions</div>
-        <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Open Mission Thread</a>
+        <div class="${sectionLabelClass}">Thread actions</div>
+        <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Thread</a>
       </div>
       <div class="mt-4">
         ${renderObjectiveActions(selected)}
@@ -940,7 +940,7 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Receipt Factory Mission Control</title>
+  <title>Receipt Factory Work Details</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -953,7 +953,7 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
     <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)_360px]">
       <aside class="order-2 min-w-0 border-t border-white/10 bg-black/30 lg:order-none lg:min-h-0 lg:border-r lg:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto lg:h-screen lg:max-h-none">
-          <div id="factory-mission-rail" hx-get="/factory/island/rail${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-rail-refresh from:body" hx-swap="innerHTML">
+          <div id="factory-mission-rail" hx-get="/factory/control/island/rail${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-rail-refresh from:body" hx-swap="innerHTML">
             ${factoryMissionRailIsland(model)}
           </div>
         </div>
@@ -963,61 +963,41 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
 	          <header class="border-b border-white/10 bg-black/20 backdrop-blur-xl">
 	            <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 px-4 py-4 md:px-8 xl:px-10">
 	              <div class="min-w-0">
-	                <div class="${sectionLabelClass}">Mission Control</div>
+	                <div class="${sectionLabelClass}">Work Details</div>
 	                <div class="mt-3 text-lg font-semibold text-white">Factory</div>
 	                <div class="mt-3 flex flex-wrap gap-2">
                     ${navPill({
-                      href: `/factory${controlQuery({
-                        objectiveId: model.objectiveId,
-                        panel: "overview",
-                        focusKind: "mission",
-                      })}`,
-                      label: "Mission Control",
-                      active: true,
+                      href: model.selected?.chatLink ?? "/factory",
+                      label: model.selected ? "Thread" : "Chat",
                     })}
                     ${navPill({
-                      href: "/factory/chat",
-                      label: "General Chat",
+                      href: `/factory/control${controlQuery({
+                        objectiveId: model.objectiveId,
+                        panel: model.panel,
+                        focusKind: model.focusKind,
+                        focusId: model.focusId,
+                      })}`,
+                      label: "Work Details",
+                      active: true,
                     })}
-                    ${model.selected ? navPill({
-                      href: model.selected.chatLink,
-                      label: "Mission Thread",
-                    }) : ""}
                   </div>
-	                <div class="mt-3 text-sm leading-6 text-zinc-400">State-first delivery control with live execution, receipts, and a non-chat operator composer.</div>
+	                <div class="mt-3 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and operator controls for the selected thread.</div>
 	              </div>
 	              <div class="flex flex-wrap items-center gap-2">
-	                ${model.selected ? `<a class="${ghostButtonClass}" href="/factory${controlQuery({ panel: "overview", focusKind: "mission" })}" data-factory-nav="new-mission">New Objective</a>` : ""}
-	                ${model.selected ? `<a class="${ghostButtonClass}" href="${esc(model.selected.chatLink)}">Open Mission Thread</a>` : ""}
+	                ${model.selected ? `<a class="${ghostButtonClass}" href="${esc(model.selected.chatLink)}">Back to Thread</a>` : ""}
 	              </div>
 	            </div>
 	          </header>
           <section id="factory-mission-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <div id="factory-mission-main" hx-get="/factory/island/main${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-main-refresh from:body" hx-swap="innerHTML">
+            <div id="factory-mission-main" hx-get="/factory/control/island/main${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-main-refresh from:body" hx-swap="innerHTML">
               ${factoryMissionMainIsland(model)}
-            </div>
-          </section>
-          <section class="border-t border-white/10 bg-black/35 px-3 py-3 backdrop-blur-2xl sm:px-4">
-            <div class="mx-auto w-full max-w-5xl px-1 md:px-4 xl:px-6">
-              <form class="${panelClass} px-4 py-4" action="/factory/compose" method="post" hx-post="/factory/compose" hx-swap="none">
-                <input type="hidden" name="objective" value="${esc(model.objectiveId ?? "")}" />
-                <label class="sr-only" for="factory-compose">Mission control composer</label>
-	                <textarea id="factory-compose" class="max-h-40 min-h-[72px] w-full resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-[15px] leading-7 text-zinc-100 outline-none placeholder:text-zinc-500" name="prompt" placeholder="${esc(model.selected ? "Add operator guidance and react this mission" : "Describe a new objective")}" required rows="1"></textarea>
-	                <div class="mt-4 flex flex-col gap-4 border-t border-white/10 pt-4 md:flex-row md:items-end md:justify-between">
-	                  <div class="text-sm leading-6 text-zinc-400">${esc(model.selected ? "Submitting here records an operator note and re-runs mission planning/execution." : "Submitting here creates a new durable objective.")}</div>
-	                  <div class="flex flex-wrap items-center gap-3">
-	                    ${model.selected ? `<a class="${ghostButtonClass}" href="/factory${controlQuery({ panel: "overview", focusKind: "mission" })}" data-factory-nav="new-mission">New Objective</a>` : ""}
-	                    <button class="${primaryButtonClass}" data-send-label="Send" type="submit">${esc(model.selected ? "React Mission" : "Create Objective")}</button>
-	                  </div>
-	                </div>
-              </form>
             </div>
           </section>
         </div>
       </main>
       <aside class="order-3 min-w-0 border-t border-white/10 bg-black/30 xl:min-h-0 xl:border-l xl:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto xl:h-screen xl:max-h-none">
-          <div id="factory-mission-inspector" hx-get="/factory/island/inspector${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-inspector-refresh from:body" hx-swap="innerHTML">
+          <div id="factory-mission-inspector" hx-get="/factory/control/island/inspector${controlQuery({ objectiveId: model.objectiveId, panel: model.panel, focusKind: model.focusKind, focusId: model.focusId })}" hx-trigger="load, factory-inspector-refresh from:body" hx-swap="innerHTML">
             ${factoryMissionInspectorIsland(model)}
           </div>
         </div>
@@ -1029,8 +1009,6 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
       var factorySource = null;
       var jobSource = null;
       var liveTimer = null;
-      var composeAction = "/factory/compose";
-      var objectiveInputSelector = 'input[name="objective"]';
 
       var getState = function () {
         return {
@@ -1046,9 +1024,6 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
         document.body.dataset.panel = url.searchParams.get("panel") || "overview";
         document.body.dataset.focusKind = url.searchParams.get("focusKind") || "mission";
         document.body.dataset.focusId = url.searchParams.get("focusId") || "";
-        document.querySelectorAll(objectiveInputSelector).forEach(function (node) {
-          node.value = document.body.dataset.objective || "";
-        });
         history.replaceState({}, "", url.pathname + url.search);
         updateIslandUrls();
         connectFactory();
@@ -1071,9 +1046,9 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
         var rail = document.getElementById("factory-mission-rail");
         var main = document.getElementById("factory-mission-main");
         var inspector = document.getElementById("factory-mission-inspector");
-        if (rail) rail.setAttribute("hx-get", "/factory/island/rail" + q);
-        if (main) main.setAttribute("hx-get", "/factory/island/main" + q);
-        if (inspector) inspector.setAttribute("hx-get", "/factory/island/inspector" + q);
+        if (rail) rail.setAttribute("hx-get", "/factory/control/island/rail" + q);
+        if (main) main.setAttribute("hx-get", "/factory/control/island/main" + q);
+        if (inspector) inspector.setAttribute("hx-get", "/factory/control/island/inspector" + q);
       };
 
       var refreshRail = function () {
@@ -1100,7 +1075,7 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
       var connectFactory = function () {
         var objective = document.body.dataset.objective || "";
         if (factorySource) factorySource.close();
-        factorySource = new EventSource("/factory/events" + (objective ? "?objective=" + encodeURIComponent(objective) : ""));
+        factorySource = new EventSource("/factory/control/events" + (objective ? "?objective=" + encodeURIComponent(objective) : ""));
         factorySource.addEventListener("factory-refresh", function () {
           refreshRail();
           refreshMain();
@@ -1133,12 +1108,6 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
         }, 1000);
       };
 
-      var clearPrompt = function () {
-        var input = document.getElementById("factory-compose");
-        if (!(input instanceof HTMLTextAreaElement)) return;
-        input.value = "";
-      };
-
       document.addEventListener("click", function (event) {
         var target = event.target;
         if (!(target instanceof HTMLElement)) return;
@@ -1148,28 +1117,12 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
         var url = new URL(link.href, window.location.origin);
         applyUrl(url);
         var mode = link.getAttribute("data-factory-nav") || "";
-        if (mode === "objective" || mode === "new-mission") {
+        if (mode === "objective") {
           refreshRail();
           refreshMain();
           refreshInspector();
           return;
         }
-        refreshMain();
-        refreshInspector();
-      });
-
-      document.body.addEventListener("factory-control-selected", function (event) {
-        var detail = event && typeof event.detail === "object" && event.detail ? event.detail : {};
-        var url = new URL(window.location.href);
-        if (typeof detail.objectiveId === "string" && detail.objectiveId) url.searchParams.set("objective", detail.objectiveId);
-        else url.searchParams.delete("objective");
-        url.searchParams.set("panel", typeof detail.panel === "string" && detail.panel ? detail.panel : "overview");
-        url.searchParams.set("focusKind", typeof detail.focusKind === "string" && detail.focusKind ? detail.focusKind : "mission");
-        if (typeof detail.focusId === "string" && detail.focusId) url.searchParams.set("focusId", detail.focusId);
-        else url.searchParams.delete("focusId");
-        applyUrl(url);
-        clearPrompt();
-        refreshRail();
         refreshMain();
         refreshInspector();
       });
@@ -1193,7 +1146,6 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
         var detail = event && event.detail;
         var elt = detail && detail.elt;
         if (!elt || !(elt instanceof HTMLElement) || detail.failed) return;
-        if (elt.tagName === "FORM" && elt.getAttribute("action") === composeAction) return;
         if (elt.tagName === "FORM") {
           refreshMain();
           if ((document.body.dataset.focusKind || "mission") === "job") refreshLive();

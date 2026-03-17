@@ -86,24 +86,24 @@ Queue streams:
 
 Use `/factory` for:
 
-- Mission Control
-- creating objectives
+- chat and thread management
+- starting new work through chat
 - repo preparation and inferred validation defaults
 - task DAG decomposition
 - autonomous worker dispatch
 - per-repo objective queueing and slot admission
 - candidate review
 - integration, validation, and promotion
-- mission debugging, receipts, runtime control, and live output
-- operator notes and mission reactivation
+- thread-scoped runs and job updates
 - repo-local customization through `profiles/<id>/PROFILE.md` and `profiles/<id>/profile.json`
 
-Use `/factory/chat` for:
+Use `/factory/control` for:
 
-- profile chat
-- profile-driven orchestration and handoff
-- run- and job-scoped profile conversations
-- deep links back into Mission Control for the same objective
+- advanced work details
+- receipts, runtime control, and live output
+- operator actions on the selected thread
+
+`/factory/chat` remains as a compatibility redirect to `/factory`.
 
 The older Hub UI is gone. Factory still reuses `src/adapters/hub-git.ts` internally as its Git/worktree adapter, but there is no separate `/hub` product surface.
 
@@ -121,4 +121,4 @@ npm run test:smoke
 
 The server auto-loads route modules from `src/agents/*.agent.ts`.
 
-The web UI uses `Mission` / `Mission Control` terminology while the durable code, HTTP APIs, receipts, and CLI still use `objective`.
+The web UI uses `chat`, `thread`, and `Work Details` terminology while the durable code, HTTP APIs, receipts, and CLI still use `objective`.

@@ -268,10 +268,9 @@ let queue!: ReturnType<typeof jsonlQueue>;
 queue = jsonlQueue({
   runtime: jobRuntime,
   stream: JOB_STREAM,
-  onJobChange: async (jobIds) => {
-    for (const jobId of jobIds) {
-      sse.publish("jobs", jobId);
-      const job = await queue.getJob(jobId);
+  onJobChange: async (jobs) => {
+    for (const job of jobs) {
+      sse.publish("jobs", job.id);
       const objectiveId = objectiveIdForJob(job
         ? {
             payload: job.payload as Record<string, unknown>,
@@ -1937,10 +1936,15 @@ const receiptWatcher = (() => {
   }
 })();
 
-const httpServer = Bun.serve({
+const SERVER_IDLE_TIMEOUT_SECONDS = 30;
+const serverOptions: Bun.Serve.Options<undefined> = {
   fetch: app.fetch,
   port: PORT,
-});
+  idleTimeout: SERVER_IDLE_TIMEOUT_SECONDS,
+};
+const serveWithOptions = Bun.serve as (options: Bun.Serve.Options<undefined>) => Bun.Server<undefined>;
+
+const httpServer = serveWithOptions(serverOptions);
 console.log(`Receipt server listening on http://localhost:${PORT}`);
 console.log(`Receipt runtime root: ${WORKSPACE_ROOT}`);
 console.log(`Receipt data dir: ${DATA_DIR}${FACTORY_RUNTIME.configPath ? ` (from ${FACTORY_RUNTIME.configPath})` : ""}`);

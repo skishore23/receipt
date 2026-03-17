@@ -99,7 +99,7 @@ type JsonlQueueOptions = {
   readonly runtime: Runtime<JobCmd, JobEvent, JobState>;
   readonly stream: string;
   readonly now?: () => number;
-  readonly onJobChange?: (jobIds: ReadonlyArray<string>) => Promise<void> | void;
+  readonly onJobChange?: (jobs: ReadonlyArray<QueueJob>) => Promise<void> | void;
 };
 
 const TERMINAL = new Set<JobStatus>(["completed", "failed", "canceled"]);
@@ -149,21 +149,28 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
 
   const emitEvent = async (event: JobEvent): Promise<void> => {
     const marker = eventId();
+    let changedJob: QueueJob | undefined;
     if ("jobId" in event) {
       await emitToStream(jobStream(event.jobId), event, `${marker}:job`);
-      jobStateCache.set(event.jobId, await opts.runtime.state(jobStream(event.jobId)));
+      const state = await opts.runtime.state(jobStream(event.jobId));
+      jobStateCache.set(event.jobId, state);
+      const record = state.jobs[event.jobId];
+      if (record) changedJob = toQueueJob(record);
     }
     await emitToStream(opts.stream, event, `${marker}:index`);
     indexState = await opts.runtime.state(opts.stream);
-    if ("jobId" in event) await opts.onJobChange?.([event.jobId]);
+    if (changedJob) await opts.onJobChange?.([changedJob]);
   };
 
   const ensureIndexState = async (): Promise<JobState> => {
+    if (indexState) return indexState;
     indexState = await opts.runtime.state(opts.stream);
     return indexState;
   };
 
   const ensureJobState = async (jobId: string): Promise<JobState> => {
+    const cached = jobStateCache.get(jobId);
+    if (cached) return cached;
     const loaded = await opts.runtime.state(jobStream(jobId));
     jobStateCache.set(jobId, loaded);
     return loaded;

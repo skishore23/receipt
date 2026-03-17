@@ -29,6 +29,8 @@ const globalTopicKey = (topic: Topic): string | undefined => (
 const topicKey = (topic: Topic, stream?: string): string =>
   stream === undefined ? (globalTopicKey(topic) ?? `${topic}:`) : `${topic}:${stream}`;
 
+const SSE_KEEPALIVE_MS = 5_000;
+
 export class SseHub {
   private readonly channels = new Map<string, Set<SseClient>>();
 
@@ -97,7 +99,7 @@ export class SseHub {
         for (const target of targets) send(topicEvent[target.topic], "init");
         ping = setInterval(() => {
           send("ping", "keepalive");
-        }, 15000);
+        }, SSE_KEEPALIVE_MS);
       },
       cancel() {
         close();

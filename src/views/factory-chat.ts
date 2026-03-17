@@ -208,7 +208,7 @@ const toolBadgeSpec = (tool: string): { readonly icon: BadgeIcon; readonly label
     return { icon: "dispatch", label: "Profile", tone: "success" };
   }
   if (normalized === "factory.status") {
-    return { icon: "inspect", label: "Objective", tone: "info" };
+    return { icon: "inspect", label: "Thread", tone: "info" };
   }
   if (normalized === "agent.status") {
     return { icon: "status", label: "Status", tone: "info" };
@@ -284,7 +284,7 @@ const renderSelectedProfileSummary = (input: {
   if (input.includeObjective ?? true) {
     contextBadges.push(iconBadge({
       icon: "objective",
-      text: input.objectiveId ? "Mission thread" : "No mission",
+      text: input.objectiveId ? "Thread" : "No thread",
       tone: input.objectiveId ? "info" : "neutral",
       mode: badgeMode,
     }));
@@ -532,8 +532,7 @@ const renderChatItem = (item: FactoryChatItem, activeProfileLabel: string, activ
     <div class="mt-4 flex flex-wrap gap-2 text-xs text-zinc-500">
       ${card.meta ? `<span>${esc(card.meta)}</span>` : ""}
       ${card.jobId ? `<span>Job ${esc(card.jobId)}</span>` : ""}
-      ${card.objectiveId ? `<span>Mission ${esc(card.objectiveId)}</span>` : ""}
-      ${card.link ? `<a class="text-emerald-200 transition hover:text-emerald-100" href="${esc(card.link)}">Open related view</a>` : ""}
+      ${card.link ? `<a class="text-emerald-200 transition hover:text-emerald-100" href="${esc(card.link)}">Open thread</a>` : ""}
     </div>
     ${renderWorkControls(card)}
   </section>`;
@@ -545,7 +544,7 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
     : `<section class="${panelClass} px-6 py-6 text-center">
       <div class="mx-auto max-w-2xl">
         <div class="text-base font-semibold text-zinc-100">${esc(model.activeProfileLabel)} is ready.</div>
-        <div class="mt-3 text-sm leading-6 text-zinc-400">Start with status, plan, debug, or dispatch.</div>
+        <div class="mt-3 text-sm leading-6 text-zinc-400">Start with status, plan, debug, or a new thread.</div>
       </div>
     </section>`;
   return `<div class="chat-stack mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}">
@@ -554,7 +553,7 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
 };
 
 const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatObjectiveNav): string => {
-  const href = `/factory/chat?profile=${encodeURIComponent(model.activeProfileId)}&objective=${encodeURIComponent(objective.objectiveId)}`;
+  const href = `/factory?profile=${encodeURIComponent(model.activeProfileId)}&objective=${encodeURIComponent(objective.objectiveId)}`;
   const selectedClass = objective.selected
     ? "border-sky-300/30 bg-sky-300/10 shadow-[0_16px_48px_rgba(56,189,248,0.12)]"
     : "border-white/10 bg-black/10 hover:border-white/15 hover:bg-white/[0.05]";
@@ -589,20 +588,20 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
         const selectedClass = profile.selected
           ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
           : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]";
-        return `<a class="block rounded-full border px-4 py-3 text-sm font-medium transition ${selectedClass}" href="/factory/chat?profile=${encodeURIComponent(profile.id)}${selectedObjectiveQuery}">
+        return `<a class="block rounded-full border px-4 py-3 text-sm font-medium transition ${selectedClass}" href="/factory?profile=${encodeURIComponent(profile.id)}${selectedObjectiveQuery}">
           ${esc(profile.label)}
         </a>`;
       }).join("")
     : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No profiles found.</div>`;
   const objectives = model.objectives.length > 0
     ? model.objectives.map((objective) => renderObjectiveLink(model, objective)).join("")
-    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No missions yet. Start in chat or Mission Control and the profile can dispatch one.</div>`;
+    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No threads yet. Start a chat and Factory will open one when work needs durable tracking.</div>`;
   return `<div class="space-y-5 px-4 py-5 md:px-5">
     <section class="${railCardClass}">
       <div class="flex items-start justify-between gap-3">
         <div>
           <div class="${sectionLabelClass}">Factory</div>
-          <div class="mt-3 text-lg font-semibold text-white">Profile Chat</div>
+          <div class="mt-3 text-lg font-semibold text-white">Chat</div>
         </div>
         <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">FX</div>
       </div>
@@ -618,7 +617,7 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Missions</div>
+        <div class="${sectionLabelClass}">Threads</div>
         <div class="text-xs text-zinc-500">${esc(`${model.objectives.length}`)}</div>
       </div>
       <div class="mt-4 grid gap-3">
@@ -654,8 +653,8 @@ const renderObjectiveActions = (objective: FactorySelectedObjectiveCard): string
   return `<div class="grid gap-3 sm:grid-cols-2">
     ${actionCard({
       action: "react",
-      label: "Resume mission",
-      description: "Re-evaluate this mission and dispatch the next eligible work.",
+      label: "Keep working",
+      description: "Re-evaluate this thread and dispatch the next eligible work.",
       buttonClass: primaryButtonClass,
     })}
     ${actionCard({
@@ -666,21 +665,21 @@ const renderObjectiveActions = (objective: FactorySelectedObjectiveCard): string
     })}
     ${actionCard({
       action: "cleanup",
-      label: "Remove workspaces",
-      description: "Delete mission worktrees and integration workspaces from disk.",
+      label: "Remove worktrees",
+      description: "Delete this thread's task worktrees and integration workspace from disk.",
       buttonClass: ghostButtonClass,
     })}
     ${actionCard({
       action: "cancel",
-      label: "Cancel mission",
-      description: "Stop active jobs and mark this mission as canceled.",
+      label: "Stop thread",
+      description: "Stop active jobs and mark this thread as canceled.",
       buttonClass: dangerButtonClass,
       hiddenReason: "cancel requested from /factory inspector",
     })}
     ${actionCard({
       action: "archive",
-      label: "Archive record",
-      description: "Hide this mission from the main list without deleting its receipts.",
+      label: "Archive thread",
+      description: "Hide this thread from the main list without deleting its receipts.",
       buttonClass: ghostButtonClass,
       span: "sm:col-span-2",
     })}
@@ -697,10 +696,9 @@ const renderJobRow = (job: FactoryChatJobNav): string => `<div class="factory-jo
   </div>
   <div class="factory-job-card__meta mt-3 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">
     ${job.runId ? `Run ${esc(job.runId)}` : "No run id"}
-    ${job.objectiveId ? ` · Mission ${esc(job.objectiveId)}` : ""}
     ${job.updatedAt ? ` · ${esc(formatTs(job.updatedAt))}` : ""}
   </div>
-  ${job.link ? `<a class="mt-3 inline-flex text-xs font-medium uppercase tracking-[0.16em] text-emerald-200 transition hover:text-emerald-100" href="${esc(job.link)}">Open related view</a>` : ""}
+  ${job.link ? `<a class="mt-3 inline-flex text-xs font-medium uppercase tracking-[0.16em] text-emerald-200 transition hover:text-emerald-100" href="${esc(job.link)}">Open thread</a>` : ""}
 </div>`;
 
 const renderActiveCodexCard = (card?: FactoryLiveCodexCard): string => {
@@ -782,7 +780,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Mission inspector</div>
+        <div class="${sectionLabelClass}">Thread details</div>
         ${objective ? badge(objective.status) : ""}
       </div>
       ${objective ? `<div class="mt-4">
@@ -790,7 +788,6 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
         <div class="mt-2 text-xs text-zinc-500">${esc(objectiveSummaryLine(objective.status, objective.phase, objective.slotState))}</div>
         ${objective.summary ? `<div class="mt-4 text-sm leading-6 text-zinc-300">${esc(objective.summary)}</div>` : ""}
         <div class="mt-4 grid gap-2 sm:grid-cols-2">
-          ${statPill("Mission", objective.objectiveId)}
           ${statPill("Integration", objective.integrationStatus ?? "unknown")}
           ${statPill("Task load", `${objective.activeTaskCount ?? 0} active / ${objective.readyTaskCount ?? 0} ready`)}
           ${statPill("Repo profile", objective.repoProfileStatus ?? "unknown")}
@@ -811,7 +808,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
           ${objective.latestDecisionAt ? `<div class="mt-2 text-xs text-zinc-500">${esc(formatTs(objective.latestDecisionAt))}</div>` : ""}
         </div>` : ""}
         <div class="mt-5 flex flex-wrap gap-2">
-          <a class="${primaryButtonClass}" href="/factory?objective=${encodeURIComponent(objective.objectiveId)}">Open Mission Control</a>
+          <a class="${primaryButtonClass}" href="/factory/control?objective=${encodeURIComponent(objective.objectiveId)}">Work Details</a>
           <a class="${ghostButtonClass}" href="${esc(objective.debugLink)}">Debug JSON</a>
           <a class="${ghostButtonClass}" href="${esc(objective.receiptsLink)}">Receipts</a>
         </div>
@@ -821,7 +818,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
             ${renderObjectiveActions(objective)}
           </div>
         </div>
-      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick a mission from the left rail to inspect it.</div>`}
+      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick a thread from the left rail to inspect it.</div>`}
     </section>
     <section class="${railCardClass} factory-job-panel">
       <div class="flex items-center justify-between gap-3">
@@ -853,7 +850,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
     <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)_360px]">
       <aside class="order-2 min-w-0 border-t border-white/10 bg-black/30 lg:order-none lg:min-h-0 lg:border-r lg:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto lg:h-screen lg:max-h-none">
-          <div id="factory-sidebar" hx-get="/factory/chat/island/sidebar?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
+          <div id="factory-sidebar" hx-get="/factory/island/sidebar?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
             ${factoryRailIsland(model.sidebar)}
           </div>
         </div>
@@ -863,35 +860,38 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
 	          <header class="border-b border-white/10 bg-black/20 backdrop-blur-xl">
 	            <div class="mx-auto flex w-full max-w-4xl flex-wrap items-center gap-4 px-4 py-4 md:px-8 xl:px-10">
 	              <div class="min-w-0">
-	                <div class="${sectionLabelClass}">${model.objectiveId ? "Mission thread" : "General chat"}</div>
+	                <div class="${sectionLabelClass}">${model.objectiveId ? "Thread" : "Chat"}</div>
 	                <div class="mt-3">
-	                  <h1 class="text-lg font-semibold text-white">Talk to <span data-profile-label>${esc(model.activeProfileLabel)}</span></h1>
+	                  <h1 class="text-lg font-semibold text-white">Chat with <span data-profile-label>${esc(model.activeProfileLabel)}</span></h1>
 	                </div>
                   <div class="mt-3 flex flex-wrap gap-2">
                     ${navPill({
-                      href: model.objectiveId ? `/factory?objective=${encodeURIComponent(model.objectiveId)}` : "/factory",
-                      label: "Mission Control",
-                    })}
-                    ${navPill({
-                      href: `/factory/chat?profile=${encodeURIComponent(model.activeProfileId)}`,
-                      label: "General Chat",
+                      href: `/factory?profile=${encodeURIComponent(model.activeProfileId)}`,
+                      label: "Chat",
                       active: !model.objectiveId,
                     })}
                     ${model.objectiveId ? navPill({
-                      href: `/factory/chat?profile=${encodeURIComponent(model.activeProfileId)}&objective=${encodeURIComponent(model.objectiveId)}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}`,
-                      label: "Mission Thread",
+                      href: `/factory?profile=${encodeURIComponent(model.activeProfileId)}&objective=${encodeURIComponent(model.objectiveId)}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}`,
+                      label: "Thread",
                       active: true,
+                    }) : ""}
+                    ${model.objectiveId ? navPill({
+                      href: `/factory/control?objective=${encodeURIComponent(model.objectiveId)}${model.runId ? `&focusKind=run&focusId=${encodeURIComponent(`${model.activeProfileId}:${model.runId}`)}` : ""}`,
+                      label: "Work Details",
                     }) : ""}
                   </div>
 	                <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(model.objectiveId
-	                    ? "Messages, runs, and recent jobs in this view are scoped to the selected mission."
-	                    : "No mission is pinned yet. Profile-level messages stay visible until you select a mission.")}</div>
+	                    ? "Messages, runs, and recent jobs in this view stay scoped to the current thread."
+	                    : "Start a chat here. Factory will keep coordination here until work needs its own thread.")}</div>
 	              </div>
-	                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory?objective=${encodeURIComponent(model.objectiveId)}">Open Mission Control</a>` : ""}
+	              <div class="flex flex-wrap items-center gap-2">
+	                <a class="${ghostButtonClass}" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">New Chat</a>
+	                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory/control?objective=${encodeURIComponent(model.objectiveId)}">Work Details</a>` : ""}
+	              </div>
 	            </div>
 	          </header>
           <section id="factory-chat-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <div id="factory-chat" hx-get="/factory/chat/island/chat?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:700ms" hx-swap="innerHTML">
+            <div id="factory-chat" hx-get="/factory/island/chat?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:700ms" hx-swap="innerHTML">
               ${factoryChatIsland(model.chat)}
             </div>
           </section>
@@ -906,8 +906,8 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
                   <div class="flex flex-wrap gap-2">
                     <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Summarize the current Factory status and the next best action.">Status</button>
                     <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Plan the work in a clean sequence and call out risks before dispatching anything.">Plan</button>
-                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Debug the selected mission and explain what is blocking it.">Debug</button>
-	                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Create a Factory objective for this request, then keep delivery moving with Codex workers until there is a concrete result.">New objective</button>
+                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Debug the selected thread and explain what is blocking it.">Debug</button>
+	                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Start a dedicated Factory thread for this request, then keep delivery moving with Codex workers until there is a concrete result.">Start thread</button>
                   </div>
                   <div class="flex flex-wrap items-center gap-3">
                     <button class="${primaryButtonClass}" data-send-label="Send" type="submit">Send</button>
@@ -920,7 +920,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
       </main>
       <aside class="order-3 min-w-0 border-t border-white/10 bg-black/30 xl:min-h-0 xl:border-l xl:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto xl:h-screen xl:max-h-none">
-          <div id="factory-inspector" class="factory-inspector-panel" hx-get="/factory/chat/island/inspector?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
+          <div id="factory-inspector" class="factory-inspector-panel" hx-get="/factory/island/inspector?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}${model.runId ? `&run=${encodeURIComponent(model.runId)}` : ""}${model.jobId ? `&job=${encodeURIComponent(model.jobId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
             ${factoryInspectorIsland(model.sidebar)}
           </div>
         </div>
@@ -943,7 +943,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         const objective = document.body.dataset.objective || "";
         const run = document.body.dataset.run || "";
         const job = document.body.dataset.job || "";
-        url.pathname = "/factory/chat";
+        url.pathname = "/factory";
         url.searchParams.set("profile", profile);
         if (objective) url.searchParams.set("objective", objective);
         else url.searchParams.delete("objective");
@@ -965,9 +965,9 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         const chat = document.getElementById("factory-chat");
         const sidebar = document.getElementById("factory-sidebar");
         const inspector = document.getElementById("factory-inspector");
-        if (chat) chat.setAttribute("hx-get", "/factory/chat/island/chat" + query);
-        if (sidebar) sidebar.setAttribute("hx-get", "/factory/chat/island/sidebar" + query);
-        if (inspector) inspector.setAttribute("hx-get", "/factory/chat/island/inspector" + query);
+        if (chat) chat.setAttribute("hx-get", "/factory/island/chat" + query);
+        if (sidebar) sidebar.setAttribute("hx-get", "/factory/island/sidebar" + query);
+        if (inspector) inspector.setAttribute("hx-get", "/factory/island/inspector" + query);
       };
       const isNearBottom = function () {
         const scroll = document.getElementById("factory-chat-scroll");
@@ -1028,7 +1028,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
 	        const profile = document.body.dataset.profile || "generalist";
 	        const objective = document.body.dataset.objective || "";
 	        if (source) source.close();
-	        source = new EventSource("/factory/chat/events?profile=" + encodeURIComponent(profile) + (objective ? "&objective=" + encodeURIComponent(objective) : ""));
+	        source = new EventSource("/factory/events?profile=" + encodeURIComponent(profile) + (objective ? "&objective=" + encodeURIComponent(objective) : ""));
 	        ["agent-refresh", "receipt-refresh", "factory-refresh"].forEach(function (eventName) {
 	          source.addEventListener(eventName, refresh);
 	        });

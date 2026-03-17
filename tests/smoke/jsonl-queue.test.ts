@@ -231,3 +231,37 @@ test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("jsonl queue: onJobChange receives the current job snapshot without deadlocking enqueue", async () => {
+  const dir = await mkTmp("receipt-queue-on-change");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+
+    let observedJobId: string | undefined;
+    const queue = jsonlQueue({
+      runtime,
+      stream: "jobs",
+      onJobChange: async (jobs) => {
+        observedJobId = jobs[0]?.id;
+        expect(jobs[0]?.status).toBe("queued");
+      },
+    });
+
+    const created = await queue.enqueue({
+      agentId: "factory",
+      payload: { kind: "factory.run", runId: "r_on_change" },
+      maxAttempts: 1,
+    });
+
+    expect(created.status).toBe("queued");
+    expect(observedJobId).toBe(created.id);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
