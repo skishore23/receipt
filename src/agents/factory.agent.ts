@@ -365,14 +365,29 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
     };
   }
   if (observation.tool === "factory.dispatch" || observation.tool === "factory.status") {
+    const action = asString(parsed?.action);
     return {
       key: `${observation.tool}-${asString(parsed?.objectiveId) ?? observation.summary ?? "factory"}`,
-      title: observation.tool === "factory.status" ? "Factory objective status" : "Factory objective",
+      title: observation.tool === "factory.status"
+        ? "Objective status"
+        : action === "create"
+          ? "Objective created"
+          : action === "react"
+            ? "Objective reacted"
+            : action === "promote"
+              ? "Objective promoted"
+              : action === "cancel"
+                ? "Objective canceled"
+                : action === "cleanup"
+                  ? "Objective cleaned up"
+                  : action === "archive"
+                    ? "Objective archived"
+                    : "Factory objective",
       worker: asString(parsed?.worker) ?? "factory",
       status: asString(parsed?.status) ?? "updated",
       summary: asString(parsed?.summary) ?? observation.summary ?? "Factory updated.",
       detail: observation.output,
-      meta: [asString(parsed?.action), durationLabel].filter(Boolean).join(" · "),
+      meta: [action, durationLabel].filter(Boolean).join(" · "),
       link: asString(parsed?.link),
       objectiveId: asString(parsed?.objectiveId),
       running: !isTerminalJobStatus(asString(parsed?.status)),
@@ -527,6 +542,9 @@ export const buildChatItemsForRun = (
   const latestChildCard = [...items].reverse().find((item): item is Extract<FactoryChatItem, { kind: "work" }> =>
     item.kind === "work" && Boolean(item.card.jobId) && item.card.worker === "codex"
   )?.card;
+  const latestObjectiveCard = [...items].reverse().find((item): item is Extract<FactoryChatItem, { kind: "work" }> =>
+    item.kind === "work" && Boolean(item.card.objectiveId)
+  )?.card;
   if (final?.type === "response.finalized") {
     const structuredFinal = summarizeStructuredSupervisorFinal(final.content, jobsById, latestChildCard);
     if (structuredFinal) {
@@ -553,6 +571,15 @@ export const buildChatItemsForRun = (
         kind: "system",
         title: "Orchestrator paused",
         body: `The parent profile hit its 8-turn budget, but the Codex child is ${childStatus}.\n\n${latestChildCard.summary}`,
+        meta: state.statusNote ?? state.status,
+      });
+    } else if (state.failure?.failureClass === "iteration_budget_exhausted" && latestObjectiveCard) {
+      const objectiveLabel = latestObjectiveCard.objectiveId ?? "objective";
+      items.push({
+        key: `${runId}-objective-status`,
+        kind: "system",
+        title: "Objective continues",
+        body: `The parent profile hit its 8-turn budget after updating ${objectiveLabel}. The objective is still ${latestObjectiveCard.status}.\n\n${latestObjectiveCard.summary}`,
         meta: state.statusNote ?? state.status,
       });
     } else {

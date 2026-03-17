@@ -21,6 +21,7 @@ import {
   initialFactoryState,
   type FactoryEvent,
 } from "../../src/modules/factory.ts";
+import type { AgentEvent } from "../../src/modules/agent.ts";
 import { buildChatItemsForRun } from "../../src/agents/factory.agent.ts";
 import { FactoryService } from "../../src/services/factory-service.ts";
 import { factoryChatIsland, factoryChatShell, factoryInspectorIsland, factorySidebarIsland } from "../../src/views/factory-chat.ts";
@@ -498,7 +499,7 @@ test("factory chat island: renders chat rows and work cards", () => {
 test("factory chat items: budget stops show the codex child state instead of a stale generic stop message", () => {
   const runStream = "agents/factory/demo/runs/run_live";
   let prev: string | undefined;
-  const push = <T extends object>(body: T, index: number) => {
+  const push = (body: AgentEvent, index: number) => {
     const next = receipt(runStream, prev, body, index);
     prev = next.hash;
     return next;
@@ -578,6 +579,89 @@ test("factory chat items: budget stops show the codex child state instead of a s
   expect(childCard && childCard.kind === "work" ? childCard.card.summary : "").toContain("lease expired");
 });
 
+test("factory chat items: objective creation still surfaces when the parent hits its budget right after dispatch", () => {
+  const runStream = "agents/factory/demo/runs/run_objective_create";
+  let prev: string | undefined;
+  const push = (body: AgentEvent, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_objective_create",
+      problem: "Redesign the center timeline.",
+      agentId: "orchestrator",
+    }, 1),
+    push({
+      type: "tool.called",
+      runId: "run_objective_create",
+      iteration: 8,
+      agentId: "orchestrator",
+      tool: "factory.dispatch",
+      input: {
+        action: "create",
+        title: "Redesign center timeline",
+        prompt: "Create an objective for the center timeline redesign.",
+      },
+      summary: "Preparing the repo profile and generated skill bundle.",
+      durationMs: 400,
+    }, 2),
+    push({
+      type: "tool.observed",
+      runId: "run_objective_create",
+      iteration: 8,
+      agentId: "orchestrator",
+      tool: "factory.dispatch",
+      output: JSON.stringify({
+        worker: "factory",
+        action: "create",
+        objectiveId: "objective_demo",
+        title: "Redesign center timeline",
+        status: "decomposing",
+        phase: "preparing_repo",
+        summary: "Preparing the repo profile and generated skill bundle.",
+        link: "/factory?objective=objective_demo",
+      }),
+      truncated: false,
+    }, 3),
+    push({
+      type: "failure.report",
+      runId: "run_objective_create",
+      agentId: "orchestrator",
+      failure: {
+        stage: "budget",
+        failureClass: "iteration_budget_exhausted",
+        message: "iteration budget exhausted (8)",
+        retryable: true,
+      },
+    }, 4),
+    push({
+      type: "run.status",
+      runId: "run_objective_create",
+      agentId: "orchestrator",
+      status: "failed",
+      note: "iteration budget exhausted (8)",
+    }, 5),
+    push({
+      type: "response.finalized",
+      runId: "run_objective_create",
+      agentId: "orchestrator",
+      content: "Stopped after hitting max iterations. Use steer/follow-up to continue.",
+    }, 6),
+  ];
+
+  const items = buildChatItemsForRun("run_objective_create", chain, new Map());
+  const objectiveCard = items.find((item) => item.kind === "work" && item.card.objectiveId === "objective_demo");
+  expect(objectiveCard && objectiveCard.kind === "work" ? objectiveCard.card.title : "").toBe("Objective created");
+
+  const objectiveStatus = items.find((item) => item.kind === "system" && item.title === "Objective continues");
+  expect(objectiveStatus && objectiveStatus.kind === "system" ? objectiveStatus.body : "").toContain("objective_demo");
+  expect(objectiveStatus && objectiveStatus.kind === "system" ? objectiveStatus.body : "").toContain("Preparing the repo profile and generated skill bundle.");
+  expect(items.some((item) => item.kind === "assistant")).toBe(false);
+});
+
 test("factory sidebar island: renders left rail navigation", () => {
   const markup = factorySidebarIsland({
     activeProfileId: "generalist",
@@ -636,7 +720,7 @@ test("factory sidebar island: renders left rail navigation", () => {
 test("factory chat items: structured supervisor snapshots render as live child state instead of raw JSON", () => {
   const runStream = "agents/factory/demo/runs/run_structured";
   let prev: string | undefined;
-  const push = <T extends object>(body: T, index: number) => {
+  const push = (body: AgentEvent, index: number) => {
     const next = receipt(runStream, prev, body, index);
     prev = next.hash;
     return next;

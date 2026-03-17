@@ -510,7 +510,10 @@ const renderChatItem = (item: FactoryChatItem, activeProfileLabel: string, activ
       ${badge(card.status)}
     </div>
     <div class="mt-4 text-sm leading-6 text-zinc-200">${esc(card.summary)}</div>
-    ${card.detail ? `<pre class="mt-4 overflow-x-auto rounded-2xl border border-white/10 bg-black/30 p-4 text-[13px] leading-6 text-zinc-300">${esc(card.detail)}</pre>` : ""}
+    ${card.detail ? `<details class="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4">
+      <summary class="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400">View details</summary>
+      <pre class="mt-3 overflow-x-auto text-[13px] leading-6 text-zinc-300 whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.detail)}</pre>
+    </details>` : ""}
     <div class="mt-4 flex flex-wrap gap-2 text-xs text-zinc-500">
       ${card.meta ? `<span>${esc(card.meta)}</span>` : ""}
       ${card.jobId ? `<span>Job ${esc(card.jobId)}</span>` : ""}
