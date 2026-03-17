@@ -72,10 +72,6 @@ Queue streams:
 - [docs/axiom-public-prover.md](./docs/axiom-public-prover.md)
 - [docs/axiom-benchmark.md](./docs/axiom-benchmark.md)
 - [docs/create-agent.md](./docs/create-agent.md)
-- [docs/agenthub-on-receipt.md](./docs/agenthub-on-receipt.md)
-- [docs/agenthub-prd.md](./docs/agenthub-prd.md)
-- [docs/hub-dogfood.md](./docs/hub-dogfood.md)
-- [docs/hub-codex-playbook.md](./docs/hub-codex-playbook.md)
 - [docs/api/README.md](./docs/api/README.md)
 - [docs/api/http.md](./docs/api/http.md)
 - [docs/api/sse.md](./docs/api/sse.md)
@@ -84,9 +80,9 @@ Queue streams:
 - [docs/api/streams.md](./docs/api/streams.md)
 - [docs/api/config.md](./docs/api/config.md)
 
-## Hub vs Factory
+## Factory and Profiles
 
-`Factory` is the receipt-native objective execution system.
+`Factory` is the operator surface for this repo.
 
 Use `/factory` for:
 
@@ -98,21 +94,10 @@ Use `/factory` for:
 - candidate review
 - integration, validation, and promotion
 - objective debugging, receipts, and runtime control
+- profile-driven orchestration and handoff
+- repo-local customization through `profiles/<id>/PROFILE.md` and `profiles/<id>/profile.json`
 
-`Hub` still exists, but it is no longer the objective surface.
-
-Use `/hub` for:
-
-- repo and commit exploration
-- workspaces
-- manual tasks
-- agents, channels, and posts
-- operator/debug utilities that are not objective-specific
-
-Short version:
-
-- if you are running or debugging an autonomous software objective, use `Factory`
-- if you are doing manual repo/team/workspace operations, you can still use `Hub`
+The older Hub UI is gone. Factory still reuses `src/adapters/hub-git.ts` internally as its Git/worktree adapter, but there is no separate `/hub` product surface.
 
 ## Multi-agent context management
 
@@ -123,12 +108,9 @@ In Receipt, rebracketing means dynamically changing merge parenthesization based
 
 ```bash
 npm run dev
-npm run hub:onboard
 npm run test:smoke
 ```
 
 The server auto-loads route modules from `src/agents/*.agent.ts`.
 
 The factory objective surface is mounted at `/factory` and is the only objective control surface in v1.
-
-Hub is mounted at `/hub` for repo/team/workspace/manual-task operations and can be bootstrapped with the default team in [config/hub-agents.json](./config/hub-agents.json).

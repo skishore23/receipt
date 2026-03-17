@@ -102,6 +102,22 @@ The metadata currently supports:
 - `toolAllowlist`
 - `handoffTargets`
 - `routeHints`
+- `orchestration`
+
+### Orchestration policy
+
+Profiles can now carry a machine-readable orchestration policy under `profile.json -> orchestration`.
+
+Current supported fields:
+
+- `executionMode`: `interactive` or `supervisor`
+- `discoveryBudget`: max discovery-tool steps before delivery is required
+- `suspendOnAsyncChild`: whether the parent should stop taking more repo-action tools while a child worker is active
+- `allowPollingWhileChildRunning`: whether status-style tools are still allowed during an active child run
+- `finalWhileChildRunning`: `allow`, `waiting_message`, or `reject`
+- `childDedupe`: `none` or `by_run_and_prompt`
+
+This is the first step toward making parent/worker supervision a profile capability instead of a hardcoded runtime special case.
 
 ### Profile resolver
 
@@ -112,6 +128,7 @@ The resolver in `src/services/factory-chat-profiles.ts` is responsible for:
 - walking profile imports
 - merging tool allowlists
 - merging handoff targets
+- merging orchestration policy
 - building a deterministic resolved hash
 - producing the final system prompt text
 
@@ -183,6 +200,12 @@ Current import behavior:
 - tool allowlists and handoff targets are merged uniquely
 
 This is the main customization mechanism for shared behavior.
+
+That same import stack now also lets repos share orchestration defaults. For example:
+
+- an imported base profile can define `executionMode: "supervisor"`
+- a concrete delivery profile can override only `discoveryBudget`
+- another profile can inherit the same supervisor policy but choose a different tool allowlist
 
 Example pattern:
 

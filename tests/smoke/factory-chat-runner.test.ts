@@ -67,6 +67,14 @@ const writeProfile = async (root: string, input: {
   readonly default?: boolean;
   readonly toolAllowlist: ReadonlyArray<string>;
   readonly handoffTargets?: ReadonlyArray<string>;
+  readonly orchestration?: {
+    readonly executionMode?: "interactive" | "supervisor";
+    readonly discoveryBudget?: number;
+    readonly suspendOnAsyncChild?: boolean;
+    readonly allowPollingWhileChildRunning?: boolean;
+    readonly finalWhileChildRunning?: "allow" | "waiting_message" | "reject";
+    readonly childDedupe?: "none" | "by_run_and_prompt";
+  };
 }): Promise<void> => {
   const dir = path.join(root, "profiles", input.id);
   await fs.mkdir(dir, { recursive: true });
@@ -79,6 +87,7 @@ const writeProfile = async (root: string, input: {
     imports: [],
     routeHints: [],
     toolAllowlist: input.toolAllowlist,
+    orchestration: input.orchestration ?? {},
     handoffTargets: input.handoffTargets ?? [],
   }, null, 2), "utf-8");
 };
@@ -149,10 +158,13 @@ test("factory chat runner: codex.run queues work asynchronously and returns imme
   expect(jobs).toHaveLength(1);
   expect(jobs[0]?.agentId).toBe("factory-codex");
   expect(jobs[0]?.status).toBe("queued");
+  expect(jobs[0]?.singletonMode).toBe("allow");
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_async_codex"));
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
   expect(observed && "output" in observed ? observed.output : "").toContain('"status": "queued"');
+  expect(observed && "output" in observed ? observed.output : "").toContain('"jobId":');
+  expect(observed && "output" in observed ? observed.output : "").toContain("codex child queued as");
 });
 
 test("factory chat runner: agent.delegate queues work and agent.status sees the queued job", async () => {
@@ -324,6 +336,339 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_async_handoff"));
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
   expect(observed && "output" in observed ? observed.output : "").toContain('"toProfileId": "software"');
+});
+
+test("factory chat runner: agent.status rejects the current factory job id", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-self-status");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["agent.status"],
+  });
+
+  const actions = [
+    {
+      thought: "incorrectly poll self",
+      action: {
+        type: "tool",
+        name: "agent.status",
+        input: JSON.stringify({ jobId: "job_parent_demo" }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Handled the invalid self-status call.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_self_status_guard",
+    problem: "Check the child job.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+    control: {
+      jobId: "job_parent_demo",
+      checkAbort: async () => false,
+      pullCommands: async () => [],
+    },
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_self_status_guard"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "agent.status"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("cannot target the current factory job");
+});
+
+test("factory chat runner: software profile rejects a third discovery step before delivery starts", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-discovery-budget");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["jobs.list", "codex.run"],
+    orchestration: {
+      executionMode: "supervisor",
+      discoveryBudget: 2,
+      suspendOnAsyncChild: true,
+      allowPollingWhileChildRunning: false,
+      finalWhileChildRunning: "waiting_message",
+      childDedupe: "by_run_and_prompt",
+    },
+  });
+
+  const actions = [
+    {
+      thought: "inspect jobs once",
+      action: {
+        type: "tool",
+        name: "jobs.list",
+        input: JSON.stringify({ limit: 5 }),
+        text: null,
+      },
+    },
+    {
+      thought: "inspect jobs twice",
+      action: {
+        type: "tool",
+        name: "jobs.list",
+        input: JSON.stringify({ limit: 5 }),
+        text: null,
+      },
+    },
+    {
+      thought: "incorrectly inspect jobs a third time",
+      action: {
+        type: "tool",
+        name: "jobs.list",
+        input: JSON.stringify({ limit: 5 }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Stopping after the discovery-budget guard fired.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_software_discovery_budget",
+    problem: "Fix the sidebar overflow.",
+    profileId: "software",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_software_discovery_budget"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "jobs.list"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Profile discovery budget exhausted");
+});
+
+test("factory chat runner: software profile rejects follow-up polling while a codex child is still active", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-child-poll-guard");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["codex.run", "agent.status"],
+    orchestration: {
+      executionMode: "supervisor",
+      suspendOnAsyncChild: true,
+      allowPollingWhileChildRunning: false,
+      finalWhileChildRunning: "waiting_message",
+      childDedupe: "by_run_and_prompt",
+    },
+  });
+
+  let childJobId = "";
+  const actions = [
+    async () => ({
+      thought: "queue codex work",
+      action: {
+        type: "tool",
+        name: "codex.run",
+        input: JSON.stringify({ prompt: "Create a temporary probe file and report back." }),
+        text: null,
+      },
+    }),
+    async () => {
+      const jobs = await queue.listJobs({ limit: 10 });
+      childJobId = jobs[0]?.id ?? childJobId;
+      return {
+        thought: "incorrectly poll the active child",
+        action: {
+          type: "tool",
+          name: "agent.status",
+          input: JSON.stringify({ jobId: childJobId }),
+          text: null,
+        },
+      };
+    },
+    async () => ({
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Waiting on child work.",
+      },
+    }),
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_software_child_poll_guard",
+    problem: "Ship the bug fix.",
+    profileId: "software",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const nextFactory = actions.shift();
+      if (!nextFactory) throw new Error("no scripted action left");
+      const next = await nextFactory();
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_software_child_poll_guard"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "agent.status"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Profile child work is already running");
+});
+
+test("factory chat runner: finalizer rewrites premature software success text while a codex child is still active", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-child-finalizer");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["codex.run"],
+    orchestration: {
+      executionMode: "supervisor",
+      suspendOnAsyncChild: true,
+      finalWhileChildRunning: "waiting_message",
+      childDedupe: "by_run_and_prompt",
+    },
+  });
+
+  const actions = [
+    {
+      thought: "queue codex work",
+      action: {
+        type: "tool",
+        name: "codex.run",
+        input: JSON.stringify({ prompt: "Create a temporary probe file and report back." }),
+        text: null,
+      },
+    },
+    {
+      thought: "incorrectly claim completion early",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Everything is already complete and validated.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_software_child_finalizer",
+    problem: "Ship the bug fix.",
+    profileId: "software",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Child work is still running as");
+  expect(result.finalResponse).not.toContain("already complete and validated");
 });
 
 test("factory chat runner: accepts valid JSON-object strings for tool input", async () => {

@@ -7,7 +7,7 @@ const md = new MiniGFM();
 const panelClass = "rounded-[28px] border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(0,0,0,0.34)] backdrop-blur-2xl";
 const softPanelClass = "rounded-[24px] border border-white/10 bg-black/20 backdrop-blur-xl";
 const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500";
-const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4";
+const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4 break-words [overflow-wrap:anywhere]";
 const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
 const inputClass = "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-emerald-300/40 focus:bg-white/[0.06]";
 const railCardClass = `${softPanelClass} p-4`;
@@ -94,9 +94,9 @@ const primaryButtonClass = `${buttonBaseClass} border-emerald-300/40 bg-emerald-
 const ghostButtonClass = `${buttonBaseClass} border-white/10 bg-white/[0.04] text-zinc-100 hover:bg-white/[0.09]`;
 const dangerButtonClass = `${buttonBaseClass} border-rose-300/25 bg-rose-400/10 text-rose-100 hover:bg-rose-400/20`;
 
-const statPill = (label: string, value: string): string => `<div class="rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
+const statPill = (label: string, value: string): string => `<div class="min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
   <div class="text-[10px] uppercase tracking-[0.18em] text-zinc-500">${esc(label)}</div>
-  <div class="mt-1 text-sm font-medium text-zinc-100">${esc(value)}</div>
+  <div class="mt-1 break-words text-sm font-medium text-zinc-100 [overflow-wrap:anywhere]">${esc(value)}</div>
 </div>`;
 
 const objectiveSummaryLine = (status: string, phase: string, slotState?: string): string =>
@@ -326,11 +326,11 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
     ? "border-sky-300/30 bg-sky-300/10 shadow-[0_16px_48px_rgba(56,189,248,0.12)]"
     : "border-white/10 bg-black/10 hover:border-white/15 hover:bg-white/[0.05]";
   return `<a class="block min-w-0 overflow-hidden rounded-[24px] border px-4 py-4 transition ${selectedClass}" href="${href}">
-    <div class="flex items-start gap-3">
-      <div class="min-w-0 flex-1">
-        <div class="min-w-0 text-sm font-semibold leading-6 text-zinc-100 [display:-webkit-box] overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">${esc(objective.title)}</div>
+    <div class="flex min-w-0 items-start gap-3 overflow-hidden">
+      <div class="min-w-0 flex-1 overflow-hidden">
+        <div class="min-w-0 break-words text-sm font-semibold leading-6 text-zinc-100 [display:-webkit-box] overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">${esc(objective.title)}</div>
       </div>
-      <div class="shrink-0 max-w-full">${badge(displayLabel(objective.status), toneForValue(objective.status))}</div>
+      <div class="shrink-0">${badge(displayLabel(objective.status), toneForValue(objective.status))}</div>
     </div>
     <div class="mt-3 flex flex-wrap gap-2">
       ${objectiveMetaPill("phase", objective.phase, toneForValue(objective.phase))}
@@ -348,18 +348,18 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
 };
 
 const renderThreadLink = (job: FactoryChatJobNav): string => {
-  const body = `<div class="flex items-start justify-between gap-3">
-      <div class="min-w-0">
+  const body = `<div class="flex min-w-0 items-start justify-between gap-3 overflow-hidden">
+      <div class="min-w-0 flex-1 overflow-hidden">
         <div class="truncate text-sm font-semibold text-zinc-100">${esc(job.runId ?? job.jobId)}</div>
-        <div class="mt-2 line-clamp-2 text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
+        <div class="mt-2 line-clamp-2 break-words text-sm leading-6 text-zinc-400 [overflow-wrap:anywhere]">${esc(job.summary)}</div>
       </div>
       <div class="shrink-0">${badge(job.status)}</div>
     </div>
-    <div class="mt-3 text-xs text-zinc-500">${esc(job.objectiveId ? `Objective ${job.objectiveId}` : job.agentId)}</div>`;
+    <div class="mt-3 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">${esc(job.objectiveId ? `Objective ${job.objectiveId}` : job.agentId)}</div>`;
   if (job.link) {
-    return `<a class="block rounded-[22px] border border-white/10 bg-black/10 px-4 py-4 transition hover:border-white/15 hover:bg-white/[0.05]" href="${esc(job.link)}">${body}</a>`;
+    return `<a class="block min-w-0 overflow-hidden rounded-[22px] border border-white/10 bg-black/10 px-4 py-4 transition hover:border-white/15 hover:bg-white/[0.05]" href="${esc(job.link)}">${body}</a>`;
   }
-  return `<div class="rounded-[22px] border border-white/10 bg-black/10 px-4 py-4">${body}</div>`;
+  return `<div class="min-w-0 overflow-hidden rounded-[22px] border border-white/10 bg-black/10 px-4 py-4">${body}</div>`;
 };
 
 export const factoryRailIsland = (model: FactorySidebarModel): string => {
@@ -481,15 +481,15 @@ const renderObjectiveActions = (objective: FactorySelectedObjectiveCard): string
   </div>`;
 };
 
-const renderJobRow = (job: FactoryChatJobNav): string => `<div class="factory-job-card rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
-  <div class="factory-job-card__row flex flex-wrap items-start justify-between gap-3">
-    <div class="factory-job-card__body">
-      <div class="factory-job-card__title text-sm font-semibold text-zinc-100">${esc(job.agentId)} · ${esc(job.jobId)}</div>
-      <div class="factory-job-card__summary mt-2 text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
+const renderJobRow = (job: FactoryChatJobNav): string => `<div class="factory-job-card min-w-0 overflow-hidden rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
+  <div class="factory-job-card__row flex min-w-0 flex-wrap items-start justify-between gap-3 overflow-hidden">
+    <div class="factory-job-card__body min-w-0 flex-1 overflow-hidden">
+      <div class="factory-job-card__title break-words text-sm font-semibold text-zinc-100 [overflow-wrap:anywhere]">${esc(job.agentId)} · ${esc(job.jobId)}</div>
+      <div class="factory-job-card__summary mt-2 break-words text-sm leading-6 text-zinc-400 [overflow-wrap:anywhere]">${esc(job.summary)}</div>
     </div>
-    <div class="factory-job-card__status">${badge(job.status)}</div>
+    <div class="factory-job-card__status shrink-0">${badge(job.status)}</div>
   </div>
-  <div class="factory-job-card__meta mt-3 text-xs text-zinc-500">
+  <div class="factory-job-card__meta mt-3 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">
     ${job.runId ? `Run ${esc(job.runId)}` : "No run id"}
     ${job.objectiveId ? ` · Objective ${esc(job.objectiveId)}` : ""}
     ${job.updatedAt ? ` · ${esc(formatTs(job.updatedAt))}` : ""}

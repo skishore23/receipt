@@ -18,6 +18,25 @@ export type FactoryChatProfileManifest = {
   readonly toolAllowlist?: ReadonlyArray<string>;
   readonly handoffTargets?: ReadonlyArray<string>;
   readonly routeHints?: ReadonlyArray<string>;
+  readonly orchestration?: FactoryChatProfileOrchestrationManifest;
+};
+
+export type FactoryChatProfileOrchestrationManifest = {
+  readonly executionMode?: "interactive" | "supervisor";
+  readonly discoveryBudget?: number;
+  readonly suspendOnAsyncChild?: boolean;
+  readonly allowPollingWhileChildRunning?: boolean;
+  readonly finalWhileChildRunning?: "allow" | "waiting_message" | "reject";
+  readonly childDedupe?: "none" | "by_run_and_prompt";
+};
+
+export type FactoryChatResolvedOrchestrationPolicy = {
+  readonly executionMode: "interactive" | "supervisor";
+  readonly discoveryBudget?: number;
+  readonly suspendOnAsyncChild: boolean;
+  readonly allowPollingWhileChildRunning: boolean;
+  readonly finalWhileChildRunning: "allow" | "waiting_message" | "reject";
+  readonly childDedupe: "none" | "by_run_and_prompt";
 };
 
 export type FactoryChatProfile = {
@@ -29,6 +48,7 @@ export type FactoryChatProfile = {
   readonly toolAllowlist: ReadonlyArray<string>;
   readonly handoffTargets: ReadonlyArray<string>;
   readonly routeHints: ReadonlyArray<string>;
+  readonly orchestration: FactoryChatProfileOrchestrationManifest;
   readonly dirPath: string;
   readonly mdPath: string;
   readonly jsonPath: string;
@@ -46,6 +66,7 @@ export type FactoryChatResolvedProfile = {
   readonly stack: ReadonlyArray<FactoryChatProfile>;
   readonly toolAllowlist: ReadonlyArray<string>;
   readonly handoffTargets: ReadonlyArray<string>;
+  readonly orchestration: FactoryChatResolvedOrchestrationPolicy;
   readonly selectionReason: string;
   readonly resolvedHash: string;
   readonly systemPrompt: string;
@@ -65,6 +86,83 @@ const ensureProfileDir = (profileRoot: string): string =>
 
 const normalizeHintText = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+const normalizeOrchestrationManifest = (
+  raw: FactoryChatProfileOrchestrationManifest | undefined,
+): FactoryChatProfileOrchestrationManifest => {
+  const executionMode = raw?.executionMode === "supervisor" || raw?.executionMode === "interactive"
+    ? raw.executionMode
+    : undefined;
+  const discoveryBudget = typeof raw?.discoveryBudget === "number" && Number.isFinite(raw.discoveryBudget)
+    ? Math.max(0, Math.min(Math.floor(raw.discoveryBudget), 20))
+    : undefined;
+  const finalWhileChildRunning = raw?.finalWhileChildRunning === "waiting_message" || raw?.finalWhileChildRunning === "reject" || raw?.finalWhileChildRunning === "allow"
+    ? raw.finalWhileChildRunning
+    : undefined;
+  const childDedupe = raw?.childDedupe === "by_run_and_prompt" || raw?.childDedupe === "none"
+    ? raw.childDedupe
+    : undefined;
+  return {
+    executionMode,
+    discoveryBudget,
+    suspendOnAsyncChild: typeof raw?.suspendOnAsyncChild === "boolean" ? raw.suspendOnAsyncChild : undefined,
+    allowPollingWhileChildRunning: typeof raw?.allowPollingWhileChildRunning === "boolean" ? raw.allowPollingWhileChildRunning : undefined,
+    finalWhileChildRunning,
+    childDedupe,
+  };
+};
+
+const mergeOrchestrationManifests = (
+  stack: ReadonlyArray<FactoryChatProfile>,
+): FactoryChatProfileOrchestrationManifest =>
+  stack.reduce<FactoryChatProfileOrchestrationManifest>((merged, profile) => {
+    const next = profile.orchestration;
+    return {
+      executionMode: next.executionMode ?? merged.executionMode,
+      discoveryBudget: next.discoveryBudget ?? merged.discoveryBudget,
+      suspendOnAsyncChild: next.suspendOnAsyncChild ?? merged.suspendOnAsyncChild,
+      allowPollingWhileChildRunning: next.allowPollingWhileChildRunning ?? merged.allowPollingWhileChildRunning,
+      finalWhileChildRunning: next.finalWhileChildRunning ?? merged.finalWhileChildRunning,
+      childDedupe: next.childDedupe ?? merged.childDedupe,
+    };
+  }, {});
+
+const resolveOrchestrationPolicy = (
+  raw: FactoryChatProfileOrchestrationManifest,
+): FactoryChatResolvedOrchestrationPolicy => {
+  const executionMode = raw.executionMode ?? "interactive";
+  const supervisorDefaults = executionMode === "supervisor"
+    ? {
+      suspendOnAsyncChild: true,
+      allowPollingWhileChildRunning: false,
+      finalWhileChildRunning: "waiting_message" as const,
+      childDedupe: "by_run_and_prompt" as const,
+    }
+    : {
+      suspendOnAsyncChild: false,
+      allowPollingWhileChildRunning: true,
+      finalWhileChildRunning: "allow" as const,
+      childDedupe: "none" as const,
+    };
+  return {
+    executionMode,
+    discoveryBudget: raw.discoveryBudget,
+    suspendOnAsyncChild: raw.suspendOnAsyncChild ?? supervisorDefaults.suspendOnAsyncChild,
+    allowPollingWhileChildRunning: raw.allowPollingWhileChildRunning ?? supervisorDefaults.allowPollingWhileChildRunning,
+    finalWhileChildRunning: raw.finalWhileChildRunning ?? supervisorDefaults.finalWhileChildRunning,
+    childDedupe: raw.childDedupe ?? supervisorDefaults.childDedupe,
+  };
+};
+
+const renderOrchestrationPolicy = (policy: FactoryChatResolvedOrchestrationPolicy): string => [
+  "## Orchestration Policy",
+  `- Execution mode: ${policy.executionMode}`,
+  `- Discovery budget: ${typeof policy.discoveryBudget === "number" ? String(policy.discoveryBudget) : "unbounded"}`,
+  `- Suspend on async child: ${policy.suspendOnAsyncChild ? "yes" : "no"}`,
+  `- Allow polling while child running: ${policy.allowPollingWhileChildRunning ? "yes" : "no"}`,
+  `- Final while child running: ${policy.finalWhileChildRunning}`,
+  `- Child dedupe: ${policy.childDedupe}`,
+].join("\n");
 
 const bestRouteHintMatch = (
   profiles: ReadonlyArray<FactoryChatProfile>,
@@ -95,6 +193,7 @@ const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): Factor
   toolAllowlist: unique(Array.isArray(raw.toolAllowlist) ? raw.toolAllowlist.filter((item): item is string => typeof item === "string").map((item) => item.trim()) : []),
   handoffTargets: unique(Array.isArray(raw.handoffTargets) ? raw.handoffTargets.filter((item): item is string => typeof item === "string").map((item) => item.trim()) : []),
   routeHints: unique(Array.isArray(raw.routeHints) ? raw.routeHints.filter((item): item is string => typeof item === "string").map((item) => item.trim().toLowerCase()) : []),
+  orchestration: normalizeOrchestrationManifest(raw.orchestration),
 });
 
 export const repoKeyForRoot = (repoRoot: string): string =>
@@ -134,6 +233,7 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
         toolAllowlist: manifest.toolAllowlist ?? [],
         handoffTargets: manifest.handoffTargets ?? [],
         routeHints: manifest.routeHints ?? [],
+        orchestration: manifest.orchestration ?? {},
         dirPath,
         mdPath,
         jsonPath,
@@ -206,6 +306,7 @@ export const resolveFactoryChatProfile = async (input: {
   const stack = [...imported, selection.profile];
   const mergedToolAllowlist = unique(stack.flatMap((profile) => [...profile.toolAllowlist]));
   const mergedHandoffTargets = unique(stack.flatMap((profile) => [...profile.handoffTargets]));
+  const orchestration = resolveOrchestrationPolicy(mergeOrchestrationManifests(stack));
   const profilePaths = stack.flatMap((profile) => [
     path.relative(profileRoot, profile.mdPath).replace(/\\/g, "/"),
     path.relative(profileRoot, profile.jsonPath).replace(/\\/g, "/"),
@@ -224,6 +325,8 @@ export const resolveFactoryChatProfile = async (input: {
     "You are not a generic chat wrapper around another assistant.",
     "Use available Receipt-native tools to answer directly, inspect state, queue work, run Codex, dispatch Factory, or hand off profiles when appropriate.",
     "",
+    renderOrchestrationPolicy(orchestration),
+    "",
     ...imported.map((profile) => `## Imported Profile: ${profile.label}\n${profile.mdBody.trim()}`),
     `## Active Profile: ${selection.profile.label}\n${selection.profile.mdBody.trim()}`,
   ].join("\n\n");
@@ -235,6 +338,7 @@ export const resolveFactoryChatProfile = async (input: {
     stack,
     toolAllowlist: mergedToolAllowlist,
     handoffTargets: mergedHandoffTargets,
+    orchestration,
     selectionReason: selection.reason,
     resolvedHash,
     systemPrompt,

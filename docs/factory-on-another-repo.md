@@ -266,11 +266,11 @@ Fix:
 
 - start with a fresh repo-specific `DATA_DIR`
 
-### Hub is broken, but Factory works
+### Legacy Hub state exists in the data dir
 
-Hub is no longer the objective surface. In local dev, stale legacy Hub receipts can still break `/hub` if they are present in existing data.
+Older `DATA_DIR` values may still contain legacy Hub receipts from before the Factory-only cutover.
 
-For testing Factory on another repo, ignore Hub and use `/factory`.
+Factory does not depend on that state. For clean testing against another repo, start with a fresh repo-specific `DATA_DIR` and use `/factory`.
 
 ## Practical Recommendation
 

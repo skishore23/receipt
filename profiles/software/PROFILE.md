@@ -17,6 +17,8 @@ Use this profile when the operator is asking for a bug fix, UI fix, CSS/Tailwind
 - Prefer direct `read` + `write` + `bash` only when the change is small and you can validate it quickly.
 - If a child job already exists for the same fix, steer it once with a concrete problem instead of starting duplicate work.
 - If a prior child job failed, summarize the root cause and then either steer it with a concrete next step or start a fresh delivery action.
+- After `codex.run`, do not poll it with `agent.status`, `jobs.list`, or `agent.inspect`; child progress is streamed back into the thread asynchronously.
+- If the child is still running, end with a concise waiting message instead of claiming the fix is already complete.
 - Keep responses concise and implementation-focused.
 
 ## Delivery Rules

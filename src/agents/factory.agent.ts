@@ -150,7 +150,13 @@ const overlayLiveJobState = (card: FactoryWorkCard, job: QueueJob | undefined): 
   if (!job) return card;
   const parsed = asObject(job.result);
   const failure = asObject(parsed?.failure);
-  const summary = asString(parsed?.summary)
+  const terminalSummary = job.status === "failed"
+    ? job.lastError ?? asString(failure?.message)
+    : job.status === "canceled"
+      ? job.canceledReason ?? asString(parsed?.note)
+      : undefined;
+  const summary = terminalSummary
+    ?? asString(parsed?.summary)
     ?? asString(parsed?.finalResponse)
     ?? asString(parsed?.note)
     ?? asString(parsed?.message)
@@ -297,7 +303,7 @@ const reverseFind = <T,>(items: ReadonlyArray<T>, predicate: (item: T) => boolea
   return undefined;
 };
 
-const buildChatItemsForRun = (
+export const buildChatItemsForRun = (
   runId: string,
   chain: Awaited<ReturnType<Runtime<AgentCmd, AgentEvent, AgentState>["chain"]>>,
   jobsById: ReadonlyMap<string, QueueJob>,
@@ -334,6 +340,29 @@ const buildChatItemsForRun = (
         title: `Handed off to ${event.toProfileId}`,
         body: event.reason,
         meta: new Date(receipt.ts).toLocaleString(),
+      });
+      continue;
+    }
+    if (event.type === "subagent.merged") {
+      const job = jobsById.get(event.subJobId);
+      const worker = job?.agentId === "factory-codex"
+        ? "codex"
+        : asString(asObject(job?.result)?.worker) ?? "subagent";
+      const baseCard: FactoryWorkCard = {
+        key: `${runId}-subagent-${receipt.hash}`,
+        title: worker === "codex" ? "Codex child update" : "Child update",
+        worker,
+        status: job?.status ?? "running",
+        summary: event.summary,
+        detail: event.task,
+        meta: new Date(receipt.ts).toLocaleString(),
+        jobId: event.subJobId,
+        running: !isTerminalJobStatus(job?.status),
+      };
+      items.push({
+        key: `${runId}-subagent-${receipt.hash}`,
+        kind: "work",
+        card: overlayLiveJobState(baseCard, job),
       });
       continue;
     }
@@ -388,13 +417,29 @@ const buildChatItemsForRun = (
   }
 
   const final = reverseFind(chain, (receipt) => receipt.body.type === "response.finalized")?.body;
+  const latestChildCard = [...items].reverse().find((item): item is Extract<FactoryChatItem, { kind: "work" }> =>
+    item.kind === "work" && Boolean(item.card.jobId) && item.card.worker === "codex"
+  )?.card;
   if (final?.type === "response.finalized") {
-    items.push({
-      key: `${runId}-assistant-final`,
-      kind: "assistant",
-      body: final.content,
-      meta: state.statusNote ?? state.status,
-    });
+    if (state.failure?.failureClass === "iteration_budget_exhausted" && latestChildCard) {
+      const childStatus = latestChildCard.running
+        ? `still running as ${latestChildCard.jobId}`
+        : `${latestChildCard.status}${latestChildCard.jobId ? ` (${latestChildCard.jobId})` : ""}`;
+      items.push({
+        key: `${runId}-child-status`,
+        kind: "system",
+        title: "Orchestrator paused",
+        body: `The parent profile hit its 8-turn budget, but the Codex child is ${childStatus}.\n\n${latestChildCard.summary}`,
+        meta: state.statusNote ?? state.status,
+      });
+    } else {
+      items.push({
+        key: `${runId}-assistant-final`,
+        kind: "assistant",
+        body: final.content,
+        meta: state.statusNote ?? state.status,
+      });
+    }
   } else if (state.status === "running") {
     items.push({
       key: `${runId}-running`,

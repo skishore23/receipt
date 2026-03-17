@@ -1,6 +1,0 @@
-interface:
-  display_name: Receipt Hub Loop
-  short_description: Repo-specific guidance for Codex working inside the Receipt hub objective loop.
-  default_prompt: "Use $receipt-hub-loop to work on Receipt hub objectives with the right Git, review, cleanup, and inspection flow."
-policy:
-  allow_implicit_invocation: false

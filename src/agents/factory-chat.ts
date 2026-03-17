@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
@@ -108,8 +109,20 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined;
 
+const tryParseJsonRecord = (value: string | undefined): Record<string, unknown> | undefined => {
+  if (!value) return undefined;
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+};
+
 const nextId = (prefix: string): string =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+const stableCodexSessionKey = (runId: string, prompt: string): string =>
+  `factory-codex:${runId}:${createHash("sha1").update(prompt).digest("hex").slice(0, 12)}`;
 
 const summarizeObjective = (detail: Awaited<ReturnType<FactoryService["getObjective"]>>) => ({
   objectiveId: detail.objectiveId,
@@ -195,7 +208,13 @@ const normalizeJobSnapshot = (job: QueueJob): Record<string, unknown> => {
     ?? asString(job.payload.problem)
     ?? asString(job.payload.kind)
     ?? `${job.agentId} job`;
-  const summary = asString(result?.summary)
+  const terminalSummary = job.status === "failed"
+    ? job.lastError ?? asString(failure?.message)
+    : job.status === "canceled"
+      ? job.canceledReason ?? asString(result?.note)
+      : undefined;
+  const summary = terminalSummary
+    ?? asString(result?.summary)
     ?? asString(result?.finalResponse)
     ?? asString(result?.note)
     ?? asString(result?.message)
@@ -224,6 +243,31 @@ const normalizeJobSnapshot = (job: QueueJob): Record<string, unknown> => {
   };
 };
 
+const isActiveJobStatus = (status: string | undefined): boolean =>
+  status === "queued" || status === "leased" || status === "running";
+
+const listChildJobsForRun = async (queue: JsonlQueue, runId: string): Promise<ReadonlyArray<QueueJob>> => {
+  const jobs = await queue.listJobs({ limit: 200 });
+  return jobs.filter((job) => asString(job.payload.parentRunId) === runId);
+};
+
+const buildActiveChildWaitingMessage = (jobs: ReadonlyArray<QueueJob>): string => {
+  const snapshots = jobs.map((job) => normalizeJobSnapshot(job));
+  const primary = snapshots[0];
+  if (!primary) return "A child job is still running. Live updates will continue in this thread.";
+  const summary = asString(primary.summary) ?? "Child work is still running.";
+  const lines = [
+    `Child work is still running as ${asString(primary.jobId) ?? "unknown job"} (${asString(primary.status) ?? "running"}).`,
+    "Live updates will continue in this thread automatically.",
+    "",
+    `Latest child summary: ${summary}`,
+  ];
+  if (snapshots.length > 1) {
+    lines.push("", `Active child jobs: ${snapshots.map((snapshot) => asString(snapshot.jobId) ?? "unknown").join(", ")}`);
+  }
+  return lines.join("\n");
+};
+
 const createCodexRunTool = (input: {
   readonly repoRoot: string;
   readonly repoKey: string;
@@ -240,11 +284,17 @@ const createCodexRunTool = (input: {
     const timeoutMs = typeof toolInput.timeoutMs === "number" && Number.isFinite(toolInput.timeoutMs)
       ? Math.max(30_000, Math.min(Math.floor(toolInput.timeoutMs), 900_000))
       : 180_000;
+    const sessionKey = input.profile.orchestration.childDedupe === "by_run_and_prompt"
+      ? stableCodexSessionKey(input.runId, prompt)
+      : `factory-codex:${input.stream}:${Date.now().toString(36)}`;
+    const singletonMode = input.profile.orchestration.childDedupe === "by_run_and_prompt"
+      ? "steer"
+      : "allow";
     const created = await input.queue.enqueue({
       agentId: "factory-codex",
       lane: "collect",
-      sessionKey: `factory-codex:${input.stream}:${Date.now().toString(36)}`,
-      singletonMode: "allow",
+      sessionKey,
+      singletonMode,
       maxAttempts: 1,
       payload: {
         kind: "factory.codex.run",
@@ -258,7 +308,11 @@ const createCodexRunTool = (input: {
         timeoutMs,
       },
     });
-    const result = normalizeJobSnapshot(created);
+    const result: Record<string, unknown> = {
+      ...normalizeJobSnapshot(created),
+      worker: "codex",
+      summary: `codex child queued as ${created.id}`,
+    };
     await commitWorkerSummary(
       input.memoryTools,
       workerMemoryScope(input.repoKey, "codex"),
@@ -324,10 +378,14 @@ const createAsyncDelegateTool = (input: {
 
 const createJobStatusTool = (input: {
   readonly queue: JsonlQueue;
+  readonly currentJobId?: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const jobId = asString(toolInput.jobId);
     if (!jobId) throw new Error("agent.status requires jobId");
+    if (jobId === input.currentJobId) {
+      throw new Error("agent.status cannot target the current factory job; use the child jobId returned by codex.run or agent.delegate");
+    }
     const job = await input.queue.getJob(jobId);
     if (!job) throw new Error(`job ${jobId} not found`);
     const snapshot = normalizeJobSnapshot(job);
@@ -370,11 +428,15 @@ const createJobsListTool = (input: {
 
 const createJobControlTool = (input: {
   readonly queue: JsonlQueue;
+  readonly currentJobId?: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const jobId = asString(toolInput.jobId);
     const command = asString(toolInput.command);
     if (!jobId) throw new Error("job.control requires jobId");
+    if (jobId === input.currentJobId) {
+      throw new Error("job.control cannot target the current factory job; use the child jobId returned by codex.run or agent.delegate");
+    }
     if (command !== "steer" && command !== "follow_up" && command !== "abort") {
       throw new Error("job.control command must be steer, follow_up, or abort");
     }
@@ -475,6 +537,110 @@ const createFactoryStatusTool = (input: {
     return {
       output: JSON.stringify({ worker: "factory", action: "status", ...summary }, null, 2),
       summary: summary.summary,
+    };
+  };
+
+const discoveryTools = new Set([
+  "ls",
+  "read",
+  "grep",
+  "agent.status",
+  "jobs.list",
+  "agent.inspect",
+  "skill.read",
+]);
+
+const deliveryTools = new Set([
+  "codex.run",
+  "write",
+  "bash",
+  "factory.dispatch",
+]);
+
+const monitorWhileChildRunningTools = new Set([
+  "agent.status",
+  "jobs.list",
+  "agent.inspect",
+  "job.control",
+]);
+
+const withProfileOrchestrationPolicy = (
+  input: {
+    readonly profile: FactoryChatResolvedProfile;
+    readonly queue: JsonlQueue;
+    readonly runId: string;
+  },
+  tools: Readonly<Record<string, AgentToolExecutor>>,
+): Readonly<Record<string, AgentToolExecutor>> => {
+  const policy = input.profile.orchestration;
+  let discoverySteps = 0;
+  let deliveryStarted = false;
+  const activeAsyncChildJobs = new Set<string>();
+  return Object.fromEntries(Object.entries(tools).map(([name, executor]) => [name, async (toolInput) => {
+    if (activeAsyncChildJobs.size > 0 && policy.suspendOnAsyncChild) {
+      const activeJobs = (await Promise.all(
+        [...activeAsyncChildJobs].map(async (jobId) => ({ jobId, job: await input.queue.getJob(jobId) })),
+      ))
+        .flatMap(({ jobId, job }) => {
+          if (!job || !isActiveJobStatus(job.status)) {
+            activeAsyncChildJobs.delete(jobId);
+            return [];
+          }
+          return [job];
+        });
+      if (activeJobs.length > 0) {
+        const pollAllowed = policy.allowPollingWhileChildRunning && monitorWhileChildRunningTools.has(name);
+        const controlAllowed = name === "job.control";
+        if (!pollAllowed && !controlAllowed) {
+          throw new Error(`Profile child work is already running. ${buildActiveChildWaitingMessage(activeJobs)}`);
+        }
+      }
+    }
+    if (
+      !deliveryStarted
+      && typeof policy.discoveryBudget === "number"
+      && discoveryTools.has(name)
+    ) {
+      discoverySteps += 1;
+      if (discoverySteps > policy.discoveryBudget) {
+        throw new Error(`Profile discovery budget exhausted; take a delivery action with ${[...deliveryTools].join(", ")}, or final.`);
+      }
+    }
+    const result = await executor(toolInput);
+    if (name === "codex.run" || name === "agent.delegate") {
+      const parsed = tryParseJsonRecord(result.output);
+      const jobId = asString(parsed?.jobId);
+      const status = asString(parsed?.status);
+      if (jobId && isActiveJobStatus(status)) activeAsyncChildJobs.add(jobId);
+    }
+    if (deliveryTools.has(name)) deliveryStarted = true;
+    return result;
+  }])) as Readonly<Record<string, AgentToolExecutor>>;
+};
+
+const createFactoryChatFinalizer = (input: {
+  readonly queue: JsonlQueue;
+  readonly profile: FactoryChatResolvedProfile;
+}): NonNullable<AgentRunInput["finalizer"]> =>
+  async ({ runId, text }) => {
+    const activeChildJobs = (await listChildJobsForRun(input.queue, runId))
+      .filter((job) => isActiveJobStatus(job.status));
+    if (activeChildJobs.length === 0) {
+      return { accept: true, text };
+    }
+    if (input.profile.orchestration.finalWhileChildRunning === "allow") {
+      return { accept: true, text };
+    }
+    if (input.profile.orchestration.finalWhileChildRunning === "reject") {
+      return {
+        accept: false,
+        note: "final response rejected because child work is still running",
+      };
+    }
+    return {
+      accept: true,
+      text: buildActiveChildWaitingMessage(activeChildJobs),
+      note: "final response rewritten because child work is still running",
     };
   };
 
@@ -584,6 +750,66 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       ? objectiveMemoryScope(repoKey, resolvedProfile.root.id, input.objectiveId)
       : profileMemoryScope(repoKey, resolvedProfile.root.id))
     : input.config.memoryScope;
+  const extraTools = withProfileOrchestrationPolicy({
+    profile: resolvedProfile,
+    queue: input.queue,
+    runId: input.runId,
+  }, {
+    "agent.delegate": createAsyncDelegateTool({
+      queue: input.queue,
+      runId: input.runId,
+      stream: input.stream,
+      repoKey,
+      objectiveId: input.objectiveId,
+      memoryTools: input.memoryTools,
+      profile: resolvedProfile,
+    }),
+    "agent.status": createJobStatusTool({
+      queue: input.queue,
+      currentJobId: input.control?.jobId,
+    }),
+    "jobs.list": createJobsListTool({
+      queue: input.queue,
+      stream: input.stream,
+      profile: resolvedProfile,
+    }),
+    "job.control": createJobControlTool({
+      queue: input.queue,
+      currentJobId: input.control?.jobId,
+    }),
+    "codex.run": createCodexRunTool({
+      repoRoot,
+      repoKey,
+      queue: input.queue,
+      runId: input.runId,
+      stream: input.stream,
+      objectiveId: input.objectiveId,
+      memoryTools: input.memoryTools,
+      profile: resolvedProfile,
+    }),
+    "factory.dispatch": createFactoryDispatchTool({
+      factoryService: input.factoryService,
+      repoKey,
+      runId: input.runId,
+      memoryTools: input.memoryTools,
+    }),
+    "factory.status": createFactoryStatusTool({
+      factoryService: input.factoryService,
+    }),
+    "profile.handoff": createProfileHandoffTool({
+      currentProfile: resolvedProfile,
+      repoRoot,
+      profileRoot,
+      runId: input.runId,
+      repoKey,
+      queue: input.queue,
+      problem: input.problem,
+      config: input.config,
+      memoryTools: input.memoryTools,
+      objectiveId: input.objectiveId,
+    }),
+    ...(input.extraTools ?? {}),
+  });
   return runAgent({
     ...input,
     config: {
@@ -629,73 +855,25 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       objectiveId: input.objectiveId,
       importedProfiles: resolvedProfile.imports.map((profile) => profile.id),
       resolvedProfileHash: resolvedProfile.resolvedHash,
+      orchestrationPolicy: resolvedProfile.orchestration,
       stream: resolvedStream,
     },
     extraToolSpecs: {
       "agent.delegate": "{\"agentId\": string, \"task\": string, \"config\"?: object} — Queue a Receipt-native subagent and return its live job handle immediately.",
-      "agent.status": "{\"jobId\": string} — Inspect a queued or running subagent job and return its latest normalized state.",
+      "agent.status": "{\"jobId\": string} — Inspect a queued or running child job and return its latest normalized state. Do not pass the current factory job id.",
       "jobs.list": "{\"limit\"?: number, \"status\"?: string, \"includeCompleted\"?: boolean} — List recent jobs related to the current Factory profile thread.",
-      "job.control": "{\"jobId\": string, \"command\": \"steer\"|\"follow_up\"|\"abort\", \"problem\"?: string, \"config\"?: object, \"note\"?: string, \"reason\"?: string} — Queue a steer, follow-up, or abort command for a running child job.",
-      "codex.run": "{\"prompt\": string, \"timeoutMs\"?: number} — Queue a focused Codex run against the repo and return its live job handle immediately.",
+      "job.control": "{\"jobId\": string, \"command\": \"steer\"|\"follow_up\"|\"abort\", \"problem\"?: string, \"config\"?: object, \"note\"?: string, \"reason\"?: string} — Queue a steer, follow-up, or abort command for a running child job. Do not pass the current factory job id.",
+      "codex.run": "{\"prompt\": string, \"timeoutMs\"?: number} — Queue a focused Codex run against the repo and return its live child job handle immediately. Reuse that returned jobId for agent.status/job.control.",
       "factory.dispatch": "{\"action\"?: \"create\"|\"react\"|\"promote\"|\"cancel\"|\"cleanup\"|\"archive\", \"objectiveId\"?: string, \"prompt\"?: string, \"title\"?: string, \"baseHash\"?: string, \"checks\"?: string[], \"channel\"?: string, \"reason\"?: string} — Create or operate on a Factory objective. 'react' means re-evaluate the objective and dispatch the next eligible work.",
       "factory.status": "{\"objectiveId\": string} — Inspect an existing Factory objective and return a concise status summary.",
       "profile.handoff": "{\"profileId\": string, \"reason\"?: string} — Hand off the conversation to another Factory profile thread.",
       ...(input.extraToolSpecs ?? {}),
     },
-    extraTools: {
-      "agent.delegate": createAsyncDelegateTool({
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        repoKey,
-        objectiveId: input.objectiveId,
-        memoryTools: input.memoryTools,
-        profile: resolvedProfile,
-      }),
-      "agent.status": createJobStatusTool({
-        queue: input.queue,
-      }),
-      "jobs.list": createJobsListTool({
-        queue: input.queue,
-        stream: input.stream,
-        profile: resolvedProfile,
-      }),
-      "job.control": createJobControlTool({
-        queue: input.queue,
-      }),
-      "codex.run": createCodexRunTool({
-        repoRoot,
-        repoKey,
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        objectiveId: input.objectiveId,
-        memoryTools: input.memoryTools,
-        profile: resolvedProfile,
-      }),
-      "factory.dispatch": createFactoryDispatchTool({
-        factoryService: input.factoryService,
-        repoKey,
-        runId: input.runId,
-        memoryTools: input.memoryTools,
-      }),
-      "factory.status": createFactoryStatusTool({
-        factoryService: input.factoryService,
-      }),
-      "profile.handoff": createProfileHandoffTool({
-        currentProfile: resolvedProfile,
-        repoRoot,
-        profileRoot,
-        runId: input.runId,
-        repoKey,
-        queue: input.queue,
-        problem: input.problem,
-        config: input.config,
-        memoryTools: input.memoryTools,
-        objectiveId: input.objectiveId,
-      }),
-      ...(input.extraTools ?? {}),
-    },
+    extraTools,
+    finalizer: createFactoryChatFinalizer({
+      queue: input.queue,
+      profile: resolvedProfile,
+    }),
   });
 };
 

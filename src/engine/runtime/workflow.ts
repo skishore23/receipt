@@ -29,6 +29,7 @@ export type AgentRunCommand = {
 };
 
 export type AgentRunControl = {
+  readonly jobId?: string;
   readonly checkAbort?: () => Promise<boolean>;
   readonly pullCommands?: () => Promise<ReadonlyArray<AgentRunCommand>>;
 };

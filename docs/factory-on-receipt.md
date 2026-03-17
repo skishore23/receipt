@@ -13,7 +13,6 @@ It covers:
 - what is implemented now
 - what belongs to the deterministic Receipt core
 - what belongs to the semantic agent layer
-- what Hub consumes as a projection
 - the important implementation quirks and limitations
 
 This is not a proposal. It is a description of the current shape of the system.
@@ -48,9 +47,9 @@ Factory solves for:
 
 The point of Factory is not to be a second operator console. The point is to make objective execution itself receipt-native.
 
-## Hub vs Factory
+## Operator Surface
 
-Factory is the upgrade over Hub for objectives.
+Factory is the operator surface in this repo.
 
 Use `Factory` when you want to:
 
@@ -59,19 +58,9 @@ Use `Factory` when you want to:
 - inspect receipts and control decisions
 - review task/candidate/integration state
 - debug objective runtime behavior
+- use profile-driven orchestration and handoff
 
-Use `Hub` when you want to:
-
-- inspect the repo or commit graph
-- create or clean up workspaces
-- run manual tasks against explicit workspaces
-- work with agents, channels, and posts
-- use general operator/debug utilities that are not objective-specific
-
-Practical rule:
-
-- objective execution should go through `/factory`
-- Hub can still be used, but not as an objective workflow surface
+There is no separate Hub UI anymore. Factory still reuses `HubGit` as its Git/worktree adapter, but objective execution, debugging, and operator interaction all go through `/factory`.
 
 ## Thesis
 
@@ -227,13 +216,6 @@ It exposes:
 - `src/adapters/codex-executor.ts`
 
 Factory does not own a second Git layer or a second worker runtime.
-
-### Hub projection layer
-
-- `src/services/hub-service.ts`
-- `src/views/hub.ts`
-
-Hub is no longer an objective execution surface. It now covers repo, workspace, agent, channel, post, task, and commit utilities only, with a CTA into `/factory` for objective work.
 
 ## Ownership Boundaries
 
@@ -832,25 +814,6 @@ Conflict flow:
 - on validation failure, emit `integration.conflicted` and spawn reconciliation
 - on stale promotion conflict, reset the integration workspace to fresh source head and spawn reconciliation
 
-## Hub Projection Model
-
-Hub now consumes factory projections for objectives.
-
-The mapping lives in `HubService.toHubObjectiveDetail()`.
-
-What Hub shows from factory state:
-
-- objective lane and status
-- integration status
-- active/ready/total task counts
-- task DAG summary
-- task worker type
-- active candidate and candidate status
-- latest logs and last message tails
-- workspace IDs and workspace paths
-
-Hub still reshapes factory data into its older `ObjectiveDetail` shape for UI compatibility. It is a consumer projection, not the durable authority.
-
 ## Important Quirks
 
 These are the main non-obvious behaviors in the current implementation.
@@ -949,10 +912,6 @@ Current smoke coverage includes:
   - CLI memory commands
   - generated factory memory script
   - durable memory commit from worker path
-- `tests/smoke/hub.test.ts`
-  - factory-backed Hub behaviors and regression scenarios
-
-The Hub smoke file is broader and slower. The focused factory memory tests are the fastest verification point for the new layered memory path.
 
 ## How To Extend It Safely
 

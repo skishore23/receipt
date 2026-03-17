@@ -10,7 +10,6 @@ import { Hono } from "hono";
 import { jsonlStore, jsonBranchStore } from "./adapters/jsonl.js";
 import { jsonlIndexedStore } from "./adapters/jsonl-indexed.js";
 import { jsonlQueue, type EnqueueJobInput } from "./adapters/jsonl-queue.js";
-import { LocalCodexExecutor } from "./adapters/codex-executor.js";
 import {
   createMemoryTools,
   decideMemory,
@@ -75,8 +74,6 @@ import { agentRunStream } from "./agents/agent.streams.js";
 import { axiomSimpleRunStream } from "./agents/axiom-simple.streams.js";
 import { runReceiptInspector } from "./agents/inspector.js";
 import { maybeQueueAxiomGuildVerifyFailureFollowUp } from "./agents/axiom-guild-recovery.js";
-import { HubService } from "./services/hub-service.js";
-import { HubServiceError } from "./services/hub-service.js";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime.js";
 import {
   assertReceiptFileName,
@@ -401,7 +398,6 @@ const delegationTools = createDelegationTools({
   dataDir: DATA_DIR,
 });
 
-const hubCodexExecutor = new LocalCodexExecutor();
 const { service: factoryService } = createFactoryServiceRuntime({
   dataDir: DATA_DIR,
   queue,
@@ -412,15 +408,6 @@ const { service: factoryService } = createFactoryServiceRuntime({
   orchestratorMode: FACTORY_ORCHESTRATOR_MODE,
   memoryTools,
 });
-const hubService = new HubService({
-  dataDir: DATA_DIR,
-  queue,
-  jobRuntime,
-  sse,
-  codexExecutor: hubCodexExecutor,
-  memoryTools,
-});
-
 const agentRunner = createAgentRunner({
   defaultStream: "agents/agent", sseTopic: "agent", sseTokenEvent: "agent-token",
   normalizeConfig: normalizeAgentConfig, runtime: agentRuntime,
@@ -1078,6 +1065,32 @@ type SubJobSummary = {
   readonly done: boolean;
 };
 
+const emitMergedSummary = async (opts: {
+  readonly parentStream?: string;
+  readonly parentRunId?: string;
+  readonly subJobId: string;
+  readonly subRunId: string;
+  readonly task: string;
+  readonly summary: string;
+}): Promise<void> => {
+  if (!opts.parentStream || !opts.parentRunId || !opts.summary.trim()) return;
+  const rs = agentRunStream(opts.parentStream, opts.parentRunId);
+  await agentRuntime.execute(rs, {
+    type: "emit",
+    eventId: makeEventId(rs),
+    event: {
+      type: "subagent.merged",
+      runId: opts.parentRunId,
+      agentId: "orchestrator",
+      subJobId: opts.subJobId,
+      subRunId: opts.subRunId,
+      task: opts.task,
+      summary: opts.summary,
+    },
+  });
+  sse.publish("receipt");
+};
+
 const summarizeSubJob = async (jobId: string, timeoutMs = subJobWaitMs): Promise<SubJobSummary> => {
   const done = await queue.waitForJob(jobId, timeoutMs, subJobPollMs);
   if (!done) return { summary: `sub-agent status: missing (${jobId})`, done: true };
@@ -1334,6 +1347,25 @@ const worker = new JobWorker({
         const latest = await queue.getJob(job.id);
         return latest?.abortRequested === true;
       };
+      const parentRunId = typeof payload.parentRunId === "string" ? payload.parentRunId.trim() : "";
+      const parentStream = typeof payload.parentStream === "string" ? payload.parentStream.trim() : "";
+      const task = typeof payload.task === "string" && payload.task.trim()
+        ? payload.task.trim()
+        : prompt;
+      let lastMergedSummary = "";
+      const emitCodexMerged = async (summary: string): Promise<void> => {
+        const next = summary.trim();
+        if (!next || next === lastMergedSummary) return;
+        lastMergedSummary = next;
+        await emitMergedSummary({
+          parentRunId,
+          parentStream,
+          subJobId: job.id,
+          subRunId: job.id,
+          task,
+          summary: next,
+        });
+      };
       try {
         const result = await runFactoryCodexJob({
           dataDir: DATA_DIR,
@@ -1344,11 +1376,15 @@ const worker = new JobWorker({
           executor: factoryService.codexExecutor,
           onProgress: async (update) => {
             await queue.progress(job.id, ctx.workerId, update);
+            const summary = typeof update.summary === "string" ? update.summary : "";
+            await emitCodexMerged(summary);
           },
         }, { shouldAbort });
+        await emitCodexMerged(typeof result.summary === "string" ? result.summary : "Codex completed.");
         return { ok: true, result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        await emitCodexMerged(message);
         const aborted = await shouldAbort();
         return {
           ok: !aborted,
@@ -1474,7 +1510,6 @@ const routes = await loadAgentRoutes({
     memoryTools,
     delegationTools,
     factoryService,
-    hubService,
     profileRoot: process.cwd(),
   },
 });

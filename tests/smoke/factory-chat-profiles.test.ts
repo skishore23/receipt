@@ -23,6 +23,14 @@ const writeProfile = async (root: string, input: {
   readonly imports?: ReadonlyArray<string>;
   readonly routeHints?: ReadonlyArray<string>;
   readonly toolAllowlist?: ReadonlyArray<string>;
+  readonly orchestration?: {
+    readonly executionMode?: "interactive" | "supervisor";
+    readonly discoveryBudget?: number;
+    readonly suspendOnAsyncChild?: boolean;
+    readonly allowPollingWhileChildRunning?: boolean;
+    readonly finalWhileChildRunning?: "allow" | "waiting_message" | "reject";
+    readonly childDedupe?: "none" | "by_run_and_prompt";
+  };
 }): Promise<void> => {
   const dir = path.join(root, "profiles", input.id);
   await fs.mkdir(dir, { recursive: true });
@@ -35,6 +43,7 @@ const writeProfile = async (root: string, input: {
     imports: input.imports ?? [],
     routeHints: input.routeHints ?? [],
     toolAllowlist: input.toolAllowlist ?? [],
+    orchestration: input.orchestration ?? {},
     handoffTargets: [],
   }, null, 2), "utf-8");
 };
@@ -55,6 +64,10 @@ test("factory chat profiles: resolves imports, route hints, and profile hashes s
     id: "shared",
     label: "Shared",
     toolAllowlist: ["memory.read", "factory.status"],
+    orchestration: {
+      executionMode: "supervisor",
+      childDedupe: "by_run_and_prompt",
+    },
   });
   await writeProfile(profileRoot, {
     id: "reviewer",
@@ -62,6 +75,10 @@ test("factory chat profiles: resolves imports, route hints, and profile hashes s
     imports: ["shared"],
     routeHints: ["review", "critique"],
     toolAllowlist: ["profile.handoff"],
+    orchestration: {
+      discoveryBudget: 1,
+      finalWhileChildRunning: "reject",
+    },
   });
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -80,6 +97,12 @@ test("factory chat profiles: resolves imports, route hints, and profile hashes s
   expect(resolved.root.id).toBe("reviewer");
   expect(resolved.imports.map((profile) => profile.id)).toEqual(["shared"]);
   expect(resolved.toolAllowlist).toEqual(["memory.read", "factory.status", "profile.handoff"]);
+  expect(resolved.orchestration.executionMode).toBe("supervisor");
+  expect(resolved.orchestration.discoveryBudget).toBe(1);
+  expect(resolved.orchestration.suspendOnAsyncChild).toBe(true);
+  expect(resolved.orchestration.allowPollingWhileChildRunning).toBe(false);
+  expect(resolved.orchestration.finalWhileChildRunning).toBe("reject");
+  expect(resolved.orchestration.childDedupe).toBe("by_run_and_prompt");
   expect(resolved.promptPath).toBe("profiles/reviewer/PROFILE.md");
   expect(resolved.profilePaths).toContain("profiles/shared/PROFILE.md");
   expect(resolved.profileRoot).toBe(path.resolve(profileRoot));

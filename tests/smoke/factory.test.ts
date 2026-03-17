@@ -10,7 +10,7 @@ import type { ZodTypeAny, infer as ZodInfer } from "zod";
 import { fold } from "../../src/core/chain.ts";
 import { receipt } from "../../src/core/chain.ts";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
+import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue.ts";
 import { createRuntime } from "../../src/core/runtime.ts";
 import { SseHub } from "../../src/framework/sse-hub.ts";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job.ts";
@@ -21,6 +21,7 @@ import {
   initialFactoryState,
   type FactoryEvent,
 } from "../../src/modules/factory.ts";
+import { buildChatItemsForRun } from "../../src/agents/factory.agent.ts";
 import { FactoryService } from "../../src/services/factory-service.ts";
 import { factoryChatIsland, factoryChatShell, factoryInspectorIsland, factorySidebarIsland } from "../../src/views/factory-chat.ts";
 import type { BranchStore, Receipt, Store } from "../../src/core/types.ts";
@@ -490,6 +491,89 @@ test("factory chat island: renders chat rows and work cards", () => {
   expect(markup).toMatch(/job_01/);
   expect(markup).toMatch(/Abort/);
   expect(markup).toMatch(/replaced the old <code>\/factory<\/code> dashboard/);
+});
+
+test("factory chat items: budget stops show the codex child state instead of a stale generic stop message", () => {
+  const runStream = "agents/factory/demo/runs/run_live";
+  let prev: string | undefined;
+  const push = <T extends object>(body: T, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_live",
+      problem: "Fix the sidebar overflow.",
+      agentId: "orchestrator",
+    }, 1),
+    push({
+      type: "subagent.merged",
+      runId: "run_live",
+      agentId: "orchestrator",
+      subJobId: "job_codex_01",
+      subRunId: "job_codex_01",
+      task: "Fix sidebar overflow.",
+      summary: "codex is still applying the class-string changes",
+    }, 2),
+    push({
+      type: "failure.report",
+      runId: "run_live",
+      agentId: "orchestrator",
+      failure: {
+        stage: "budget",
+        failureClass: "iteration_budget_exhausted",
+        message: "iteration budget exhausted (8)",
+        retryable: true,
+      },
+    }, 3),
+    push({
+      type: "run.status",
+      runId: "run_live",
+      agentId: "orchestrator",
+      status: "failed",
+      note: "iteration budget exhausted (8)",
+    }, 4),
+    push({
+      type: "response.finalized",
+      runId: "run_live",
+      agentId: "orchestrator",
+      content: "Stopped after hitting max iterations. Use steer/follow-up to continue.",
+    }, 5),
+  ];
+
+  const childJob: QueueJob = {
+    id: "job_codex_01",
+    agentId: "factory-codex",
+    lane: "collect",
+    sessionKey: "factory-codex:demo",
+    singletonMode: "allow",
+    payload: {
+      kind: "factory.codex.run",
+      stream: "agents/factory/demo",
+      task: "Fix sidebar overflow.",
+    },
+    status: "failed",
+    attempt: 1,
+    maxAttempts: 1,
+    createdAt: 1,
+    updatedAt: 2,
+    lastError: "lease expired",
+    result: {
+      worker: "codex",
+      status: "running",
+      summary: "codex is still applying the class-string changes",
+    },
+    commands: [],
+  };
+
+  const items = buildChatItemsForRun("run_live", chain, new Map([[childJob.id, childJob]]));
+  const paused = items.find((item) => item.kind === "system" && item.title === "Orchestrator paused");
+  expect(paused && paused.kind === "system" ? paused.body : "").toContain("lease expired");
+
+  const childCard = items.find((item) => item.kind === "work" && item.card.jobId === "job_codex_01");
+  expect(childCard && childCard.kind === "work" ? childCard.card.summary : "").toContain("lease expired");
 });
 
 test("factory sidebar island: renders left rail navigation", () => {

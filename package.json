@@ -18,7 +18,6 @@
     "cli": "bun src/cli.ts",
     "receipt": "bun src/cli.ts",
     "factory": "bun src/cli.ts factory",
-    "hub:onboard": "bun scripts/hub-onboard.ts",
     "video:capture": "npm --prefix video run capture:ui",
     "video:preview": "npm --prefix video run preview",
     "video:render": "npm --prefix video run render",

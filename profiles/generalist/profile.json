@@ -26,6 +26,10 @@
     "factory.status",
     "profile.handoff"
   ],
+  "orchestration": {
+    "executionMode": "interactive",
+    "childDedupe": "by_run_and_prompt"
+  },
   "handoffTargets": [
     "software"
   ],

@@ -18,6 +18,14 @@
     "codex.run",
     "profile.handoff"
   ],
+  "orchestration": {
+    "executionMode": "supervisor",
+    "discoveryBudget": 2,
+    "suspendOnAsyncChild": true,
+    "allowPollingWhileChildRunning": false,
+    "finalWhileChildRunning": "waiting_message",
+    "childDedupe": "by_run_and_prompt"
+  },
   "handoffTargets": [
     "generalist"
   ],
