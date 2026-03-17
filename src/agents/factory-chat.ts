@@ -82,14 +82,14 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "  \"action\": {",
   "    \"type\": \"tool\" | \"final\",",
   "    \"name\": \"tool name when type=tool, otherwise null\",",
-  "    \"input\": {\"tool\": \"args\"} | \"JSON object string for tool args\",",
+  "    \"input\": \"JSON object string for tool args\",",
   "    \"text\": \"final answer when type=final, otherwise null\"",
   "  }",
   "}",
   "",
-  "For final actions, set \"name\": null and \"input\": {}.",
+  "For final actions, set \"name\": null and \"input\": \"{}\".",
   "For tool actions, set \"text\": null.",
-  "The input field must be a JSON object. A JSON object string is accepted only as a fallback.",
+  "The input field must always be a JSON object encoded as a string.",
 ].join("\n");
 
 const asString = (value: unknown): string | undefined =>

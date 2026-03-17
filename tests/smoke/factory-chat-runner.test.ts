@@ -326,7 +326,7 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
   expect(observed && "output" in observed ? observed.output : "").toContain('"toProfileId": "software"');
 });
 
-test("factory chat runner: accepts object-shaped tool input without requiring a nested JSON string", async () => {
+test("factory chat runner: accepts valid JSON-object strings for tool input", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-object-input");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -347,7 +347,7 @@ test("factory chat runner: accepts object-shaped tool input without requiring a 
       action: {
         type: "tool",
         name: "jobs.list",
-        input: { limit: 3 },
+        input: JSON.stringify({ limit: 3 }),
         text: null,
       },
     },
@@ -356,7 +356,7 @@ test("factory chat runner: accepts object-shaped tool input without requiring a 
       action: {
         type: "final",
         name: null,
-        input: {},
+        input: "{}",
         text: "Listed the recent jobs.",
       },
     },
@@ -419,7 +419,7 @@ test("factory chat runner: retries once when the model emits malformed tool-inpu
       action: {
         type: "tool",
         name: "jobs.list",
-        input: { limit: 2 },
+        input: JSON.stringify({ limit: 2 }),
         text: null,
       },
     },
@@ -428,7 +428,7 @@ test("factory chat runner: retries once when the model emits malformed tool-inpu
       action: {
         type: "final",
         name: null,
-        input: {},
+        input: "{}",
         text: "Recovered from the malformed tool input.",
       },
     },

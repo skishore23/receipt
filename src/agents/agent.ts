@@ -188,7 +188,7 @@ const structuredAgentActionSchema = z.object({
   action: z.object({
     type: z.enum(["tool", "final"]),
     name: z.string().nullable(),
-    input: z.union([z.string(), z.record(z.string(), z.unknown())]),
+    input: z.string(),
     text: z.string().nullable(),
   }).strict(),
 }).strict();
@@ -844,7 +844,7 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
           const repairedPrompt = [
             promptText,
             "",
-            "Correction: for tool actions, set action.input to a JSON object when possible. Do not wrap it in prose or markdown.",
+            "Correction: for tool actions, set action.input to a valid JSON object encoded as a string. Do not wrap it in prose or markdown.",
           ].join("\n");
           const repaired = await invoke(repairedPrompt);
           if (await checkAbort(`iteration-${iteration}.after_json_retry`)) {
