@@ -124,6 +124,23 @@ const asObject = (value: unknown): Record<string, unknown> | undefined =>
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 
+const profileLabel = (profileId?: string): string => {
+  const value = profileId?.trim();
+  if (!value) return "Active profile";
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
+};
+
+const summarizeProfileMarkdown = (value: string): string | undefined => {
+  const withoutFrontmatter = value.replace(/^---[\s\S]*?---\s*/, "");
+  const lines = withoutFrontmatter
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const summary = lines.find((line) => !line.startsWith("#") && !line.startsWith("-") && !line.startsWith("```"));
+  if (!summary) return undefined;
+  return summary.length > 180 ? `${summary.slice(0, 179)}…` : summary;
+};
+
 const tryParseJson = (value: string): Record<string, unknown> | undefined => {
   try {
     return asObject(JSON.parse(value));
@@ -563,6 +580,7 @@ export const buildChatItemsForRun = (
   }
 
   const final = reverseFind(chain, (receipt) => receipt.body.type === "response.finalized")?.body;
+  const continued = reverseFind(chain, (receipt) => receipt.body.type === "run.continued")?.body;
   const latestChildCard = [...items].reverse().find((item): item is Extract<FactoryChatItem, { kind: "work" }> =>
     item.kind === "work" && Boolean(item.card.jobId) && item.card.worker === "codex"
   )?.card;
@@ -586,6 +604,14 @@ export const buildChatItemsForRun = (
           card: structuredFinal.childCard,
         });
       }
+    } else if (continued?.type === "run.continued") {
+      items.push({
+        key: `${runId}-continued`,
+        kind: "system",
+        title: "Thread continues automatically",
+        body: `${continued.summary}\n\nNext run: ${continued.nextRunId}\nNext job: ${continued.nextJobId}`,
+        meta: `${continued.previousMaxIterations} -> ${continued.nextMaxIterations} steps`,
+      });
     } else if (state.failure?.failureClass === "iteration_budget_exhausted" && latestChildCard) {
       const childStatus = latestChildCard.running
         ? `still running as ${latestChildCard.jobId}`
@@ -614,11 +640,15 @@ export const buildChatItemsForRun = (
       });
     }
   } else if (state.status === "running") {
+    const activeProfile = profileLabel(state.profile?.profileId);
+    const activityLine = state.lastTool?.name
+      ? `${activeProfile} is using ${state.lastTool.name}${state.lastTool.summary ? `.\n\n${state.lastTool.summary}` : ""}${state.lastTool.error ? `\n\n${state.lastTool.error}` : ""}`
+      : `${activeProfile} is shaping the next step in this thread. Live updates will appear here.`;
     items.push({
       key: `${runId}-running`,
       kind: "system",
-      title: "Working",
-      body: "The active profile is still processing this turn.",
+      title: `${activeProfile} working`,
+      body: activityLine,
       meta: state.status,
     });
   } else if (state.status === "failed") {
@@ -873,7 +903,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     ]);
 
     const allRunIds = collectRunIds(indexChain);
-    const runIds = input.runId && allRunIds.includes(input.runId) ? [input.runId] : allRunIds;
+    const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
+    const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
+    const activeRunId = runIds.at(-1) ?? input.runId;
     const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))));
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
     const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(runIds[index]!, runChain, jobsById));
@@ -881,6 +913,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const profileNav: ReadonlyArray<FactoryChatProfileNav> = profiles.map((profile) => ({
       id: profile.id,
       label: profile.label,
+      summary: summarizeProfileMarkdown(profile.mdBody),
       selected: profile.id === resolved.root.id,
     }));
     const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = objectives
@@ -949,11 +982,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const chatModel: FactoryChatIslandModel = {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
+      activeProfileSummary: summarizeProfileMarkdown(resolved.root.mdBody),
       items: chatItems,
     };
     const sidebarModel: FactorySidebarModel = {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
+      activeProfileSummary: summarizeProfileMarkdown(resolved.root.mdBody),
       activeProfileTools: resolved.toolAllowlist,
       profiles: profileNav,
       objectives: objectiveNav,
@@ -964,8 +999,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
+      activeProfileSummary: summarizeProfileMarkdown(resolved.root.mdBody),
       objectiveId: input.objectiveId,
-      runId: input.runId,
+      runId: activeRunId,
       jobId: input.jobId,
       chat: chatModel,
       sidebar: sidebarModel,
@@ -1588,6 +1624,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                 "factory-run-started": {
                   profileId: resolved.root.id,
                   profileLabel: resolved.root.label,
+                  profileSummary: summarizeProfileMarkdown(resolved.root.mdBody) ?? "",
                   objectiveId: objectiveId ?? "",
                   jobId: created.id,
                   runId,

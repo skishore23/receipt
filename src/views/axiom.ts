@@ -34,6 +34,8 @@ const eventBadgeClass = (event: AgentEvent): string => {
     case "thought.logged":
     case "response.finalized":
       return "agent";
+    case "run.continued":
+      return "system";
     case "tool.called":
     case "tool.observed":
       return "tool";
@@ -551,6 +553,8 @@ export const axiomChatHtml = (chain: Chain<AgentEvent>, runId?: string): string 
           return `Validation · ${event.gate}`;
         case "response.finalized":
           return "Final response";
+        case "run.continued":
+          return "Run continued";
         case "config.updated":
           return "Config updated";
         case "memory.slice":
@@ -620,6 +624,14 @@ export const axiomChatHtml = (chain: Chain<AgentEvent>, runId?: string): string 
           ${event.details ? `<pre>${esc(event.details)}</pre>` : ""}`;
         case "response.finalized":
           return `<pre>${esc(event.content)}</pre>`;
+        case "run.continued":
+          return `<div class="card-copy">${esc(event.summary)}</div><pre>${esc(formatJson({
+            nextRunId: event.nextRunId,
+            nextJobId: event.nextJobId,
+            previousMaxIterations: event.previousMaxIterations,
+            nextMaxIterations: event.nextMaxIterations,
+            continuationDepth: event.continuationDepth,
+          }))}</pre>`;
         case "config.updated":
           return `<pre>${esc(formatJson(event.config))}</pre>`;
         case "memory.slice":

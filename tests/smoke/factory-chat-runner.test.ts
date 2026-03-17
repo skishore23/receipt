@@ -806,6 +806,70 @@ test("factory chat runner: retries once when the model emits malformed tool-inpu
   expect(result.finalResponse).toContain("Recovered from the malformed tool input.");
 });
 
+test("factory chat runner: exhausted slices queue an automatic continuation on the same thread with a higher budget", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-slice-continue");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["jobs.list"],
+  });
+
+  const actions = Array.from({ length: 8 }, (_, index) => ({
+    thought: `poll jobs ${index + 1}`,
+    action: {
+      type: "tool",
+      name: "jobs.list",
+      input: JSON.stringify({ limit: 5 }),
+      text: null,
+    },
+  }));
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_slice_continue",
+    problem: "Keep this thread active and keep watching the queue.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Continuing automatically in this thread");
+
+  const jobs = await queue.listJobs({ limit: 10 });
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]?.agentId).toBe("factory");
+  expect(String(jobs[0]?.payload.stream)).toContain("/generalist");
+  expect((jobs[0]?.payload.config as Record<string, unknown> | undefined)?.maxIterations).toBe(12);
+  expect(jobs[0]?.payload.continuationDepth).toBe(1);
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_slice_continue"));
+  const continuation = chain.find((receipt) => receipt.body.type === "run.continued")?.body;
+  expect(continuation && "nextJobId" in continuation ? continuation.nextJobId : "").toBe(jobs[0]?.id);
+  expect(continuation && "nextMaxIterations" in continuation ? continuation.nextMaxIterations : 0).toBe(12);
+});
+
 test("factory chat runner: codex progress snapshots surface while the child is still running", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-progress");
   const repoRoot = await createTempDir("receipt-factory-chat-progress-repo");

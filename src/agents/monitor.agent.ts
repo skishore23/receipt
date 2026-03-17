@@ -55,6 +55,8 @@ const summarizeEvent = (event: AgentEvent): string => {
       return `tool ${event.tool}${event.error ? ` error=${event.error}` : ""}`;
     case "response.finalized":
       return `final ${event.content.slice(0, 160)}`;
+    case "run.continued":
+      return `continued ${event.nextRunId} job=${event.nextJobId}`;
     case "memory.slice":
       return `memory.slice scope=${event.scope} items=${event.itemCount}`;
     case "context.pruned":

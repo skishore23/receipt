@@ -103,6 +103,7 @@ export type AgentRunInput = {
   readonly toolAllowlist?: ReadonlyArray<string>;
   readonly startupEvents?: ReadonlyArray<AgentEvent>;
   readonly finalizer?: AgentFinalizer;
+  readonly onIterationBudgetExhausted?: AgentIterationBudgetHandler;
 };
 
 export type AgentToolResult = {
@@ -120,6 +121,12 @@ export type AgentFinalizerResult = {
   readonly note?: string;
 };
 
+export type AgentIterationBudgetContinuation = {
+  readonly finalText: string;
+  readonly note?: string;
+  readonly events?: ReadonlyArray<AgentEvent>;
+};
+
 export type AgentFinalizer = (input: {
   readonly runId: string;
   readonly runStream: string;
@@ -131,6 +138,15 @@ export type AgentFinalizer = (input: {
   readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly now: () => number;
 }) => Promise<AgentFinalizerResult>;
+
+export type AgentIterationBudgetHandler = (input: {
+  readonly runId: string;
+  readonly runStream: string;
+  readonly problem: string;
+  readonly config: AgentRunConfig;
+  readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
+  readonly now: () => number;
+}) => Promise<AgentIterationBudgetContinuation | undefined>;
 
 const truncateText = (input: string, limit: number): { readonly text: string; readonly truncated: boolean } => {
   if (input.length <= limit) return { text: input, truncated: false };
@@ -1104,6 +1120,48 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
           durationMs: now() - started,
           error: message,
         });
+      }
+    }
+
+    if (!finalized) {
+      const continuation = await input.onIterationBudgetExhausted?.({
+        runId: input.runId,
+        runStream,
+        problem,
+        config: {
+          maxIterations,
+          maxToolOutputChars: input.config.maxToolOutputChars,
+          memoryScope,
+          workspace: input.config.workspace,
+        },
+        runtime: input.runtime,
+        now,
+      });
+      if (continuation) {
+        for (const event of continuation.events ?? []) {
+          await emit(event, true);
+        }
+        const finalText = continuation.finalText.trim() || `Reached the current ${maxIterations}-step slice.`;
+        await emit({
+          type: "response.finalized",
+          runId: input.runId,
+          agentId: "orchestrator",
+          content: finalText,
+        }, true);
+        await emit({
+          type: "run.status",
+          runId: input.runId,
+          status: "completed",
+          agentId: "orchestrator",
+          note: continuation.note?.trim() || `slice completed after ${maxIterations} iterations`,
+        }, true);
+        await input.memoryTools.commit({
+          scope: memoryScope,
+          text: `run ${input.runId} continued: ${truncateText(finalText, 800).text}`,
+          tags: ["agent", "final", "continued"],
+          meta: { runId: input.runId, ts: now(), continued: true },
+        });
+        finalized = true;
       }
     }
 

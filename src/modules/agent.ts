@@ -136,6 +136,19 @@ export type AgentEvent =
       readonly content: string;
     }
   | {
+      readonly type: "run.continued";
+      readonly runId: string;
+      readonly agentId?: string;
+      readonly nextRunId: string;
+      readonly nextJobId: string;
+      readonly profileId?: string;
+      readonly objectiveId?: string;
+      readonly previousMaxIterations: number;
+      readonly nextMaxIterations: number;
+      readonly continuationDepth: number;
+      readonly summary: string;
+    }
+  | {
       readonly type: "context.pruned";
       readonly runId: string;
       readonly iteration: number;
@@ -383,6 +396,7 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     case "tool.observed":
     case "memory.slice":
     case "validation.report":
+    case "run.continued":
     case "context.pruned":
     case "context.compacted":
     case "overflow.recovered":

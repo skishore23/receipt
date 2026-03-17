@@ -42,6 +42,8 @@ export const FACTORY_CHAT_DEFAULT_CONFIG: FactoryChatRunConfig = {
   memoryScope: "repos/factory/profiles/generalist",
 };
 
+const FACTORY_CHAT_ITERATION_LADDER = [8, 12, 16, 24, 32, 40] as const;
+
 export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "llmStructured"> & {
   readonly config: FactoryChatRunConfig;
   readonly queue: JsonlQueue;
@@ -56,6 +58,7 @@ export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "ll
     readonly schemaName: string;
   }) => Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }>;
   readonly profileId?: string;
+  readonly continuationDepth?: number;
 };
 
 const FACTORY_CHAT_LOOP_TEMPLATE = [
@@ -120,6 +123,14 @@ const tryParseJsonRecord = (value: string | undefined): Record<string, unknown> 
 
 const nextId = (prefix: string): string =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+const parseContinuationDepth = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(Math.floor(value), 16))
+    : 0;
+
+const nextIterationBudget = (current: number): number | undefined =>
+  FACTORY_CHAT_ITERATION_LADDER.find((candidate) => candidate > current);
 
 const stableCodexSessionKey = (runId: string, prompt: string): string =>
   `factory-codex:${runId}:${createHash("sha1").update(prompt).digest("hex").slice(0, 12)}`;
@@ -737,6 +748,7 @@ export const normalizeFactoryChatConfig = (input: Partial<FactoryChatRunConfig>)
 export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentRunResult> => {
   const repoRoot = path.resolve(input.repoRoot);
   const profileRoot = path.resolve(input.profileRoot ?? repoRoot);
+  const continuationDepth = parseContinuationDepth(input.continuationDepth);
   const resolvedProfile = await resolveFactoryChatProfile({
     repoRoot,
     profileRoot,
@@ -810,6 +822,51 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     }),
     ...(input.extraTools ?? {}),
   });
+  const onIterationBudgetExhausted: NonNullable<AgentRunInput["onIterationBudgetExhausted"]> = async ({ runId, problem, config }) => {
+    const nextMaxIterations = nextIterationBudget(config.maxIterations);
+    if (nextMaxIterations === undefined) return undefined;
+    const nextRunId = nextId("run");
+    const nextConfig = normalizeFactoryChatConfig({
+      ...input.config,
+      maxIterations: nextMaxIterations,
+      memoryScope: input.config.memoryScope,
+    });
+    const created = await input.queue.enqueue({
+      agentId: "factory",
+      lane: "collect",
+      sessionKey: `factory-chat:${resolvedStream}`,
+      singletonMode: "allow",
+      maxAttempts: 1,
+      payload: {
+        kind: "factory.run",
+        stream: resolvedStream,
+        runId: nextRunId,
+        problem,
+        profileId: resolvedProfile.root.id,
+        ...(input.objectiveId ? { objectiveId: input.objectiveId } : {}),
+        config: nextConfig,
+        continuationDepth: continuationDepth + 1,
+      },
+    });
+    const summary = `Reached the current ${config.maxIterations}-step slice. Continuing automatically in this thread as ${nextRunId} with a ${nextMaxIterations}-step budget.`;
+    return {
+      finalText: `${summary}\n\nLive updates will keep appearing here.`,
+      note: `continued automatically as ${nextRunId}`,
+      events: [{
+        type: "run.continued",
+        runId,
+        agentId: "orchestrator",
+        nextRunId,
+        nextJobId: created.id,
+        profileId: resolvedProfile.root.id,
+        objectiveId: input.objectiveId,
+        previousMaxIterations: config.maxIterations,
+        nextMaxIterations,
+        continuationDepth: continuationDepth + 1,
+        summary,
+      }],
+    };
+  };
   return runAgent({
     ...input,
     config: {
@@ -874,6 +931,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       queue: input.queue,
       profile: resolvedProfile,
     }),
+    onIterationBudgetExhausted,
   });
 };
 

@@ -264,6 +264,7 @@ const toolBadgeSpec = (tool: string): { readonly icon: BadgeIcon; readonly label
 const renderSelectedProfileSummary = (input: {
   readonly profileLabel: string;
   readonly profileId: string;
+  readonly profileSummary?: string;
   readonly tools: ReadonlyArray<string>;
   readonly objectiveId?: string;
   readonly includeObjective?: boolean;
@@ -296,6 +297,7 @@ const renderSelectedProfileSummary = (input: {
         ${contextBadges.join("")}
       </div>
       <div class="font-mono text-[11px] text-zinc-500">${esc(input.profileId)}</div>
+      ${input.profileSummary ? `<div class="text-sm leading-6 text-zinc-400">${esc(input.profileSummary)}</div>` : ""}
     </div>
     ${input.tools.length > 0 ? `<div class="space-y-2">
       <div class="${sectionLabelClass}">Tools in scope</div>
@@ -317,6 +319,7 @@ const renderSelectedProfileSummary = (input: {
 export type FactoryChatProfileNav = {
   readonly id: string;
   readonly label: string;
+  readonly summary?: string;
   readonly selected: boolean;
 };
 
@@ -389,6 +392,7 @@ export type FactoryLiveCodexCard = {
 export type FactorySidebarModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
+  readonly activeProfileSummary?: string;
   readonly activeProfileTools: ReadonlyArray<string>;
   readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
   readonly objectives: ReadonlyArray<FactoryChatObjectiveNav>;
@@ -440,12 +444,14 @@ export type FactoryChatItem =
 export type FactoryChatIslandModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
+  readonly activeProfileSummary?: string;
   readonly items: ReadonlyArray<FactoryChatItem>;
 };
 
 export type FactoryChatShellModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
+  readonly activeProfileSummary?: string;
   readonly objectiveId?: string;
   readonly runId?: string;
   readonly jobId?: string;
@@ -476,7 +482,12 @@ const renderWorkControls = (card: FactoryWorkCard): string => {
   </div>`;
 };
 
-const renderChatItem = (item: FactoryChatItem, activeProfileLabel: string, activeProfileId: string): string => {
+const renderChatItem = (
+  item: FactoryChatItem,
+  activeProfileLabel: string,
+  activeProfileId: string,
+  activeProfileSummary?: string,
+): string => {
   if (item.kind === "user") {
     return `<section class="flex justify-end">
       <div class="max-w-3xl space-y-2">
@@ -498,6 +509,7 @@ const renderChatItem = (item: FactoryChatItem, activeProfileLabel: string, activ
             <span class="text-xs text-zinc-500">${esc(activeProfileId)}</span>
             ${item.meta ? `<span class="text-xs text-zinc-500">${esc(item.meta)}</span>` : ""}
           </div>
+          ${activeProfileSummary ? `<div class="mt-2 text-sm leading-6 text-zinc-400">${esc(activeProfileSummary)}</div>` : ""}
         </div>
       </div>
       <div class="${panelClass} px-5 py-4">
@@ -540,14 +552,19 @@ const renderChatItem = (item: FactoryChatItem, activeProfileLabel: string, activ
 
 export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   const body = model.items.length > 0
-    ? model.items.map((item) => renderChatItem(item, model.activeProfileLabel, model.activeProfileId)).join("")
+    ? model.items.map((item) => renderChatItem(
+      item,
+      model.activeProfileLabel,
+      model.activeProfileId,
+      model.activeProfileSummary,
+    )).join("")
     : `<section class="${panelClass} px-6 py-6 text-center">
       <div class="mx-auto max-w-2xl">
         <div class="text-base font-semibold text-zinc-100">${esc(model.activeProfileLabel)} is ready.</div>
-        <div class="mt-3 text-sm leading-6 text-zinc-400">Start with status, plan, debug, or a new thread.</div>
+        <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(model.activeProfileSummary ?? "Start with status, plan, debug, or a new thread.")}</div>
       </div>
     </section>`;
-  return `<div class="chat-stack mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}">
+  return `<div class="chat-stack mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}">
     ${body}
   </div>`;
 };
@@ -580,6 +597,7 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
 };
 
 export const factoryRailIsland = (model: FactorySidebarModel): string => {
+  const blankChat = !model.selectedObjective;
   const selectedObjectiveQuery = model.selectedObjective
     ? `&objective=${encodeURIComponent(model.selectedObjective.objectiveId)}`
     : "";
@@ -588,14 +606,30 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
         const selectedClass = profile.selected
           ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
           : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]";
-        return `<a class="block rounded-full border px-4 py-3 text-sm font-medium transition ${selectedClass}" href="/factory?profile=${encodeURIComponent(profile.id)}${selectedObjectiveQuery}">
-          ${esc(profile.label)}
+        return `<a class="block rounded-[22px] border px-4 py-3 transition ${selectedClass}" href="/factory?profile=${encodeURIComponent(profile.id)}${selectedObjectiveQuery}">
+          <div class="text-sm font-medium">${esc(profile.label)}</div>
+          ${profile.summary ? `<div class="mt-1 text-xs leading-5 text-zinc-400">${esc(profile.summary)}</div>` : ""}
         </a>`;
       }).join("")
     : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No profiles found.</div>`;
-  const objectives = model.objectives.length > 0
+  const objectiveCards = model.objectives.length > 0
     ? model.objectives.map((objective) => renderObjectiveLink(model, objective)).join("")
-    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No threads yet. Start a chat and Factory will open one when work needs durable tracking.</div>`;
+    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">${blankChat
+      ? "No recent threads yet. This blank chat has no active thread."
+      : "No threads yet. Start a chat and Factory will open one when work needs durable tracking."}</div>`;
+  const objectives = blankChat && model.objectives.length > 0
+    ? `<div class="space-y-3">
+      <div class="rounded-2xl border border-dashed border-white/10 px-4 py-4 text-sm leading-6 text-zinc-500">
+        Blank chat is active. Recent threads are still available here, but they are not part of the current conversation unless you reopen one.
+      </div>
+      <details class="rounded-[24px] border border-white/10 bg-black/10 px-4 py-4">
+        <summary class="cursor-pointer list-none text-sm font-medium text-zinc-200">Show recent threads</summary>
+        <div class="mt-4 grid gap-3">
+          ${objectiveCards}
+        </div>
+      </details>
+    </div>`
+    : objectiveCards;
   return `<div class="space-y-5 px-4 py-5 md:px-5">
     <section class="${railCardClass}">
       <div class="flex items-start justify-between gap-3">
@@ -617,7 +651,7 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Threads</div>
+        <div class="${sectionLabelClass}">${blankChat ? "Recent Threads" : "Threads"}</div>
         <div class="text-xs text-zinc-500">${esc(`${model.objectives.length}`)}</div>
       </div>
       <div class="mt-4 grid gap-3">
@@ -766,6 +800,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
       ${renderSelectedProfileSummary({
         profileLabel: model.activeProfileLabel,
         profileId: model.activeProfileId,
+        profileSummary: model.activeProfileSummary,
         tools: model.activeProfileTools,
         includeObjective: false,
         layout: "panel",
@@ -880,12 +915,13 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
                       label: "Work Details",
                     }) : ""}
                   </div>
-	                <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(model.objectiveId
+	                <div class="mt-3 text-sm leading-6 text-zinc-400" data-profile-summary>${esc(model.activeProfileSummary ?? (model.objectiveId
 	                    ? "Messages, runs, and recent jobs in this view stay scoped to the current thread."
-	                    : "Start a chat here. Factory will keep coordination here until work needs its own thread.")}</div>
+	                    : "Start a chat here. Factory will keep coordination here until work needs its own thread."))}</div>
+                  ${!model.objectiveId ? `<div class="mt-2 text-xs leading-5 text-zinc-500">Blank chat is active. Recent threads stay in the rail until you reopen one.</div>` : ""}
 	              </div>
 	              <div class="flex flex-wrap items-center gap-2">
-	                <a class="${ghostButtonClass}" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">New Chat</a>
+	                <a class="${ghostButtonClass}" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">Blank Chat</a>
 	                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory/control?objective=${encodeURIComponent(model.objectiveId)}">Work Details</a>` : ""}
 	              </div>
 	            </div>
@@ -1005,11 +1041,15 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         if (!nextProfile || nextProfile === document.body.dataset.profile) return;
         document.body.dataset.profile = nextProfile;
         const nextLabel = chat.getAttribute("data-active-profile-label") || nextProfile;
+        const nextSummary = chat.getAttribute("data-active-profile-summary") || "";
         document.querySelectorAll(profileInputSelector).forEach(function (node) {
           node.value = nextProfile;
         });
         document.querySelectorAll("[data-profile-label]").forEach(function (node) {
           node.textContent = nextLabel;
+        });
+        document.querySelectorAll("[data-profile-summary]").forEach(function (node) {
+          node.textContent = nextSummary;
         });
         syncUrl();
         updateIslandUrls();
@@ -1078,6 +1118,9 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         document.body.dataset.job = typeof detail.jobId === "string" ? detail.jobId : "";
         document.querySelectorAll("[data-profile-label]").forEach(function (node) {
           node.textContent = typeof detail.profileLabel === "string" && detail.profileLabel ? detail.profileLabel : nextProfile;
+        });
+        document.querySelectorAll("[data-profile-summary]").forEach(function (node) {
+          node.textContent = typeof detail.profileSummary === "string" ? detail.profileSummary : "";
         });
         syncUrl();
         updateIslandUrls();

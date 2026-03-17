@@ -561,7 +561,7 @@ test("factory shell: renders chat surface on /factory with thread-aware links", 
   expect(markup).toMatch(/>Chat</);
   expect(markup).toMatch(/>Thread</);
   expect(markup).toMatch(/Work Details/);
-  expect(markup).toMatch(/New Chat/);
+  expect(markup).toMatch(/Blank Chat/);
   expect(markup).toMatch(/factory-run-started/);
   expect(markup).toMatch(/Message Factory/);
   expect(markup).toMatch(/Messages, runs, and recent jobs in this view stay scoped to the current thread\./);
@@ -963,14 +963,74 @@ test("factory chat items: objective creation still surfaces when the parent hits
   expect(items.some((item) => item.kind === "assistant")).toBe(false);
 });
 
+test("factory chat items: automatic slice continuations render as live thread progress instead of a stop message", () => {
+  const runStream = "agents/factory/demo/runs/run_slice_continue";
+  let prev: string | undefined;
+  const push = (body: AgentEvent, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_slice_continue",
+      problem: "Keep this thread active.",
+      agentId: "orchestrator",
+    }, 1),
+    push({
+      type: "run.continued",
+      runId: "run_slice_continue",
+      agentId: "orchestrator",
+      nextRunId: "run_next",
+      nextJobId: "job_next",
+      profileId: "generalist",
+      previousMaxIterations: 8,
+      nextMaxIterations: 12,
+      continuationDepth: 1,
+      summary: "Reached the current 8-step slice. Continuing automatically in this thread as run_next with a 12-step budget.",
+    }, 2),
+    push({
+      type: "response.finalized",
+      runId: "run_slice_continue",
+      agentId: "orchestrator",
+      content: "Reached the current 8-step slice. Continuing automatically in this thread as run_next with a 12-step budget.\n\nLive updates will keep appearing here.",
+    }, 3),
+    push({
+      type: "run.status",
+      runId: "run_slice_continue",
+      agentId: "orchestrator",
+      status: "completed",
+      note: "continued automatically as run_next",
+    }, 4),
+  ];
+
+  const items = buildChatItemsForRun("run_slice_continue", chain, new Map());
+  const continued = items.find((item) => item.kind === "system" && item.title === "Thread continues automatically");
+  expect(continued && continued.kind === "system" ? continued.body : "").toContain("run_next");
+  expect(continued && continued.kind === "system" ? continued.body : "").toContain("job_next");
+  expect(items.some((item) => item.kind === "assistant")).toBe(false);
+});
+
 test("factory sidebar island: renders left rail navigation", () => {
   const markup = factorySidebarIsland({
     activeProfileId: "generalist",
     activeProfileLabel: "Generalist",
+    activeProfileSummary: "Answer directly, inspect receipts, and keep delivery moving.",
     activeProfileTools: [],
     profiles: [
-      { id: "generalist", label: "Generalist", selected: true },
-      { id: "reviewer", label: "Reviewer", selected: false },
+      {
+        id: "generalist",
+        label: "Generalist",
+        summary: "Answer directly, inspect receipts, and keep delivery moving.",
+        selected: true,
+      },
+      {
+        id: "reviewer",
+        label: "Reviewer",
+        summary: "Review changes and call out concrete risks before promotion.",
+        selected: false,
+      },
     ],
     objectives: [{
       objectiveId: "objective_demo",
@@ -1009,6 +1069,7 @@ test("factory sidebar island: renders left rail navigation", () => {
 
   expect(markup).toMatch(/>Chat</);
   expect(markup).toMatch(/Reviewer/);
+  expect(markup).toMatch(/inspect receipts, and keep delivery moving/);
   expect(markup).toMatch(/href="\/factory\?profile=reviewer&objective=objective_demo"/);
   expect(markup).toMatch(/Profile-driven Factory UI/);
   expect(markup).toMatch(/Threads/);
@@ -1016,6 +1077,38 @@ test("factory sidebar island: renders left rail navigation", () => {
   expect(markup).toMatch(/1 active/);
   expect(markup).not.toMatch(/Recent Thread/);
   expect(markup).not.toMatch(/run_01/);
+});
+
+test("factory sidebar island: blank chat treats old objectives as recent threads instead of active context", () => {
+  const markup = factorySidebarIsland({
+    activeProfileId: "generalist",
+    activeProfileLabel: "Generalist",
+    activeProfileSummary: "Answer directly, inspect receipts, and keep delivery moving.",
+    activeProfileTools: [],
+    profiles: [
+      { id: "generalist", label: "Generalist", summary: "Answer directly, inspect receipts, and keep delivery moving.", selected: true },
+    ],
+    objectives: [{
+      objectiveId: "objective_demo",
+      title: "Profile-driven Factory UI",
+      status: "executing",
+      phase: "executing",
+      summary: "Chat shell is wired to the worker path.",
+      updatedAt: 10,
+      selected: false,
+      slotState: "active",
+      activeTaskCount: 1,
+      readyTaskCount: 2,
+      taskCount: 5,
+      integrationStatus: "executing",
+    }],
+    jobs: [],
+    selectedObjective: undefined,
+  });
+
+  expect(markup).toMatch(/Recent Threads/);
+  expect(markup).toMatch(/Blank chat is active/);
+  expect(markup).toMatch(/Show recent threads/);
 });
 
 test("factory chat items: structured supervisor snapshots render as live child state instead of raw JSON", () => {
