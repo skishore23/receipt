@@ -404,15 +404,15 @@ const renderObjectiveActions = (objective: FactorySelectedObjectiveCard): string
   </div>`;
 };
 
-const renderJobRow = (job: FactoryChatJobNav): string => `<div class="rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
-  <div class="flex flex-wrap items-start justify-between gap-3">
-    <div class="min-w-0">
-      <div class="truncate text-sm font-semibold text-zinc-100">${esc(job.agentId)} · ${esc(job.jobId)}</div>
-      <div class="mt-2 max-h-[3rem] overflow-hidden text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
+const renderJobRow = (job: FactoryChatJobNav): string => `<div class="factory-job-card rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
+  <div class="factory-job-card__row flex flex-wrap items-start justify-between gap-3">
+    <div class="factory-job-card__body">
+      <div class="factory-job-card__title text-sm font-semibold text-zinc-100">${esc(job.agentId)} · ${esc(job.jobId)}</div>
+      <div class="factory-job-card__summary mt-2 text-sm leading-6 text-zinc-400">${esc(job.summary)}</div>
     </div>
-    ${badge(job.status)}
+    <div class="factory-job-card__status">${badge(job.status)}</div>
   </div>
-  <div class="mt-3 text-xs text-zinc-500">
+  <div class="factory-job-card__meta mt-3 text-xs text-zinc-500">
     ${job.runId ? `Run ${esc(job.runId)}` : "No run id"}
     ${job.objectiveId ? ` · Objective ${esc(job.objectiveId)}` : ""}
     ${job.updatedAt ? ` · ${esc(formatTs(job.updatedAt))}` : ""}
@@ -477,12 +477,12 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
         </div>
       </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick an objective from the left rail to inspect it.</div>`}
     </section>
-    <section class="${railCardClass}">
+    <section class="${railCardClass} factory-job-panel">
       <div class="flex items-center justify-between gap-3">
         <div class="${sectionLabelClass}">Recent jobs</div>
         <div class="text-xs text-zinc-500">${esc(`${model.jobs.length}`)}</div>
       </div>
-      <div class="mt-4 grid gap-3">
+      <div class="factory-job-list mt-4 grid gap-3">
         ${jobs}
       </div>
     </section>
@@ -556,7 +556,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
       </main>
       <aside class="order-3 min-w-0 border-t border-white/10 bg-black/30 xl:min-h-0 xl:border-l xl:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto xl:h-screen xl:max-h-none">
-          <div id="factory-inspector" hx-get="/factory/island/inspector?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
+          <div id="factory-inspector" class="factory-inspector-panel" hx-get="/factory/island/inspector?profile=${encodeURIComponent(model.activeProfileId)}${model.objectiveId ? `&objective=${encodeURIComponent(model.objectiveId)}` : ""}" hx-trigger="load, factory-refresh from:body throttle:800ms" hx-swap="innerHTML">
             ${factoryInspectorIsland(model.sidebar)}
           </div>
         </div>

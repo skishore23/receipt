@@ -168,6 +168,62 @@
     @apply bg-transparent p-0;
   }
 
+  /* Manual repro: open /factory and inspect Recent jobs with a very long agent/job id or summary token.
+     The right rail should keep every card inside the panel with no horizontal scrollbar. */
+  .factory-inspector-panel,
+  .factory-job-panel,
+  .factory-job-list,
+  .factory-job-card,
+  .factory-job-card__row,
+  .factory-job-card__body,
+  .factory-job-card__title,
+  .factory-job-card__summary,
+  .factory-job-card__meta {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .factory-inspector-panel,
+  .factory-job-panel,
+  .factory-job-list {
+    overflow-x: hidden;
+  }
+
+  .factory-job-card {
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .factory-job-card__body {
+    flex: 1 1 12rem;
+    overflow: hidden;
+  }
+
+  .factory-job-card__status {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  .factory-job-card__title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .factory-job-card__summary {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .factory-job-card__meta {
+    overflow-wrap: anywhere;
+  }
+
   .sr-only {
     position: absolute;
     width: 1px;

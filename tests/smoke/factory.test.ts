@@ -544,6 +544,7 @@ test("factory sidebar island: renders left rail navigation", () => {
 });
 
 test("factory inspector island: renders selected objective controls and recent jobs", () => {
+  const longJobId = "job_with_a_name_that_used_to_force_the_recent_jobs_card_past_the_inspector_width_when_it_rendered";
   const markup = factoryInspectorIsland({
     activeProfileId: "generalist",
     activeProfileLabel: "Generalist",
@@ -562,10 +563,10 @@ test("factory inspector island: renders selected objective controls and recent j
       slotState: "active",
     }],
     jobs: [{
-      jobId: "job_01",
-      agentId: "factory",
+      jobId: longJobId,
+      agentId: "factory-agent-with-an-overly-verbose-name-for-overflow-repro",
       status: "running",
-      summary: "Ship the profile-driven Factory UI.",
+      summary: "Ship the profile-driven Factory UI while keeping recent-job cards inside the inspector rail even when a summary contains_a_single_unbroken_token_that_is_much_longer_than_the_available_width.",
       runId: "run_01",
       objectiveId: "objective_demo",
       updatedAt: 1000,
@@ -598,7 +599,11 @@ test("factory inspector island: renders selected objective controls and recent j
   expect(markup).toMatch(/Receipts/);
   expect(markup).toMatch(/Latest decision/);
   expect(markup).toMatch(/Run run_01/);
-  expect(markup).toMatch(/job_01/);
+  expect(markup).toContain(longJobId);
   expect(markup).toMatch(/Open related view/);
   expect(markup).toMatch(/Ship the profile-driven Factory UI/);
+  expect(markup).toMatch(/factory-inspector-panel|factory-job-panel/);
+  expect(markup).toMatch(/factory-job-list/);
+  expect(markup).toMatch(/factory-job-card__title/);
+  expect(markup).toMatch(/factory-job-card__summary/);
 });
