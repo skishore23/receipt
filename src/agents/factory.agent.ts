@@ -7,24 +7,14 @@ import type { MemoryTools } from "../adapters/memory-tools.js";
 import { fold } from "../core/chain.js";
 import type { Runtime } from "../core/runtime.js";
 import {
-  emptyHtml,
   html,
   json,
   optionalTrimmedString,
   readRecordBody,
-  requireTrimmedString,
   text,
-  trimmedString,
 } from "../framework/http.js";
 import type { AgentLoaderContext, AgentRouteModule } from "../framework/agent-types.js";
-import {
-  type AgentRunConfig,
-} from "./agent.js";
 import { agentRunStream } from "./agent.streams.js";
-import {
-  FACTORY_CHAT_DEFAULT_CONFIG,
-  normalizeFactoryChatConfig,
-} from "./factory-chat.js";
 import type { AgentCmd, AgentEvent, AgentState } from "../modules/agent.js";
 import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent.js";
 import {
@@ -76,47 +66,10 @@ import {
   type FactoryMissionTaskSummary,
 } from "../views/factory-mission-control.js";
 import type { QueueJob } from "../adapters/jsonl-queue.js";
+import { parseComposerDraft } from "../factory-cli/composer.js";
 
 const isActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
-
-const parseChecks = (value: unknown): ReadonlyArray<string> | undefined => {
-  if (typeof value === "string") {
-    const lines = value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    return lines.length > 0 ? lines : undefined;
-  }
-  if (Array.isArray(value)) {
-    const items = value
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    return items.length > 0 ? items : undefined;
-  }
-  return undefined;
-};
-
-const deriveObjectiveTitle = (prompt: string): string => {
-  const compact = prompt.replace(/\s+/g, " ").trim();
-  if (!compact) return "";
-  const sentence = compact.split(/[.!?]/)[0] ?? compact;
-  return sentence.slice(0, 96).trim();
-};
-
-const parsePolicy = (value: unknown): Record<string, unknown> | undefined => {
-  if (!value) return undefined;
-  if (typeof value === "string") {
-    if (!value.trim()) return undefined;
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    } catch {
-      throw new FactoryServiceError(400, "Malformed policy JSON");
-    }
-    throw new FactoryServiceError(400, "Policy must be an object");
-  }
-  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-  throw new FactoryServiceError(400, "Policy must be an object");
-};
 
 const asObject = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -128,7 +81,7 @@ const asString = (value: unknown): string | undefined =>
 
 const profileLabel = (profileId?: string): string => {
   const value = profileId?.trim();
-  if (!value) return "Active profile";
+  if (!value) return "Active skill";
   return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
 };
 
@@ -187,6 +140,84 @@ const tryParseJson = (value: string): Record<string, unknown> | undefined => {
   } catch {
     return undefined;
   }
+};
+
+const humanizeKey = (value: string): string =>
+  value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+
+const formatJsonScalar = (value: unknown): string | undefined => {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return undefined;
+};
+
+const compactJsonValue = (value: unknown): string | undefined => {
+  const scalar = formatJsonScalar(value);
+  if (scalar) return clipProfileText(scalar, 220);
+  if (Array.isArray(value)) {
+    const items = value
+      .map((entry) => formatJsonScalar(entry) ?? compactJsonValue(asObject(entry)))
+      .filter((entry): entry is string => Boolean(entry))
+      .slice(0, 6);
+    return items.length > 0 ? clipProfileText(items.join("; "), 220) : undefined;
+  }
+  const record = asObject(value);
+  if (!record) return undefined;
+  const entries = Object.entries(record)
+    .map(([key, entryValue]) => {
+      const rendered = formatJsonScalar(entryValue)
+        ?? (Array.isArray(entryValue)
+          ? compactJsonValue(entryValue)
+          : compactJsonValue(asObject(entryValue)));
+      return rendered ? `${humanizeKey(key)}: ${rendered}` : undefined;
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 6);
+  return entries.length > 0 ? clipProfileText(entries.join("; "), 220) : undefined;
+};
+
+const jsonRecordToMarkdown = (record: Record<string, unknown>): string | undefined => {
+  const sections = Object.entries(record)
+    .flatMap(([key, value]) => {
+      const heading = `## ${humanizeKey(key)}`;
+      const scalar = formatJsonScalar(value);
+      if (scalar) return [`${heading}\n${scalar}`];
+      if (Array.isArray(value)) {
+        const items = value
+          .map((entry) => formatJsonScalar(entry) ?? compactJsonValue(asObject(entry)))
+          .filter((entry): entry is string => Boolean(entry))
+          .slice(0, 8);
+        return items.length > 0 ? [`${heading}\n${items.map((entry) => `- ${entry}`).join("\n")}`] : [];
+      }
+      const nested = asObject(value);
+      if (!nested) return [];
+      const lines = Object.entries(nested)
+        .map(([nestedKey, nestedValue]) => {
+          const rendered = formatJsonScalar(nestedValue)
+            ?? (Array.isArray(nestedValue)
+              ? compactJsonValue(nestedValue)
+              : compactJsonValue(asObject(nestedValue)));
+          return rendered ? `- ${humanizeKey(nestedKey)}: ${rendered}` : undefined;
+        })
+        .filter((entry): entry is string => Boolean(entry))
+        .slice(0, 8);
+      return lines.length > 0 ? [`${heading}\n${lines.join("\n")}`] : [];
+    })
+    .filter(Boolean);
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
+};
+
+const buildDetail = (...chunks: ReadonlyArray<string | undefined>): string | undefined => {
+  const detail = chunks
+    .map((chunk) => chunk?.trim())
+    .filter((chunk): chunk is string => Boolean(chunk))
+    .join("\n\n");
+  return detail || undefined;
 };
 
 const summarizeJob = (job: QueueJob): string => {
@@ -482,9 +513,10 @@ const filterReceiptsForContext = (
     || mentionsContextRef(receipt.summary, taskIds, candidateIds)
   );
 
-const buildActiveCodexCard = (jobs: ReadonlyArray<QueueJob>): FactoryLiveCodexCard | undefined => {
+export const buildActiveCodexCard = (jobs: ReadonlyArray<QueueJob>): FactoryLiveCodexCard | undefined => {
   const codexJob = [...jobs]
     .filter((job) => normalizedWorkerId(job.agentId) === "codex")
+    .filter((job) => !isTerminalJobStatus(job.status))
     .sort((left, right) =>
       codexJobPriority(left) - codexJobPriority(right)
       || right.updatedAt - left.updatedAt
@@ -714,7 +746,11 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       worker: delegatedTo,
       status: asString(parsed?.status) ?? "queued",
       summary: asString(parsed?.summary) ?? observation.summary ?? "Delegated work queued.",
-      detail: observation.output,
+      detail: buildDetail(
+        asString(parsed?.summary),
+        asString(parsed?.jobId) ? `Job ${asString(parsed?.jobId)}` : undefined,
+        asString(parsed?.runId) ? `Run ${asString(parsed?.runId)}` : undefined,
+      ),
       meta: durationLabel,
       jobId: asString(parsed?.jobId),
       running: !isTerminalJobStatus(asString(parsed?.status)),
@@ -727,7 +763,12 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       worker: asString(parsed?.worker) ?? "agent",
       status: asString(parsed?.status) ?? "unknown",
       summary: asString(parsed?.summary) ?? observation.summary ?? `Job ${asString(parsed?.jobId) ?? "unknown"}`,
-      detail: observation.output,
+      detail: buildDetail(
+        asString(parsed?.task) ? `Task: ${asString(parsed?.task)}` : undefined,
+        asString(parsed?.lastMessage) ? `Latest note: ${asString(parsed?.lastMessage)}` : undefined,
+        asString(parsed?.stderrTail) ? `stderr:\n${asString(parsed?.stderrTail)}` : undefined,
+        asString(parsed?.stdoutTail) ? `stdout:\n${asString(parsed?.stdoutTail)}` : undefined,
+      ),
       meta: durationLabel,
       jobId: asString(parsed?.jobId),
       running: !isTerminalJobStatus(asString(parsed?.status)),
@@ -747,7 +788,14 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       worker: "codex",
       status: latestStatus ?? "unknown",
       summary: observation.summary ?? asString(latest?.summary) ?? "Checked Codex status.",
-      detail: observation.output,
+      detail: buildDetail(
+        typeof parsed?.activeCount === "number" ? `${parsed.activeCount} active Codex job${parsed.activeCount === 1 ? "" : "s"}` : undefined,
+        asString(latest?.task) ? `Task: ${asString(latest?.task)}` : undefined,
+        asString(latest?.lastMessage) ? `Latest note: ${asString(latest?.lastMessage)}` : undefined,
+        jobs.length > 1
+          ? `Recent jobs:\n${jobs.slice(0, 5).map((job) => `- ${asString(job.jobId) ?? "unknown"}: ${asString(job.status) ?? "unknown"}${asString(job.summary) ? ` — ${asString(job.summary)}` : ""}`).join("\n")}`
+          : undefined,
+      ),
       meta: durationLabel,
       jobId: asString(latest?.jobId),
       running: typeof parsed?.activeCount === "number"
@@ -762,7 +810,11 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       worker: "queue",
       status: asString(parsed?.status) ?? "queued",
       summary: observation.summary ?? "Queued a command for a child job.",
-      detail: observation.output,
+      detail: buildDetail(
+        asString(parsed?.command) ? `Command: ${asString(parsed?.command)}` : undefined,
+        asString(parsed?.jobId) ? `Job ${asString(parsed?.jobId)}` : undefined,
+        compactJsonValue(parsed?.payload),
+      ),
       meta: [asString(parsed?.command), durationLabel].filter(Boolean).join(" · "),
       jobId: asString(parsed?.jobId),
       running: false,
@@ -775,11 +827,13 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       worker: asString(parsed?.worker) ?? "codex",
       status: asString(parsed?.status) ?? "queued",
       summary: asString(parsed?.summary) ?? observation.summary ?? "Codex run queued.",
-      detail: [
+      detail: buildDetail(
+        asString(parsed?.task) ? `Task: ${asString(parsed?.task)}` : undefined,
+        asString(parsed?.jobId) ? `Job ${asString(parsed?.jobId)}` : undefined,
         asString(parsed?.lastMessage),
         asString(parsed?.stderrTail),
         asString(parsed?.stdoutTail),
-      ].filter(Boolean).join("\n\n") || observation.output,
+      ),
       meta: durationLabel,
       link: asString(parsed?.link),
       jobId: asString(parsed?.jobId),
@@ -791,24 +845,29 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
     return {
       key: `${observation.tool}-${asString(parsed?.objectiveId) ?? observation.summary ?? "factory"}`,
       title: observation.tool === "factory.status"
-        ? "Thread status"
+        ? "Project status"
         : action === "create"
-          ? "Thread started"
+          ? "Project started"
           : action === "react"
-            ? "Thread updated"
+            ? "Project updated"
             : action === "promote"
-              ? "Thread promoted"
+              ? "Project promoted"
               : action === "cancel"
-                ? "Thread stopped"
+                ? "Project stopped"
                 : action === "cleanup"
                   ? "Worktrees removed"
                   : action === "archive"
-                    ? "Thread archived"
-                    : "Factory thread",
+                    ? "Project archived"
+                    : "Factory project",
       worker: asString(parsed?.worker) ?? "factory",
       status: asString(parsed?.status) ?? "updated",
       summary: asString(parsed?.summary) ?? observation.summary ?? "Factory updated.",
-      detail: observation.output,
+      detail: buildDetail(
+        asString(parsed?.title) ? `Title: ${asString(parsed?.title)}` : undefined,
+        asString(parsed?.phase) ? `Stage: ${asString(parsed?.phase)}` : undefined,
+        asString(parsed?.integrationStatus) ? `Integration: ${asString(parsed?.integrationStatus)}` : undefined,
+        asString(parsed?.latestCommitHash) ? `Commit: ${asString(parsed?.latestCommitHash)}` : undefined,
+      ),
       meta: [action, durationLabel].filter(Boolean).join(" · "),
       link: asString(parsed?.link),
       objectiveId: asString(parsed?.objectiveId),
@@ -818,11 +877,15 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
   if (observation.tool === "profile.handoff") {
     return {
       key: `${observation.tool}-${asString(parsed?.toProfileId) ?? observation.summary ?? "handoff"}`,
-      title: "Profile handoff",
+      title: "Skill handoff",
       worker: "profile",
       status: asString(parsed?.status) ?? "queued",
-      summary: asString(parsed?.summary) ?? observation.summary ?? "Continuation queued on another profile.",
-      detail: observation.output,
+      summary: asString(parsed?.summary) ?? observation.summary ?? "Continuation queued on another skill.",
+      detail: buildDetail(
+        asString(parsed?.fromProfileId) ? `From skill: ${asString(parsed?.fromProfileId)}` : undefined,
+        asString(parsed?.toProfileId) ? `To skill: ${asString(parsed?.toProfileId)}` : undefined,
+        asString(parsed?.runId) ? `Run ${asString(parsed?.runId)}` : undefined,
+      ),
       meta: durationLabel,
       link: asString(parsed?.link),
       jobId: asString(parsed?.jobId),
@@ -874,7 +937,7 @@ export const buildChatItemsForRun = (
       items.push({
         key: `${runId}-profile-handoff-${receipt.hash}`,
         kind: "system",
-        title: `Handed off to ${event.toProfileId}`,
+        title: `Handed off to ${event.toProfileId} skill`,
         body: event.reason,
         meta: new Date(receipt.ts).toLocaleString(),
       });
@@ -983,7 +1046,7 @@ export const buildChatItemsForRun = (
       items.push({
         key: `${runId}-continued`,
         kind: "system",
-        title: "Thread continues automatically",
+        title: "Project continues automatically",
         body: `${continued.summary}\n\nNext run: ${continued.nextRunId}\nNext job: ${continued.nextJobId}`,
         meta: `${continued.previousMaxIterations} -> ${continued.nextMaxIterations} steps`,
       });
@@ -995,22 +1058,23 @@ export const buildChatItemsForRun = (
         key: `${runId}-child-status`,
         kind: "system",
         title: "Orchestrator paused",
-        body: `The parent profile hit its 8-turn budget, but the Codex child is ${childStatus}.\n\n${latestChildCard.summary}`,
+        body: `The parent skill hit its 8-turn budget, but the Codex child is ${childStatus}.\n\n${latestChildCard.summary}`,
         meta: state.statusNote ?? state.status,
       });
     } else if (state.failure?.failureClass === "iteration_budget_exhausted" && latestObjectiveCard) {
       items.push({
         key: `${runId}-objective-status`,
         kind: "system",
-        title: "Thread continues",
-        body: `The parent profile hit its 8-turn budget after updating this thread. The work is still ${latestObjectiveCard.status}.\n\n${latestObjectiveCard.summary}`,
+        title: "Project continues",
+        body: `The parent skill hit its 8-turn budget after updating this project. The project is still ${latestObjectiveCard.status}.\n\n${latestObjectiveCard.summary}`,
         meta: state.statusNote ?? state.status,
       });
     } else {
+      const parsedFinal = tryParseJson(final.content);
       items.push({
         key: `${runId}-assistant-final`,
         kind: "assistant",
-        body: final.content,
+        body: parsedFinal ? (jsonRecordToMarkdown(parsedFinal) ?? final.content) : final.content,
         meta: state.statusNote ?? state.status,
       });
     }
@@ -1018,7 +1082,7 @@ export const buildChatItemsForRun = (
     const activeProfile = profileLabel(state.profile?.profileId);
     const activityLine = state.lastTool?.name
       ? `${activeProfile} is using ${state.lastTool.name}${state.lastTool.summary ? `.\n\n${state.lastTool.summary}` : ""}${state.lastTool.error ? `\n\n${state.lastTool.error}` : ""}`
-      : `${activeProfile} is shaping the next step in this thread. Live updates will appear here.`;
+      : `${activeProfile} is shaping the next step in this project chat. Live updates will appear here.`;
     if (!hasRunningWorkCard()) {
       items.push({
         key: `${runId}-running`,
@@ -1099,6 +1163,9 @@ const buildChatLink = (input: {
 const makeFactoryChatId = (): string =>
   `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
+const makeFactoryRunId = (): string =>
+  `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
 const chatItemPreview = (item: FactoryChatItem): string => {
   if (item.kind === "user" || item.kind === "assistant") return item.body;
   if (item.kind === "system") return `${item.title}: ${item.body}`;
@@ -1153,11 +1220,11 @@ const describeRunActivity = (
   if (tool === "jobs.list") return `${profileLabel} is checking live jobs.`;
   if (tool === "agent.status") return `${profileLabel} is checking child status.`;
   if (tool === "codex.status") return `${profileLabel} is checking Codex progress.`;
-  if (tool === "factory.status") return `${profileLabel} is checking thread status.`;
-  if (tool === "factory.dispatch") return `${profileLabel} is updating the Factory thread.`;
+  if (tool === "factory.status") return `${profileLabel} is checking project status.`;
+  if (tool === "factory.dispatch") return `${profileLabel} is updating the project.`;
   if (tool === "codex.run") return `${profileLabel} queued Codex work and is waiting for progress.`;
   if (tool === "agent.delegate") return `${profileLabel} delegated follow-up work.`;
-  if (tool === "profile.handoff") return `${profileLabel} is handing off this thread.`;
+  if (tool === "profile.handoff") return `${profileLabel} is handing off this project chat.`;
   if (tool && tool.length > 0) return `${profileLabel} is using ${tool}.`;
   if (finalContent?.trim()) return "Run completed.";
   if (state.status === "running") return `${profileLabel} is still working.`;
@@ -1379,6 +1446,64 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const requestedFocusId = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("focusId"));
+
+  const wantsJsonNavigation = (req: Request): boolean =>
+    (req.headers.get("accept") ?? "").includes("application/json");
+
+  const navigationResponse = (req: Request, location: string): Response =>
+    wantsJsonNavigation(req)
+      ? json(200, { location })
+      : new Response(null, {
+          status: 303,
+          headers: {
+            Location: location,
+            "Cache-Control": "no-store",
+          },
+        });
+
+  const navigationError = (req: Request, status: number, message: string): Response =>
+    wantsJsonNavigation(req)
+      ? json(status, { error: message })
+      : text(status, message);
+
+  const resolveWatchedObjectiveId = async (value: string | undefined): Promise<string | undefined> => {
+    if (!value) return undefined;
+    const objectives = await service.listObjectives();
+    const exact = objectives.find((objective) => objective.objectiveId === value);
+    if (exact) return exact.objectiveId;
+    const prefix = objectives.find((objective) => objective.objectiveId.startsWith(value));
+    return prefix?.objectiveId;
+  };
+
+  const resolveComposerJob = async (
+    objectiveId: string | undefined,
+    preferredJobId: string | undefined,
+  ): Promise<QueueJob> => {
+    if (preferredJobId) {
+      const preferred = await ctx.queue.getJob(preferredJobId);
+      if (preferred) return preferred;
+    }
+    if (!objectiveId) throw new FactoryServiceError(409, "Select an objective before sending job commands.");
+    const jobs = (await ctx.queue.listJobs({ limit: 160 }))
+      .filter((job) => jobObjectiveId(job) === objectiveId)
+      .sort((left, right) => {
+        const leftActive = isActiveJobStatus(left.status) ? 1 : 0;
+        const rightActive = isActiveJobStatus(right.status) ? 1 : 0;
+        return rightActive - leftActive
+          || right.updatedAt - left.updatedAt
+          || right.createdAt - left.createdAt
+          || right.id.localeCompare(left.id);
+      });
+    const active = jobs.find((job) => isActiveJobStatus(job.status));
+    if (active) return active;
+    const detail = await service.getObjective(objectiveId);
+    const taskJobId = detail.tasks.find((task) => isActiveJobStatus(task.jobStatus) && task.jobId)?.jobId;
+    if (taskJobId) {
+      const queued = await ctx.queue.getJob(taskJobId);
+      if (queued) return queued;
+    }
+    throw new FactoryServiceError(409, "Selected objective has no active job to control.");
+  };
 
   const projectionCacheTtlMs = 180;
   const chatShellCache = new Map<string, {
@@ -2069,6 +2194,191 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       events: "/factory/events",
     },
     register: (app: Hono) => {
+      app.post("/factory/compose", async (c) => {
+        const req = c.req.raw;
+        try {
+          await service.ensureBootstrap();
+          const body = await readRecordBody(req, (message) => new FactoryServiceError(400, message));
+          const prompt = optionalTrimmedString(body.prompt);
+          if (!prompt) return navigationError(req, 400, "Enter a chat message or slash command.");
+
+          const objectiveId = requestedObjectiveId(req);
+          const requestedChat = requestedChatId(req);
+          const requestedRun = requestedRunId(req);
+          const requestedJob = optionalTrimmedString(body.currentJobId) ?? requestedJobId(req);
+          const resolved = await resolveFactoryChatProfile({
+            repoRoot: service.git.repoRoot,
+            profileRoot,
+            requestedId: requestedProfileId(req),
+          });
+
+          if (prompt.startsWith("/")) {
+            const parsed = parseComposerDraft(prompt, objectiveId);
+            if (!parsed.ok) return navigationError(req, 400, parsed.error);
+            const command = parsed.command;
+
+            switch (command.type) {
+              case "help":
+                return navigationResponse(
+                  req,
+                  `${buildChatLink({
+                    profileId: resolved.root.id,
+                    objectiveId,
+                    chatId: requestedChat,
+                    runId: requestedRun,
+                    jobId: requestedJob,
+                  })}#factory-command-help`,
+                );
+              case "watch": {
+                const nextObjectiveId = await resolveWatchedObjectiveId(command.objectiveId ?? objectiveId);
+                if (!nextObjectiveId) {
+                  return navigationError(req, 404, command.objectiveId
+                    ? `Objective '${command.objectiveId}' was not found.`
+                    : "Select an objective or provide one to /watch.");
+                }
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: nextObjectiveId,
+                }));
+              }
+              case "new": {
+                const created = await service.createObjective({
+                  title: command.title ?? "Factory objective",
+                  prompt: command.prompt,
+                  profileId: resolved.root.id,
+                });
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: created.objectiveId,
+                }));
+              }
+              case "react": {
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before reacting to it.");
+                const detail = await service.reactObjectiveWithNote(objectiveId, command.message);
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: detail.objectiveId,
+                  runId: requestedRun,
+                  jobId: requestedJob,
+                }));
+              }
+              case "promote": {
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before promoting it.");
+                const detail = await service.promoteObjective(objectiveId);
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: detail.objectiveId,
+                  runId: requestedRun,
+                  jobId: requestedJob,
+                }));
+              }
+              case "cancel": {
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before canceling it.");
+                const detail = await service.cancelObjective(objectiveId, command.reason ?? "canceled from UI");
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: detail.objectiveId,
+                }));
+              }
+              case "cleanup": {
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before cleaning workspaces.");
+                const detail = await service.cleanupObjectiveWorkspaces(objectiveId);
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: detail.objectiveId,
+                }));
+              }
+              case "archive": {
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before archiving it.");
+                const detail = await service.archiveObjective(objectiveId);
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: detail.objectiveId,
+                }));
+              }
+              case "steer": {
+                const job = await resolveComposerJob(objectiveId, requestedJob);
+                const queued = await service.queueJobSteer(job.id, {
+                  problem: command.problem,
+                  by: "factory.web",
+                });
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
+                  chatId: requestedChat,
+                  runId: jobAnyRunId(queued.job) ?? requestedRun,
+                  jobId: queued.job.id,
+                }));
+              }
+              case "follow-up": {
+                const job = await resolveComposerJob(objectiveId, requestedJob);
+                const queued = await service.queueJobFollowUp(
+                  job.id,
+                  command.note ?? "Follow up on the current active job.",
+                  "factory.web",
+                );
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
+                  chatId: requestedChat,
+                  runId: jobAnyRunId(queued.job) ?? requestedRun,
+                  jobId: queued.job.id,
+                }));
+              }
+              case "abort-job": {
+                const job = await resolveComposerJob(objectiveId, requestedJob);
+                const queued = await service.queueJobAbort(
+                  job.id,
+                  command.reason ?? "abort requested from UI",
+                  "factory.web",
+                );
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
+                  chatId: requestedChat,
+                  runId: jobAnyRunId(queued.job) ?? requestedRun,
+                  jobId: queued.job.id,
+                }));
+              }
+            }
+          }
+
+          const chatId = objectiveId ? undefined : (requestedChat ?? makeFactoryChatId());
+          const stream = factoryChatStream(service.git.repoRoot, resolved.root.id, objectiveId, chatId);
+          const runId = makeFactoryRunId();
+          const created = await ctx.queue.enqueue({
+            agentId: "factory",
+            lane: "collect",
+            sessionKey: `factory-chat:${stream}`,
+            singletonMode: "allow",
+            maxAttempts: 1,
+            payload: {
+              kind: "factory.run",
+              stream,
+              runId,
+              problem: prompt,
+              profileId: resolved.root.id,
+              ...(objectiveId ? { objectiveId } : {}),
+              ...(chatId ? { chatId } : {}),
+            },
+          });
+          ctx.sse.publish("jobs", created.id);
+          if (objectiveId) ctx.sse.publish("factory", objectiveId);
+          return navigationResponse(req, buildChatLink({
+            profileId: resolved.root.id,
+            objectiveId,
+            chatId,
+            runId,
+            jobId: created.id,
+          }));
+        } catch (err) {
+          if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);
+          const message = err instanceof Error ? err.message : "factory server error";
+          console.error(err);
+          return navigationError(req, 500, message);
+        }
+      });
+
       app.get("/factory", async (c) => wrap(
         async () => buildChatShellModelCached({
           profileId: requestedProfileId(c.req.raw),
@@ -2377,129 +2687,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         (body) => json(200, body)
       ));
 
-      app.post("/factory/control/compose", async (c) => wrap(
-        async () => {
-          await service.ensureBootstrap();
-          const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
-          const prompt = requireTrimmedString(body.prompt, "prompt required");
-          const objectiveId = optionalTrimmedString(body.objective);
-          const detail = objectiveId
-            ? await (async () => {
-                await service.addObjectiveNote(objectiveId, prompt);
-                await service.reactObjective(objectiveId);
-                return service.getObjective(objectiveId);
-              })()
-            : await service.createObjective({
-                title: deriveObjectiveTitle(prompt),
-                prompt,
-                profileId: optionalTrimmedString(body.profile),
-              });
-          const location = buildMissionLink({
-            objectiveId: detail.objectiveId,
-            panel: "overview",
-            focusKind: "mission",
-          });
-          if (c.req.header("HX-Request") === "true") {
-            return emptyHtml({
-              "HX-Replace-Url": location,
-              "HX-Trigger": JSON.stringify({
-                "factory-control-selected": {
-                  objectiveId: detail.objectiveId,
-                  panel: "overview",
-                  focusKind: "mission",
-                },
-              }),
-            });
-          }
-          return new Response(null, {
-            status: 303,
-            headers: {
-              Location: location,
-              "Cache-Control": "no-store",
-            },
-          });
-        },
-        (response) => response
-      ));
-
-      app.post("/factory/run", async (c) => wrap(
-        async () => {
-          await service.ensureBootstrap();
-          const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
-          const problem = requireTrimmedString(body.problem, "problem required");
-          const objectiveId = optionalTrimmedString(body.objective);
-          const chatId = optionalTrimmedString(body.chat);
-          const requestedProfile = optionalTrimmedString(body.profile);
-          const resolved = await resolveFactoryChatProfile({
-            repoRoot: service.git.repoRoot,
-            profileRoot,
-            requestedId: requestedProfile,
-            problem,
-            allowDefaultOverride: true,
-          });
-          const stream = factoryChatStream(service.git.repoRoot, resolved.root.id, objectiveId, chatId);
-          const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          const config: AgentRunConfig = normalizeFactoryChatConfig(FACTORY_CHAT_DEFAULT_CONFIG);
-          const created = await ctx.queue.enqueue({
-            agentId: "factory",
-            lane: "collect",
-            sessionKey: `factory-chat:${stream}`,
-            singletonMode: "allow",
-            maxAttempts: 1,
-            payload: {
-              kind: "factory.run",
-              stream,
-              runId,
-              problem,
-              profileId: resolved.root.id,
-              ...(chatId ? { chatId } : {}),
-              ...(objectiveId ? { objectiveId } : {}),
-              config,
-            },
-          });
-          ctx.sse.publish("jobs", created.id);
-          const location = buildChatLink({
-            profileId: resolved.root.id,
-            objectiveId,
-            chatId,
-            runId,
-            jobId: created.id,
-          });
-          return new Response(null, {
-            status: 303,
-            headers: {
-              Location: location,
-              "Cache-Control": "no-store",
-            },
-          });
-        },
-        (response) => response
-      ));
-
       app.get("/factory/api/objectives", async (c) => wrap(
         async () => ({
           objectives: await service.listObjectives(),
           board: await service.buildBoardProjection(optionalTrimmedString(c.req.query("objective"))),
         }),
         (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives", async (c) => wrap(
-        async () => {
-          const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
-          return {
-            objective: await service.createObjective({
-              title: trimmedString(body.title) ?? deriveObjectiveTitle(requireTrimmedString(body.prompt, "prompt required")),
-              prompt: trimmedString(body.prompt),
-              baseHash: optionalTrimmedString(body.baseHash),
-              checks: parseChecks(body.validationCommands) ?? parseChecks(body.checks),
-              channel: optionalTrimmedString(body.channel),
-              policy: parsePolicy(body.policy),
-              profileId: optionalTrimmedString(body.profile),
-            }),
-          };
-        },
-        (body) => json(201, body)
       ));
 
       app.get("/factory/api/objectives/:id", async (c) => wrap(
@@ -2520,81 +2713,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           ),
         }),
         (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives/:id/react", async (c) => wrap(
-        async () => ({ objective: await service.reactObjective(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives/:id/promote", async (c) => wrap(
-        async () => ({ objective: await service.promoteObjective(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives/:id/cancel", async (c) => wrap(
-        async () => {
-          const body = await readRecordBody(c.req.raw, (message) => new FactoryServiceError(400, message));
-          return { objective: await service.cancelObjective(c.req.param("id"), optionalTrimmedString(body.reason)) };
-        },
-        (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives/:id/archive", async (c) => wrap(
-        async () => ({ objective: await service.archiveObjective(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.post("/factory/api/objectives/:id/cleanup", async (c) => wrap(
-        async () => ({ objective: await service.cleanupObjectiveWorkspaces(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.post("/factory/job/:id/steer", async (c) => wrap(
-        async () => {
-          const jobId = c.req.param("id");
-          const body = await readRecordBody(c.req.raw, (msg) => new FactoryServiceError(400, msg));
-          const payload: Record<string, unknown> = {};
-          const problem = optionalTrimmedString(body.problem);
-          const configRaw = optionalTrimmedString(body.config);
-          if (problem) payload.problem = problem;
-          if (configRaw) {
-            const parsed = parsePolicy(configRaw);
-            if (parsed) payload.config = parsed;
-          }
-          if (Object.keys(payload).length === 0) throw new FactoryServiceError(400, "provide problem and/or config");
-          const queued = await ctx.queue.queueCommand({ jobId, command: "steer", payload, by: "factory.ui" });
-          if (!queued) throw new FactoryServiceError(404, "job not found");
-          ctx.sse.publish("jobs", jobId);
-          return "Steer command queued.";
-        },
-        (msg) => text(202, msg)
-      ));
-
-      app.post("/factory/job/:id/follow-up", async (c) => wrap(
-        async () => {
-          const jobId = c.req.param("id");
-          const body = await readRecordBody(c.req.raw, (msg) => new FactoryServiceError(400, msg));
-          const note = requireTrimmedString(body.note, "note required");
-          const queued = await ctx.queue.queueCommand({ jobId, command: "follow_up", payload: { note }, by: "factory.ui" });
-          if (!queued) throw new FactoryServiceError(404, "job not found");
-          ctx.sse.publish("jobs", jobId);
-          return "Follow-up command queued.";
-        },
-        (msg) => text(202, msg)
-      ));
-
-      app.post("/factory/job/:id/abort", async (c) => wrap(
-        async () => {
-          const jobId = c.req.param("id");
-          const body = await readRecordBody(c.req.raw, (msg) => new FactoryServiceError(400, msg));
-          const reason = optionalTrimmedString(body.reason) ?? "abort requested";
-          const queued = await ctx.queue.queueCommand({ jobId, command: "abort", payload: { reason }, by: "factory.ui" });
-          if (!queued) throw new FactoryServiceError(404, "job not found");
-          ctx.sse.publish("jobs", jobId);
-          return "Abort command queued.";
-        },
-        (msg) => text(202, msg)
       ));
     },
   };

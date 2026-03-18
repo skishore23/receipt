@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl.js";
-import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue.js";
+import type { JsonlQueue, QueueCommandRecord, QueueJob } from "../adapters/jsonl-queue.js";
 import { type CodexExecutor, type CodexRunControl } from "../adapters/codex-executor.js";
 import { HubGit, HubGitError } from "../adapters/hub-git.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
@@ -225,6 +225,22 @@ export type FactoryObjectiveInput = {
   readonly channel?: string;
   readonly policy?: FactoryObjectivePolicy;
   readonly profileId?: string;
+};
+
+export type FactoryObjectiveComposeInput = {
+  readonly prompt: string;
+  readonly objectiveId?: string;
+  readonly title?: string;
+  readonly baseHash?: string;
+  readonly checks?: ReadonlyArray<string>;
+  readonly channel?: string;
+  readonly policy?: FactoryObjectivePolicy;
+  readonly profileId?: string;
+};
+
+export type FactoryQueuedJobCommand = {
+  readonly job: QueueJob;
+  readonly command: QueueCommandRecord;
 };
 
 export type FactoryContextSources = {
@@ -1160,6 +1176,23 @@ export class FactoryService {
     };
   }
 
+  async composeObjective(input: FactoryObjectiveComposeInput): Promise<FactoryObjectiveDetail> {
+    const prompt = requireNonEmpty(input.prompt, "prompt required");
+    const objectiveId = optionalTrimmedString(input.objectiveId);
+    if (objectiveId) {
+      return this.reactObjectiveWithNote(objectiveId, prompt);
+    }
+    return this.createObjective({
+      title: optionalTrimmedString(input.title) ?? clipText(prompt, 96) ?? "Factory objective",
+      prompt,
+      baseHash: input.baseHash,
+      checks: input.checks,
+      channel: input.channel,
+      policy: input.policy,
+      profileId: input.profileId,
+    });
+  }
+
   async addObjectiveNote(objectiveId: string, message: string): Promise<void> {
     await this.getObjectiveState(objectiveId);
     const normalized = message.trim();
@@ -1170,6 +1203,13 @@ export class FactoryService {
       message: normalized,
       notedAt: Date.now(),
     });
+  }
+
+  async reactObjectiveWithNote(objectiveId: string, message?: string): Promise<FactoryObjectiveDetail> {
+    const normalized = optionalTrimmedString(message);
+    if (normalized) await this.addObjectiveNote(objectiveId, normalized);
+    await this.reactObjective(objectiveId);
+    return this.getObjective(objectiveId);
   }
 
   async promoteObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
@@ -1183,12 +1223,7 @@ export class FactoryService {
 
   async cancelObjective(objectiveId: string, reason?: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
-    for (const taskId of state.graph.activeNodeIds) {
-      const task = state.graph.nodes[taskId];
-      if (task?.jobId) {
-        await this.queue.cancel(task.jobId, reason ?? "factory objective canceled", "factory");
-      }
-    }
+    await this.cancelObjectiveTaskJobs(state, reason ?? "factory objective canceled");
     await this.emitObjective(objectiveId, {
       type: "objective.canceled",
       objectiveId,
@@ -1201,6 +1236,7 @@ export class FactoryService {
 
   async archiveObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
+    await this.cancelObjectiveTaskJobs(state, "factory objective archived");
     if (!state.archivedAt) {
       await this.emitObjective(objectiveId, {
         type: "objective.archived",
@@ -1208,6 +1244,7 @@ export class FactoryService {
         archivedAt: Date.now(),
       });
     }
+    await this.rebalanceObjectiveSlots();
     return this.getObjective(objectiveId);
   }
 
@@ -1235,12 +1272,84 @@ export class FactoryService {
     return this.getObjective(objectiveId);
   }
 
+  async queueJobSteer(
+    jobId: string,
+    input: {
+      readonly problem?: string;
+      readonly config?: Record<string, unknown>;
+      readonly by?: string;
+    },
+  ): Promise<FactoryQueuedJobCommand> {
+    const payload: Record<string, unknown> = {};
+    const problem = optionalTrimmedString(input.problem);
+    if (problem) payload.problem = problem;
+    if (input.config && isRecord(input.config) && Object.keys(input.config).length > 0) payload.config = input.config;
+    if (Object.keys(payload).length === 0) throw new FactoryServiceError(400, "provide problem and/or config");
+    return this.queueJobCommand(jobId, {
+      command: "steer",
+      payload,
+      by: input.by ?? "factory.cli",
+    });
+  }
+
+  async queueJobFollowUp(
+    jobId: string,
+    note: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    return this.queueJobCommand(jobId, {
+      command: "follow_up",
+      payload: { note: requireNonEmpty(note, "note required") },
+      by,
+    });
+  }
+
+  async queueJobAbort(
+    jobId: string,
+    reason?: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    return this.queueJobCommand(jobId, {
+      command: "abort",
+      payload: { reason: optionalTrimmedString(reason) ?? "abort requested" },
+      by,
+    });
+  }
+
   async resumeObjectives(): Promise<void> {
     await this.rebalanceObjectiveSlots();
     const objectives = await this.listObjectives();
-    for (const objective of objectives.filter((item) => !["completed", "failed", "canceled"].includes(item.status) && item.scheduler.slotState === "active")) {
+    for (const objective of objectives.filter((item) =>
+      !item.archivedAt
+      && !["completed", "failed", "canceled"].includes(item.status)
+      && item.scheduler.slotState === "active"
+    )) {
       await this.enqueueObjectiveControl(objective.objectiveId, "admitted");
     }
+  }
+
+  private async queueJobCommand(
+    jobId: string,
+    input: {
+      readonly command: "steer" | "follow_up" | "abort";
+      readonly payload?: Record<string, unknown>;
+      readonly by?: string;
+    },
+  ): Promise<FactoryQueuedJobCommand> {
+    const existing = await this.queue.getJob(jobId);
+    if (!existing) throw new FactoryServiceError(404, "job not found");
+    const command = await this.queue.queueCommand({
+      jobId,
+      command: input.command,
+      payload: input.payload,
+      by: input.by,
+    });
+    if (!command) throw new FactoryServiceError(404, "job not found");
+    this.sse.publish("jobs", jobId);
+    return {
+      job: await this.queue.getJob(jobId) ?? existing,
+      command,
+    };
   }
 
   private objectiveElapsedMinutes(state: FactoryState, now = Date.now()): number {
@@ -1254,6 +1363,17 @@ export class FactoryService {
 
   private releasesObjectiveSlot(status: FactoryObjectiveStatus): boolean {
     return this.isTerminalObjectiveStatus(status) || status === "blocked";
+  }
+
+  private async cancelObjectiveTaskJobs(
+    state: FactoryState,
+    reason: string,
+  ): Promise<void> {
+    for (const taskId of state.taskOrder) {
+      const task = state.graph.nodes[taskId];
+      if (!task?.jobId) continue;
+      await this.queue.cancel(task.jobId, reason, "factory");
+    }
   }
 
   private async listObjectiveStates(): Promise<ReadonlyArray<FactoryState>> {
@@ -1747,13 +1867,15 @@ export class FactoryService {
       if (
         state.scheduler.slotState === "active"
         && !state.scheduler.releasedAt
-        && this.releasesObjectiveSlot(state.status)
+        && (this.releasesObjectiveSlot(state.status) || Boolean(state.archivedAt))
       ) {
         await this.emitObjective(state.objectiveId, {
           type: "objective.slot.released",
           objectiveId: state.objectiveId,
           releasedAt: Date.now(),
-          reason: `slot released after objective entered ${state.status}`,
+          reason: state.archivedAt
+            ? "slot released after objective archived"
+            : `slot released after objective entered ${state.status}`,
         });
       }
     }

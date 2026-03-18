@@ -8,7 +8,6 @@ const railCardClass = `${softPanelClass} p-4`;
 const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500";
 const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4 break-words [overflow-wrap:anywhere]";
 const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
-const inputClass = "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-emerald-300/40 focus:bg-white/[0.06]";
 const primaryButtonClass = `${buttonBaseClass} border-emerald-300/40 bg-emerald-300 text-zinc-950 hover:bg-emerald-200`;
 const ghostButtonClass = `${buttonBaseClass} border-white/10 bg-white/[0.04] text-zinc-100 hover:bg-white/[0.09]`;
 const dangerButtonClass = `${buttonBaseClass} border-rose-300/25 bg-rose-400/10 text-rose-100 hover:bg-rose-400/20`;
@@ -72,6 +71,23 @@ const statPill = (label: string, value: string): string => `<div class="min-w-0 
   <div class="text-[10px] uppercase tracking-[0.18em] text-zinc-500">${esc(label)}</div>
   <div class="mt-1 break-words text-sm font-medium text-zinc-100 [overflow-wrap:anywhere]">${esc(value)}</div>
 </div>`;
+
+const renderCliActionCard = (input: {
+  readonly label: string;
+  readonly description: string;
+  readonly command: string;
+  readonly commandBadgeClass?: string;
+  readonly span?: string;
+}): string => `<div class="${input.span ?? ""} rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-4">
+    <span class="flex items-start justify-between gap-3">
+      <span class="min-w-0">
+        <span class="block text-sm font-semibold text-zinc-100">${esc(input.label)}</span>
+        <span class="mt-2 block text-sm leading-6 text-zinc-400">${esc(input.description)}</span>
+      </span>
+      <span class="${input.commandBadgeClass ?? ghostButtonClass} shrink-0">CLI</span>
+    </span>
+    <code class="mt-3 block overflow-x-auto rounded-2xl border border-white/10 bg-black/25 px-3 py-3 text-[12px] leading-5 text-zinc-200 [overflow-wrap:anywhere]">${esc(input.command)}</code>
+  </div>`;
 
 const sectionTitle = (section: FactoryMissionSectionKey): string =>
   section === "needs_attention"
@@ -365,7 +381,7 @@ export const factoryMissionRailIsland = (model: FactoryMissionShellModel): strin
       <div class="mt-4 grid gap-3">
         ${items.length > 0
           ? items.map((objective) => renderObjectiveLink(model.panel, objective)).join("")
-          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No threads.</div>`}
+          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No projects.</div>`}
       </div>
     </section>`;
   };
@@ -375,8 +391,8 @@ export const factoryMissionRailIsland = (model: FactoryMissionShellModel): strin
       <div class="flex items-start justify-between gap-3">
         <div>
           <div class="${sectionLabelClass}">Factory</div>
-          <div class="mt-3 text-lg font-semibold text-white">Work Details</div>
-          <div class="mt-2 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and controls for Factory threads.</div>
+          <div class="mt-3 text-lg font-semibold text-white">Project Details</div>
+          <div class="mt-2 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and controls for Factory projects.</div>
         </div>
         <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">WD</div>
       </div>
@@ -440,7 +456,7 @@ const renderRunCard = (run: FactoryMissionRunSummary): string => `<a class="bloc
   <div class="mt-3 text-sm leading-6 text-zinc-300">${esc(run.summary)}</div>
   ${run.prompt ? `<div class="mt-3 text-xs text-zinc-500">${esc(run.prompt)}</div>` : ""}
   <div class="mt-3">
-    <span class="text-xs font-medium uppercase tracking-[0.16em] text-emerald-200">Open run thread</span>
+    <span class="text-xs font-medium uppercase tracking-[0.16em] text-emerald-200">Open run chat</span>
   </div>
 </a>`;
 
@@ -478,7 +494,7 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
   <section class="${panelClass} px-5 py-5">
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <div class="${sectionLabelClass}">Thread</div>
+        <div class="${sectionLabelClass}">Project</div>
         <div class="mt-2 text-2xl font-semibold text-white">${esc(selected.title)}</div>
         <div class="mt-3 flex flex-wrap gap-2">
           ${badge(selected.status)}
@@ -487,7 +503,7 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
           ${selected.integrationStatus ? badge(selected.integrationStatus) : ""}
         </div>
       </div>
-      <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Thread</a>
+      <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Chat</a>
     </div>
     ${selected.summary ? `<div class="mt-5 text-sm leading-7 text-zinc-300">${esc(selected.summary)}</div>` : ""}
     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -512,7 +528,7 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
     </div>` : ""}
   </section>
   <section class="${panelClass} px-5 py-5">
-    <div class="${sectionLabelClass}">Thread prompt</div>
+    <div class="${sectionLabelClass}">Project prompt</div>
     <pre class="mt-3 whitespace-pre-wrap text-sm leading-7 text-zinc-300 [overflow-wrap:anywhere]">${esc(selected.prompt)}</pre>
   </section>
   <section class="${panelClass} px-5 py-5">
@@ -580,7 +596,7 @@ const renderExecutionPanel = (selected: FactoryMissionSelectedModel): string => 
     <div class="mt-4 grid gap-3">
       ${selected.runs.length > 0
         ? selected.runs.map(renderRunCard).join("")
-        : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">${esc(selected.focus.kind === "mission" ? "No profile runs yet for this thread." : "No related runs in this context.")}</div>`}
+        : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">${esc(selected.focus.kind === "mission" ? "No profile runs yet for this project." : "No related runs in this context.")}</div>`}
     </div>
   </section>
   <section class="${panelClass} px-5 py-5">
@@ -650,10 +666,10 @@ const renderLivePanel = (model: FactoryMissionShellModel, selected: FactoryMissi
   return `<div class="space-y-6">
     <section class="${panelClass} px-5 py-5">
       <div class="${sectionLabelClass}">Live execution</div>
-      <div class="mt-3 text-sm leading-6 text-zinc-300">Work Details streams worktree output for the focused task or job. Select a task/job in Execution or use the focused item in the inspector.</div>
+      <div class="mt-3 text-sm leading-6 text-zinc-300">Project Details streams worktree output for the focused task or job. Select a task/job in Execution or use the focused item in the inspector.</div>
       ${selected.focus.kind === "run" ? `<div class="mt-4 rounded-[22px] border border-white/10 bg-black/20 px-4 py-4 text-sm leading-6 text-zinc-300">
-        Run focus does not have worktree logs here. Open the profile thread for this run instead.
-        <div class="mt-3"><a class="${ghostButtonClass}" href="${esc(selected.focus.chatLink)}">Open Run Thread</a></div>
+        Run focus does not have worktree logs here. Open the project chat for this run instead.
+        <div class="mt-3"><a class="${ghostButtonClass}" href="${esc(selected.focus.chatLink)}">Open Run Chat</a></div>
       </div>` : ""}
       ${!canStream && selected.focus.kind !== "run" ? `<div class="mt-4 rounded-[22px] border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">Focus a task or job to view live output.</div>` : ""}
     </section>
@@ -733,7 +749,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
       <div class="flex flex-wrap items-center gap-3">
         ${panelTabs(model)}
       </div>
-      ${emptyState("No thread selected", "Pick a thread from the rail to inspect execution, logs, and receipts.")}
+      ${emptyState("No project selected", "Pick a project from the rail to inspect execution, logs, and receipts.")}
     </div>`;
   }
   const selected = model.selected;
@@ -749,7 +765,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
   return `<div class="space-y-6 px-4 pb-8 pt-6 md:px-8 xl:px-10">
     <div class="flex flex-wrap items-center justify-between gap-4">
       <div>
-        <div class="${sectionLabelClass}">Work Details</div>
+        <div class="${sectionLabelClass}">Project Details</div>
         <div class="mt-2 text-2xl font-semibold text-white">${esc(selected.title)}</div>
       </div>
       ${panelTabs(model)}
@@ -760,7 +776,7 @@ export const factoryMissionMainIsland = (model: FactoryMissionShellModel): strin
 
 const renderMissionFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "mission" }>): string => `<div class="space-y-5">
   <div>
-    <div class="${sectionLabelClass}">Thread</div>
+    <div class="${sectionLabelClass}">Project</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.title)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
       ${badge(focus.status)}
@@ -809,32 +825,35 @@ const renderRunFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind
     <div class="mt-2 text-sm leading-6 text-zinc-300">${esc(focus.prompt)}</div>
   </div>` : ""}
   ${focus.previewLines.length > 0 ? `<div>
-    <div class="${sectionLabelClass}">Recent thread</div>
+    <div class="${sectionLabelClass}">Recent chat</div>
     <div class="mt-2 space-y-2">
       ${focus.previewLines.map((line) => `<div class="rounded-[18px] border border-white/10 bg-black/20 px-3 py-3 text-sm leading-6 text-zinc-300">${esc(line)}</div>`).join("")}
     </div>
   </div>` : ""}
   <div class="flex flex-wrap gap-2">
-    <a class="${primaryButtonClass}" href="${esc(focus.chatLink)}">Open in Thread</a>
+    <a class="${primaryButtonClass}" href="${esc(focus.chatLink)}">Open in Chat</a>
   </div>
 </div>`;
 
 const renderJobControls = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "job" }>): string => {
   if (!focus.active) return "";
-  const encoded = encodeURIComponent(focus.jobId);
   return `<div class="mt-5 grid gap-3">
-    <form class="grid gap-2" action="/factory/job/${encoded}/steer" method="post" hx-post="/factory/job/${encoded}/steer" hx-swap="none">
-      <input class="${inputClass}" type="text" name="problem" placeholder="Steer this job" />
-      <div><button class="${ghostButtonClass}" type="submit">Steer</button></div>
-    </form>
-    <form class="grid gap-2" action="/factory/job/${encoded}/follow-up" method="post" hx-post="/factory/job/${encoded}/follow-up" hx-swap="none">
-      <input class="${inputClass}" type="text" name="note" placeholder="Add follow-up context" />
-      <div><button class="${ghostButtonClass}" type="submit">Add Note</button></div>
-    </form>
-    <form action="/factory/job/${encoded}/abort" method="post" hx-post="/factory/job/${encoded}/abort" hx-swap="none">
-      <input type="hidden" name="reason" value="abort requested from /factory/control" />
-      <button class="${dangerButtonClass}" type="submit">Abort Job</button>
-    </form>
+    ${renderCliActionCard({
+      label: "Steer job",
+      description: "Queue updated instructions for this running Factory child.",
+      command: `receipt factory steer ${focus.jobId} --problem \"<updated direction>\"`,
+    })}
+    ${renderCliActionCard({
+      label: "Follow up",
+      description: "Attach more operator context without replacing the current goal.",
+      command: `receipt factory follow-up ${focus.jobId} --note \"<extra context>\"`,
+    })}
+    ${renderCliActionCard({
+      label: "Abort job",
+      description: "Request a clean stop for this job from the CLI-first operator surface.",
+      command: `receipt factory abort-job ${focus.jobId} --reason \"abort requested\"`,
+      commandBadgeClass: dangerButtonClass,
+    })}
   </div>`;
 };
 
@@ -895,57 +914,33 @@ const renderTaskFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kin
 </div>`;
 
 const renderObjectiveActions = (selected: FactoryMissionSelectedModel): string => {
-  const objectiveId = encodeURIComponent(selected.objectiveId);
-  const actionCard = (input: {
-    readonly action: string;
-    readonly label: string;
-    readonly description: string;
-    readonly buttonClass: string;
-    readonly hiddenReason?: string;
-    readonly span?: string;
-  }): string => `<form class="${input.span ?? ""}" action="/factory/api/objectives/${objectiveId}/${input.action}" method="post" hx-post="/factory/api/objectives/${objectiveId}/${input.action}" hx-swap="none">
-      ${input.hiddenReason ? `<input type="hidden" name="reason" value="${esc(input.hiddenReason)}" />` : ""}
-      <button class="w-full rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-4 text-left transition hover:bg-white/[0.06]" type="submit">
-        <span class="flex items-start justify-between gap-3">
-          <span class="min-w-0">
-            <span class="block text-sm font-semibold text-zinc-100">${esc(input.label)}</span>
-            <span class="mt-2 block text-sm leading-6 text-zinc-400">${esc(input.description)}</span>
-          </span>
-          <span class="${input.buttonClass} shrink-0">Run</span>
-        </span>
-      </button>
-    </form>`;
   return `<div class="grid gap-3">
-    ${actionCard({
-      action: "react",
-      label: "Keep working",
-      description: "Re-evaluate this thread and dispatch the next eligible work.",
-      buttonClass: primaryButtonClass,
+    ${renderCliActionCard({
+      label: "Advance project",
+      description: "Re-evaluate this project and dispatch the next eligible step from the CLI.",
+      command: `receipt factory react ${selected.objectiveId} --message \"<operator note>\"`,
+      commandBadgeClass: primaryButtonClass,
     })}
-    ${actionCard({
-      action: "promote",
+    ${renderCliActionCard({
       label: "Promote to source",
       description: "Merge the ready integration branch into the source branch.",
-      buttonClass: ghostButtonClass,
+      command: `receipt factory promote ${selected.objectiveId}`,
     })}
-    ${actionCard({
-      action: "cleanup",
+    ${renderCliActionCard({
       label: "Remove worktrees",
-      description: "Delete this thread's task worktrees and integration workspace from disk.",
-      buttonClass: ghostButtonClass,
+      description: "Delete this project's task worktrees and integration workspace from disk.",
+      command: `receipt factory cleanup ${selected.objectiveId}`,
     })}
-    ${actionCard({
-      action: "cancel",
-      label: "Stop thread",
-      description: "Stop active jobs and mark this thread as canceled.",
-      buttonClass: dangerButtonClass,
-      hiddenReason: "cancel requested from /factory/control",
+    ${renderCliActionCard({
+      label: "Stop project",
+      description: "Stop active jobs and mark this project as canceled.",
+      command: `receipt factory cancel ${selected.objectiveId} --reason \"cancel requested\"`,
+      commandBadgeClass: dangerButtonClass,
     })}
-    ${actionCard({
-      action: "archive",
-      label: "Archive thread",
-      description: "Hide this thread from the main list without deleting its receipts.",
-      buttonClass: ghostButtonClass,
+    ${renderCliActionCard({
+      label: "Archive project",
+      description: "Hide this project from the main list without deleting its receipts.",
+      command: `receipt factory archive ${selected.objectiveId}`,
     })}
   </div>`;
 };
@@ -955,7 +950,7 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
     return `<div class="space-y-5 px-4 py-5 md:px-5">
       <section class="${railCardClass}">
         <div class="${sectionLabelClass}">Focused item</div>
-        <div class="mt-4 text-sm leading-6 text-zinc-500">Pick a thread from the rail to inspect state, focus runs/jobs/tasks, and send operator guidance.</div>
+        <div class="mt-4 text-sm leading-6 text-zinc-500">Pick a project from the rail to inspect state, focus runs/jobs/tasks, and send operator guidance.</div>
       </section>
     </div>`;
   }
@@ -981,8 +976,8 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Thread actions</div>
-        <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Thread</a>
+        <div class="${sectionLabelClass}">Project actions</div>
+        <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Chat</a>
       </div>
       <div class="mt-4">
         ${renderObjectiveActions(selected)}
@@ -996,7 +991,7 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Receipt Factory Work Details</title>
+  <title>Receipt Factory Project Details</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -1019,12 +1014,12 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
 	          <header class="border-b border-white/10 bg-black/20 backdrop-blur-xl">
 	            <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 px-4 py-4 md:px-8 xl:px-10">
 	              <div class="min-w-0">
-	                <div class="${sectionLabelClass}">Work Details</div>
+	                <div class="${sectionLabelClass}">Project Details</div>
 	                <div class="mt-3 text-lg font-semibold text-white">Factory</div>
 	                <div class="mt-3 flex flex-wrap gap-2">
                     ${navPill({
                       href: model.selected?.chatLink ?? "/factory",
-                      label: model.selected ? "Thread" : "Chat",
+                      label: model.selected ? "Project" : "Chat",
                     })}
                     ${navPill({
                       href: `/factory/control${controlQuery({
@@ -1033,14 +1028,14 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
                         focusKind: model.focusKind,
                         focusId: model.focusId,
                       })}`,
-                      label: "Work Details",
+                      label: "Project Details",
                       active: true,
                     })}
                   </div>
-	                <div class="mt-3 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and operator controls for the selected thread.</div>
+	                <div class="mt-3 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and operator controls for the selected project.</div>
 	              </div>
 	              <div class="flex flex-wrap items-center gap-2">
-	                ${model.selected ? `<a class="${ghostButtonClass}" href="${esc(model.selected.chatLink)}">Back to Thread</a>` : ""}
+	                ${model.selected ? `<a class="${ghostButtonClass}" href="${esc(model.selected.chatLink)}">Back to Chat</a>` : ""}
 	              </div>
 	            </div>
 	          </header>

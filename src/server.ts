@@ -63,6 +63,7 @@ import { loadAxiomPrompts, hashAxiomPrompts } from "./prompts/axiom.js";
 import { runTheoremGuild, normalizeTheoremConfig } from "./agents/theorem.js";
 import { runWriterGuild, normalizeWriterConfig } from "./agents/writer.js";
 import { runAgent, normalizeAgentConfig } from "./agents/agent.js";
+import { createQueuedBudgetContinuation, parseContinuationDepth } from "./agents/agent-continuation.js";
 import { runInfra, normalizeInfraConfig } from "./agents/infra.js";
 import { runAxiom, normalizeAxiomConfig } from "./agents/axiom.js";
 import { runAxiomSimple, normalizeAxiomSimpleConfig, type AxiomSimpleWorkerLauncher } from "./agents/axiom-simple.js";
@@ -337,7 +338,9 @@ const apiStatus = () => {
 };
 
 type AgentRunnerSpec = {
+  readonly defaultAgentId: string;
   readonly defaultStream: string;
+  readonly jobKind: string;
   readonly sseTopic: "theorem" | "writer" | "agent";
   readonly sseTokenEvent: string;
   readonly normalizeConfig: (input: Record<string, unknown>) => unknown;
@@ -348,6 +351,7 @@ type AgentRunnerSpec = {
   readonly promptPath: string;
   readonly runFn: (input: Record<string, unknown>) => Promise<Record<string, unknown> | void>;
   readonly extras?: Record<string, unknown>;
+  readonly autoContinueOnBudget?: boolean;
 };
 
 const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
@@ -357,6 +361,16 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
       ? payload.config as Record<string, unknown> : {};
     const config = spec.normalizeConfig(configInput);
     const { apiReady, apiNote } = apiStatus();
+    const onIterationBudgetExhausted = spec.autoContinueOnBudget
+      ? createQueuedBudgetContinuation({
+        queue,
+        agentId: spec.defaultAgentId,
+        jobKind: spec.jobKind,
+        stream,
+        payload,
+        continuationDepth: parseContinuationDepth(payload.continuationDepth),
+      })
+      : undefined;
     const runnerResult = await spec.runFn({
       ...payload,
       stream, runId, runStream, problem, config,
@@ -370,6 +384,7 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
       }),
       model: spec.model, promptHash: spec.promptHash, promptPath: spec.promptPath,
       apiReady, apiNote, control,
+      onIterationBudgetExhausted,
       broadcast: () => { sse.publish(spec.sseTopic, stream); sse.publish("receipt"); },
       ...(spec.extras ?? {}),
     });
@@ -385,7 +400,9 @@ let axiomGuildRunner: AgentRunner;
 let axiomSimpleRunner: AgentRunner;
 
 const writerRunner = createAgentRunner({
+  defaultAgentId: "writer",
   defaultStream: "agents/writer", sseTopic: "writer", sseTokenEvent: "writer-token",
+  jobKind: "writer.run",
   normalizeConfig: normalizeWriterConfig, runtime: writerRuntime,
   prompts: WRITER_PROMPTS, model: WRITER_MODEL,
   promptHash: WRITER_PROMPTS_HASH, promptPath: WRITER_PROMPTS_PATH,
@@ -428,34 +445,45 @@ const { service: factoryService } = createFactoryServiceRuntime({
 });
 const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService);
 const agentRunner = createAgentRunner({
+  defaultAgentId: "agent",
   defaultStream: "agents/agent", sseTopic: "agent", sseTokenEvent: "agent-token",
+  jobKind: "agent.run",
   normalizeConfig: normalizeAgentConfig, runtime: agentRuntime,
   prompts: AGENT_PROMPTS, model: AGENT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
   runFn: runAgent as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  autoContinueOnBudget: true,
   extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const infraRunner = createAgentRunner({
+  defaultAgentId: "infra",
   defaultStream: "agents/infra", sseTopic: "agent", sseTokenEvent: "agent-token",
+  jobKind: "infra.run",
   normalizeConfig: normalizeInfraConfig, runtime: agentRuntime,
   prompts: INFRA_PROMPTS, model: INFRA_MODEL,
   promptHash: INFRA_PROMPTS_HASH, promptPath: INFRA_PROMPTS_PATH,
   runFn: runInfra as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  autoContinueOnBudget: true,
   extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const axiomRunner = createAgentRunner({
+  defaultAgentId: "axiom",
   defaultStream: "agents/axiom", sseTopic: "agent", sseTokenEvent: "agent-token",
+  jobKind: "axiom.run",
   normalizeConfig: normalizeAxiomConfig, runtime: agentRuntime,
   prompts: AXIOM_PROMPTS, model: AXIOM_MODEL,
   promptHash: AXIOM_PROMPTS_HASH, promptPath: AXIOM_PROMPTS_PATH,
   runFn: runAxiom as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  autoContinueOnBudget: true,
   extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured },
 });
 
 const factoryRunner = createAgentRunner({
+  defaultAgentId: "factory",
   defaultStream: "agents/factory", sseTopic: "agent", sseTokenEvent: "agent-token",
+  jobKind: "factory.run",
   normalizeConfig: normalizeFactoryChatConfig, runtime: agentRuntime,
   prompts: AGENT_PROMPTS, model: AGENT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
@@ -914,7 +942,9 @@ const delegateAxiomForTheorem = async (input: {
 };
 
 theoremRunner = createAgentRunner({
+  defaultAgentId: "theorem",
   defaultStream: "agents/theorem", sseTopic: "theorem", sseTokenEvent: "theorem-token",
+  jobKind: "theorem.run",
   normalizeConfig: normalizeTheoremConfig, runtime: theoremRuntime,
   prompts: THEOREM_PROMPTS, model: THEOREM_MODEL,
   promptHash: THEOREM_PROMPTS_HASH, promptPath: THEOREM_PROMPTS_PATH,

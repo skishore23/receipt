@@ -36,6 +36,48 @@ Use the JSON output to inspect:
 - latest context-pack and memory-script paths
 - recent receipts and summaries
 
+## CLI-First Factory Control
+
+Use these when you need to mutate Factory state. Do not rely on `/factory` web forms for operator actions.
+
+- `receipt factory run --prompt "<objective prompt>"`
+- `receipt factory create --prompt "<objective prompt>"`
+- `receipt factory compose --objective <objectiveId> --prompt "<operator note>"`
+- `receipt factory react <objectiveId> --message "<operator note>"`
+- `receipt factory promote <objectiveId>`
+- `receipt factory cancel <objectiveId> --reason "<reason>"`
+- `receipt factory cleanup <objectiveId>`
+- `receipt factory archive <objectiveId>`
+- `receipt factory steer <jobId> --problem "<updated direction>"`
+- `receipt factory follow-up <jobId> --note "<extra context>"`
+- `receipt factory abort-job <jobId> --reason "<reason>"`
+
+## Codex Status Probe
+
+Use this only when the debugging question is about the Codex runtime or status plumbing itself, such as:
+
+- "Codex always shows failed"
+- "I never see queued or running"
+- "Is the problem in live status capture or just this objective?"
+
+Run an isolated probe first:
+
+- `receipt factory codex-probe --mode both --json --reply probe-ok`
+
+Useful variants:
+
+- `receipt factory codex-probe --mode queue --json --reply probe-ok`
+- `receipt factory codex-probe --mode direct --json --reply probe-ok`
+- `receipt factory codex-probe --mode both --reply probe-ok`
+
+Use the probe output to inspect:
+
+- whether direct Codex progress snapshots appear
+- whether the queue path moves through `queued`, `running`, and `completed`
+- the artifact paths for `last-message.txt`, `stdout.log`, and `stderr.log`
+
+Treat the probe as independent runtime evidence. It does not replace current-objective receipts when you are explaining why a specific task or candidate failed.
+
 ## Deeper Receipt Inspection
 
 When the Factory objective view is not enough, inspect the objective stream directly:

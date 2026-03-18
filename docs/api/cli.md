@@ -160,6 +160,56 @@ receipt memory commit factory/objectives/demo/tasks/task_01 --text "Need reconci
 receipt memory diff factory/objectives/demo --from-ts 1710000000000
 ```
 
+### receipt factory
+- Purpose: primary CLI-first operator surface for Factory workflows.
+- Notes:
+  - `receipt factory` with no subcommand opens the board/TUI when interactive, or prints the board snapshot with `--json`.
+  - `/factory` web pages are inspect-only; create/react/job-control flows should use these CLI commands instead.
+- Subcommands:
+  - `init` prepares `.receipt/config.json`.
+  - `run` creates a new objective and stays attached until terminal/manual-promotion state.
+  - `create` creates a tracked objective and returns immediately.
+  - `compose` creates a new objective, or with `--objective <id>` adds a note and reacts the existing objective.
+  - `watch` opens or prints a selected objective.
+  - `inspect` prints a selected objective panel.
+  - `resume` reacts an objective and stays attached until terminal/manual-promotion state.
+  - `react`, `promote`, `cancel`, `cleanup`, `archive` mutate an objective once and return structured output.
+  - `steer`, `follow-up`, `abort-job` queue commands for a Factory-visible job.
+- JSON output:
+  - objective mutations return `{ ok, kind: "objective", action, objectiveId, objective, note? }`
+  - job mutations return `{ ok, kind: "job", action, jobId, job, commandId }`
+- Examples:
+```bash
+receipt factory create --prompt "Plan a CLI-first Factory migration"
+receipt factory compose --objective objective_demo --prompt "Tighten the next pass and keep receipts concise."
+receipt factory react objective_demo --message "Advance using the latest operator note."
+receipt factory steer job_demo --problem "Retarget this run to the live-output bug."
+receipt factory follow-up job_demo --note "Keep the receipt links stable."
+receipt factory abort-job job_demo --reason "cancel stale run"
+```
+
+### receipt factory codex-probe
+- Purpose: run an isolated Codex status probe through the real Factory Codex runtime, so you can inspect direct progress capture and queue-integrated status transitions without touching existing Factory jobs.
+- Notes:
+  - does not require `receipt factory init`.
+  - uses an isolated probe data dir under `.receipt/data/probes/<probe-id>` by default.
+- Flags:
+  - `--mode direct|queue|both` (default `both`).
+  - `--reply <text>` (used to build the default safe prompt).
+  - `--prompt <text>` (overrides the default prompt).
+  - `--timeout-ms <n>` (default `120000`, clamped to `30000..900000`).
+  - `--poll-ms <n>` (default `250`, clamped to `50..10000`).
+  - `--probe-dir <path>` (optional custom isolated data dir).
+  - `--repo-root <path>` (optional repo root override).
+  - `--json` (optional structured output).
+- Output:
+  - text mode: direct and/or queue snapshot timeline plus artifact file paths.
+  - json mode: `{ ok, mode, prompt, repoRoot, dataDir, codexBin, timeoutMs, pollMs, direct?, queue? }`.
+- Example:
+```bash
+receipt factory codex-probe --mode both --reply status-ok
+```
+
 ## Resolution Rules
 - `run-id|stream` arguments:
   - if value contains `/`, treated as stream directly.

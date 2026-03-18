@@ -95,6 +95,43 @@ const createCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
+const createCodexReplyStub = async (delayMs = 1_100): Promise<string> => {
+  const dir = await createTempDir("receipt-factory-cli-codex-reply");
+  const nodeBody = [
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "(async () => {",
+    "  const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "  if (!lastMessagePath) throw new Error('codex reply stub missing required args');",
+    "  const prompt = await readAll();",
+    "  const match = prompt.match(/Reply with exactly:\\s*(.+)/i);",
+    "  const reply = match ? match[1].split(/\\r?\\n/)[0].trim() : 'reply-missing';",
+    "  process.stdout.write('stub-start\\n');",
+    "  fs.writeFileSync(lastMessagePath, 'stub running\\n', 'utf8');",
+    `  await sleep(${delayMs});`,
+    "  fs.writeFileSync(lastMessagePath, `${reply}\\n`, 'utf8');",
+    "  process.stdout.write(`${reply}\\n`);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  if (process.platform === "win32") {
+    const jsPath = path.join(dir, "codex-reply-stub.js");
+    const cmdPath = path.join(dir, "codex-reply-stub.cmd");
+    await fs.writeFile(jsPath, nodeBody, "utf-8");
+    await fs.writeFile(cmdPath, `@echo off\r\n"${BUN.replace(/\//g, "\\")}" "%~dp0\\codex-reply-stub.js" %*\r\n`, "utf-8");
+    return cmdPath;
+  }
+  const scriptPath = path.join(dir, "codex-reply-stub");
+  await fs.writeFile(scriptPath, `#!/usr/bin/env bun\n${nodeBody}`, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
 const runCli = (args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> =>
   new Promise((resolve) => {
     const child = spawn(BUN, [CLI, ...args], {
@@ -168,6 +205,55 @@ test("factory runtime config: repo default data dir is .receipt/data before init
   expect(resolved.configPath).toBeUndefined();
 }, 120_000);
 
+test("factory cli: codex-probe runs direct and queue status probes without init", async () => {
+  const repoDir = await createRepo();
+  const codexStub = await createCodexReplyStub();
+  const probe = await runCli([
+    "factory",
+    "codex-probe",
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--mode",
+    "both",
+    "--reply",
+    "probe-ok",
+    "--timeout-ms",
+    "30000",
+    "--poll-ms",
+    "100",
+  ], {
+    RECEIPT_CODEX_BIN: codexStub,
+  });
+  expect(probe.code).toBe(0);
+  const payload = JSON.parse(probe.stdout) as {
+    readonly ok: boolean;
+    readonly dataDir: string;
+    readonly direct?: {
+      readonly finalStatus: string;
+      readonly snapshots: ReadonlyArray<{ readonly status: string }>;
+      readonly artifacts: { readonly lastMessagePath: string };
+    };
+    readonly queue?: {
+      readonly finalStatus: string;
+      readonly snapshots: ReadonlyArray<{ readonly status: string }>;
+      readonly artifacts: { readonly lastMessagePath: string };
+    };
+  };
+  expect(payload.ok).toBe(true);
+  expect(payload.dataDir).toContain(path.join(".receipt", "data", "probes"));
+  expect(payload.direct?.finalStatus).toBe("completed");
+  expect(payload.queue?.finalStatus).toBe("completed");
+  expect(payload.direct?.snapshots.some((snapshot) => snapshot.status === "running")).toBe(true);
+  expect(payload.queue?.snapshots.some((snapshot) => snapshot.status === "queued")).toBe(true);
+  expect(payload.queue?.snapshots.some((snapshot) => snapshot.status === "completed")).toBe(true);
+
+  const directLastMessage = await fs.readFile(payload.direct!.artifacts.lastMessagePath, "utf-8");
+  const queueLastMessage = await fs.readFile(payload.queue!.artifacts.lastMessagePath, "utf-8");
+  expect(directLastMessage.trim()).toBe("probe-ok");
+  expect(queueLastMessage.trim()).toBe("probe-ok");
+}, 120_000);
+
 test("factory cli: run promotes changes and inspect exposes debug data", async () => {
   const repoDir = await createRepo();
   const codexStub = await createCodexStub();
@@ -229,6 +315,192 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
   expect(inspectPayload.data.lastJobs.length >= 1).toBeTruthy();
 }, 120_000);
 
+test("factory cli: create, compose, and react expose structured mutation results", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const created = await runCli([
+    "factory",
+    "create",
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--title",
+    "CLI-first objective",
+    "--prompt",
+    "Create a CLI-first Factory objective.",
+  ]);
+  expect(created.code).toBe(0);
+  const createdPayload = JSON.parse(created.stdout) as {
+    readonly ok: boolean;
+    readonly kind: string;
+    readonly action: string;
+    readonly objectiveId: string;
+    readonly objective: {
+      readonly objectiveId: string;
+      readonly title: string;
+      readonly recentReceipts: ReadonlyArray<{ readonly type: string }>;
+    };
+  };
+  expect(createdPayload.ok).toBe(true);
+  expect(createdPayload.kind).toBe("objective");
+  expect(createdPayload.action).toBe("create");
+  expect(createdPayload.objectiveId).toBe(createdPayload.objective.objectiveId);
+  expect(createdPayload.objective.title).toBe("CLI-first objective");
+
+  const composed = await runCli([
+    "factory",
+    "compose",
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--objective",
+    createdPayload.objectiveId,
+    "--prompt",
+    "Tighten the next pass and keep receipts concise.",
+  ]);
+  expect(composed.code).toBe(0);
+  const composedPayload = JSON.parse(composed.stdout) as {
+    readonly action: string;
+    readonly note?: string;
+    readonly objective: {
+      readonly recentReceipts: ReadonlyArray<{ readonly type: string }>;
+    };
+  };
+  expect(composedPayload.action).toBe("compose");
+  expect(composedPayload.note).toMatch(/Tighten the next pass/);
+  expect(composedPayload.objective.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
+
+  const reacted = await runCli([
+    "factory",
+    "react",
+    createdPayload.objectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--message",
+    "Continue with the operator guidance.",
+  ]);
+  expect(reacted.code).toBe(0);
+  const reactedPayload = JSON.parse(reacted.stdout) as {
+    readonly action: string;
+    readonly note?: string;
+    readonly objectiveId: string;
+    readonly objective: {
+      readonly objectiveId: string;
+      readonly recentReceipts: ReadonlyArray<{ readonly type: string }>;
+    };
+  };
+  expect(reactedPayload.action).toBe("react");
+  expect(reactedPayload.note).toBe("Continue with the operator guidance.");
+  expect(reactedPayload.objectiveId).toBe(createdPayload.objectiveId);
+  expect(reactedPayload.objective.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
+}, 120_000);
+
+test("factory cli: steer, follow-up, and abort-job queue structured job commands", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const config = await loadFactoryConfig(repoDir);
+  expect(config).toBeDefined();
+  const runtime = createFactoryCliRuntime(config!);
+  try {
+    const job = await runtime.queue.enqueue({
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.codex.run",
+        objectiveId: "objective_demo",
+        stream: "factory-chat:test",
+        runId: "run_factory_cli_mutation",
+        prompt: "Seed the queue for CLI mutation tests.",
+      },
+      maxAttempts: 1,
+    });
+
+    const steer = await runCli([
+      "factory",
+      "steer",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--problem",
+      "Retarget the current job.",
+    ]);
+    expect(steer.code).toBe(0);
+    const steerPayload = JSON.parse(steer.stdout) as {
+      readonly kind: string;
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+    };
+    expect(steerPayload.kind).toBe("job");
+    expect(steerPayload.action).toBe("steer");
+    expect(steerPayload.jobId).toBe(job.id);
+    expect(steerPayload.commandId.length).toBeGreaterThan(0);
+
+    const followUp = await runCli([
+      "factory",
+      "follow-up",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--note",
+      "Keep the objective context attached.",
+    ]);
+    expect(followUp.code).toBe(0);
+    const followUpPayload = JSON.parse(followUp.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+    };
+    expect(followUpPayload.action).toBe("follow_up");
+    expect(followUpPayload.jobId).toBe(job.id);
+    expect(followUpPayload.commandId.length).toBeGreaterThan(0);
+
+    const abort = await runCli([
+      "factory",
+      "abort-job",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--reason",
+      "stop queued cli test job",
+    ]);
+    expect(abort.code).toBe(0);
+    const abortPayload = JSON.parse(abort.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly status: string;
+        readonly abortRequested?: boolean;
+        readonly commands: ReadonlyArray<{ readonly command: string }>;
+      };
+    };
+    expect(abortPayload.action).toBe("abort");
+    expect(abortPayload.jobId).toBe(job.id);
+    expect(abortPayload.commandId.length).toBeGreaterThan(0);
+    expect(abortPayload.job.status === "canceled" || abortPayload.job.abortRequested === true).toBe(true);
+
+    await runtime.queue.refresh();
+    const refreshed = await runtime.queue.getJob(job.id);
+    expect(refreshed).toBeDefined();
+    expect(refreshed?.commands.some((command) => command.command === "steer")).toBe(true);
+    expect(refreshed?.commands.some((command) => command.command === "follow_up")).toBe(true);
+    expect(refreshed?.commands.some((command) => command.command === "abort")).toBe(true);
+  } finally {
+    runtime.stop();
+  }
+}, 120_000);
+
 test("factory cli: composer parser handles plain text and slash commands", () => {
   expect(parseComposerDraft("Ship a better objective flow")).toEqual({
     ok: true,
@@ -256,6 +528,27 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
     ok: true,
     command: {
       type: "help",
+    },
+  });
+  expect(parseComposerDraft("/steer tighten the current plan", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "steer",
+      problem: "tighten the current plan",
+    },
+  });
+  expect(parseComposerDraft("/follow-up keep the logs attached", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "follow-up",
+      note: "keep the logs attached",
+    },
+  });
+  expect(parseComposerDraft("/abort-job stop the current worker", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "abort-job",
+      reason: "stop the current worker",
     },
   });
 });

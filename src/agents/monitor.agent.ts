@@ -29,6 +29,7 @@ type MonitorRouteDeps = {
 };
 
 type AgentRunStartIntent = {
+  readonly agentId: string;
   readonly stream: string;
   readonly runId: string;
   readonly problem: string;
@@ -169,8 +170,10 @@ const redirectResponse = (
   });
 
 const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): string => {
+  const currentStreamAgent = opts.stream.replace(/^agents\//, "");
+  const activeAgentId = MONITOR_AGENT_IDS.find((agentId) => agentId === currentStreamAgent) ?? "agent";
   const agentOptions = MONITOR_AGENT_IDS
-    .map((agentId) => `<option value="${escapeHtml(agentId)}"${agentId === "agent" ? " selected" : ""}>${escapeHtml(getAgentDisplayName(agentId))}</option>`)
+    .map((agentId) => `<option value="${escapeHtml(agentId)}"${agentId === activeAgentId ? " selected" : ""}>${escapeHtml(getAgentDisplayName(agentId))}</option>`)
     .join("");
   return `<!doctype html>
 <html>
@@ -769,6 +772,9 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
           <label>Task
             <textarea name="problem" placeholder="Describe the task..." required rows="3"></textarea>
           </label>
+          <label>Max iterations
+            <input name="maxIterations" type="number" min="1" max="80" value="20" />
+          </label>
           <button type="submit">Dispatch</button>
           <div id="monitor-submit-status" class="command-status"></div>
         </form>
@@ -1077,6 +1083,11 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
     }
     if (submitStatus) submitStatus.textContent = "Dispatching...";
     try {
+      const config = {};
+      const rawMaxIterations = Number(formData.get("maxIterations"));
+      if (Number.isFinite(rawMaxIterations)) {
+        config.maxIterations = Math.max(1, Math.min(Math.floor(rawMaxIterations), 80));
+      }
       const res = await fetch("/agents/" + encodeURIComponent(String(agentId)) + "/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1084,6 +1095,7 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
           kind: agentId + ".run",
           agentName: submitAgent instanceof HTMLSelectElement ? submitAgent.selectedOptions[0]?.textContent?.trim() : undefined,
           problem: String(problem).trim(),
+          ...(Object.keys(config).length > 0 ? { config } : {}),
         }),
       });
       const body = await res.json();
@@ -1181,19 +1193,19 @@ const agentShell = (opts: { stream: string; runId?: string; jobId?: string }): s
 export const translateAgentRunStartIntent = (
   intent: AgentRunStartIntent
 ): ReadonlyArray<RuntimeOp<AgentCmd>> => {
-  const queueJobId = `agent_${intent.runId}_${Date.now().toString(36)}`;
+  const queueJobId = `${intent.agentId}_${intent.runId}_${Date.now().toString(36)}`;
   return [
     {
       type: "enqueue_job",
       job: {
         jobId: queueJobId,
-        agentId: "agent",
+        agentId: intent.agentId,
         lane: "collect",
-        sessionKey: `agent:${intent.stream}`,
+        sessionKey: `${intent.agentId}:${intent.stream}`,
         singletonMode: "cancel",
         maxAttempts: 2,
         payload: {
-          kind: "agent.run",
+          kind: `${intent.agentId}.run`,
           stream: intent.stream,
           runId: intent.runId,
           problem: intent.problem,
@@ -1285,25 +1297,30 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
           ? Math.max(1, Math.min(Math.floor(limitRaw), 240))
           : 80;
         const jobs = await listJobs({ status, limit });
-        const selected = (
+        let selected = (
           selectedParam && jobs.some((job) => job.id === selectedParam)
             ? selectedParam
             : ""
         );
+        const selectedJob = jobs.find((job) => job.id === selected);
+        const selectedFollowUpJobId = selectedJob ? readJobFollowUpMeta(selectedJob).followUpJobId : undefined;
+        if (selectedFollowUpJobId && jobs.some((job) => job.id === selectedFollowUpJobId)) {
+          selected = selectedFollowUpJobId;
+        }
         if (jobs.length === 0) {
           return html(`<div class="jobs-wrap" data-selected-job-id=""><p class="small muted">No jobs enqueued yet.</p></div>`);
         }
         const activeCount = jobs.filter((job) => !TERMINAL_JOB_STATUS.has(job.status)).length;
         const terminalCount = jobs.length - activeCount;
-        const selectedJob = jobs.find((job) => job.id === selected);
+        const selectedActiveJob = jobs.find((job) => job.id === selected);
         const selectedRun = (
-          selectedJob && typeof selectedJob.payload.runId === "string"
-            ? selectedJob.payload.runId
+          selectedActiveJob && typeof selectedActiveJob.payload.runId === "string"
+            ? selectedActiveJob.payload.runId
             : ""
         );
         const selectedStream = (
-          selectedJob && typeof selectedJob.payload.stream === "string"
-            ? selectedJob.payload.stream
+          selectedActiveJob && typeof selectedActiveJob.payload.stream === "string"
+            ? selectedActiveJob.payload.stream
             : ""
         );
         const rows = jobs.map((job) => {
@@ -1536,14 +1553,16 @@ export const createMonitorRoute = (deps: MonitorRouteDeps): AgentRouteModule => 
       };
 
       const runHandler = async (c: Context) => {
-        const stream = c.req.query("stream") ?? "agents/agent";
         const formRaw = toFormRecord(await c.req.parseBody());
+        const agentId = formRaw.agentId?.trim() || "agent";
+        const stream = c.req.query("stream") ?? `agents/${agentId}`;
         const problem = formRaw.problem?.trim() ?? "";
         if (!problem) return text(400, "problem required");
         const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const config = parseAgentConfig(formRaw);
 
         const ops = translateAgentRunStartIntent({
+          agentId,
           stream,
           runId,
           problem,

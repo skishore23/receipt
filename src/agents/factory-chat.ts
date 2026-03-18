@@ -80,6 +80,12 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Tool specs:",
   "{{tool_help}}",
   "",
+  "For final answers to the user:",
+  "- write plain language, not raw JSON",
+  "- keep it concise and operator-facing",
+  "- prefer the words Skill, Chat, and Work",
+  "- mention objective, run, and job only when needed for debugging or inspection",
+  "",
   "Respond with JSON only, no markdown. Always include every field in the action object:",
   "{",
   "  \"thought\": \"short reasoning\",",
@@ -298,11 +304,11 @@ const codexJobPriority = (
 const buildActiveChildWaitingMessage = (jobs: ReadonlyArray<QueueJob>): string => {
   const snapshots = jobs.map((job) => normalizeJobSnapshot(job));
   const primary = snapshots[0];
-  if (!primary) return "A child job is still running. Live updates will continue in this thread.";
+  if (!primary) return "A child job is still running. Live updates will continue in this project chat.";
   const summary = asString(primary.summary) ?? "Child work is still running.";
   const lines = [
     `Child work is still running as ${asString(primary.jobId) ?? "unknown job"} (${asString(primary.status) ?? "running"}).`,
-    "Live updates will continue in this thread automatically.",
+    "Live updates will continue in this project chat automatically.",
     "",
     `Latest child summary: ${summary}`,
   ];
@@ -955,7 +961,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         continuationDepth: continuationDepth + 1,
       },
     });
-    const summary = `Reached the current ${config.maxIterations}-step slice. Continuing automatically in this thread as ${nextRunId} with a ${nextMaxIterations}-step budget.`;
+    const summary = `Reached the current ${config.maxIterations}-step slice. Continuing automatically in this project chat as ${nextRunId} with a ${nextMaxIterations}-step budget.`;
     return {
       finalText: `${summary}\n\nLive updates will keep appearing here.`,
       note: `continued automatically as ${nextRunId}`,
@@ -1025,13 +1031,13 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     extraToolSpecs: {
       "agent.delegate": "{\"agentId\": string, \"task\": string, \"config\"?: object} — Queue a Receipt-native subagent and return its live job handle immediately.",
       "agent.status": "{\"jobId\": string} — Inspect a queued or running child job and return its latest normalized state. Do not pass the current factory job id.",
-      "jobs.list": "{\"limit\"?: number, \"status\"?: string, \"includeCompleted\"?: boolean} — List recent jobs related to the current Factory profile thread.",
-      "codex.status": "{\"jobId\"?: string, \"limit\"?: number, \"includeCompleted\"?: boolean} — Inspect live Codex work for the current run, objective, or profile thread. With jobId, inspect that Codex child directly.",
+      "jobs.list": "{\"limit\"?: number, \"status\"?: string, \"includeCompleted\"?: boolean} — List recent jobs related to the current Factory skill chat.",
+      "codex.status": "{\"jobId\"?: string, \"limit\"?: number, \"includeCompleted\"?: boolean} — Inspect live Codex activity for the current run, project, or skill chat. With jobId, inspect that Codex child directly.",
       "job.control": "{\"jobId\": string, \"command\": \"steer\"|\"follow_up\"|\"abort\", \"problem\"?: string, \"config\"?: object, \"note\"?: string, \"reason\"?: string} — Queue a steer, follow-up, or abort command for a running child job. Do not pass the current factory job id.",
       "codex.run": "{\"prompt\": string, \"timeoutMs\"?: number} — Queue a focused Codex run against the repo and return its live child job handle immediately. Reuse that returned jobId for agent.status/job.control.",
-      "factory.dispatch": "{\"action\"?: \"create\"|\"react\"|\"promote\"|\"cancel\"|\"cleanup\"|\"archive\", \"objectiveId\"?: string, \"prompt\"?: string, \"title\"?: string, \"baseHash\"?: string, \"checks\"?: string[], \"channel\"?: string, \"reason\"?: string} — Create or operate on a Factory objective. 'react' means re-evaluate the objective and dispatch the next eligible work.",
-      "factory.status": "{\"objectiveId\": string} — Inspect an existing Factory objective and return a concise status summary.",
-      "profile.handoff": "{\"profileId\": string, \"reason\"?: string} — Hand off the conversation to another Factory profile thread.",
+      "factory.dispatch": "{\"action\"?: \"create\"|\"react\"|\"promote\"|\"cancel\"|\"cleanup\"|\"archive\", \"objectiveId\"?: string, \"prompt\"?: string, \"title\"?: string, \"baseHash\"?: string, \"checks\"?: string[], \"channel\"?: string, \"reason\"?: string} — Create or operate on a tracked Factory project. 'react' means re-evaluate the project and dispatch the next eligible step.",
+      "factory.status": "{\"objectiveId\": string} — Inspect a tracked Factory project and return a concise status summary.",
+      "profile.handoff": "{\"profileId\": string, \"reason\"?: string} — Hand off the conversation to another Factory skill chat.",
       ...(input.extraToolSpecs ?? {}),
     },
     extraTools,

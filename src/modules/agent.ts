@@ -269,6 +269,15 @@ export type AgentState = {
     readonly handoffTarget?: string;
     readonly updatedAt: number;
   };
+  readonly continuation?: {
+    readonly nextRunId: string;
+    readonly nextJobId: string;
+    readonly previousMaxIterations: number;
+    readonly nextMaxIterations: number;
+    readonly continuationDepth: number;
+    readonly summary: string;
+    readonly updatedAt: number;
+  };
 };
 
 export const initial: AgentState = {
@@ -356,8 +365,21 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     case "response.finalized":
       return {
         ...state,
-        status: "completed",
+        status: state.status === "failed" ? "failed" : "completed",
         finalResponse: event.content,
+      };
+    case "run.continued":
+      return {
+        ...state,
+        continuation: {
+          nextRunId: event.nextRunId,
+          nextJobId: event.nextJobId,
+          previousMaxIterations: event.previousMaxIterations,
+          nextMaxIterations: event.nextMaxIterations,
+          continuationDepth: event.continuationDepth,
+          summary: event.summary,
+          updatedAt: ts,
+        },
       };
     case "profile.selected":
       return {
@@ -396,7 +418,6 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     case "tool.observed":
     case "memory.slice":
     case "validation.report":
-    case "run.continued":
     case "context.pruned":
     case "context.compacted":
     case "overflow.recovered":

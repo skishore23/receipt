@@ -83,6 +83,194 @@ const findLatestFactoryJob = async (
   return match.payload as FactoryTaskJobPayload;
 };
 
+const findLatestObjectiveJob = async (
+  queue: ReturnType<typeof jsonlQueue>,
+  objectiveId: string,
+  kind: string,
+) => {
+  const jobs = await queue.listJobs({ limit: 80 });
+  return jobs
+    .filter((job) => {
+      const payload = job.payload as { readonly kind?: string; readonly objectiveId?: string };
+      return payload.kind === kind && payload.objectiveId === objectiveId;
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+};
+
+const countObjectiveControlJobs = async (
+  queue: ReturnType<typeof jsonlQueue>,
+  objectiveId: string,
+): Promise<number> => {
+  const jobs = await queue.listJobs({ limit: 80 });
+  return jobs.filter((job) => {
+    const payload = job.payload as {
+      readonly kind?: string;
+      readonly objectiveId?: string;
+    };
+    return payload.kind === "factory.objective.control" && payload.objectiveId === objectiveId;
+  }).length;
+};
+
+test("factory scheduling: queued objectives preserve FIFO order without invoking llm decomposition", async () => {
+  const dataDir = await createTempDir("receipt-factory-scheduling-fifo");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  let llmCalls = 0;
+  const llmStructured = async <Schema extends ZodTypeAny>(opts: {
+    readonly schemaName: string;
+    readonly schema: Schema;
+  }): Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }> => {
+    llmCalls += 1;
+    const payload = {
+      tasks: [{
+        title: "Should not run during queue admission",
+        prompt: "This decomposition path should stay untouched in this test.",
+        workerType: "codex",
+        dependsOn: [],
+      }],
+    };
+    return {
+      parsed: opts.schema.parse(payload),
+      raw: JSON.stringify(payload),
+    };
+  };
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    llmStructured,
+    repoRoot,
+  });
+
+  const first = await service.createObjective({
+    title: "First queued scheduling objective",
+    prompt: "Keep the repo slot and do not start decomposition yet.",
+    checks: ["git status --short"],
+  });
+  const second = await service.createObjective({
+    title: "Second queued scheduling objective",
+    prompt: "Wait behind the first objective in FIFO order.",
+    checks: ["git status --short"],
+  });
+  const third = await service.createObjective({
+    title: "Third queued scheduling objective",
+    prompt: "Wait behind the second objective in FIFO order.",
+    checks: ["git status --short"],
+  });
+
+  expect(llmCalls).toBe(0);
+  expect(first.scheduler.slotState).toBe("active");
+  expect(second.scheduler.slotState).toBe("queued");
+  expect(second.scheduler.queuePosition).toBe(1);
+  expect(second.phase).toBe("waiting_for_slot");
+  expect(second.nextAction).toBe("Waiting for the repo execution slot (1 in queue).");
+  expect(third.scheduler.slotState).toBe("queued");
+  expect(third.scheduler.queuePosition).toBe(2);
+  expect(third.phase).toBe("waiting_for_slot");
+  expect(third.nextAction).toBe("Waiting for the repo execution slot (2 in queue).");
+}, 120_000);
+
+test("factory scheduling: archiving an active objective cancels queued task jobs and admits the next objective immediately", async () => {
+  const dataDir = await createTempDir("receipt-factory-archive-rebalance");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    repoRoot,
+  });
+
+  const first = await service.createObjective({
+    title: "Archive source objective",
+    prompt: "Dispatch a task so archive cleanup has a live queue job to cancel.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, first.objectiveId);
+
+  const queuedTaskJob = await findLatestObjectiveJob(queue, first.objectiveId, "factory.task.run");
+  expect(queuedTaskJob).toBeTruthy();
+  expect(queuedTaskJob?.status).toBe("queued");
+
+  const second = await service.createObjective({
+    title: "Queued follow-up objective",
+    prompt: "Wait for the first objective to release the repo execution slot.",
+    checks: ["git status --short"],
+  });
+  expect(second.scheduler.slotState).toBe("queued");
+  expect(second.scheduler.queuePosition).toBe(1);
+
+  await service.archiveObjective(first.objectiveId);
+
+  const canceledTaskJob = queuedTaskJob ? await queue.getJob(queuedTaskJob.id) : undefined;
+  expect(canceledTaskJob?.status).toBe("canceled");
+
+  const archived = await service.getObjective(first.objectiveId);
+  expect(archived.archivedAt).toBeTruthy();
+  expect(archived.recentReceipts.some((receipt) =>
+    receipt.type === "objective.slot.released" && /archived/i.test(receipt.summary)
+  )).toBe(true);
+
+  const admitted = await service.getObjective(second.objectiveId);
+  expect(admitted.scheduler.slotState).toBe("active");
+  expect(admitted.phase).toBe("preparing_repo");
+  const admittedControlJob = await findLatestObjectiveJob(queue, second.objectiveId, "factory.objective.control");
+  const admittedPayload = admittedControlJob?.payload as {
+    readonly kind?: string;
+    readonly reason?: string;
+  } | undefined;
+  expect(admittedPayload?.reason).toBe("admitted");
+}, 120_000);
+
+test("factory scheduling: resume ignores archived objectives instead of re-enqueueing control work for them", async () => {
+  const dataDir = await createTempDir("receipt-factory-archive-resume");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    repoRoot,
+  });
+
+  const first = await service.createObjective({
+    title: "Archived resume source objective",
+    prompt: "Archive this objective after it dispatches once.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, first.objectiveId);
+
+  const second = await service.createObjective({
+    title: "Resume target objective",
+    prompt: "This objective should inherit the slot after archive.",
+    checks: ["git status --short"],
+  });
+  expect(second.scheduler.slotState).toBe("queued");
+
+  await service.archiveObjective(first.objectiveId);
+  const archivedControlJobsBefore = await countObjectiveControlJobs(queue, first.objectiveId);
+
+  await service.resumeObjectives();
+
+  const archivedControlJobsAfter = await countObjectiveControlJobs(queue, first.objectiveId);
+  expect(archivedControlJobsAfter).toBe(archivedControlJobsBefore);
+
+  const active = await service.getObjective(second.objectiveId);
+  expect(active.scheduler.slotState).toBe("active");
+}, 120_000);
+
 test("factory runtime: blocked tasks emit split/supersede mutation receipts at runtime", async () => {
   const dataDir = await createTempDir("receipt-factory-mutation");
   const repoRoot = await createSourceRepo();

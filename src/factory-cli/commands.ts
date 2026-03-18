@@ -8,6 +8,19 @@ import type { Flags } from "../cli.types.js";
 import type { FactoryObjectivePolicy } from "../modules/factory.js";
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory.js";
 import { bunWhich, resolveBunRuntime } from "../lib/runtime-paths.js";
+import {
+  abortJobMutation,
+  archiveObjectiveMutation,
+  cancelObjectiveMutation,
+  cleanupObjectiveMutation,
+  composeObjectiveMutation,
+  createObjectiveMutation,
+  followUpJobMutation,
+  promoteObjectiveMutation,
+  reactObjectiveMutation,
+  steerJobMutation,
+  type FactoryMutationResult,
+} from "./actions.js";
 import { FactoryTerminalApp, type FactoryAppExit } from "./app.js";
 import {
   detectGitRoot,
@@ -15,8 +28,10 @@ import {
   type FactoryCliStoredConfig,
   isInteractiveTerminal,
   loadFactoryConfig,
+  resolveFactoryRuntimeConfig,
   writeFactoryConfig,
 } from "./config.js";
+import { renderCodexProbeText, runFactoryCodexProbe, type CodexProbeMode } from "./codex-probe.js";
 import { renderBoardText, renderObjectiveHeader, renderObjectivePanelText } from "./format.js";
 import { createFactoryCliRuntime } from "./runtime.js";
 import { terminalTheme } from "./theme.js";
@@ -24,6 +39,22 @@ import type { FactoryObjectivePanel } from "./view-model.js";
 
 const parseBooleanFlag = (flags: Flags, key: string): boolean =>
   flags[key] === true || flags[key] === "true";
+
+const parseIntegerFlag = (
+  flags: Flags,
+  key: string,
+  fallback: number,
+  input: {
+    readonly min: number;
+    readonly max: number;
+  },
+): number => {
+  const value = asString(flags, key);
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`--${key} must be a number`);
+  return Math.max(input.min, Math.min(Math.floor(parsed), input.max));
+};
 
 const asString = (flags: Flags, key: string): string | undefined => {
   const value = flags[key];
@@ -36,6 +67,17 @@ const asStrings = (flags: Flags, key: string): ReadonlyArray<string> => {
   if (Array.isArray(value)) return value;
   if (typeof value === "string") return [value];
   return [];
+};
+
+const parseJsonObjectFlag = (value: string | undefined, label: string): Record<string, unknown> | undefined => {
+  if (!value?.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error(`${label} must be valid JSON`);
+  }
+  throw new Error(`${label} must be a JSON object`);
 };
 
 const deriveTitle = (title: string | undefined, prompt: string): string => {
@@ -163,6 +205,45 @@ const parsePanel = (value: string | undefined): FactoryObjectivePanel => {
 
 const printJson = (value: unknown): void => {
   console.log(JSON.stringify(value, null, 2));
+};
+
+const printMutationResult = (
+  result: FactoryMutationResult,
+  asJson: boolean,
+): void => {
+  if (asJson) {
+    printJson({
+      ok: true,
+      kind: result.kind,
+      action: result.action,
+      ...(result.kind === "objective"
+        ? {
+            objectiveId: result.objectiveId,
+            objective: result.objective,
+            ...(result.note ? { note: result.note } : {}),
+          }
+        : {
+            jobId: result.jobId,
+            job: result.job,
+            commandId: result.commandId,
+          }),
+    });
+    return;
+  }
+  if (result.kind === "objective") {
+    const verb = result.action === "compose" && result.note ? "reacted" : result.action;
+    console.log(`${verb} ${result.objectiveId}`);
+    return;
+  }
+  const label = result.action === "follow_up" ? "follow-up" : result.action === "abort" ? "abort" : "steer";
+  console.log(`${label} queued for ${result.jobId}`);
+};
+
+const parseCodexProbeMode = (value: string | undefined): CodexProbeMode => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return "both";
+  if (normalized === "direct" || normalized === "queue" || normalized === "both") return normalized;
+  throw new Error(`Unsupported codex probe mode '${value}'. Use direct, queue, or both.`);
 };
 
 const ensurePromptValue = async (opts: {
@@ -439,6 +520,40 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
     return;
   }
 
+  if (subcommand === "codex-probe") {
+    const runtimeConfig = await resolveFactoryRuntimeConfig(cwd, asString(flags, "repo-root"));
+    const mode = parseCodexProbeMode(asString(flags, "mode"));
+    const timeoutMs = parseIntegerFlag(flags, "timeout-ms", 120_000, { min: 30_000, max: 900_000 });
+    const pollMs = parseIntegerFlag(flags, "poll-ms", 250, { min: 50, max: 10_000 });
+    const reply = asString(flags, "reply") ?? `receipt-probe-${Date.now().toString(36)}`;
+    const prompt = asString(flags, "prompt") ?? [
+      `Reply with exactly: ${reply}`,
+      "Do not modify any files.",
+    ].join("\n");
+    const probeId = `codex-probe-${Date.now().toString(36)}`;
+    const probeDataDir = path.resolve(
+      asString(flags, "probe-dir") ?? path.join(runtimeConfig.dataDir, "probes", probeId),
+    );
+    const report = await runFactoryCodexProbe({
+      configPath: runtimeConfig.configPath ?? path.join(runtimeConfig.repoRoot, ".receipt", "config.json"),
+      repoRoot: runtimeConfig.repoRoot,
+      dataDir: runtimeConfig.dataDir,
+      codexBin: runtimeConfig.codexBin,
+      defaultChecks: [],
+      defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    }, {
+      mode,
+      prompt,
+      dataDir: probeDataDir,
+      pollMs,
+      timeoutMs,
+    });
+    if (json) printJson(report);
+    else console.log(renderCodexProbeText(report));
+    if (!report.ok) process.exitCode = 1;
+    return;
+  }
+
   const config = await ensureFactoryConfig(cwd, flags);
   const runtime = createFactoryCliRuntime(config, {
     onWorkerError: (error) => {
@@ -471,12 +586,14 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           await readPolicyFile(asString(flags, "policy-file")),
         );
         await runtime.start();
-        const created = await runtime.service.createObjective({
-          title: deriveTitle(asString(flags, "title"), prompt),
+        const created = await createObjectiveMutation(runtime, {
           prompt,
+          title: deriveTitle(asString(flags, "title"), prompt),
           baseHash: asString(flags, "base-hash"),
           checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          channel: asString(flags, "channel"),
           policy: policyOverride,
+          profileId: asString(flags, "profile"),
         });
         if (json || !isInteractiveTerminal()) {
           const result = await waitForObjectiveTerminal(runtime, created.objectiveId);
@@ -491,6 +608,47 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           exitOnTerminal: true,
         });
         process.exitCode = result.code;
+        return;
+      }
+      case "create": {
+        const prompt = asString(flags, "prompt") ?? asString(flags, "problem") ?? args.slice(1).join(" ").trim();
+        if (!prompt) throw new Error("factory create requires --prompt or trailing prompt text");
+        const explicitChecks = asStrings(flags, "check").flatMap(parseChecksInput);
+        const policyOverride = mergePolicy(
+          config.defaultPolicy,
+          await readPolicyFile(asString(flags, "policy-file")),
+        );
+        const result = await createObjectiveMutation(runtime, {
+          prompt,
+          title: deriveTitle(asString(flags, "title"), prompt),
+          baseHash: asString(flags, "base-hash"),
+          checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          channel: asString(flags, "channel"),
+          policy: policyOverride,
+          profileId: asString(flags, "profile"),
+        });
+        printMutationResult(result, json);
+        return;
+      }
+      case "compose": {
+        const prompt = asString(flags, "prompt") ?? asString(flags, "problem") ?? args.slice(1).join(" ").trim();
+        if (!prompt) throw new Error("factory compose requires --prompt or trailing prompt text");
+        const explicitChecks = asStrings(flags, "check").flatMap(parseChecksInput);
+        const policyOverride = mergePolicy(
+          config.defaultPolicy,
+          await readPolicyFile(asString(flags, "policy-file")),
+        );
+        const result = await composeObjectiveMutation(runtime, {
+          prompt,
+          objectiveId: asString(flags, "objective"),
+          title: deriveTitle(asString(flags, "title"), prompt),
+          baseHash: asString(flags, "base-hash"),
+          checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          channel: asString(flags, "channel"),
+          policy: policyOverride,
+          profileId: asString(flags, "profile"),
+        });
+        printMutationResult(result, json);
         return;
       }
       case "watch": {
@@ -520,7 +678,7 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory resume requires <objective-id>");
         await runtime.start();
-        await runtime.service.reactObjective(objectiveId);
+        await reactObjectiveMutation(runtime, { objectiveId });
         if (json || !isInteractiveTerminal()) {
           const result = await waitForObjectiveTerminal(runtime, objectiveId);
           await printObjectiveSnapshot(runtime, objectiveId, "overview", json);
@@ -536,36 +694,78 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         process.exitCode = result.code;
         return;
       }
+      case "react": {
+        const objectiveId = args[1];
+        if (!objectiveId) throw new Error("factory react requires <objective-id>");
+        const trailingMessage = args.slice(2).join(" ").trim();
+        const message = asString(flags, "message") ?? (trailingMessage || undefined);
+        const result = await reactObjectiveMutation(runtime, { objectiveId, message });
+        printMutationResult(result, json);
+        return;
+      }
       case "promote": {
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory promote requires <objective-id>");
-        const detail = await runtime.service.promoteObjective(objectiveId);
-        if (json) printJson({ objective: detail });
-        else console.log(`promoted ${objectiveId}`);
+        const result = await promoteObjectiveMutation(runtime, objectiveId);
+        printMutationResult(result, json);
         return;
       }
       case "cancel": {
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory cancel requires <objective-id>");
-        const detail = await runtime.service.cancelObjective(objectiveId, asString(flags, "reason") ?? "canceled from CLI");
-        if (json) printJson({ objective: detail });
-        else console.log(`canceled ${objectiveId}`);
+        const result = await cancelObjectiveMutation(runtime, {
+          objectiveId,
+          reason: asString(flags, "reason") ?? "canceled from CLI",
+        });
+        printMutationResult(result, json);
         return;
       }
       case "cleanup": {
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory cleanup requires <objective-id>");
-        const detail = await runtime.service.cleanupObjectiveWorkspaces(objectiveId);
-        if (json) printJson({ objective: detail });
-        else console.log(`cleaned workspaces for ${objectiveId}`);
+        const result = await cleanupObjectiveMutation(runtime, objectiveId);
+        printMutationResult(result, json);
         return;
       }
       case "archive": {
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory archive requires <objective-id>");
-        const detail = await runtime.service.archiveObjective(objectiveId);
-        if (json) printJson({ objective: detail });
-        else console.log(`archived ${objectiveId}`);
+        const result = await archiveObjectiveMutation(runtime, objectiveId);
+        printMutationResult(result, json);
+        return;
+      }
+      case "steer": {
+        const jobId = args[1];
+        if (!jobId) throw new Error("factory steer requires <job-id>");
+        const trailingProblem = args.slice(2).join(" ").trim();
+        const problem = asString(flags, "problem") ?? (trailingProblem || undefined);
+        const configOverride = parseJsonObjectFlag(asString(flags, "config"), "--config");
+        const result = await steerJobMutation(runtime, {
+          jobId,
+          problem,
+          config: configOverride,
+        });
+        printMutationResult(result, json);
+        return;
+      }
+      case "follow-up": {
+        const jobId = args[1];
+        if (!jobId) throw new Error("factory follow-up requires <job-id>");
+        const note = asString(flags, "note") ?? args.slice(2).join(" ").trim();
+        if (!note) throw new Error("factory follow-up requires --note or trailing note text");
+        const result = await followUpJobMutation(runtime, { jobId, note });
+        printMutationResult(result, json);
+        return;
+      }
+      case "abort-job": {
+        const jobId = args[1];
+        if (!jobId) throw new Error("factory abort-job requires <job-id>");
+        const trailingReason = args.slice(2).join(" ").trim();
+        const result = await abortJobMutation(runtime, {
+          jobId,
+          reason: asString(flags, "reason") ?? (trailingReason || undefined),
+        });
+        printMutationResult(result, json);
         return;
       }
       default:

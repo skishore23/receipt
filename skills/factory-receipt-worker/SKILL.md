@@ -15,6 +15,7 @@ Do this before making code or review claims:
 2. Read the current `.receipt/factory/*.context-pack.json`.
 3. Run the generated `.receipt/factory/*.memory.cjs` script for `context` and `objective`.
 4. Inspect the current objective with `receipt factory inspect <objectiveId> --json --panel debug` and `--panel receipts`.
+5. If the question is about whether Codex status capture itself is broken, reproduce it independently with `receipt factory codex-probe --mode both --json --reply probe-ok` before claiming the status pipeline is failing.
 
 ## Working Rules
 
@@ -25,6 +26,8 @@ Do this before making code or review claims:
 - Do not assume generated repo-profile skills outside the worktree are present or necessary.
 - When checks fail, inspect prior current-objective candidate history before calling a failure inherited.
 - If the evidence is incomplete, say so explicitly instead of guessing.
+- Use `receipt factory ...` for Factory mutations. Treat `/factory` web views as inspect-only.
+- Use `receipt factory codex-probe` only for Codex runtime/status debugging. Treat it as an isolated runtime probe, not as evidence about the current objective unless you tie it back to receipts or live job state.
 
 ## References
 

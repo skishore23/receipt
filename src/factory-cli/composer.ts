@@ -27,6 +27,18 @@ export type ComposerCommand =
     }
   | {
       readonly type: "archive";
+    }
+  | {
+      readonly type: "steer";
+      readonly problem?: string;
+    }
+  | {
+      readonly type: "follow-up";
+      readonly note?: string;
+    }
+  | {
+      readonly type: "abort-job";
+      readonly reason?: string;
     };
 
 export type ParsedComposerDraft =
@@ -132,6 +144,41 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
       return { ok: true, command: { type: "cleanup" } };
     case "archive":
       return { ok: true, command: { type: "archive" } };
+    case "steer":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before steering its active job." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "steer",
+          problem: payload || undefined,
+        },
+      };
+    case "follow-up":
+    case "followup":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before sending a follow-up note." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "follow-up",
+          note: payload || undefined,
+        },
+      };
+    case "abort-job":
+    case "abortjob":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before aborting its active job." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "abort-job",
+          reason: payload || undefined,
+        },
+      };
     default:
       return {
         ok: false,

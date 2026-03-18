@@ -33,6 +33,8 @@ Do not call a failure inherited when:
 - If the packet, receipts, and current-objective history show the change is good and the failed check is inherited, say that directly and cite the prior evidence source.
 - If the failure appears new or ambiguous, do not guess. Describe what is missing and what needs another pass.
 - Before asking for more work, verify that the worker actually queried prior candidate history instead of relying on the prompt or the latest check alone.
+- If the claim is that Codex status capture itself is broken, confirm with `receipt factory codex-probe` before attributing the problem to the current objective or candidate.
+- If you need to advance, steer, or cancel work during review, use the CLI (`receipt factory react|compose|steer|follow-up|abort-job`) instead of the inspect-only web views.
 
 ## Durable Notes
 

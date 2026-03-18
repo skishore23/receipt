@@ -285,6 +285,7 @@ test("framework routes: status parity for core endpoints", async () => {
     const monitorHtml = await monitorPage.text();
     expect(monitorHtml).toMatch(/General Agent/);
     expect(monitorHtml).toMatch(/Infrastructure Agent/);
+    expect(monitorHtml).toMatch(/name="maxIterations"/);
     expect(monitorHtml).toMatch(/Theorem Guild/);
     expect(monitorHtml).toMatch(/Proof Guild/);
     expect(monitorHtml).toMatch(/Axiom Simple/);

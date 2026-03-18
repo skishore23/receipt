@@ -9,7 +9,6 @@ const softPanelClass = "rounded-[24px] border border-white/10 bg-black/20 backdr
 const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500";
 const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4 break-words [overflow-wrap:anywhere]";
 const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
-const inputClass = "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-emerald-300/40 focus:bg-white/[0.06]";
 const railCardClass = `${softPanelClass} p-4`;
 const navPillClass = "inline-flex items-center rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.16em] transition";
 const FACTORY_CHAT_REFRESH_MS = 120;
@@ -127,6 +126,22 @@ const statPill = (label: string, value: string): string => `<div class="min-w-0 
   <div class="mt-1 break-words text-sm font-medium text-zinc-100 [overflow-wrap:anywhere]">${esc(value)}</div>
 </div>`;
 
+const renderCliActionCard = (input: {
+  readonly label: string;
+  readonly description: string;
+  readonly command: string;
+  readonly badgeClass?: string;
+}): string => `<div class="rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-4">
+    <span class="flex items-start justify-between gap-3">
+      <span class="min-w-0">
+        <span class="block text-sm font-semibold text-zinc-100">${esc(input.label)}</span>
+        <span class="mt-2 block text-sm leading-6 text-zinc-400">${esc(input.description)}</span>
+      </span>
+      <span class="${input.badgeClass ?? ghostButtonClass} shrink-0">CLI</span>
+    </span>
+    <code class="mt-3 block overflow-x-auto rounded-2xl border border-white/10 bg-black/25 px-3 py-3 text-[12px] leading-5 text-zinc-200 [overflow-wrap:anywhere]">${esc(input.command)}</code>
+  </div>`;
+
 const navPill = (input: {
   readonly href: string;
   readonly label: string;
@@ -136,6 +151,26 @@ const navPill = (input: {
     ? "border-sky-300/30 bg-sky-300/10 text-sky-100"
     : "border-white/10 bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]";
   return `<a class="${navPillClass} ${classes}" href="${esc(input.href)}">${esc(input.label)}</a>`;
+};
+
+const skillToolLabel = (tool: string): string => {
+  const normalized = tool.trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "codex.run") return "Codex";
+  if (normalized === "codex.status") return "Codex inspect";
+  if (normalized === "factory.dispatch") return "Project ops";
+  if (normalized === "factory.status") return "Project status";
+  if (normalized === "job.control") return "Steer";
+  if (normalized === "jobs.list") return "Jobs";
+  if (normalized === "agent.status") return "Inspect";
+  if (normalized === "agent.inspect") return "Trace";
+  if (normalized === "agent.delegate") return "Delegate";
+  if (normalized === "profile.handoff") return "Handoff";
+  if (normalized === "bash") return "Shell";
+  if (normalized === "grep") return "Search";
+  if (normalized === "read") return "Read";
+  if (normalized === "write") return "Edit";
+  return startCase(normalized);
 };
 
 const objectiveSummaryLine = (status: string, phase: string, slotState?: string): string =>
@@ -375,6 +410,50 @@ const renderFactoryChatClientScript = (): string => `
       return scroll instanceof HTMLElement ? scroll : null;
     };
 
+    const composerForm = function () {
+      const form = document.getElementById("factory-composer");
+      return form instanceof HTMLFormElement ? form : null;
+    };
+
+    const composerStatus = function () {
+      const node = document.getElementById("factory-composer-status");
+      return node instanceof HTMLElement ? node : null;
+    };
+
+    const composerSubmit = function () {
+      const button = document.getElementById("factory-composer-submit");
+      return button instanceof HTMLButtonElement ? button : null;
+    };
+
+    const setComposerStatus = function (message) {
+      const node = composerStatus();
+      if (!node) return;
+      if (!message) {
+        node.textContent = "";
+        node.classList.add("hidden");
+        return;
+      }
+      node.textContent = message;
+      node.classList.remove("hidden");
+    };
+
+    const setComposerBusy = function (busy) {
+      const input = chatInput();
+      const submit = composerSubmit();
+      if (input) input.disabled = busy;
+      if (submit) {
+        submit.disabled = busy;
+        submit.textContent = busy ? "Sending..." : "Send";
+      }
+    };
+
+    const autoResizeInput = function () {
+      const input = chatInput();
+      if (!input) return;
+      input.style.height = "0px";
+      input.style.height = Math.min(Math.max(input.scrollHeight, 132), 320) + "px";
+    };
+
     const isNearBottom = function () {
       const scroll = chatScroll();
       if (!scroll) return true;
@@ -401,12 +480,67 @@ const renderFactoryChatClientScript = (): string => `
       const input = chatInput();
       if (!input || !prompt) return;
       input.value = prompt;
+      autoResizeInput();
       input.focus();
       input.selectionStart = input.value.length;
       input.selectionEnd = input.value.length;
     });
 
     document.addEventListener("DOMContentLoaded", function () {
+      const input = chatInput();
+      if (input) {
+        input.addEventListener("input", autoResizeInput, { passive: true });
+        input.addEventListener("keydown", function (event) {
+          if (!event || !(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+          event.preventDefault();
+          const form = composerForm();
+          if (form) form.requestSubmit();
+        });
+        autoResizeInput();
+      }
+      const form = composerForm();
+      if (form) {
+        form.addEventListener("submit", async function (event) {
+          event.preventDefault();
+          const activeForm = composerForm();
+          if (!activeForm) return;
+          const activeInput = chatInput();
+          const payload = activeInput && activeInput.value ? activeInput.value.trim() : "";
+          if (!payload) {
+            setComposerStatus("Enter a chat message or slash command.");
+            return;
+          }
+          setComposerBusy(true);
+          setComposerStatus("");
+          try {
+            const response = await window.fetch(activeForm.action, {
+              method: activeForm.method || "POST",
+              body: new window.FormData(activeForm),
+              headers: {
+                Accept: "application/json",
+              },
+              credentials: "same-origin",
+            });
+            const contentType = response.headers.get("content-type") || "";
+            const body = contentType.indexOf("application/json") >= 0
+              ? await response.json().catch(function () { return {}; })
+              : { error: await response.text().catch(function () { return "Request failed."; }) };
+            if (!response.ok) {
+              setComposerStatus(typeof body.error === "string" && body.error.trim() ? body.error : "Request failed.");
+              return;
+            }
+            if (typeof body.location === "string" && body.location.trim()) {
+              window.location.assign(body.location);
+              return;
+            }
+            window.location.reload();
+          } catch (error) {
+            setComposerStatus(error instanceof Error ? error.message : "Request failed.");
+          } finally {
+            setComposerBusy(false);
+          }
+        });
+      }
       const scroll = chatScroll();
       if (scroll) {
         scroll.addEventListener("scroll", function () {
@@ -432,24 +566,25 @@ const renderFactoryChatClientScript = (): string => `
 
 const renderJobControls = (jobId: string, running?: boolean, abortRequested?: boolean): string => {
   if (!running) return "";
-  const encodedJobId = encodeURIComponent(jobId);
   return `<div class="mt-4 grid gap-3">
-    <form class="grid gap-2" action="/factory/job/${encodedJobId}/steer" method="post" hx-post="/factory/job/${encodedJobId}/steer" hx-swap="none">
-      <input class="${inputClass}" type="text" name="problem" placeholder="Steer this job" />
-      <div class="flex flex-wrap gap-2">
-        <button class="${ghostButtonClass}" type="submit">Steer</button>
-      </div>
-    </form>
-    <form class="grid gap-2" action="/factory/job/${encodedJobId}/follow-up" method="post" hx-post="/factory/job/${encodedJobId}/follow-up" hx-swap="none">
-      <input class="${inputClass}" type="text" name="note" placeholder="Add follow-up context" />
-      <div class="flex flex-wrap gap-2">
-        <button class="${ghostButtonClass}" type="submit">Add Note</button>
-      </div>
-    </form>
-    ${abortRequested ? `<div class="rounded-[20px] border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm leading-6 text-amber-50">Abort requested. Waiting for the worker to stop cleanly.</div>` : `<form action="/factory/job/${encodedJobId}/abort" method="post" hx-post="/factory/job/${encodedJobId}/abort" hx-swap="none">
-      <input type="hidden" name="reason" value="abort requested from /factory chat" />
-      <button class="${dangerButtonClass}" type="submit">Abort</button>
-    </form>`}
+    ${renderCliActionCard({
+      label: "Steer job",
+      description: "Queue updated direction for this active Factory child.",
+      command: `receipt factory steer ${jobId} --problem \"<updated direction>\"`,
+    })}
+    ${renderCliActionCard({
+      label: "Follow up",
+      description: "Attach extra context without replacing the active job goal.",
+      command: `receipt factory follow-up ${jobId} --note \"<extra context>\"`,
+    })}
+    ${abortRequested
+      ? `<div class="rounded-[20px] border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm leading-6 text-amber-50">Abort requested. Waiting for the worker to stop cleanly.</div>`
+      : renderCliActionCard({
+          label: "Abort job",
+          description: "Request a clean stop from the CLI-first operator workflow.",
+          command: `receipt factory abort-job ${jobId} --reason \"abort requested\"`,
+          badgeClass: dangerButtonClass,
+        })}
   </div>`;
 };
 
@@ -476,15 +611,15 @@ const shellPill = (label: string, tone: Tone = "neutral"): string =>
 
 const shellHeaderTitle = (model: FactoryChatShellModel): string =>
   model.sidebar.selectedObjective?.title
-    ?? (model.chatId ? "Blank chat" : model.activeProfileLabel);
+    ?? (model.chatId ? "New chat" : model.activeProfileLabel);
 
 const renderShellStatusPills = (model: FactoryChatShellModel): string => {
-  const pills: string[] = [shellPill(model.activeProfileLabel, "neutral")];
+  const pills: string[] = [shellPill(`Skill ${model.activeProfileLabel}`, "neutral")];
   const objective = model.sidebar.selectedObjective;
   if (objective) {
-    pills.push(shellPill(displayLabel(objective.status) || "thread", toneForValue(objective.status)));
-    pills.push(shellPill(displayLabel(objective.phase) || "phase", toneForValue(objective.phase)));
-    if (typeof objective.queuePosition === "number") pills.push(shellPill(`queue ${objective.queuePosition}`, "warning"));
+    pills.push(shellPill(`Project ${displayLabel(objective.status) || "active"}`, toneForValue(objective.status)));
+    pills.push(shellPill(`Stage ${displayLabel(objective.phase) || "active"}`, toneForValue(objective.phase)));
+    if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning"));
   }
   if (model.sidebar.activeCodex) {
     pills.push(shellPill(`codex ${displayLabel(model.sidebar.activeCodex.status) || "active"}`, toneForValue(model.sidebar.activeCodex.status)));
@@ -495,6 +630,39 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
     pills.push(shellPill(`run ${displayLabel(model.sidebar.activeRun.status)}`, toneForValue(model.sidebar.activeRun.status)));
   }
   return pills.join("");
+};
+
+const composerChipClass = "inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]";
+const composerTextareaClass = "min-h-[132px] w-full rounded-[24px] border border-white/10 bg-black/25 px-4 py-4 text-sm leading-6 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-emerald-300/30 focus:bg-black/35";
+
+const composerJobId = (model: FactoryChatShellModel): string | undefined => {
+  if (model.jobId) return model.jobId;
+  if (model.sidebar.activeCodex?.jobId) return model.sidebar.activeCodex.jobId;
+  const liveChild = model.sidebar.liveChildren?.find((child) => !isTerminalJobStatusValue(child.status));
+  if (liveChild?.jobId) return liveChild.jobId;
+  return model.sidebar.jobs.find((job) =>
+    job.status === "queued" || job.status === "leased" || job.status === "running"
+  )?.jobId;
+};
+
+const promptFillChip = (label: string, prompt: string): string =>
+  `<button class="${composerChipClass}" type="button" data-prompt-fill="${esc(prompt)}">${esc(label)}</button>`;
+
+const renderComposerPromptChips = (model: FactoryChatShellModel): string => {
+  const chips = model.objectiveId
+    ? [
+        promptFillChip("Status check", "What should happen next on this project?"),
+        promptFillChip("Focus plan", "Continue, but focus on the highest-risk open task first."),
+        promptFillChip("React", "/react Continue with the latest context and keep the update concise."),
+        promptFillChip("Steer", "/steer Retarget the current worker to the top priority issue."),
+      ]
+    : [
+        promptFillChip("Start work", "Investigate the current repo state and tell me what should happen next."),
+        promptFillChip("Quick status", "What can you infer about the current Factory state from the UI context?"),
+        promptFillChip("Tracked project", "/new Create a tracked Factory objective for this request."),
+        promptFillChip("Watch project", "/watch objective_demo"),
+      ];
+  return chips.join("");
 };
 
 const compactStatusText = (value: string, maxChars = 160): string => {
@@ -554,12 +722,12 @@ const renderChatItem = (
     return `<section class="space-y-3">
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-center gap-3">
-          <div class="flex h-10 w-10 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-sm font-semibold text-emerald-100">AI</div>
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-zinc-100">${esc(activeProfileLabel)}</div>
-            <div class="text-xs text-zinc-500">${esc(activeProfileId)}</div>
-          </div>
+        <div class="flex h-10 w-10 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-sm font-semibold text-emerald-100">AI</div>
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-zinc-100">${esc(activeProfileLabel)}</div>
+          <div class="text-xs text-zinc-500">Skill ${esc(activeProfileId)}</div>
         </div>
+      </div>
         ${item.meta ? `<div class="text-xs text-zinc-500">${esc(item.meta)}</div>` : ""}
       </div>
       <div class="${panelClass} px-5 py-4">
@@ -607,102 +775,16 @@ const renderChatItem = (
     <div class="mt-4 flex flex-wrap gap-2 text-xs text-zinc-500">
       ${card.meta ? `<span>${esc(card.meta)}</span>` : ""}
       ${card.jobId ? `<span>Job ${esc(card.jobId)}</span>` : ""}
-      ${card.link ? `<a class="text-emerald-200 transition hover:text-emerald-100" href="${esc(card.link)}">Open thread</a>` : ""}
+      ${card.link ? `<a class="text-emerald-200 transition hover:text-emerald-100" href="${esc(card.link)}">Inspect</a>` : ""}
     </div>
     ${renderWorkControls(card)}
   </section>`;
 };
 
-type FactoryCenterWorkEntry = {
-  readonly key: string;
-  readonly kindLabel: string;
-  readonly title: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly meta?: string;
-  readonly link?: string;
-  readonly jobId?: string;
-  readonly running?: boolean;
-  readonly abortRequested?: boolean;
-};
-
-const buildCenterWorkEntries = (model: FactoryChatIslandModel): ReadonlyArray<FactoryCenterWorkEntry> => {
-  const entries: FactoryCenterWorkEntry[] = [];
-  if (model.activeRun) {
-    entries.push({
-      key: `run-${model.activeRun.runId}`,
-      kindLabel: "Supervisor",
-      title: model.activeRun.profileLabel,
-      status: model.activeRun.status,
-      summary: model.activeRun.summary,
-      meta: [
-        `Run ${model.activeRun.runId}`,
-        model.activeRun.lastToolName ? `Tool ${model.activeRun.lastToolName}` : "",
-        model.activeRun.updatedAt ? `Updated ${formatTs(model.activeRun.updatedAt)}` : "",
-      ].filter(Boolean).join(" · "),
-      link: model.activeRun.link,
-    });
-  }
-  for (const child of model.liveChildren ?? []) {
-    entries.push({
-      key: `job-${child.jobId}`,
-      kindLabel: child.worker === "codex" ? "Codex" : startCase(child.worker || child.agentId),
-      title: child.task ?? startCase(child.agentId),
-      status: child.status,
-      summary: child.summary,
-      meta: [
-        `Job ${child.jobId}`,
-        child.runId ? `Run ${child.runId}` : "",
-        child.updatedAt ? `Updated ${formatTs(child.updatedAt)}` : "",
-      ].filter(Boolean).join(" · "),
-      link: child.rawLink,
-      jobId: child.jobId,
-      running: child.running,
-      abortRequested: child.abortRequested,
-    });
-  }
-  if (entries.length === 0 && model.activeCodex) {
-    entries.push({
-      key: `codex-${model.activeCodex.jobId}`,
-      kindLabel: "Codex",
-      title: model.activeCodex.task ?? "Codex child",
-      status: model.activeCodex.status,
-      summary: model.activeCodex.summary,
-      meta: [
-        `Job ${model.activeCodex.jobId}`,
-        model.activeCodex.runId ? `Run ${model.activeCodex.runId}` : "",
-        model.activeCodex.updatedAt ? `Updated ${formatTs(model.activeCodex.updatedAt)}` : "",
-      ].filter(Boolean).join(" · "),
-      link: model.activeCodex.rawLink,
-      jobId: model.activeCodex.jobId,
-      running: model.activeCodex.running,
-      abortRequested: model.activeCodex.abortRequested,
-    });
-  }
-  return entries.slice(0, 6);
-};
-
-const renderCenterWorkCard = (entry: FactoryCenterWorkEntry): string => `<article class="rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
-  <div class="flex items-start justify-between gap-3">
-    <div class="min-w-0">
-      <div class="${sectionLabelClass}">${esc(entry.kindLabel)}</div>
-      <div class="mt-1 text-sm font-semibold text-zinc-100">${esc(entry.title)}</div>
-      <div class="mt-2 text-sm leading-6 text-zinc-300">${esc(compactStatusText(entry.summary, 180))}</div>
-    </div>
-    ${badge(displayLabel(entry.status), toneForValue(entry.status))}
-  </div>
-  ${entry.meta ? `<div class="mt-3 text-[11px] leading-5 text-zinc-500">${esc(entry.meta)}</div>` : ""}
-  <div class="mt-3 flex flex-wrap gap-2">
-    ${entry.link ? `<a class="${ghostButtonClass}" href="${esc(entry.link)}">Open</a>` : ""}
-  </div>
-  ${entry.jobId ? renderJobControls(entry.jobId, entry.running, entry.abortRequested) : ""}
-</article>`;
-
 const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
   const thread = model.selectedThread;
   const jobs = model.jobs ?? [];
-  const entries = buildCenterWorkEntries(model);
-  if (!thread && entries.length === 0 && jobs.length === 0) return "";
+  const hasLiveWork = Boolean(model.activeRun || model.activeCodex || (model.liveChildren?.length ?? 0) > 0);
   const running = jobs.filter((job) => isActiveJobStatusValue(job.status)).length;
   const queued = jobs.filter((job) => job.status === "queued").length;
   const blocked = jobs.filter((job) => job.status === "failed" || job.status === "canceled").length
@@ -716,13 +798,14 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
         "stdoutTail" in logSource && logSource.stdoutTail !== logSource.stderrTail ? logSource.stdoutTail : undefined,
       ].filter(Boolean).join("\n\n")
     : "";
+  if (!thread && !hasLiveWork && jobs.length === 0 && !logText) return "";
   return `<section class="space-y-5">
     <section class="${panelClass} px-5 py-5">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div class="min-w-0">
-          <div class="${sectionLabelClass}">${thread ? "Selected thread" : "Live work"}</div>
-          <div class="mt-2 text-xl font-semibold text-white">${esc(thread?.title ?? `${model.activeProfileLabel} workbench`)}</div>
-          <div class="mt-3 text-sm leading-6 text-zinc-300">${esc(thread?.summary ?? model.activeProfileSummary ?? "Factory keeps the active work, logs, and transcript in one place.")}</div>
+          <div class="${sectionLabelClass}">${thread ? "Selected project" : "Project activity"}</div>
+          <div class="mt-2 text-xl font-semibold text-white">${esc(thread?.title ?? `${model.activeProfileLabel} project`)}</div>
+          <div class="mt-3 text-sm leading-6 text-zinc-300">${esc(thread?.summary ?? model.activeProfileSummary ?? "Factory keeps the active project, logs, and transcript in one place.")}</div>
         </div>
         <div class="flex flex-wrap gap-2">
           ${thread ? badge(displayLabel(thread.status), toneForValue(thread.status)) : ""}
@@ -739,20 +822,6 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
         <div class="${sectionLabelClass}">Next action</div>
         <div class="mt-2 text-sm leading-6 text-zinc-300">${esc(thread.nextAction)}</div>
       </div>` : ""}
-    </section>
-    <section class="${panelClass} px-5 py-5">
-      <div class="flex items-center justify-between gap-3">
-        <div>
-          <div class="${sectionLabelClass}">Active work</div>
-          <div class="mt-2 text-sm text-zinc-400">What is running right now, with direct jump-offs for logs and control.</div>
-        </div>
-        <div class="text-xs text-zinc-500">${esc(`${entries.length}`)}</div>
-      </div>
-      <div class="mt-4 grid gap-3 lg:grid-cols-2">
-        ${entries.length > 0
-          ? entries.map(renderCenterWorkCard).join("")
-          : `<div class="rounded-[22px] border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No worker is active in this thread right now.</div>`}
-      </div>
     </section>
     ${logText ? `<section class="${panelClass} px-5 py-5">
       <div class="flex items-center justify-between gap-3">
@@ -778,23 +847,58 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
     : `<section class="${softPanelClass} px-5 py-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div class="${sectionLabelClass}">Blank chat</div>
-          <div class="mt-2 text-sm font-medium text-zinc-100">${esc(model.activeProfileLabel)} is ready for a new thread or a quick status request.</div>
+          <div class="${sectionLabelClass}">New chat</div>
+          <div class="mt-2 text-sm font-medium text-zinc-100">${esc(model.activeProfileLabel)} is ready for a new request or a quick status question.</div>
         </div>
         ${badge("idle", "neutral")}
       </div>
-      <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(model.activeProfileSummary ?? "Ask for status, debug a thread, or start a new delivery thread.")}</div>
+      <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(model.activeProfileSummary ?? "Start with chat. Factory will open a project automatically when the request needs durable execution.")}</div>
     </section>`;
   return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 pb-8 pt-6 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}">
     ${workbench}
     <section class="space-y-3">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Thread transcript</div>
+        <div class="${sectionLabelClass}">Chat transcript</div>
         <div class="text-xs text-zinc-500">${esc(`${model.items.length}`)} items</div>
       </div>
       ${body}
     </section>
   </div>`;
+};
+
+const renderSkillCard = (model: FactorySidebarModel): string => {
+  const skillInitials = model.activeProfileLabel
+    .split(/\s+/)
+    .map((part) => part[0] ?? "")
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const sections = (model.activeProfileSections ?? []).slice(0, 2);
+  const tools = model.activeProfileTools.map(skillToolLabel).filter(Boolean).slice(0, 6);
+  return `<section class="${railCardClass}">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="${sectionLabelClass}">Skill</div>
+        <div class="mt-3 text-lg font-semibold text-white">${esc(model.activeProfileLabel)}</div>
+        <div class="mt-2 text-sm leading-6 text-zinc-300">${esc(model.activeProfileSummary ?? "Factory uses the active skill to decide how to inspect, queue, and steer projects.")}</div>
+      </div>
+      <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">${esc(skillInitials || "SK")}</div>
+    </div>
+    ${sections.length > 0 ? `<div class="mt-4 grid gap-3">
+      ${sections.map((section) => `<div class="rounded-[20px] border border-white/10 bg-black/20 px-4 py-3">
+        <div class="${sectionLabelClass}">${esc(section.title)}</div>
+        <div class="mt-2 grid gap-2">
+          ${section.items.slice(0, 3).map((item) => `<div class="text-sm leading-6 text-zinc-300">${esc(item)}</div>`).join("")}
+        </div>
+      </div>`).join("")}
+    </div>` : ""}
+    ${tools.length > 0 ? `<div class="mt-4">
+      <div class="${sectionLabelClass}">Tools</div>
+      <div class="mt-3 flex flex-wrap gap-2">
+        ${tools.map((tool) => badge(tool, "neutral")).join("")}
+      </div>
+    </div>` : ""}
+  </section>`;
 };
 
 const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatObjectiveNav): string => {
@@ -810,8 +914,8 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
       <div class="shrink-0">${badge(displayLabel(objective.status), toneForValue(objective.status))}</div>
     </div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${objectiveMetaPill("phase", objective.phase, toneForValue(objective.phase))}
-      ${objectiveMetaPill("slot", objective.slotState, toneForValue(objective.slotState))}
+      ${objectiveMetaPill("stage", objective.phase, toneForValue(objective.phase))}
+      ${objectiveMetaPill("queue", objective.slotState, toneForValue(objective.slotState))}
       ${objective.integrationStatus ? objectiveMetaPill("integration", objective.integrationStatus, toneForValue(objective.integrationStatus)) : ""}
     </div>
     ${objective.summary ? `<div class="mt-3 [display:-webkit-box] overflow-hidden break-words text-sm leading-6 text-zinc-400 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">${esc(objective.summary)}</div>` : ""}
@@ -842,19 +946,19 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
           ${profile.summary ? `<div class="mt-1 text-xs leading-5 text-zinc-400">${esc(profile.summary)}</div>` : ""}
         </a>`;
       }).join("")
-    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No profiles found.</div>`;
+    : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No skills found.</div>`;
   const objectiveCards = model.objectives.length > 0
     ? model.objectives.map((objective) => renderObjectiveLink(model, objective)).join("")
     : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">${blankChat
-      ? "No recent threads yet. This blank chat has no active thread."
-      : "No threads yet. Start a chat and Factory will open one when work needs durable tracking."}</div>`;
+      ? "No recent projects yet. This new chat has no active project."
+      : "No tracked projects yet. Start chatting and Factory will open a project when it needs durable tracking."}</div>`;
   const objectives = blankChat && model.objectives.length > 0
     ? `<div class="space-y-3">
       <div class="rounded-2xl border border-dashed border-white/10 px-4 py-4 text-sm leading-6 text-zinc-500">
-        Blank chat is active. Recent threads are still available here, but they are not part of the current conversation unless you reopen one.
+        New chat is active. Recent projects are still available here, but they are not part of the current conversation unless you reopen one.
       </div>
       <details class="rounded-[24px] border border-white/10 bg-black/10 px-4 py-4">
-        <summary class="cursor-pointer list-none text-sm font-medium text-zinc-200">Show recent threads</summary>
+        <summary class="cursor-pointer list-none text-sm font-medium text-zinc-200">Show recent projects</summary>
         <div class="mt-4 grid gap-3">
           ${objectiveCards}
         </div>
@@ -862,18 +966,10 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
     </div>`
     : objectiveCards;
   return `<div class="space-y-5 px-4 py-5 md:px-5">
-    <section class="${railCardClass}">
-      <div class="flex items-start justify-between gap-3">
-        <div>
-          <div class="${sectionLabelClass}">Factory</div>
-          <div class="mt-3 text-lg font-semibold text-white">Threads</div>
-        </div>
-        <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">FX</div>
-      </div>
-    </section>
+    ${renderSkillCard(model)}
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">${blankChat ? "Recent Threads" : "Threads"}</div>
+        <div class="${sectionLabelClass}">${blankChat ? "Recent projects" : "Projects"}</div>
         <div class="text-xs text-zinc-500">${esc(`${model.objectives.length}`)}</div>
       </div>
       <div class="mt-4 grid gap-3">
@@ -883,7 +979,7 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
     <section class="${railCardClass}">
       <details>
         <summary class="flex cursor-pointer list-none items-center justify-between gap-3">
-          <span class="${sectionLabelClass}">Profile filter</span>
+          <span class="${sectionLabelClass}">Skills</span>
           <span class="text-xs text-zinc-500">${esc(`${model.profiles.length}`)}</span>
         </summary>
         <div class="mt-4 grid gap-3">
@@ -897,58 +993,34 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
 export const factorySidebarIsland = (model: FactorySidebarModel): string => factoryRailIsland(model);
 
 const renderObjectiveActions = (objective: FactorySelectedObjectiveCard): string => {
-  const objectiveId = encodeURIComponent(objective.objectiveId);
-  const actionCard = (input: {
-    readonly action: string;
-    readonly label: string;
-    readonly description: string;
-    readonly buttonClass: string;
-    readonly hiddenReason?: string;
-    readonly span?: string;
-  }): string => `<form class="${input.span ?? ""}" action="/factory/api/objectives/${objectiveId}/${input.action}" method="post" hx-post="/factory/api/objectives/${objectiveId}/${input.action}" hx-swap="none">
-      ${input.hiddenReason ? `<input type="hidden" name="reason" value="${esc(input.hiddenReason)}" />` : ""}
-      <button class="w-full rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-4 text-left transition hover:bg-white/[0.06]" type="submit">
-        <span class="flex items-start justify-between gap-3">
-          <span class="min-w-0">
-            <span class="block text-sm font-semibold text-zinc-100">${esc(input.label)}</span>
-            <span class="mt-2 block text-sm leading-6 text-zinc-400">${esc(input.description)}</span>
-          </span>
-          <span class="${input.buttonClass} shrink-0">Run</span>
-        </span>
-      </button>
-    </form>`;
   return `<div class="grid gap-3 sm:grid-cols-2">
-    ${actionCard({
-      action: "react",
-      label: "Keep working",
-      description: "Re-evaluate this thread and dispatch the next eligible work.",
-      buttonClass: primaryButtonClass,
+    ${renderCliActionCard({
+      label: "Advance project",
+      description: "Re-evaluate this project and dispatch the next eligible step from the CLI.",
+      command: `receipt factory react ${objective.objectiveId} --message \"<operator note>\"`,
+      badgeClass: primaryButtonClass,
     })}
-    ${actionCard({
-      action: "promote",
+    ${renderCliActionCard({
       label: "Promote to source",
       description: "Merge the ready integration branch into the source branch.",
-      buttonClass: ghostButtonClass,
+      command: `receipt factory promote ${objective.objectiveId}`,
     })}
-    ${actionCard({
-      action: "cleanup",
+    ${renderCliActionCard({
       label: "Remove worktrees",
-      description: "Delete this thread's task worktrees and integration workspace from disk.",
-      buttonClass: ghostButtonClass,
+      description: "Delete this project's task worktrees and integration workspace from disk.",
+      command: `receipt factory cleanup ${objective.objectiveId}`,
     })}
-    ${actionCard({
-      action: "cancel",
-      label: "Stop thread",
-      description: "Stop active jobs and mark this thread as canceled.",
-      buttonClass: dangerButtonClass,
-      hiddenReason: "cancel requested from /factory inspector",
+    ${renderCliActionCard({
+      label: "Stop project",
+      description: "Stop active jobs and mark this project as canceled.",
+      command: `receipt factory cancel ${objective.objectiveId} --reason \"cancel requested\"`,
+      badgeClass: dangerButtonClass,
     })}
-    ${actionCard({
-      action: "archive",
-      label: "Archive thread",
-      description: "Hide this thread from the main list without deleting its receipts.",
-      buttonClass: ghostButtonClass,
-      span: "sm:col-span-2",
+    ${renderCliActionCard({
+      label: "Archive project",
+      description: "Hide this project from the main list without deleting its receipts.",
+      command: `receipt factory archive ${objective.objectiveId}`,
+      badgeClass: ghostButtonClass,
     })}
   </div>`;
 };
@@ -965,7 +1037,7 @@ const renderJobRow = (job: FactoryChatJobNav): string => `<div class="factory-jo
     ${job.runId ? `Run ${esc(job.runId)}` : "No run id"}
     ${job.updatedAt ? ` · ${esc(formatTs(job.updatedAt))}` : ""}
   </div>
-  ${job.link ? `<a class="mt-3 inline-flex text-xs font-medium uppercase tracking-[0.16em] text-emerald-200 transition hover:text-emerald-100" href="${esc(job.link)}">Open thread</a>` : ""}
+  ${job.link ? `<a class="mt-3 inline-flex text-xs font-medium uppercase tracking-[0.16em] text-emerald-200 transition hover:text-emerald-100" href="${esc(job.link)}">Inspect</a>` : ""}
 </div>`;
 
 const isTerminalJobStatusValue = (status?: string): boolean =>
@@ -1048,7 +1120,7 @@ const renderOpsSummary = (model: FactorySidebarModel): string => {
   }
   return `<section class="${railCardClass}">
     <div class="flex items-center justify-between gap-3">
-      <div class="${sectionLabelClass}">Thread overview</div>
+      <div class="${sectionLabelClass}">Project overview</div>
       <div class="text-xs text-zinc-500">${esc(`${model.jobs.length}`)} jobs</div>
     </div>
     <div class="mt-4 grid gap-2 sm:grid-cols-2">
@@ -1059,7 +1131,7 @@ const renderOpsSummary = (model: FactorySidebarModel): string => {
       ${statPill("Codex active", `${codexActive}`)}
       ${model.selectedObjective
         ? statPill("Tasks", `${model.selectedObjective.activeTaskCount ?? 0} active / ${model.selectedObjective.readyTaskCount ?? 0} ready`)
-        : statPill("Scope", model.chatId ? "Blank chat" : "Profile stream")}
+        : statPill("Scope", model.chatId ? "New chat" : "Skill chat")}
     </div>
   </section>`;
 };
@@ -1084,7 +1156,7 @@ const renderCodexTelemetryCard = (card: FactoryCodexTelemetryCard): string => {
     </div>
     ${logChunks ? `<pre class="mt-3 max-h-52 overflow-auto rounded-[18px] border border-white/10 bg-black/30 px-3 py-3 text-[12px] leading-5 text-zinc-300 whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(logChunks)}</pre>` : `<div class="mt-3 rounded-[18px] border border-dashed border-white/10 px-3 py-3 text-sm text-zinc-500">No live Codex output yet.</div>`}
     <div class="mt-3 flex flex-wrap gap-2">
-      <a class="${ghostButtonClass}" href="${esc(card.rawLink)}" target="_blank" rel="noreferrer">Job JSON</a>
+      <a class="${ghostButtonClass}" href="${esc(card.rawLink)}" target="_blank" rel="noreferrer">Inspect job</a>
     </div>
     ${renderJobControls(card.jobId, card.running, card.abortRequested)}
   </article>`;
@@ -1133,10 +1205,10 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
   if (objective) {
     statusEntries.push({
       key: `objective-${objective.objectiveId}`,
-      kindLabel: "Factory thread",
+      kindLabel: "Factory project",
       title: objective.title,
       status: objective.status,
-      summary: objective.summary ?? objective.nextAction ?? "Thread is waiting for the next action.",
+      summary: objective.summary ?? objective.nextAction ?? "Project is waiting for the next action.",
       meta: [displayLabel(objective.phase), displayLabel(objective.slotState), displayLabel(objective.integrationStatus)].filter(Boolean).join(" · "),
       detail: [
         objective.nextAction ? `Next action: ${objective.nextAction}` : "",
@@ -1221,7 +1293,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
   }
   const liveStatusMarkup = statusEntries.length > 0
     ? statusEntries.map(renderLiveStatusEntry).join("")
-    : `<div class="text-sm leading-6 text-zinc-500">No live work is visible in this thread yet. When Factory, runs, or child jobs move, their current state will appear here automatically.</div>`;
+    : `<div class="text-sm leading-6 text-zinc-500">No live project state is visible in this project chat yet. When Factory, runs, or child jobs move, their current state will appear here automatically.</div>`;
   const jobs = visibleJobs.length > 0
     ? visibleJobs.map(renderJobRow).join("")
     : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No recent jobs.</div>`;
@@ -1229,29 +1301,29 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
     ${renderOpsSummary(model)}
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Live details</div>
+        <div class="${sectionLabelClass}">Inspect</div>
         <div class="text-xs text-zinc-500">${esc(`${statusEntries.length}`)}</div>
       </div>
-      <div class="mt-3 text-xs leading-5 text-zinc-500">Realtime from Factory and receipt events. This rail is the current operations board, not the full transcript.</div>
+      <div class="mt-3 text-xs leading-5 text-zinc-500">Live project, run, and child-job state. This rail is the inspect view, not the full chat transcript.</div>
       <div class="mt-4 grid gap-3">
         ${liveStatusMarkup}
       </div>
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Worker logs</div>
+        <div class="${sectionLabelClass}">Worker tails</div>
         <div class="text-xs text-zinc-500">${esc(`${codexTelemetry.length}`)}</div>
       </div>
-      <div class="mt-3 text-xs leading-5 text-zinc-500">Visible worker tail output for the Codex jobs currently active in this thread, or the most recent failed one if nothing is active.</div>
+      <div class="mt-3 text-xs leading-5 text-zinc-500">Visible tail output for the Codex jobs currently active in this project chat, or the most recent failed one if nothing is active.</div>
       <div class="mt-4 grid gap-3">
         ${codexTelemetry.length > 0
           ? codexTelemetry.map(renderCodexTelemetryCard).join("")
-          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No Codex worker is active in this thread right now.</div>`}
+          : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-sm text-zinc-500">No Codex worker is active in this project chat right now.</div>`}
       </div>
     </section>
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
-        <div class="${sectionLabelClass}">Thread details</div>
+        <div class="${sectionLabelClass}">Project details</div>
         ${objective ? badge(objective.status) : ""}
       </div>
       ${objective ? `<div class="mt-4">
@@ -1279,8 +1351,8 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
           ${objective.latestDecisionAt ? `<div class="mt-2 text-xs text-zinc-500">${esc(formatTs(objective.latestDecisionAt))}</div>` : ""}
         </div>` : ""}
         <div class="mt-5 flex flex-wrap gap-2">
-          <a class="${primaryButtonClass}" href="/factory/control?thread=${encodeURIComponent(objective.objectiveId)}">Work Details</a>
-          <a class="${ghostButtonClass}" href="${esc(objective.debugLink)}">Debug JSON</a>
+          <a class="${primaryButtonClass}" href="/factory/control?thread=${encodeURIComponent(objective.objectiveId)}">Inspect</a>
+          <a class="${ghostButtonClass}" href="${esc(objective.debugLink)}">Debug</a>
           <a class="${ghostButtonClass}" href="${esc(objective.receiptsLink)}">Receipts</a>
         </div>
         <div class="mt-5">
@@ -1289,7 +1361,7 @@ export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
             ${renderObjectiveActions(objective)}
           </div>
         </div>
-      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick a thread from the left rail to inspect it.</div>`}
+      </div>` : `<div class="mt-4 text-sm leading-6 text-zinc-500">Pick a project from the left rail to inspect it.</div>`}
     </section>
     <section class="${railCardClass} factory-job-panel">
       <details ${visibleJobs.length > 0 ? "" : "open"}>
@@ -1317,6 +1389,10 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
   const islandTrigger = factoryChatSseTrigger(FACTORY_CHAT_REFRESH_MS);
   const sidebarTrigger = factoryChatSseTrigger(FACTORY_SIDEBAR_REFRESH_MS);
   const inspectorTrigger = factoryChatSseTrigger(FACTORY_INSPECTOR_REFRESH_MS);
+  const currentJobId = composerJobId(model);
+  const composerPlaceholder = model.objectiveId
+    ? "Ask for status, send guidance, or use /react, /steer, /follow-up, /promote, /cancel..."
+    : "Chat here to inspect, plan, or start work. Plain text stays in chat; slash commands run direct actions.";
   return `<!doctype html>
 <html class="h-full">
 <head>
@@ -1346,15 +1422,15 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
           <header class="sticky top-0 z-20 border-b border-white/10 bg-black/35 backdrop-blur-xl">
             <div class="mx-auto flex w-full max-w-4xl flex-wrap items-center justify-between gap-2 px-4 py-2.5 md:px-8 xl:px-10">
               <div class="min-w-0 flex flex-1 flex-wrap items-center gap-2">
-                <span class="${sectionLabelClass}">${model.objectiveId ? "Thread" : "Chat"}</span>
+                <span class="${sectionLabelClass}">${model.objectiveId ? "Project" : "Chat"}</span>
                 <h1 class="min-w-0 truncate text-sm font-semibold text-white" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
                 <div class="flex flex-wrap gap-2">
                   ${renderShellStatusPills(model)}
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-2">
-                <a class="${ghostButtonClass}" href="/factory/new-chat?profile=${encodeURIComponent(model.activeProfileId)}">NEW CHAT</a>
-                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory/control?thread=${encodeURIComponent(model.objectiveId)}">Work Details</a>` : ""}
+                <a class="${ghostButtonClass}" href="/factory/new-chat?profile=${encodeURIComponent(model.activeProfileId)}">New chat</a>
+                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory/control?thread=${encodeURIComponent(model.objectiveId)}">Inspect</a>` : ""}
               </div>
             </div>
           </header>
@@ -1365,24 +1441,28 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
           </section>
           <section class="border-t border-white/10 bg-black/35 px-3 py-3 backdrop-blur-2xl sm:px-4">
             <div class="mx-auto w-full max-w-4xl px-1 md:px-4 xl:px-6">
-              <form class="${panelClass} px-4 py-4" action="/factory/run" method="post">
-                <input type="hidden" name="profile" value="${esc(model.activeProfileId)}" />
-                <input type="hidden" name="objective" value="${esc(model.objectiveId ?? "")}" />
-                <input type="hidden" name="chat" value="${esc(model.chatId ?? "")}" />
-                <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <textarea id="factory-prompt" class="max-h-40 min-h-[72px] w-full resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-[15px] leading-7 text-zinc-100 outline-none placeholder:text-zinc-500" name="problem" placeholder="Message Factory" required rows="1"></textarea>
-                <div class="mt-4 flex flex-col gap-4 border-t border-white/10 pt-4 md:flex-row md:items-end md:justify-between">
-                  <div class="flex flex-wrap gap-2">
-                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Summarize the current Factory status and the next best action.">Status</button>
-                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Plan the work in a clean sequence and call out risks before dispatching anything.">Plan</button>
-                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Debug the selected thread and explain what is blocking it.">Debug</button>
-	                    <button class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.08]" type="button" data-prompt-fill="Start a dedicated Factory thread for this request, then keep delivery moving with Codex workers until there is a concrete result.">Start thread</button>
+              <div class="${panelClass} px-4 py-4">
+                <div class="${sectionLabelClass}">Chat And Commands</div>
+                <div class="mt-3 text-sm leading-6 text-zinc-300">Use plain text to chat from the UI. The agent can still drive CLI-backed work under the hood, and slash commands trigger direct Factory actions when you need them.</div>
+                <form id="factory-composer" class="mt-4" action="/factory/compose${shellQuery}" method="post">
+                  ${currentJobId ? `<input type="hidden" name="currentJobId" value="${esc(currentJobId)}" />` : ""}
+                  <label class="sr-only" for="factory-prompt">Factory prompt</label>
+                  <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass}" rows="4" placeholder="${esc(composerPlaceholder)}" autofocus></textarea>
+                  <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                    <div class="text-xs leading-5 text-zinc-500">Plain text starts or continues chat. Press Cmd/Ctrl + Enter to send.</div>
+                    <button id="factory-composer-submit" class="${primaryButtonClass}" type="submit">Send</button>
                   </div>
-                  <div class="flex flex-wrap items-center gap-3">
-                    <button class="${primaryButtonClass}" data-send-label="Send" type="submit">Send</button>
-                  </div>
+                  <div id="factory-composer-status" class="mt-3 hidden rounded-[18px] border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-300" aria-live="polite"></div>
+                </form>
+                <div class="mt-4 flex flex-wrap gap-2">
+                  ${renderComposerPromptChips(model)}
                 </div>
-              </form>
+                <details id="factory-command-help" class="mt-4 rounded-[22px] border border-white/10 bg-black/20 px-4 py-4">
+                  <summary class="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400">Slash commands</summary>
+                  <div class="mt-3 text-sm leading-6 text-zinc-300">Available commands: <code>/new</code>, <code>/watch</code>, <code>/react</code>, <code>/steer</code>, <code>/follow-up</code>, <code>/abort-job</code>, <code>/promote</code>, <code>/cancel</code>, <code>/cleanup</code>, <code>/archive</code>.</div>
+                  <div class="mt-2 text-sm leading-6 text-zinc-500">Examples: <code>/new Fix the live-output panel.</code> <code>/react Keep receipts concise.</code> <code>/steer Retarget the current worker to the failing check.</code></div>
+                </details>
+              </div>
             </div>
           </section>
         </div>

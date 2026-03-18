@@ -18,6 +18,8 @@ export type AgentRunResult = {
   readonly note?: string;
   readonly finalResponse?: string;
   readonly failure?: FailureRecord;
+  readonly followUpJobId?: string;
+  readonly followUpRunId?: string;
 };
 
 export const buildAgentRunResult = (opts: {
@@ -33,4 +35,6 @@ export const buildAgentRunResult = (opts: {
   note: opts.state.statusNote,
   finalResponse: opts.state.finalResponse,
   failure: withoutUpdatedAt(opts.state.failure),
+  followUpJobId: opts.state.continuation?.nextJobId,
+  followUpRunId: opts.state.continuation?.nextRunId,
 });

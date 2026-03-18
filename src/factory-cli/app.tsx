@@ -2,6 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, ProgressBar, Spinner, StatusMessage } from "@inkjs/ui";
 import { Box, Text, useApp, useInput } from "ink";
 
+import {
+  abortJobMutation,
+  archiveObjectiveMutation,
+  cancelObjectiveMutation,
+  cleanupObjectiveMutation,
+  createObjectiveMutation,
+  followUpJobMutation,
+  promoteObjectiveMutation,
+  reactObjectiveMutation,
+  requireActiveObjectiveJob,
+  steerJobMutation,
+} from "./actions.js";
 import type { FactoryCliRuntime } from "./runtime.js";
 import { deriveObjectiveTitle, parseComposerDraft } from "./composer.js";
 import { FactoryThemeProvider, InlineAlert, statusColor, terminalTheme, tone } from "./theme.js";
@@ -628,7 +640,7 @@ const HelpOverlay = (): React.ReactElement => (
   <Surface
     kicker="Command Help"
     title="Slash commands"
-    subtitle="Plain text creates a new objective when nothing is selected, otherwise it reacts to the selected objective."
+    subtitle="Plain text creates a new objective when nothing is selected, otherwise it reacts to the selected objective. Active-job commands target the latest running or queued job for the selected objective."
     marginBottom={1}
   >
     <Text color={tone("text")}>/new &lt;prompt&gt;</Text>
@@ -638,6 +650,9 @@ const HelpOverlay = (): React.ReactElement => (
     <Text color={tone("text")}>/cancel [reason]</Text>
     <Text color={tone("text")}>/cleanup</Text>
     <Text color={tone("text")}>/archive</Text>
+    <Text color={tone("text")}>/steer [problem]</Text>
+    <Text color={tone("text")}>/follow-up [note]</Text>
+    <Text color={tone("text")}>/abort-job [reason]</Text>
     <Text color={tone("text")}>/help or /?</Text>
   </Surface>
 );
@@ -1062,9 +1077,9 @@ export const FactoryTerminalApp = ({
     }
     if (command.type === "new") {
       await runAction("Creating objective", async () => {
-        const created = await runtime.service.createObjective({
-          title: command.title ?? deriveObjectiveTitle(command.prompt),
+        const created = await createObjectiveMutation(runtime, {
           prompt: command.prompt,
+          title: command.title ?? deriveObjectiveTitle(command.prompt),
           checks: runtime.config.defaultChecks,
           policy: runtime.config.defaultPolicy,
         });
@@ -1084,32 +1099,67 @@ export const FactoryTerminalApp = ({
     switch (command.type) {
       case "react":
         await runAction("Reacting objective", async () => {
-          if (command.message) await runtime.service.addObjectiveNote(objectiveId, command.message);
-          await runtime.service.reactObjective(objectiveId);
+          await reactObjectiveMutation(runtime, {
+            objectiveId,
+            message: command.message,
+          });
         });
         setDraft("");
         return;
       case "promote":
         await runAction("Promoting objective", async () => {
-          await runtime.service.promoteObjective(objectiveId);
+          await promoteObjectiveMutation(runtime, objectiveId);
         });
         setDraft("");
         return;
       case "cancel":
         await runAction("Canceling objective", async () => {
-          await runtime.service.cancelObjective(objectiveId, command.reason ?? "canceled from CLI");
+          await cancelObjectiveMutation(runtime, {
+            objectiveId,
+            reason: command.reason ?? "canceled from CLI",
+          });
         });
         setDraft("");
         return;
       case "cleanup":
         await runAction("Cleaning workspaces", async () => {
-          await runtime.service.cleanupObjectiveWorkspaces(objectiveId);
+          await cleanupObjectiveMutation(runtime, objectiveId);
         });
         setDraft("");
         return;
       case "archive":
         await runAction("Archiving objective", async () => {
-          await runtime.service.archiveObjective(objectiveId);
+          await archiveObjectiveMutation(runtime, objectiveId);
+        });
+        setDraft("");
+        return;
+      case "steer":
+        await runAction("Queueing steer", async () => {
+          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
+          await steerJobMutation(runtime, {
+            jobId: activeJob.id,
+            problem: command.problem,
+          });
+        });
+        setDraft("");
+        return;
+      case "follow-up":
+        await runAction("Queueing follow-up", async () => {
+          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
+          await followUpJobMutation(runtime, {
+            jobId: activeJob.id,
+            note: command.note ?? "Follow up on the current active job.",
+          });
+        });
+        setDraft("");
+        return;
+      case "abort-job":
+        await runAction("Requesting job abort", async () => {
+          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
+          await abortJobMutation(runtime, {
+            jobId: activeJob.id,
+            reason: command.reason ?? "abort requested from CLI",
+          });
         });
         setDraft("");
         return;
@@ -1214,31 +1264,34 @@ export const FactoryTerminalApp = ({
     if (!objectiveId) return;
     if (input === "r") {
       void runAction("Reacting objective", async () => {
-        await runtime.service.reactObjective(objectiveId);
+        await reactObjectiveMutation(runtime, { objectiveId });
       });
       return;
     }
     if (input === "p") {
       void runAction("Promoting objective", async () => {
-        await runtime.service.promoteObjective(objectiveId);
+        await promoteObjectiveMutation(runtime, objectiveId);
       });
       return;
     }
     if (input === "c") {
       void runAction("Canceling objective", async () => {
-        await runtime.service.cancelObjective(objectiveId, "canceled from CLI");
+        await cancelObjectiveMutation(runtime, {
+          objectiveId,
+          reason: "canceled from CLI",
+        });
       });
       return;
     }
     if (input === "x") {
       void runAction("Cleaning workspaces", async () => {
-        await runtime.service.cleanupObjectiveWorkspaces(objectiveId);
+        await cleanupObjectiveMutation(runtime, objectiveId);
       });
       return;
     }
     if (input === "a") {
       void runAction("Archiving objective", async () => {
-        await runtime.service.archiveObjective(objectiveId);
+        await archiveObjectiveMutation(runtime, objectiveId);
       });
     }
   });

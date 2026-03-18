@@ -172,6 +172,7 @@ test("framework translators: theorem resume anchor follows the visible branch re
 
 test("framework translators: agent run intent emits enqueue + redirect", () => {
   const ops = translateAgentRunStartIntent({
+    agentId: "agent",
     stream: "agent",
     runId: "run_1",
     problem: "Inspect files",

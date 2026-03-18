@@ -41,7 +41,7 @@ export const normalizeAgentConfig = (input: Partial<AgentRunConfig>): AgentRunCo
   maxIterations: clampNumber(
     Number.isFinite(input.maxIterations ?? Number.NaN) ? input.maxIterations! : AGENT_DEFAULT_CONFIG.maxIterations,
     1,
-    40
+    80
   ),
   maxToolOutputChars: clampNumber(
     Number.isFinite(input.maxToolOutputChars ?? Number.NaN) ? input.maxToolOutputChars! : AGENT_DEFAULT_CONFIG.maxToolOutputChars,
@@ -125,6 +125,8 @@ export type AgentIterationBudgetContinuation = {
   readonly finalText: string;
   readonly note?: string;
   readonly events?: ReadonlyArray<AgentEvent>;
+  readonly nextRunId?: string;
+  readonly nextJobId?: string;
 };
 
 export type AgentFinalizer = (input: {
