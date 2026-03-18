@@ -569,7 +569,7 @@ test("factory shell: renders chat surface on /factory with thread-aware links", 
   expect(markup).toMatch(/>Chat</);
   expect(markup).toMatch(/>Thread</);
   expect(markup).toMatch(/Work Details/);
-  expect(markup).toMatch(/Blank Chat/);
+  expect(markup).toMatch(/NEW CHAT/);
   expect(markup).toMatch(/factory-run-started/);
   expect(markup).toMatch(/Message Factory/);
   expect(markup).toMatch(/Messages, runs, and recent jobs in this view stay scoped to the current thread\./);
@@ -1210,7 +1210,7 @@ test("factory sidebar island: blank chat treats old objectives as recent threads
   });
 
   expect(markup).toMatch(/Recent Threads/);
-  expect(markup).toMatch(/Blank chat is active/);
+  expect(markup).toMatch(/New chat is active/);
   expect(markup).toMatch(/Show recent threads/);
 });
 

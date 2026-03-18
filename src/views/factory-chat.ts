@@ -1101,10 +1101,10 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
 	                <div class="mt-3 text-sm leading-6 text-zinc-400" data-profile-summary>${esc(model.activeProfileSummary ?? (model.objectiveId
 	                    ? "Messages, runs, and recent jobs in this view stay scoped to the current thread."
 	                    : "Start a chat here. Factory will keep coordination here until work needs its own thread."))}</div>
-                  ${!model.objectiveId ? `<div class="mt-2 text-xs leading-5 text-zinc-500">Blank chat is active. Recent threads stay in the rail until you reopen one.</div>` : ""}
+                  ${!model.objectiveId ? `<div class="mt-2 text-xs leading-5 text-zinc-500">New chat is active. Recent threads stay in the rail until you reopen one.</div>` : ""}
 	              </div>
 	              <div class="flex flex-wrap items-center gap-2">
-	                <a class="${ghostButtonClass}" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">Blank Chat</a>
+	                <a class="${ghostButtonClass}" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">NEW CHAT</a>
 	                ${model.objectiveId ? `<a class="${ghostButtonClass}" href="/factory/control?objective=${encodeURIComponent(model.objectiveId)}">Work Details</a>` : ""}
 	              </div>
 	            </div>
