@@ -53,13 +53,21 @@ export class JobWorker {
     this.onError = opts.onError;
   }
 
+  private reportError(err: unknown): void {
+    const error = err instanceof Error ? err : new Error(String(err));
+    try {
+      this.onError?.(error);
+    } catch {
+      // Error reporting must not crash the worker loop.
+    }
+  }
+
   start(): void {
     if (this.running) return;
     this.running = true;
     void this.loop().catch((err) => {
       this.running = false;
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.onError?.(error);
+      this.reportError(err);
     });
   }
 
@@ -89,6 +97,13 @@ export class JobWorker {
           timeoutMs: this.idleResyncMs,
         });
         seenVersion = next.version;
+      } catch (err) {
+        this.reportError(err);
+        if (!this.running) break;
+        await new Promise((resolve) => {
+          setTimeout(resolve, Math.min(this.idleResyncMs, 1_000));
+        });
+        seenVersion = this.queue.snapshot().version;
       } finally {
         if (this.onTick) this.onTick();
       }
@@ -104,9 +119,7 @@ export class JobWorker {
       if (!leased) break;
       const runPromise = this.runLeased(leased)
         .catch((err) => {
-          this.running = false;
-          const error = err instanceof Error ? err : new Error(String(err));
-          this.onError?.(error);
+          this.reportError(err);
         })
         .finally(() => {
           this.active.delete(leased.id);
@@ -129,7 +142,9 @@ export class JobWorker {
     await this.queue.heartbeat(job.id, this.workerId, this.leaseMs);
 
     const heartbeat = setInterval(() => {
-      void this.queue.heartbeat(job.id, this.workerId, this.leaseMs);
+      void this.queue.heartbeat(job.id, this.workerId, this.leaseMs).catch((err) => {
+        this.reportError(err);
+      });
     }, Math.max(1_000, Math.floor(this.leaseMs / 2)));
 
     try {

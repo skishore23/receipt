@@ -398,3 +398,69 @@ test("jsonl queue: enqueue wakes an idle worker without relying on a short poll 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat error", async () => {
+  const dir = await mkTmp("receipt-queue-worker-recover");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const baseQueue = jsonlQueue({ runtime, stream: "jobs" });
+    let failHeartbeatForJobId: string | undefined;
+    const queue: typeof baseQueue = {
+      ...baseQueue,
+      heartbeat: async (jobId, workerId, leaseMs) => {
+        if (jobId === failHeartbeatForJobId) {
+          failHeartbeatForJobId = undefined;
+          throw new Error("simulated heartbeat failure");
+        }
+        return baseQueue.heartbeat(jobId, workerId, leaseMs);
+      },
+    };
+    const handled: string[] = [];
+    const workerErrors: string[] = [];
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_resilient",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async (job) => {
+          handled.push(job.id);
+          return { ok: true, result: { ok: true } };
+        },
+      },
+      onError: (error) => {
+        workerErrors.push(error.message);
+      },
+    });
+
+    const first = await baseQueue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_worker_fail_1" },
+      maxAttempts: 1,
+    });
+    failHeartbeatForJobId = first.id;
+    const second = await baseQueue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_worker_fail_2" },
+      maxAttempts: 1,
+    });
+
+    worker.start();
+    const secondSettled = await baseQueue.waitForJob(second.id, 2_000);
+    worker.stop();
+
+    expect(workerErrors).toContain("simulated heartbeat failure");
+    expect(handled).toContain(second.id);
+    expect(secondSettled?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

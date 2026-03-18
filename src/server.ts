@@ -87,6 +87,7 @@ import { loadAgentRoutes } from "./framework/agent-loader.js";
 import { SseHub } from "./framework/sse-hub.js";
 import { makeEventId, text } from "./framework/http.js";
 import { JobWorker, type JobHandler } from "./engine/runtime/job-worker.js";
+import { deriveJobFailureDecision } from "./engine/runtime/job-failure-policy.js";
 import { evaluateImprovementProposal } from "./engine/runtime/improvement-harness.js";
 import { resolveFactoryRuntimeConfig } from "./factory-cli/config.js";
 
@@ -1292,21 +1293,12 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
       ...(result ?? {}),
     };
     if (normalizedResult.status === "failed") {
-      const failure = typeof normalizedResult.failure === "object" && normalizedResult.failure && !Array.isArray(normalizedResult.failure)
-        ? normalizedResult.failure as Record<string, unknown>
-        : undefined;
-      const failureMessage = typeof failure?.message === "string" && failure.message.trim()
-        ? failure.message
-        : undefined;
+      const decision = deriveJobFailureDecision(normalizedResult);
       return {
         ok: false,
-        error: typeof normalizedResult.note === "string" && normalizedResult.note.trim()
-          ? normalizedResult.note
-          : failureMessage
-            ? failureMessage
-          : "run failed",
+        error: decision.error,
         result: normalizedResult,
-        noRetry: true,
+        noRetry: decision.noRetry,
       };
     }
     if (job.payload.kind === "factory.task.run") {
@@ -1322,6 +1314,9 @@ const worker = new JobWorker({
   idleResyncMs: jobIdleResyncMs,
   leaseMs: jobLeaseMs,
   concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 2)),
+  onError: (error) => {
+    console.error(`[job-worker ${jobWorkerId}]`, error);
+  },
   handlers: {
     theorem: createWorkerHandler({
       defaultStream: "agents/theorem", defaultAgentId: "theorem", kind: "theorem.run",
