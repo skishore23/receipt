@@ -1347,7 +1347,11 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => `<!doc
         const elt = detail && detail.elt;
         if (!elt || !(elt instanceof HTMLElement)) return;
         if (elt.tagName === "FORM" && elt.getAttribute("action") === "/factory/run") {
-          if (detail.failed) setRunPending(false);
+          if (detail.failed) {
+            setRunPending(false);
+            return;
+          }
+          clearPrompt();
           return;
         }
         if (detail.failed) return;
