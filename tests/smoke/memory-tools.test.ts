@@ -13,7 +13,7 @@ import {
   type MemoryState,
 } from "../../src/adapters/memory-tools.ts";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 
 const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));

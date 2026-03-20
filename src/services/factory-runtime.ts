@@ -12,7 +12,7 @@ import {
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl.js";
 import { jsonlQueue } from "../adapters/jsonl-queue.js";
 import { embed, llmStructured } from "../adapters/openai.js";
-import { createRuntime } from "../core/runtime.js";
+import { createRuntime } from "@receipt/core/runtime.js";
 import type { JobHandler } from "../engine/runtime/job-worker.js";
 import type { SseHub } from "../framework/sse-hub.js";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job.js";

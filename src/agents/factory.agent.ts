@@ -4,8 +4,8 @@ import type { Hono } from "hono";
 
 import { LocalCodexExecutor } from "../adapters/codex-executor.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
-import { fold } from "../core/chain.js";
-import type { Runtime } from "../core/runtime.js";
+import { fold } from "@receipt/core/chain.js";
+import type { Runtime } from "@receipt/core/runtime.js";
 import {
   html,
   json,

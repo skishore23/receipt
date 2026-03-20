@@ -1,4 +1,4 @@
-import type { Runtime } from "../core/runtime.js";
+import type { Runtime } from "@receipt/core/runtime.js";
 import { runAgentLoop, type ModernAgentSpec } from "../engine/runtime/agent-loop.js";
 import type { ReceiptDeclaration } from "./receipt.js";
 

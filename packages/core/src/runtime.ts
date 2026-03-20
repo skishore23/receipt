@@ -188,10 +188,30 @@ export const createRuntime = <Cmd, Event, State>(
     }
     const localChain = [...await store.read(stream)];
     const chain = [...await materializeChain(stream, localChain, seen)];
+    
+    let state = initial;
+    let foldStartIndex = 0;
+
+    if (cached && cached.branchKey === branchKey && chain.length >= cached.chain.length) {
+      const cachedLength = cached.chain.length;
+      if (cachedLength > 0) {
+        const lastCached = cached.chain[cachedLength - 1];
+        const correspondingNew = chain[cachedLength - 1];
+        if (correspondingNew && correspondingNew.hash === lastCached?.hash) {
+          state = cached.state;
+          foldStartIndex = cachedLength;
+        }
+      }
+    }
+
+    for (let i = foldStartIndex; i < chain.length; i++) {
+      state = reducer(state, chain[i]!.body, chain[i]!.ts);
+    }
+
     const snapshot = {
       chain,
       localChain,
-      state: fold(chain, reducer, initial),
+      state,
       version: store.version ? await store.version(stream) : undefined,
       branchKey,
     } satisfies StreamSnapshot;

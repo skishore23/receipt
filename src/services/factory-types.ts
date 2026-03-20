@@ -1,4 +1,4 @@
-import type { GraphRef } from "../core/graph.js";
+import type { GraphRef } from "@receipt/core/graph.js";
 import type { QueueCommandRecord, QueueJob } from "../adapters/jsonl-queue.js";
 import type {
   FactoryBudgetState,
@@ -31,7 +31,7 @@ export class FactoryServiceError extends Error {
 export type FactoryServiceOptions = {
   readonly dataDir: string;
   readonly queue: import("../adapters/jsonl-queue.js").JsonlQueue;
-  readonly jobRuntime: import("../core/runtime.js").Runtime<
+  readonly jobRuntime: import("@receipt/core/runtime.js").Runtime<
     import("../modules/job.js").JobCmd,
     import("../modules/job.js").JobEvent,
     import("../modules/job.js").JobState

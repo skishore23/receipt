@@ -49,8 +49,8 @@ import {
   factoryChatCodexArtifactPaths,
   type FactoryChatCodexArtifactPaths,
 } from "./factory-codex-artifacts.js";
-import { createRuntime, type Runtime } from "../core/runtime.js";
-import { type GraphRef } from "../core/graph.js";
+import { createRuntime, type Runtime } from "@receipt/core/runtime.js";
+import { type GraphRef } from "@receipt/core/graph.js";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts.js";
 import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString } from "../framework/http.js";
 import type { SseHub } from "../framework/sse-hub.js";
@@ -1090,8 +1090,11 @@ export class FactoryService {
     return status === "completed" || status === "failed" || status === "canceled";
   }
 
-  private releasesObjectiveSlot(status: FactoryObjectiveStatus): boolean {
-    return this.isTerminalObjectiveStatus(status) || status === "blocked";
+  private releasesObjectiveSlot(state: Pick<FactoryState, "status" | "integration">): boolean {
+    const { status } = state;
+    if (this.isTerminalObjectiveStatus(status) || status === "blocked" || status === "promoting") return true;
+    const is = state.integration?.status;
+    return is === "ready_to_promote" || is === "promoting" || is === "promoted";
   }
 
   private async cancelObjectiveTaskJobs(
@@ -1255,7 +1258,7 @@ export class FactoryService {
     const states = await this.listObjectiveStates();
     return states.some((state) =>
       !state.archivedAt
-      && !this.releasesObjectiveSlot(state.status)
+      && !this.releasesObjectiveSlot(state)
       && state.scheduler.slotState === "active"
       && !state.scheduler.releasedAt,
     );
@@ -1603,7 +1606,7 @@ export class FactoryService {
       if (
         state.scheduler.slotState === "active"
         && !state.scheduler.releasedAt
-        && (this.releasesObjectiveSlot(state.status) || Boolean(state.archivedAt))
+        && (this.releasesObjectiveSlot(state) || Boolean(state.archivedAt))
       ) {
         await this.emitObjective(state.objectiveId, {
           type: "objective.slot.released",
@@ -1619,7 +1622,7 @@ export class FactoryService {
     const refreshed = await this.listObjectiveStates();
     const active = refreshed.find((state) =>
       !state.archivedAt
-      && !this.releasesObjectiveSlot(state.status)
+      && !this.releasesObjectiveSlot(state)
       && state.scheduler.slotState === "active"
       && !state.scheduler.releasedAt,
     );
@@ -1627,7 +1630,7 @@ export class FactoryService {
 
     const next = refreshed.find((state) =>
       !state.archivedAt
-      && !this.releasesObjectiveSlot(state.status)
+      && !this.releasesObjectiveSlot(state)
       && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt),
     );
     if (!next) return;

@@ -3,19 +3,16 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "Bundler",
-    "jsx": "react-jsx",
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "declaration": true,
+    "composite": true,
     "types": ["bun-types"]
   },
-  "references": [
-    { "path": "./packages/core" }
-  ],
   "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx"
+    "src/**/*.ts"
   ]
 }

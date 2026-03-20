@@ -9,7 +9,7 @@ import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import type { DelegationTools } from "../../src/adapters/delegation.ts";
 import type { MemoryTools } from "../../src/adapters/memory-tools.ts";
 import { runAgent, type AgentRunInput } from "../../src/agents/agent.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import type { AgentCmd, AgentEvent, AgentState } from "../../src/modules/agent.ts";
 import { decide as decideAgent, reduce as reduceAgent, initial as initialAgent } from "../../src/modules/agent.ts";
 

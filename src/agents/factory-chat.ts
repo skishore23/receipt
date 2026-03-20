@@ -782,12 +782,13 @@ const createRepoStatusTool = (input: {
     };
   };
 
-const latestObjectiveByRun = new Map<string, string>();
+const latestObjectiveByStream = new Map<string, string>();
 
 const createFactoryDispatchTool = (input: {
   readonly factoryService: FactoryService;
   readonly repoKey: string;
   readonly runId: string;
+  readonly stream: string;
   readonly memoryTools: MemoryTools;
   readonly profileId: string;
 }): AgentToolExecutor =>
@@ -799,7 +800,7 @@ const createFactoryDispatchTool = (input: {
     if (action === "create") {
       const prompt = asString(toolInput.prompt);
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
-      const existingObjectiveId = latestObjectiveByRun.get(input.runId);
+      const existingObjectiveId = latestObjectiveByStream.get(input.stream);
       const existing = existingObjectiveId
         ? await input.factoryService.getObjective(existingObjectiveId).catch(() => undefined)
         : undefined;
@@ -839,9 +840,9 @@ const createFactoryDispatchTool = (input: {
     }
     const summary = summarizeObjective(detail);
     if (detail.archivedAt || detail.status === "completed") {
-      latestObjectiveByRun.delete(input.runId);
+      latestObjectiveByStream.delete(input.stream);
     } else {
-      latestObjectiveByRun.set(input.runId, detail.objectiveId);
+      latestObjectiveByStream.set(input.stream, detail.objectiveId);
     }
     await commitWorkerSummary(
       input.memoryTools,
@@ -1251,6 +1252,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       factoryService: input.factoryService,
       repoKey,
       runId: input.runId,
+      stream: input.stream,
       memoryTools: input.memoryTools,
       profileId: resolvedProfile.root.id,
     }),

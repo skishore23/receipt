@@ -2,7 +2,7 @@
 // Agent Module - think/act/observe run receipts
 // ============================================================================
 
-import type { Decide, Reducer } from "../core/types.js";
+import type { Decide, Reducer } from "@receipt/core/types.js";
 import type { FailureRecord, FailureStateRecord } from "./failure.js";
 import { cloneFailureRecord } from "./failure.js";
 

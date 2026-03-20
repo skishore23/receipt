@@ -4,7 +4,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 
 type CounterCmd = {
   readonly type: "counter.inc";

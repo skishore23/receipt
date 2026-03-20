@@ -6,7 +6,7 @@ import path from "node:path";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
 import type { MemoryTools } from "../../src/adapters/memory-tools.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import type { JobCmd, JobEvent, JobState } from "../../src/modules/job.ts";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob } from "../../src/modules/job.ts";
 import type { AgentCmd, AgentEvent, AgentState } from "../../src/modules/agent.ts";

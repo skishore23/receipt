@@ -6,8 +6,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Decide, Reducer } from "../core/types.js";
-import type { Runtime } from "../core/runtime.js";
+import type { Decide, Reducer } from "@receipt/core/types.js";
+import type { Runtime } from "@receipt/core/runtime.js";
 
 export type MemoryEntry = {
   readonly id: string;

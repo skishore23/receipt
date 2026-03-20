@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { JobWorker } from "../../src/engine/runtime/job-worker.ts";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job.ts";
 

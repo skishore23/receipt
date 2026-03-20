@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { createRuntime } from "../../src/core/runtime.ts";
-import { receipt } from "../../src/core/chain.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
+import { receipt } from "@receipt/core/chain.js";
 import { createStreamLocator, jsonBranchStore } from "../../src/adapters/jsonl.ts";
 import { jsonlStore } from "../../src/adapters/jsonl.ts";
 

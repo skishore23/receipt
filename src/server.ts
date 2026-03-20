@@ -20,7 +20,7 @@ import {
 } from "./adapters/memory-tools.js";
 import { createDelegationTools } from "./adapters/delegation.js";
 import { createHeartbeat, type HeartbeatSpec } from "./adapters/heartbeat.js";
-import { createRuntime } from "./core/runtime.js";
+import { createRuntime } from "@receipt/core/runtime.js";
 import type { JobCmd, JobEvent, JobState } from "./modules/job.js";
 import { decide as decideJob, reduce as reduceJob, initial as initialJob } from "./modules/job.js";
 import type { AgentEvent } from "./modules/agent.js";
@@ -100,7 +100,8 @@ const parseWorkerConcurrency = (value: string | undefined, fallback: number): nu
   return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
 };
 const defaultJobConcurrency = parseWorkerConcurrency(process.env.JOB_CONCURRENCY, 2);
-const generalJobConcurrency = parseWorkerConcurrency(process.env.GENERAL_JOB_CONCURRENCY, defaultJobConcurrency);
+const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURRENCY, defaultJobConcurrency);
+const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, defaultJobConcurrency);
 const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, defaultJobConcurrency);
 const jobIdleResyncMs = Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000);
 const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 300_000);
@@ -649,23 +650,29 @@ const jobHandlers = {
   },
 } satisfies Record<string, JobHandler>;
 
-const generalWorkerAgentIds = [
-  "agent",
-  "factory",
-  FACTORY_CONTROL_AGENT_ID,
-] as const;
-
 const workers = [
   new JobWorker({
     queue,
     handlers: jobHandlers,
-    workerId: `${jobWorkerId}:general`,
-    leaseAgentIds: generalWorkerAgentIds,
+    workerId: `${jobWorkerId}:chat`,
+    leaseAgentIds: ["factory"],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
-    concurrency: generalJobConcurrency,
+    concurrency: chatJobConcurrency,
     onError: (error) => {
-      console.error(`[job-worker ${jobWorkerId}:general]`, error);
+      console.error(`[job-worker ${jobWorkerId}:chat]`, error);
+    },
+  }),
+  new JobWorker({
+    queue,
+    handlers: jobHandlers,
+    workerId: `${jobWorkerId}:orchestration`,
+    leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID],
+    idleResyncMs: jobIdleResyncMs,
+    leaseMs: jobLeaseMs,
+    concurrency: orchestrationJobConcurrency,
+    onError: (error) => {
+      console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
     },
   }),
   new JobWorker({

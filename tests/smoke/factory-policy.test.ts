@@ -9,7 +9,7 @@ import type { ZodTypeAny, infer as ZodInfer } from "zod";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { buildFactoryDecisionSet } from "../../src/engine/merge/factory-policy.ts";
 import { SseHub } from "../../src/framework/sse-hub.ts";
 import {

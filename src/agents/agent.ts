@@ -8,8 +8,8 @@ import { spawn } from "node:child_process";
 
 import { z } from "zod";
 
-import type { Chain } from "../core/types.js";
-import type { Runtime } from "../core/runtime.js";
+import type { Chain } from "@receipt/core/types.js";
+import type { Runtime } from "@receipt/core/runtime.js";
 import { clampNumber, parseFormNum, type AgentRunControl, createQueuedEmitter, getLatestRunId } from "../engine/runtime/workflow.js";
 import type { MemoryTools } from "../adapters/memory-tools.js";
 import type { AgentCmd, AgentEvent, AgentState, AgentToolName } from "../modules/agent.js";

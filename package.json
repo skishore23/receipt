@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "receipt": "dist/cli.js"
   },
@@ -24,7 +27,7 @@
     "video:render:vertical": "npm --prefix video run render:vertical",
     "start": "bun dist/server.js",
     "clean": "bun -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "bun run clean && tsc -p tsconfig.json && bun scripts/copy-runtime-assets.mjs && bun run css:build",
+    "build": "bun run clean && tsc -b tsconfig.json && bun scripts/copy-runtime-assets.mjs && bun run css:build",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
@@ -36,6 +39,7 @@
     "@hono/zod-validator": "^0.7.6",
     "@inkjs/ui": "^2.0.0",
     "@oblivionocean/minigfm": "^1.0.7",
+    "@receipt/core": "workspace:*",
     "@tailwindcss/cli": "^4.2.1",
     "clsx": "^2.1.1",
     "hono": "^4.12.4",

@@ -5,7 +5,7 @@ import { LocalCodexExecutor } from "../adapters/codex-executor.js";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl.js";
 import { jsonlQueue, type QueueJob } from "../adapters/jsonl-queue.js";
 import { runFactoryCodexJob } from "../agents/factory-chat.js";
-import { createRuntime } from "../core/runtime.js";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { JobWorker } from "../engine/runtime/job-worker.js";
 import { SseHub } from "../framework/sse-hub.js";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job.js";

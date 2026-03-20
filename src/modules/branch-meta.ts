@@ -2,7 +2,7 @@
 // Branch Metadata Module - receipt-native branch index
 // ============================================================================
 
-import type { Branch, Reducer } from "../core/types.js";
+import type { Branch, Reducer } from "@receipt/core/types.js";
 
 export type BranchMetaEvent = {
   readonly type: "branch.meta.upsert";

@@ -7,8 +7,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-import type { Branch, BranchStore, Chain, Receipt, Store } from "../core/types.js";
-import { fold, receipt } from "../core/chain.js";
+import type { Branch, BranchStore, Chain, Receipt, Store } from "@receipt/core/types.js";
+import { fold, receipt } from "@receipt/core/chain.js";
 import {
   initial as initialBranchMeta,
   reduce as reduceBranchMeta,

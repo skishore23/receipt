@@ -8,11 +8,11 @@ import { promisify } from "node:util";
 import { Hono } from "hono";
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
 
-import { fold } from "../../src/core/chain.ts";
-import { receipt } from "../../src/core/chain.ts";
+import { fold } from "@receipt/core/chain.js";
+import { receipt } from "@receipt/core/chain.js";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { SseHub } from "../../src/framework/sse-hub.ts";
 import type { AgentLoaderContext } from "../../src/framework/agent-types.ts";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job.ts";
@@ -34,7 +34,7 @@ import {
   factoryMissionMainIsland,
   type FactoryMissionShellModel,
 } from "../../src/views/factory-mission-control.ts";
-import type { BranchStore, Receipt, Store } from "../../src/core/types.ts";
+import type { BranchStore, Receipt, Store } from "@receipt/core/types.js";
 
 const stream = "factory/objectives/demo";
 const execFileAsync = promisify(execFile);

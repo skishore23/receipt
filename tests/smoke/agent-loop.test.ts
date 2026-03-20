@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl.ts";
-import { createRuntime } from "../../src/core/runtime.ts";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { runAgentLoop } from "../../src/engine/runtime/agent-loop.ts";
 import { action } from "../../src/sdk/actions.ts";
 import { receipt } from "../../src/sdk/receipt.ts";

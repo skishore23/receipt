@@ -9,7 +9,7 @@ import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type
 import { jsonBranchStore, jsonlStore } from "./adapters/jsonl.js";
 import { jsonlQueue } from "./adapters/jsonl-queue.js";
 import type { Flags } from "./cli.types.js";
-import { createRuntime } from "./core/runtime.js";
+import { createRuntime } from "@receipt/core/runtime.js";
 import { runAgentLoop } from "./engine/runtime/agent-loop.js";
 import { handleFactoryCommand } from "./factory-cli/commands.js";
 import { resolveFactoryRuntimeConfig } from "./factory-cli/config.js";
