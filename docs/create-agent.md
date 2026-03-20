@@ -57,7 +57,7 @@ Example:
 import { defineAgent, receipt, assistant, human } from "../sdk/index.js";
 
 export default defineAgent({
-  id: "writer",
+  id: "my-agent",
   version: "1.0.0",
 
   receipts: {

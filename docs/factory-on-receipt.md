@@ -178,7 +178,7 @@ It does not own durable state. It:
 
 ### Factory semantic/orchestrator layer
 
-- `src/services/factory-orchestrator.ts`
+- `src/agents/orchestrator.ts`
 - `prompts/factory/orchestrator.md`
 
 This layer chooses among valid actions. It is intentionally narrower than the service layer:
@@ -588,7 +588,7 @@ Important defaults:
 
 ## Semantic Action Model
 
-The semantic action type union in `src/services/factory-orchestrator.ts` is:
+The semantic action type union in `src/agents/orchestrator.ts` is:
 
 - `split_task`
 - `reassign_task`

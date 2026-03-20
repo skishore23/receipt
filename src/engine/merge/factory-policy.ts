@@ -175,9 +175,6 @@ const workerFit = (task: FactoryTaskRecord | undefined): number => {
   if (!task) return 0.5;
   const text = `${task.title}\n${task.prompt}`.toLowerCase();
   const worker = String(task.workerType);
-  if (/\b(write|docs?|copy|summary|content)\b/.test(text)) return worker === "writer" ? 1 : 0.35;
-  if (/\b(prove|theorem|formal|lean|lemma|axiom)\b/.test(text)) return worker === "theorem" || worker === "axiom" ? 1 : 0.3;
-  if (/\b(inspect|debug|trace|analy[sz]e|investigate)\b/.test(text)) return worker === "inspector" ? 1 : worker === "codex" ? 0.7 : 0.4;
   if (/\b(infra|deploy|docker|terraform|k8s|kubernetes|pipeline|ci)\b/.test(text)) return worker === "infra" ? 1 : 0.3;
   return worker === "codex" ? 0.8 : 0.6;
 };

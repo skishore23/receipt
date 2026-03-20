@@ -43,7 +43,7 @@ receipt dev
   - queued mode: `{ ok, mode: "queued", jobId, runId, stream, runStream }`
 - Example:
 ```bash
-receipt run writer --problem "Draft launch thread" --stream agents/writer
+receipt run factory --problem "Plan a CLI-first migration" --stream agents/factory
 ```
 
 ### receipt trace <run-id|stream>
@@ -61,7 +61,7 @@ receipt trace run_abcd1234
 - Output (JSON): `{ stream, receipts: [...] }`.
 - Example:
 ```bash
-receipt replay agents/writer/runs/run_abcd1234
+receipt replay agents/factory/runs/run_abcd1234
 ```
 
 ### receipt inspect <run-id|stream>
@@ -81,7 +81,7 @@ receipt inspect run_abcd1234
 - Output (JSON): `{ ok, stream, at, branch }`.
 - Example:
 ```bash
-receipt fork run_abcd1234 --at 12 --name agents/writer/runs/run_abcd1234/branches/hotfix
+receipt fork run_abcd1234 --at 12 --name agents/factory/runs/run_abcd1234/branches/hotfix
 ```
 
 ### receipt jobs

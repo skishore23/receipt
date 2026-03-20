@@ -14,7 +14,7 @@ Instead, "context" is split across several layers that serve different jobs:
 | --- | --- | --- | --- |
 | Receipts | Raw, append-only event history | JSONL streams via the runtime | Reducers, inspectors, debugging tools |
 | Reduced state | Structured current view derived from receipts | In-memory replay result from reducers | Services, routes, projections |
-| Prompt context | The exact text or bounded summary sent to an LLM | Prompt builders and `prompt.context` / compaction events | Theorem, Writer, Agent flows |
+| Prompt context | The exact text or bounded summary sent to an LLM | Prompt builders and `prompt.context` / compaction events | Factory flows |
 | Scoped memory | Durable summaries/facts keyed by scope | `memory/<scope>` streams | Long-running agents, Factory workers |
 | Factory task packet | Materialized worker handoff for one task pass | `<worktree>/.receipt/factory/*` | Codex or another worker |
 
@@ -63,7 +63,6 @@ That file gives the repo four basic primitives:
 
 This is intentionally simple. It is used for:
 
-- inspector runs
 - delegation inspection
 - operator-facing debugging
 
@@ -73,38 +72,13 @@ This is not semantic memory. It is just bounded raw evidence.
 
 Some agents build smarter prompt context instead of passing raw receipt dumps.
 
-`src/lib/memory.ts` provides `buildRankedContext(...)`, which:
+The ranked-context pattern ranks candidate context items by score and recency, optionally keeps pinned items, respects both item count and character budgets, and truncates when needed.
 
-- ranks candidate context items by score and recency
-- optionally keeps pinned items
-- respects both item count and character budgets
-- truncates lines and entire selections when needed
-
-This utility is used most clearly in `src/agents/theorem.memory.ts`, where theorem memory selection is:
-
-- phase-aware
-- bracket-aware
-- target-claim-aware
-- bounded by `maxChars`
-
-So in the theorem path, "context" means "the highest-value recent proof artifacts under a budget", not "the whole transcript".
+Factory uses this pattern through its recursive context packs and layered memory scopes to deliver bounded, high-value context to workers.
 
 ## 3. Prompt snapshots and overflow receipts
 
-Some long-running agent flows explicitly record what happened to prompt context.
-
-Examples:
-
-- `src/agents/theorem.ts`
-- `src/agents/writer.ts`
-- `src/agents/agent.ts`
-
-The exact receipt set depends on the agent:
-
-- theorem and writer emit `prompt.context`
-- theorem, writer, and the generic agent emit `context.pruned`
-- theorem, writer, and the generic agent emit `context.compacted`
-- theorem, writer, and the generic agent emit `overflow.recovered`
+Long-running agent flows explicitly record what happened to prompt context through receipts like `prompt.context`, `context.pruned`, `context.compacted`, and `overflow.recovered`.
 
 This is important because it makes prompt management observable. The system does not silently trim prompts and hide that fact.
 
@@ -115,12 +89,7 @@ Common policy shape:
 - if it still risks overflow, compact it further before the model call
 - if the model still overflows, retry once with a smaller prompt and emit a recovery receipt
 
-The generic agent loop in `src/agents/agent.ts` goes one step further:
-
-- before compaction it flushes recent transcript text into scoped memory
-- then it compacts the prompt
-
-That means context pressure can move information from "live prompt text" into "durable memory" instead of just deleting it.
+Context pressure can move information from "live prompt text" into "durable memory" instead of just deleting it.
 
 ## 4. Scoped memory is the durable summary layer
 

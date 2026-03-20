@@ -9,45 +9,22 @@ Receipt uses Server-Sent Events for live UI refresh and token streaming.
 - Keepalive: `event: ping` every 15 seconds.
 
 ## Topics and Event Names
-- `theorem` topic
-  - refresh event: `theorem-refresh`
-  - token event: `theorem-token` (JSON `{ runId, delta }`)
-- `writer` topic
-  - refresh event: `writer-refresh`
-  - token event: `writer-token` (JSON `{ runId, delta }`)
 - `agent` topic
   - refresh event: `agent-refresh`
-  - token event: `agent-token` (JSON `{ runId, delta }`)
 - `receipt` topic (global)
   - refresh event: `receipt-refresh`
-  - token event: `receipt-token` (JSON `{ groupId, runId, agentId, file, delta }`)
 - `jobs` topic
   - refresh event: `job-refresh`
+- `factory` topic
+  - refresh event: `factory-refresh`
 
 ## Subscription Endpoints
 
-### GET /theorem/stream
-- Query: `stream` (default `agents/theorem`).
-- Scope: theorem topic + stream-specific channel.
+### GET /factory/events
+- Scope: factory topic + objective-scoped channel.
 - Example:
 ```bash
-curl -N 'http://localhost:8787/theorem/stream?stream=agents/theorem'
-```
-
-### GET /writer/stream
-- Query: `stream` (default `agents/writer`).
-- Scope: writer topic + stream-specific channel.
-- Example:
-```bash
-curl -N 'http://localhost:8787/writer/stream?stream=agents/writer'
-```
-
-### GET /monitor/stream
-- Query: `stream` (default `agents/agent`).
-- Scope: agent topic + stream-specific channel.
-- Example:
-```bash
-curl -N 'http://localhost:8787/monitor/stream?stream=agents/agent'
+curl -N 'http://localhost:8787/factory/events?objective=obj_abc'
 ```
 
 ### GET /receipt/stream

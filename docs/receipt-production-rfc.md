@@ -91,7 +91,7 @@ Receipt already has several of the right primitives:
 - job worker leases and heartbeats in `src/engine/runtime/job-worker.ts`
 - receipt-based approval precedent in `src/modules/self-improvement.ts`
 - operator SSE fanout in `src/framework/sse-hub.ts`
-- monitor and receipt-inspection UI surfaces in `src/agents/monitor.agent.ts` and `src/views/receipt.ts`
+- receipt-inspection UI surfaces in `src/views/receipt.ts`
 
 Those are not throwaway ideas. The production system should preserve them.
 
@@ -1505,8 +1505,8 @@ Acceptance criteria:
 ### Migration strategy from current repo
 
 1. Preserve JSONL for local development and tests initially.
-2. Introduce new infra runtime without rewriting existing theorem/writer/agent paths.
-3. Reuse current monitor and receipt-inspection surfaces where possible.
+2. Introduce new infra runtime without rewriting existing factory agent paths.
+3. Reuse current receipt-inspection surfaces where possible.
 4. Move generic abstractions back into shared code only after the infra path is stable.
 
 This avoids a dangerous rewrite of unrelated agent paths.

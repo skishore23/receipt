@@ -55,7 +55,7 @@ flowchart LR
   Git --> IntWT["Integration worktree"]
   IntWT --> Source["Source branch"]
 
-  OtherWorkers["theorem / writer / inspector / agent / infra / axiom"] --> Queue
+  OtherWorkers["other worker types"] --> Queue
 ```
 
 ## Components And Responsibilities
@@ -75,7 +75,7 @@ It is not the durable source of truth. It derives state from receipts and emits 
 
 ### Factory orchestrator
 
-The orchestrator in `src/services/factory-orchestrator.ts` is a narrow semantic chooser. It does not own state. It chooses among valid actions that the service has already enumerated.
+The orchestrator in `src/agents/orchestrator.ts` is a narrow semantic chooser. It does not own state. It chooses among valid actions that the service has already enumerated.
 
 ### Codex executor
 
@@ -233,16 +233,7 @@ It is not the orchestrator, and it does not replace the Factory control plane.
 
 ## Other Worker Types
 
-The reducer and queue model allow other worker types:
-
-- `theorem`
-- `writer`
-- `inspector`
-- `agent`
-- `infra`
-- `axiom`
-
-Those are selected by task `workerType`, but the default decomposition guidance prefers `codex` unless a specialist is clearly better.
+The reducer and queue model allow other worker types via `workerType` on task records. The default decomposition guidance prefers `codex`.
 
 ## Task Worktrees
 

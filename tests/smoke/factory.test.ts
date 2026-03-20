@@ -727,7 +727,8 @@ test("factory work details shell: renders the advanced /factory/control surface"
   expect(markup).toMatch(/id="factory-mission-main"/);
   expect(markup).toMatch(/id="factory-mission-rail"/);
   expect(markup).toMatch(/id="factory-mission-inspector"/);
-  expect(markup).toMatch(/new EventSource\("\/factory\/control\/events/);
+  expect(markup).toMatch(/data-factory-control/);
+  expect(markup).toMatch(/factory-client\.js/);
   expect(markup).not.toMatch(/setInterval\(/);
   expect(markup).not.toMatch(/startLivePolling/);
   expect(markup).toMatch(/>Chat</);

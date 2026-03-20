@@ -19,22 +19,18 @@
 
 | Variable | Default | Impact |
 |---|---|---|
-| `OPENAI_API_KEY` | unset | Required for live LLM/embedding calls; without it, theorem/writer/agent/inspector runs fail gracefully with status notes. |
-| `OPENAI_MODEL` | `gpt-5.2` | Default model for theorem/writer/agent/inspector text calls. |
+| `OPENAI_API_KEY` | unset | Required for live LLM/embedding calls; without it, factory agent runs fail gracefully with status notes. |
+| `OPENAI_MODEL` | `gpt-5.2` | Default model for factory agent text calls. |
 | `OPENAI_MAX_RETRIES` | `3` | Retry attempts on rate limits. |
 | `OPENAI_RETRY_BASE_MS` | `500` | Base backoff for rate-limit retry. |
 
-## Planner/Theorem Tuning
+## Planner Tuning
 
 | Variable | Default | Impact |
 |---|---|---|
-| `PLANNER_STEP_TIMEOUT_MS` | `90000` | Timeout budget used by writer/agent planning step execution. |
-| `THEOREM_PASS_K` | `2` | Theorem structured pass count fallback (clamped to valid bounds in code paths using it). |
+| `PLANNER_STEP_TIMEOUT_MS` | `90000` | Timeout budget used by factory planning step execution. |
 
 Prompt templates are loaded from checked-in files:
-- `prompts/theorem.prompts.json`
-- `prompts/writer.prompts.json`
-- `prompts/inspector.prompts.json`
 - `prompts/agent.prompts.json`
 
 ## Improvement Harness

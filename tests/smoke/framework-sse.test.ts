@@ -11,7 +11,7 @@ const readChunk = async (reader: ReadableStreamDefaultReader<Uint8Array>): Promi
 test("framework sse: subscribe sends init and publish emits topic event", async () => {
   const hub = new SseHub();
   const abort = new AbortController();
-  const response = hub.subscribe("theorem", "demo", abort.signal);
+  const response = hub.subscribe("agent", "demo", abort.signal);
   expect(response.status).toBe(200);
   expect(response.headers.get("Content-Type")).toBe("text/event-stream");
 
@@ -20,12 +20,12 @@ test("framework sse: subscribe sends init and publish emits topic event", async 
   const streamReader = reader!;
 
   const init = await readChunk(streamReader);
-  expect(init).toMatch(/event: theorem-refresh/);
+  expect(init).toMatch(/event: agent-refresh/);
   expect(init).toMatch(/data: init/);
 
-  hub.publish("theorem", "demo");
+  hub.publish("agent", "demo");
   const published = await readChunk(streamReader);
-  expect(published).toMatch(/event: theorem-refresh/);
+  expect(published).toMatch(/event: agent-refresh/);
   expect(published).toMatch(/data: \d+/);
 
   abort.abort();
@@ -54,15 +54,15 @@ test("framework sse: receipt topic is global", async () => {
 test("framework sse: publishData forwards custom event payload", async () => {
   const hub = new SseHub();
   const abort = new AbortController();
-  const response = hub.subscribe("writer", "demo", abort.signal);
+  const response = hub.subscribe("agent", "demo", abort.signal);
   const reader = response.body?.getReader();
   expect(reader).toBeTruthy();
   const streamReader = reader!;
 
   await readChunk(streamReader); // init
-  hub.publishData("writer", "demo", "writer-token", "{\"delta\":\"hi\"}");
+  hub.publishData("agent", "demo", "agent-token", "{\"delta\":\"hi\"}");
   const published = await readChunk(streamReader);
-  expect(published).toMatch(/event: writer-token/);
+  expect(published).toMatch(/event: agent-token/);
   expect(published).toMatch(/data: \{\"delta\":\"hi\"\}/);
 
   abort.abort();
@@ -73,7 +73,7 @@ test("framework sse: subscribeMany fans in multiple topics", async () => {
   const hub = new SseHub();
   const abort = new AbortController();
   const response = hub.subscribeMany([
-    { topic: "theorem", stream: "demo" },
+    { topic: "agent", stream: "demo" },
     { topic: "receipt" },
   ], abort.signal);
   const reader = response.body?.getReader();
@@ -81,13 +81,13 @@ test("framework sse: subscribeMany fans in multiple topics", async () => {
   const streamReader = reader!;
 
   const init = `${await readChunk(streamReader)}${await readChunk(streamReader)}`;
-  expect(init).toMatch(/event: theorem-refresh/);
+  expect(init).toMatch(/event: agent-refresh/);
   expect(init).toMatch(/event: receipt-refresh/);
 
-  hub.publish("theorem", "demo");
+  hub.publish("agent", "demo");
   hub.publish("receipt");
   const published = `${await readChunk(streamReader)}${await readChunk(streamReader)}`;
-  expect(published).toMatch(/event: theorem-refresh/);
+  expect(published).toMatch(/event: agent-refresh/);
   expect(published).toMatch(/event: receipt-refresh/);
 
   abort.abort();

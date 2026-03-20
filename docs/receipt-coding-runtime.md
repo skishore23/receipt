@@ -157,7 +157,7 @@ The current repo already provides useful building blocks:
 - JSONL-backed receipt persistence in `src/adapters/jsonl.ts`
 - receipt-native job lifecycle and worker leasing in `src/engine/runtime/job-worker.ts`
 - HTTP and SSE surfaces in `src/server.ts`
-- receipt and monitor views in `src/views`
+- receipt views in `src/views`
 
 The current limitations for this use case are:
 

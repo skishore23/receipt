@@ -1,7 +1,9 @@
 @import "tailwindcss";
 
+@source "../views/ui.ts";
 @source "../views/factory-chat.ts";
 @source "../views/factory-mission-control.ts";
+@source "../views/receipt.ts";
 
 :root {
   --background: oklch(0.145 0.01 255);

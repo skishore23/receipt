@@ -1,4 +1,4 @@
-export type Topic = "theorem" | "writer" | "agent" | "receipt" | "jobs" | "factory";
+export type Topic = "agent" | "receipt" | "jobs" | "factory";
 export type SseSubscription = {
   readonly topic: Topic;
   readonly stream?: string;
@@ -10,8 +10,6 @@ type SseClient = {
 };
 
 const topicEvent: Record<Topic, string> = {
-  theorem: "theorem-refresh",
-  writer: "writer-refresh",
   agent: "agent-refresh",
   receipt: "receipt-refresh",
   jobs: "job-refresh",

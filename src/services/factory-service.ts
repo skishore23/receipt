@@ -72,7 +72,7 @@ const FACTORY_SHARED_REPO_PROFILE_DIR = path.join("factory", "repo-profile");
 const DEFAULT_FACTORY_PROFILE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const FACTORY_CONTROL_AGENT_ID = "factory-control";
 const AGENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
-const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "theorem", "writer", "inspector", "agent", "infra", "axiom"]);
+const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "infra"]);
 
 const resolveRepoRoot = (repoRoot?: string): string =>
   repoRoot?.trim()

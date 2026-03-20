@@ -1,109 +1,23 @@
 import type { FactoryLiveOutputSnapshot } from "../services/factory-service.js";
 
-import { esc } from "./agent-framework.js";
-
-const panelClass = "rounded-[28px] border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(0,0,0,0.34)] backdrop-blur-2xl";
-const softPanelClass = "rounded-[24px] border border-white/10 bg-black/20 backdrop-blur-xl";
-const railCardClass = `${softPanelClass} p-4`;
-const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500";
-const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4 break-words [overflow-wrap:anywhere]";
-const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
-const primaryButtonClass = `${buttonBaseClass} border-emerald-300/40 bg-emerald-300 text-zinc-950 hover:bg-emerald-200`;
-const ghostButtonClass = `${buttonBaseClass} border-white/10 bg-white/[0.04] text-zinc-100 hover:bg-white/[0.09]`;
-const dangerButtonClass = `${buttonBaseClass} border-rose-300/25 bg-rose-400/10 text-rose-100 hover:bg-rose-400/20`;
-const navPillClass = "inline-flex items-center rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.16em] transition";
-
-type Tone = "neutral" | "info" | "success" | "warning" | "danger";
-
-const formatTs = (ts?: number): string =>
-  typeof ts === "number" && Number.isFinite(ts) ? new Date(ts).toLocaleString() : "";
-
-const shortHash = (hash?: string): string =>
-  hash ? hash.slice(0, 10) : "";
-
-const displayLabel = (value?: string): string => {
-  const text = value?.trim();
-  if (!text) return "";
-  return text.replace(/[_-]+/g, " ");
-};
-
-const toneForValue = (value?: string): Tone => {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  if (!normalized) return "neutral";
-  if (["completed", "ready_to_promote", "approved", "success", "ready", "promoted"].includes(normalized)) return "success";
-  if (["failed", "canceled", "cancelled", "blocked", "error", "changes_requested", "conflicted"].includes(normalized)) return "danger";
-  if (["queued", "pending", "waiting_for_slot", "waiting", "needs_attention", "decomposing", "planning"].includes(normalized)) return "warning";
-  if (["executing", "running", "active", "integrating", "promoting", "reviewing", "leased"].includes(normalized)) return "info";
-  return "neutral";
-};
-
-const badgeToneClass = (tone: Tone): string => {
-  switch (tone) {
-    case "success":
-      return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
-    case "warning":
-      return "border-amber-300/25 bg-amber-300/10 text-amber-100";
-    case "danger":
-      return "border-rose-300/20 bg-rose-300/10 text-rose-100";
-    case "info":
-      return "border-sky-300/20 bg-sky-300/10 text-sky-100";
-    default:
-      return "border-white/10 bg-white/[0.04] text-zinc-300";
-  }
-};
-
-const badge = (label: string, tone: Tone = toneForValue(label)): string =>
-  `<span class="${badgeBaseClass} ${badgeToneClass(tone)}">${esc(displayLabel(label) || label)}</span>`;
-
-const navPill = (input: {
-  readonly href: string;
-  readonly label: string;
-  readonly active?: boolean;
-  readonly dataFactoryNav?: string;
-}): string => {
-  const classes = input.active
-    ? "border-sky-300/30 bg-sky-300/10 text-sky-100"
-    : "border-white/10 bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]";
-  return `<a class="${navPillClass} ${classes}" href="${esc(input.href)}"${input.dataFactoryNav ? ` data-factory-nav="${esc(input.dataFactoryNav)}"` : ""}>${esc(input.label)}</a>`;
-};
-
-const statPill = (label: string, value: string): string => `<div class="min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
-  <div class="text-[10px] uppercase tracking-[0.18em] text-zinc-500">${esc(label)}</div>
-  <div class="mt-1 break-words text-sm font-medium text-zinc-100 [overflow-wrap:anywhere]">${esc(value)}</div>
-</div>`;
-
-const renderCliActionCard = (input: {
-  readonly label: string;
-  readonly description: string;
-  readonly command: string;
-  readonly commandBadgeClass?: string;
-  readonly span?: string;
-}): string => `<div class="${input.span ?? ""} rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-4">
-    <span class="flex items-start justify-between gap-3">
-      <span class="min-w-0">
-        <span class="block text-sm font-semibold text-zinc-100">${esc(input.label)}</span>
-        <span class="mt-2 block text-sm leading-6 text-zinc-400">${esc(input.description)}</span>
-      </span>
-      <span class="${input.commandBadgeClass ?? ghostButtonClass} shrink-0">CLI</span>
-    </span>
-    <code class="mt-3 block overflow-x-auto rounded-2xl border border-white/10 bg-black/25 px-3 py-3 text-[12px] leading-5 text-zinc-200 [overflow-wrap:anywhere]">${esc(input.command)}</code>
-  </div>`;
-
-const sectionTitle = (section: FactoryMissionSectionKey): string =>
-  section === "needs_attention"
-    ? "Needs Attention"
-    : section === "active"
-      ? "Active"
-      : section === "queued"
-        ? "Queued"
-        : "Completed";
-
-const emptyState = (title: string, body: string): string => `<section class="${panelClass} px-6 py-6 text-center">
-  <div class="mx-auto max-w-2xl">
-    <div class="text-base font-semibold text-zinc-100">${esc(title)}</div>
-    <div class="mt-3 text-sm leading-6 text-zinc-400">${esc(body)}</div>
-  </div>
-</section>`;
+import {
+  badge,
+  displayLabel,
+  emptyState,
+  esc,
+  formatTs,
+  ghostButtonClass,
+  navPill,
+  panelClass,
+  primaryButtonClass,
+  railCardClass,
+  renderJobActionCards,
+  renderObjectiveActions,
+  sectionLabelClass,
+  shortHash,
+  statPill,
+  toneForValue,
+} from "./ui.js";
 
 const controlQuery = (input: {
   readonly objectiveId?: string;
@@ -123,6 +37,15 @@ const controlQuery = (input: {
 export type FactoryMissionPanel = "overview" | "execution" | "live" | "receipts" | "debug";
 export type FactoryMissionFocusKind = "mission" | "run" | "job" | "task";
 export type FactoryMissionSectionKey = "needs_attention" | "active" | "queued" | "completed";
+
+const sectionTitle = (section: FactoryMissionSectionKey): string =>
+  section === "needs_attention"
+    ? "Needs Attention"
+    : section === "active"
+      ? "Active"
+      : section === "queued"
+        ? "Queued"
+        : "Completed";
 
 export type FactoryMissionObjectiveNav = {
   readonly objectiveId: string;
@@ -353,12 +276,12 @@ const renderObjectiveLink = (
       <div class="min-w-0 flex-1 overflow-hidden">
         <div class="min-w-0 break-words text-sm font-semibold leading-6 text-zinc-100 [display:-webkit-box] overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">${esc(objective.title)}</div>
       </div>
-      <div class="shrink-0">${badge(objective.status)}</div>
+      <div class="shrink-0">${badge(displayLabel(objective.status) || objective.status, toneForValue(objective.status))}</div>
     </div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${badge(`phase ${objective.phase}`, toneForValue(objective.phase))}
-      ${badge(`slot ${queueMeta}`, toneForValue(objective.slotState))}
-      ${objective.integrationStatus ? badge(`integration ${objective.integrationStatus}`, toneForValue(objective.integrationStatus)) : ""}
+      ${badge(displayLabel(`phase ${objective.phase}`) || `phase ${objective.phase}`, toneForValue(objective.phase))}
+      ${badge(displayLabel(`slot ${queueMeta}`) || `slot ${queueMeta}`, toneForValue(objective.slotState))}
+      ${objective.integrationStatus ? badge(displayLabel(`integration ${objective.integrationStatus}`) || `integration ${objective.integrationStatus}`, toneForValue(objective.integrationStatus)) : ""}
     </div>
     ${objective.summary ? `<div class="mt-3 [display:-webkit-box] overflow-hidden break-words text-sm leading-6 text-zinc-400 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">${esc(objective.summary)}</div>` : ""}
     <div class="mt-4 flex flex-wrap gap-2">
@@ -395,6 +318,10 @@ export const factoryMissionRailIsland = (model: FactoryMissionShellModel): strin
           <div class="mt-2 text-sm leading-6 text-zinc-400">Execution state, logs, receipts, and controls for Factory projects.</div>
         </div>
         <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-xs font-semibold uppercase tracking-[0.2em] text-zinc-200">WD</div>
+      </div>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <a class="rounded-full border border-sky-300/20 bg-sky-300/[0.06] px-3 py-1.5 text-xs font-medium text-sky-200 transition hover:bg-sky-300/[0.12]" href="/factory">\u2190 Chat</a>
+        <a class="rounded-full border border-sky-300/20 bg-sky-300/[0.06] px-3 py-1.5 text-xs font-medium text-sky-200 transition hover:bg-sky-300/[0.12]" href="/receipt">Receipts \u2192</a>
       </div>
     </section>
     ${sectionMarkup("needs_attention")}
@@ -435,7 +362,7 @@ const renderTaskCard = (task: FactoryMissionTaskSummary): string => `<a class="b
       <div class="text-sm font-semibold text-zinc-100">${esc(task.title)}</div>
       <div class="mt-2 text-xs text-zinc-500">${esc(task.taskId)} · ${esc(displayLabel(task.workerType) || task.workerType)}</div>
     </div>
-    ${badge(task.jobStatus ?? task.status)}
+    ${badge(displayLabel(task.jobStatus ?? task.status) || (task.jobStatus ?? task.status), toneForValue(task.jobStatus ?? task.status))}
   </div>
   ${task.summary ? `<div class="mt-3 text-sm leading-6 text-zinc-300">${esc(task.summary)}</div>` : ""}
   <div class="mt-3 flex flex-wrap gap-2 text-xs text-zinc-500">
@@ -451,7 +378,7 @@ const renderRunCard = (run: FactoryMissionRunSummary): string => `<a class="bloc
       <div class="text-sm font-semibold text-zinc-100">${esc(run.profileLabel)} · ${esc(run.runId)}</div>
       <div class="mt-2 text-xs text-zinc-500">${run.updatedAt ? `Updated ${esc(formatTs(run.updatedAt))}` : ""}</div>
     </div>
-    ${badge(run.status)}
+    ${badge(displayLabel(run.status) || run.status, toneForValue(run.status))}
   </div>
   <div class="mt-3 text-sm leading-6 text-zinc-300">${esc(run.summary)}</div>
   ${run.prompt ? `<div class="mt-3 text-xs text-zinc-500">${esc(run.prompt)}</div>` : ""}
@@ -466,7 +393,7 @@ const renderJobCard = (job: FactoryMissionJobSummary): string => `<a class="fact
       <div class="factory-job-card__title break-words text-sm font-semibold text-zinc-100 [overflow-wrap:anywhere]">${esc(job.agentId)} · ${esc(job.jobId)}</div>
       <div class="factory-job-card__summary mt-2 break-words text-sm leading-6 text-zinc-400 [overflow-wrap:anywhere]">${esc(job.summary)}</div>
     </div>
-    <div class="factory-job-card__status shrink-0">${badge(job.status)}</div>
+    <div class="factory-job-card__status shrink-0">${badge(displayLabel(job.status) || job.status, toneForValue(job.status))}</div>
   </div>
   <div class="factory-job-card__meta mt-3 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">
     ${job.runId ? `Run ${esc(job.runId)}` : "No run id"}
@@ -497,10 +424,10 @@ const renderOverviewPanel = (selected: FactoryMissionSelectedModel): string => `
         <div class="${sectionLabelClass}">Project</div>
         <div class="mt-2 text-2xl font-semibold text-white">${esc(selected.title)}</div>
         <div class="mt-3 flex flex-wrap gap-2">
-          ${badge(selected.status)}
-          ${badge(selected.phase)}
-          ${badge(selected.slotState)}
-          ${selected.integrationStatus ? badge(selected.integrationStatus) : ""}
+          ${badge(displayLabel(selected.status) || selected.status, toneForValue(selected.status))}
+          ${badge(displayLabel(selected.phase) || selected.phase, toneForValue(selected.phase))}
+          ${badge(displayLabel(selected.slotState) || selected.slotState, toneForValue(selected.slotState))}
+          ${selected.integrationStatus ? badge(displayLabel(selected.integrationStatus) || selected.integrationStatus, toneForValue(selected.integrationStatus)) : ""}
         </div>
       </div>
       <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Chat</a>
@@ -636,7 +563,7 @@ export const factoryMissionLiveOutputIsland = (input: {
           <div class="${sectionLabelClass}">Focused output</div>
           <div class="mt-2 text-lg font-semibold text-white">${esc(snapshot?.title ?? "Live output")}</div>
         </div>
-        ${snapshot ? badge(snapshot.status) : ""}
+        ${snapshot ? badge(displayLabel(snapshot.status) || snapshot.status, toneForValue(snapshot.status)) : ""}
       </div>
       ${snapshot ? `<div class="mt-4 space-y-4">
         ${snapshot.summary ? `<div>
@@ -779,10 +706,10 @@ const renderMissionFocus = (focus: Extract<FactoryMissionFocusModel, { readonly 
     <div class="${sectionLabelClass}">Project</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.title)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${badge(focus.status)}
-      ${badge(focus.phase)}
-      ${focus.slotState ? badge(focus.slotState) : ""}
-      ${focus.integrationStatus ? badge(focus.integrationStatus) : ""}
+      ${badge(displayLabel(focus.status) || focus.status, toneForValue(focus.status))}
+      ${badge(displayLabel(focus.phase) || focus.phase, toneForValue(focus.phase))}
+      ${focus.slotState ? badge(displayLabel(focus.slotState) || focus.slotState, toneForValue(focus.slotState)) : ""}
+      ${focus.integrationStatus ? badge(displayLabel(focus.integrationStatus) || focus.integrationStatus, toneForValue(focus.integrationStatus)) : ""}
     </div>
   </div>
   <div class="grid gap-2 sm:grid-cols-2">
@@ -816,7 +743,7 @@ const renderRunFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind
     <div class="${sectionLabelClass}">Focused run</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.profileLabel)} · ${esc(focus.runId)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${badge(focus.status)}
+      ${badge(displayLabel(focus.status) || focus.status, toneForValue(focus.status))}
     </div>
   </div>
   <div class="text-sm leading-6 text-zinc-300">${esc(focus.summary)}</div>
@@ -835,35 +762,16 @@ const renderRunFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind
   </div>
 </div>`;
 
-const renderJobControls = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "job" }>): string => {
-  if (!focus.active) return "";
-  return `<div class="mt-5 grid gap-3">
-    ${renderCliActionCard({
-      label: "Steer job",
-      description: "Queue updated instructions for this running Factory child.",
-      command: `receipt factory steer ${focus.jobId} --problem \"<updated direction>\"`,
-    })}
-    ${renderCliActionCard({
-      label: "Follow up",
-      description: "Attach more operator context without replacing the current goal.",
-      command: `receipt factory follow-up ${focus.jobId} --note \"<extra context>\"`,
-    })}
-    ${renderCliActionCard({
-      label: "Abort job",
-      description: "Request a clean stop for this job from the CLI-first operator surface.",
-      command: `receipt factory abort-job ${focus.jobId} --reason \"abort requested\"`,
-      commandBadgeClass: dangerButtonClass,
-    })}
-  </div>`;
-};
+const renderLocalJobControls = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "job" }>): string =>
+  focus.active ? `<div class="mt-5">${renderJobActionCards(focus.jobId)}</div>` : "";
 
 const renderJobFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "job" }>): string => `<div class="space-y-5">
   <div>
     <div class="${sectionLabelClass}">Focused job</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.agentId)} · ${esc(focus.jobId)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${badge(focus.status)}
-      ${focus.taskId ? badge(`task ${focus.taskId}`, "info") : ""}
+      ${badge(displayLabel(focus.status) || focus.status, toneForValue(focus.status))}
+      ${focus.taskId ? badge(displayLabel(`task ${focus.taskId}`) || `task ${focus.taskId}`, "info") : ""}
     </div>
   </div>
   <div class="text-sm leading-6 text-zinc-300">${esc(focus.summary)}</div>
@@ -885,7 +793,7 @@ const renderJobFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind
   <div class="flex flex-wrap gap-2">
     <a class="${ghostButtonClass}" href="${esc(focus.rawLink)}" target="_blank" rel="noreferrer">Job JSON</a>
   </div>
-  ${renderJobControls(focus)}
+  ${renderLocalJobControls(focus)}
 </div>`;
 
 const renderTaskFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kind: "task" }>): string => `<div class="space-y-5">
@@ -893,8 +801,8 @@ const renderTaskFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kin
     <div class="${sectionLabelClass}">Focused task</div>
     <div class="mt-2 text-lg font-semibold text-white">${esc(focus.title)}</div>
     <div class="mt-3 flex flex-wrap gap-2">
-      ${badge(focus.jobStatus ?? focus.status)}
-      ${badge(focus.workerType)}
+      ${badge(displayLabel(focus.jobStatus ?? focus.status) || (focus.jobStatus ?? focus.status), toneForValue(focus.jobStatus ?? focus.status))}
+      ${badge(displayLabel(focus.workerType) || focus.workerType, toneForValue(focus.workerType))}
     </div>
   </div>
   ${focus.summary ? `<div class="text-sm leading-6 text-zinc-300">${esc(focus.summary)}</div>` : ""}
@@ -913,37 +821,8 @@ const renderTaskFocus = (focus: Extract<FactoryMissionFocusModel, { readonly kin
   ${(focus.stdoutTail || focus.stderrTail) ? `<div class="rounded-[22px] border border-white/10 bg-black/20 px-4 py-4 text-sm leading-6 text-zinc-300">Open the Live panel to follow ongoing task output.</div>` : ""}
 </div>`;
 
-const renderObjectiveActions = (selected: FactoryMissionSelectedModel): string => {
-  return `<div class="grid gap-3">
-    ${renderCliActionCard({
-      label: "Advance project",
-      description: "Re-evaluate this project and dispatch the next eligible step from the CLI.",
-      command: `receipt factory react ${selected.objectiveId} --message \"<operator note>\"`,
-      commandBadgeClass: primaryButtonClass,
-    })}
-    ${renderCliActionCard({
-      label: "Promote to source",
-      description: "Merge the ready integration branch into the source branch.",
-      command: `receipt factory promote ${selected.objectiveId}`,
-    })}
-    ${renderCliActionCard({
-      label: "Remove worktrees",
-      description: "Delete this project's task worktrees and integration workspace from disk.",
-      command: `receipt factory cleanup ${selected.objectiveId}`,
-    })}
-    ${renderCliActionCard({
-      label: "Stop project",
-      description: "Stop active jobs and mark this project as canceled.",
-      command: `receipt factory cancel ${selected.objectiveId} --reason \"cancel requested\"`,
-      commandBadgeClass: dangerButtonClass,
-    })}
-    ${renderCliActionCard({
-      label: "Archive project",
-      description: "Hide this project from the main list without deleting its receipts.",
-      command: `receipt factory archive ${selected.objectiveId}`,
-    })}
-  </div>`;
-};
+const renderLocalObjectiveActions = (selected: FactoryMissionSelectedModel): string =>
+  renderObjectiveActions(selected.objectiveId);
 
 export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): string => {
   if (!model.selected) {
@@ -968,7 +847,7 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
     <section class="${railCardClass}">
       <div class="flex items-center justify-between gap-3">
         <div class="${sectionLabelClass}">Focused item</div>
-        ${badge(selected.focus.status)}
+        ${badge(displayLabel(selected.focus.status) || selected.focus.status, toneForValue(selected.focus.status))}
       </div>
       <div class="mt-4">
         ${focusMarkup}
@@ -980,7 +859,7 @@ export const factoryMissionInspectorIsland = (model: FactoryMissionShellModel): 
         <a class="${ghostButtonClass}" href="${esc(selected.chatLink)}">Back to Chat</a>
       </div>
       <div class="mt-4">
-        ${renderObjectiveActions(selected)}
+        ${renderLocalObjectiveActions(selected)}
       </div>
     </section>
   </div>`;
@@ -998,7 +877,7 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
   <link rel="stylesheet" href="/assets/factory.css" />
   <script src="/assets/htmx.min.js"></script>
 </head>
-<body class="overflow-x-hidden lg:h-screen lg:overflow-hidden" data-objective="${esc(model.objectiveId ?? "")}" data-panel="${esc(model.panel)}" data-focus-kind="${esc(model.focusKind)}" data-focus-id="${esc(model.focusId ?? "")}">
+<body class="overflow-x-hidden lg:h-screen lg:overflow-hidden" data-factory-control data-objective="${esc(model.objectiveId ?? "")}" data-panel="${esc(model.panel)}" data-focus-kind="${esc(model.focusKind)}" data-focus-id="${esc(model.focusId ?? "")}">
   <div class="relative min-h-screen bg-background text-foreground lg:h-screen">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(110,231,183,0.14),transparent_28%),radial-gradient(circle_at_top_right,rgba(96,165,250,0.16),transparent_30%),linear-gradient(180deg,rgba(8,10,14,0.94),rgba(8,10,14,1))]"></div>
     <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)_360px]">
@@ -1055,131 +934,6 @@ export const factoryMissionControlShell = (model: FactoryMissionShellModel): str
       </aside>
     </div>
   </div>
-  <script>
-    (function () {
-      var controlSource = null;
-
-      var getState = function () {
-        return {
-          objective: document.body.dataset.objective || "",
-          panel: document.body.dataset.panel || "overview",
-          focusKind: document.body.dataset.focusKind || "mission",
-          focusId: document.body.dataset.focusId || "",
-        };
-      };
-
-      var applyUrl = function (url) {
-        document.body.dataset.objective = url.searchParams.get("objective") || "";
-        document.body.dataset.panel = url.searchParams.get("panel") || "overview";
-        document.body.dataset.focusKind = url.searchParams.get("focusKind") || "mission";
-        document.body.dataset.focusId = url.searchParams.get("focusId") || "";
-        history.replaceState({}, "", url.pathname + url.search);
-        updateIslandUrls();
-        connectControl();
-      };
-
-      var query = function () {
-        var state = getState();
-        var params = new URLSearchParams();
-        if (state.objective) params.set("objective", state.objective);
-        if (state.panel) params.set("panel", state.panel);
-        if (state.focusKind) params.set("focusKind", state.focusKind);
-        if (state.focusId) params.set("focusId", state.focusId);
-        var built = params.toString();
-        return built ? "?" + built : "";
-      };
-
-      var updateIslandUrls = function () {
-        var q = query();
-        var rail = document.getElementById("factory-mission-rail");
-        var main = document.getElementById("factory-mission-main");
-        var inspector = document.getElementById("factory-mission-inspector");
-        if (rail) rail.setAttribute("hx-get", "/factory/control/island/rail" + q);
-        if (main) main.setAttribute("hx-get", "/factory/control/island/main" + q);
-        if (inspector) inspector.setAttribute("hx-get", "/factory/control/island/inspector" + q);
-      };
-
-      var refreshRail = function () {
-        document.body.dispatchEvent(new CustomEvent("factory-rail-refresh", { bubbles: true }));
-      };
-
-      var refreshMain = function () {
-        document.body.dispatchEvent(new CustomEvent("factory-main-refresh", { bubbles: true }));
-      };
-
-      var refreshInspector = function () {
-        document.body.dispatchEvent(new CustomEvent("factory-inspector-refresh", { bubbles: true }));
-      };
-
-      var refreshLive = function () {
-        document.body.dispatchEvent(new CustomEvent("factory-live-refresh", { bubbles: true }));
-      };
-
-      var hasLiveFocus = function () {
-        var focusKind = document.body.dataset.focusKind || "mission";
-        var focusId = document.body.dataset.focusId || "";
-        return (focusKind === "task" || focusKind === "job") && Boolean(focusId);
-      };
-
-      var refreshFromStream = function () {
-        refreshRail();
-        refreshMain();
-        refreshInspector();
-        if (hasLiveFocus()) refreshLive();
-      };
-
-      var connectControl = function () {
-        if (controlSource) controlSource.close();
-        controlSource = new EventSource("/factory/control/events" + query());
-        controlSource.addEventListener("factory-refresh", refreshFromStream);
-        controlSource.addEventListener("receipt-refresh", refreshFromStream);
-        controlSource.addEventListener("job-refresh", function () {
-          refreshRail();
-          refreshMain();
-          refreshInspector();
-          if (hasLiveFocus()) refreshLive();
-        });
-      };
-
-      document.addEventListener("click", function (event) {
-        var target = event.target;
-        if (!(target instanceof HTMLElement)) return;
-        var link = target.closest("[data-factory-nav]");
-        if (!(link instanceof HTMLAnchorElement)) return;
-        event.preventDefault();
-        var url = new URL(link.href, window.location.origin);
-        applyUrl(url);
-        var mode = link.getAttribute("data-factory-nav") || "";
-        if (mode === "objective") {
-          refreshRail();
-          refreshMain();
-          refreshInspector();
-          return;
-        }
-        refreshMain();
-        refreshInspector();
-      });
-
-      document.addEventListener("DOMContentLoaded", function () {
-        updateIslandUrls();
-        connectControl();
-      });
-
-      document.addEventListener("htmx:afterRequest", function (event) {
-        var detail = event && event.detail;
-        var elt = detail && detail.elt;
-        if (!elt || !(elt instanceof HTMLElement) || detail.failed) return;
-        if (elt.tagName === "FORM") {
-          refreshMain();
-          refreshInspector();
-          if (hasLiveFocus()) refreshLive();
-        }
-      });
-
-      window.addEventListener("beforeunload", function () {
-        if (controlSource) controlSource.close();
-      });
-    })();
-  </script>
+  <script src="/assets/factory-client.js"></script>
 </body>
 </html>`;

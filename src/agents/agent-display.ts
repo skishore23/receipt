@@ -1,11 +1,9 @@
 export const MONITOR_AGENT_IDS = [
-  "agent",
   "factory",
 ] as const;
 
 const AGENT_DISPLAY_NAMES: Readonly<Record<string, string>> = {
-  agent: "Orchestrator",
-  factory: "Orchestrator (Factory)",
+  factory: "Orchestrator",
 };
 
 const titleCaseWord = (value: string): string =>

@@ -967,6 +967,39 @@ app.post("/memory/:scope/diff", async (c) => {
   return jsonResponse(200, { entries });
 });
 
+// ── Static asset serving ────────────────────────────────────────────────────
+
+const ASSET_DIR = (() => {
+  const fromDist = path.resolve(import.meta.dir, "assets");
+  const fromSrc = path.resolve(import.meta.dir, "..", "dist", "assets");
+  try { if (fs.existsSync(fromDist)) return fromDist; } catch {}
+  return fromSrc;
+})();
+const MIME_TYPES: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+};
+
+app.get("/assets/:file", async (c) => {
+  const fileName = c.req.param("file");
+  if (fileName.includes("..") || fileName.includes("/")) return text(400, "invalid asset path");
+  const filePath = path.join(ASSET_DIR, fileName);
+  try {
+    const body = fs.readFileSync(filePath);
+    const ext = path.extname(fileName).toLowerCase();
+    const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+    return new Response(body, {
+      headers: {
+        "Content-Type": contentType,
+        "Cache-Control": "public, max-age=3600",
+      },
+    });
+  } catch {
+    return text(404, "asset not found");
+  }
+});
+
 app.notFound(() => text(404, "Not found"));
 
 const receiptWatcher = (() => {

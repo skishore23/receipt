@@ -67,6 +67,19 @@ import {
 } from "../views/factory-mission-control.js";
 import type { QueueJob } from "../adapters/jsonl-queue.js";
 import { parseComposerDraft } from "../factory-cli/composer.js";
+import {
+  listReceiptFiles,
+  readReceiptFile,
+  sliceReceiptRecords,
+  buildReceiptTimeline,
+} from "../adapters/receipt-tools.js";
+import {
+  receiptShell,
+  receiptFoldsHtml,
+  receiptRecordsHtml,
+  receiptSideHtml,
+} from "../views/receipt.js";
+import { parseOrder, parseLimit, parseInspectorDepth } from "../framework/http.js";
 
 const isActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
@@ -1662,7 +1675,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           phase: selectedObjective.phase,
           summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
           debugLink: `/factory/api/objectives/${encodeURIComponent(selectedObjective.objectiveId)}/debug`,
-          receiptsLink: `/factory/api/objectives/${encodeURIComponent(selectedObjective.objectiveId)}/receipts?limit=50`,
+          receiptsLink: `/receipt`,
           nextAction: selectedObjective.nextAction,
           slotState: selectedObjective.scheduler.slotState,
           queuePosition: selectedObjective.scheduler.queuePosition,
@@ -1848,7 +1861,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       blockedReason: detail.blockedReason,
       blockedExplanation: detail.blockedExplanation?.summary,
       debugLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/debug`,
-      receiptsLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/receipts?limit=50`,
+      receiptsLink: `/receipt`,
       slotState: detail.scheduler.slotState,
       queuePosition: detail.scheduler.queuePosition,
       integrationStatus: detail.integrationStatus,
@@ -2077,7 +2090,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       jobs: jobSummaries,
       recentReceipts: focus.kind === "mission" ? recentReceipts : scopedReceipts,
       debugLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/debug`,
-      receiptsLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/receipts?limit=50`,
+      receiptsLink: `/receipt`,
       chatLink: buildChatLink({ objectiveId: detail.objectiveId }),
       repoProfileSummary: debug.repoProfile.summary,
       debugNextAction: debug.nextAction,
@@ -2714,6 +2727,72 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         }),
         (body) => json(200, body)
       ));
+
+      // ── Receipt browser routes ──────────────────────────────────────
+      const receiptDataDir = ctx.dataDir;
+      const receiptSse = ctx.sse;
+
+      app.get("/receipt", async (c) => {
+        const file = c.req.query("file") ?? "";
+        const order = parseOrder(c.req.query("order"));
+        const limit = parseLimit(c.req.query("limit"));
+        const depth = parseInspectorDepth(c.req.query("depth"));
+        const files = await listReceiptFiles(receiptDataDir);
+        const selected = files.find((f) => f.name === file)?.name ?? files[0]?.name;
+        return html(receiptShell({ selected, limit, order, depth }));
+      });
+
+      app.get("/receipt/island/folds", async (c) => {
+        const selected = c.req.query("selected") ?? "";
+        const order = parseOrder(c.req.query("order"));
+        const limit = parseLimit(c.req.query("limit"));
+        const depth = parseInspectorDepth(c.req.query("depth"));
+        const files = await listReceiptFiles(receiptDataDir);
+        return html(receiptFoldsHtml(files, selected, order, limit, depth));
+      });
+
+      app.get("/receipt/island/records", async (c) => {
+        const file = c.req.query("file") ?? "";
+        if (!file) return html(receiptRecordsHtml({ selected: undefined, records: [], order: "desc", limit: 200, total: 0 }));
+        const files = await listReceiptFiles(receiptDataDir);
+        const found = files.find((f) => f.name === file);
+        if (!found) return html(`<div class="empty">Stream not found.</div>`);
+        const records = await readReceiptFile(receiptDataDir, found.name);
+        const order = parseOrder(c.req.query("order"));
+        const limit = parseLimit(c.req.query("limit"));
+        const slice = sliceReceiptRecords(records, order, limit);
+        return html(receiptRecordsHtml({ selected: found.name, records: slice, order, limit, total: records.length }));
+      });
+
+      app.get("/receipt/island/side", async (c) => {
+        const file = c.req.query("file") ?? "";
+        const order = parseOrder(c.req.query("order"));
+        const limit = parseLimit(c.req.query("limit"));
+        const depth = parseInspectorDepth(c.req.query("depth"));
+        if (!file) {
+          return html(receiptSideHtml({ selected: undefined, order, limit, depth, total: 0, shown: 0 }));
+        }
+        const files = await listReceiptFiles(receiptDataDir);
+        const found = files.find((f) => f.name === file);
+        if (!found) {
+          return html(receiptSideHtml({ selected: file, order, limit, depth, total: 0, shown: 0 }));
+        }
+        const records = await readReceiptFile(receiptDataDir, found.name);
+        const slice = sliceReceiptRecords(records, order, limit);
+        const timeline = buildReceiptTimeline(records, depth);
+        return html(receiptSideHtml({
+          selected: found.name,
+          order,
+          limit,
+          depth,
+          total: records.length,
+          shown: slice.length,
+          fileMeta: { size: found.size, mtime: found.mtime },
+          timeline,
+        }));
+      });
+
+      app.get("/receipt/stream", async (c) => receiptSse.subscribe("receipt", undefined, c.req.raw.signal));
     },
   };
 };

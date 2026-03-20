@@ -56,12 +56,8 @@ export type FactoryIntegrationStatus =
 
 export type FactoryWorkerType =
   | "codex"
-  | "theorem"
-  | "writer"
-  | "inspector"
   | "agent"
   | "infra"
-  | "axiom"
   | string;
 
 export type FactoryObjectiveProfileWorktreeMode = "required" | "forbidden";

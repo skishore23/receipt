@@ -11,10 +11,10 @@ Receipt persists append-only hash-linked receipts in per-stream JSONL files.
 - Sub-run stream: `agents/<agentId>/runs/<runId>/sub/<subRunId>`
 
 Examples:
-- `agents/theorem`
-- `agents/theorem/runs/run_abc123`
-- `agents/theorem/runs/run_abc123/branches/resume_k9`
-- `agents/theorem/runs/run_abc123/sub/run_abc123_sub_m1`
+- `agents/factory`
+- `agents/factory/runs/run_abc123`
+- `agents/factory/runs/run_abc123/branches/resume_k9`
+- `agents/factory/runs/run_abc123/sub/run_abc123_sub_m1`
 
 ### Queue Streams
 - Index stream: `jobs`
@@ -25,9 +25,6 @@ Examples:
 
 ### Improvement Stream
 - `improvement`
-
-### Inspector Stream
-- `agents/inspector`
 
 ## Queue Lifecycle Receipts
 Common job events:

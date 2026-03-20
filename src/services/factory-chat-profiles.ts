@@ -159,10 +159,6 @@ const PROFILE_CAPABILITY_TOOLS = {
 const FACTORY_OBJECTIVE_WORKTREE_DEFAULTS = {
   codex: "required",
   infra: "required",
-  theorem: "required",
-  axiom: "required",
-  writer: "forbidden",
-  inspector: "forbidden",
   agent: "forbidden",
 } as const satisfies Record<string, FactoryChatProfileObjectiveWorktreeMode>;
 
