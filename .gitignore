@@ -9,3 +9,4 @@ data/
 .wink/
 video
 *.lean
+*.tsbuildinfo
