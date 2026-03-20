@@ -32,9 +32,9 @@ import {
 import {
   factoryChatIsland,
   factoryChatShell,
-  factoryInspectorIsland,
   factorySidebarIsland,
 } from "../views/factory-chat.js";
+import { factoryInspectorIsland } from "../views/factory-inspector.js";
 import type {
   FactoryChatIslandModel,
   FactoryChatItem,
@@ -2505,7 +2505,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
-          return model.inspector;
+          return { ...model.inspector, panel: requestedPanel(c.req.raw) as any };
         },
         (model) => html(factoryInspectorIsland(model))
       ));
