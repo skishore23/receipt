@@ -94,6 +94,7 @@ export type FactoryObjectivePhase =
   | "executing"
   | "integrating"
   | "promoting"
+  | "completed"
   | "blocked";
 
 export type FactoryObjectiveSlotState = "queued" | "active";

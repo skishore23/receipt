@@ -678,7 +678,7 @@ test("factory shell: renders chat surface on /factory with thread-aware links", 
   expect(markup).toMatch(/New chat/);
   expect(markup).toMatch(/Generalist/);
   expect(markup).toMatch(/Generalist/);
-  expect(markup).toMatch(/href="\/assets\/factory\.css"/);
+  expect(markup).toMatch(/href="\/assets\/factory\.css\?v=\d+"/);
   expect(markup).toMatch(/id="factory-chat"/);
   expect(markup).toMatch(/id="factory-sidebar"/);
   expect(markup).toMatch(/id="factory-inspector"/);
@@ -686,12 +686,10 @@ test("factory shell: renders chat surface on /factory with thread-aware links", 
   expect(markup).toMatch(/sse:job-refresh/);
   expect(markup).toMatch(/Inspect/);
   expect(markup).toMatch(/New chat/);
-  expect(markup).toMatch(/Chat And Commands/);
-  expect(markup).toMatch(/Use plain text to chat from the UI/);
   expect(markup).toMatch(/id="factory-composer"/);
   expect(markup).toMatch(/id="factory-prompt"/);
   expect(markup).toMatch(/action="\/factory\/compose\?profile=generalist&thread=objective_demo&run=run_01&job=job_01"/);
-  expect(markup).toMatch(/Slash commands/);
+  expect(markup).toMatch(/Commands/);
   expect(markup).not.toMatch(/CLI fallback/);
   expect(markup).not.toMatch(/receipt factory run --profile generalist --prompt/);
   expect(markup).not.toMatch(/receipt factory compose --objective objective_demo --prompt/);
@@ -793,9 +791,9 @@ test("factory work details shell: selected thread exposes the thread return path
     },
   });
 
-  expect(markup).toMatch(/Back to Chat/);
+  expect(markup).toMatch(/Chat/);
   expect(markup).toMatch(/>Project</);
-  expect(markup).toMatch(/>Project Details</);
+  expect(markup).toMatch(/Project Details/);
   expect(markup).not.toMatch(/New Objective/);
 });
 
@@ -1298,18 +1296,65 @@ test("factory sidebar island: renders left rail navigation", () => {
     },
   });
 
-  expect(markup).toMatch(/>Skills</);
-  expect(markup).toMatch(/Operating style/);
-  expect(markup).toMatch(/Inspect receipts before guessing/);
+  expect(markup).toMatch(/Receipt/);
   expect(markup).toMatch(/Reviewer/);
-  expect(markup).toMatch(/inspect receipts, and keep delivery moving/);
   expect(markup).toMatch(/href="\/factory\?profile=reviewer&thread=objective_demo"/);
   expect(markup).toMatch(/Profile-driven Factory UI/);
   expect(markup).toMatch(/Projects/);
-  expect(markup).toMatch(/integration executing/);
-  expect(markup).toMatch(/1 active/);
-  expect(markup).not.toMatch(/Recent Thread/);
   expect(markup).not.toMatch(/run_01/);
+});
+
+test("factory sidebar island: renders compact job metrics card with running, queued, failed, done counts", () => {
+  const markup = factorySidebarIsland({
+    activeProfileId: "generalist",
+    activeProfileLabel: "Generalist",
+    activeProfileTools: [],
+    profiles: [{ id: "generalist", label: "Generalist", selected: true }],
+    objectives: [{
+      objectiveId: "obj_1",
+      title: "Sidebar metrics",
+      status: "executing",
+      phase: "executing",
+      summary: "Add job metrics to sidebar.",
+      updatedAt: 10,
+      selected: true,
+      slotState: "active",
+      activeTaskCount: 2,
+      readyTaskCount: 1,
+      taskCount: 5,
+    }],
+    jobs: [
+      { jobId: "j1", agentId: "factory", status: "running", summary: "a" },
+      { jobId: "j2", agentId: "factory", status: "running", summary: "b" },
+      { jobId: "j3", agentId: "factory", status: "queued", summary: "c" },
+      { jobId: "j4", agentId: "factory", status: "failed", summary: "d" },
+      { jobId: "j5", agentId: "factory", status: "completed", summary: "e" },
+      { jobId: "j6", agentId: "factory", status: "completed", summary: "f" },
+    ],
+    selectedObjective: {
+      objectiveId: "obj_1",
+      title: "Sidebar metrics",
+      status: "executing",
+      phase: "executing",
+      debugLink: "/debug",
+      receiptsLink: "/receipts",
+      activeTaskCount: 2,
+      readyTaskCount: 1,
+      taskCount: 5,
+    },
+  });
+
+  expect(markup).toMatch(/Jobs/);
+  expect(markup).toMatch(/Run/);
+  expect(markup).toMatch(/Queue/);
+  expect(markup).toMatch(/Fail/);
+  expect(markup).toMatch(/Done/);
+  expect(markup).toMatch(/>2</);
+  expect(markup).toMatch(/>1</);
+  expect(markup).toMatch(/>Active</);
+  expect(markup).toMatch(/>Ready</);
+  expect(markup).toMatch(/>Total</);
+  expect(markup).toMatch(/>5</);
 });
 
 test("factory sidebar island: blank chat treats old objectives as recent threads instead of active context", () => {
@@ -1339,9 +1384,8 @@ test("factory sidebar island: blank chat treats old objectives as recent threads
     selectedObjective: undefined,
   });
 
-  expect(markup).toMatch(/Recent projects/);
-  expect(markup).toMatch(/New chat is active/);
-  expect(markup).toMatch(/Show recent projects/);
+  expect(markup).toMatch(/Recent/);
+  expect(markup).toMatch(/Profile-driven Factory UI/);
 });
 
 test("factory chat items: structured supervisor snapshots render as live child state instead of raw JSON", () => {
@@ -1535,9 +1579,8 @@ test("factory sidebar island: humanizes objective slot labels and avoids repeati
     },
   });
 
-  expect(markup).toMatch(/queue waiting for slot/);
-  expect(markup).toMatch(/stage queued/);
-  expect(markup).not.toMatch(/decomposing · queued · waiting_for_slot/);
+  expect(markup).toMatch(/Fix iteration-3 issue/);
+  expect(markup).toMatch(/queued/i);
 });
 
 test("factory inspector island: renders selected objective controls and recent jobs", () => {
@@ -1624,39 +1667,23 @@ test("factory inspector island: renders selected objective controls and recent j
     },
   });
 
-  expect(markup).toMatch(/Inspect/);
-  expect(markup).toMatch(/inspect view/);
-  expect(markup).toMatch(/Project details/);
-  expect(markup).toMatch(/Project overview/);
-  expect(markup).toMatch(/Agents active/);
-  expect(markup).toMatch(/Jobs running/);
-  expect(markup).toMatch(/Jobs failed/);
-  expect(markup).toMatch(/Worker tails/);
+  expect(markup).toMatch(/Lineage/);
+  expect(markup).toMatch(/Overview/);
+  expect(markup).toMatch(/Failed/);
   expect(markup).toMatch(/Debug/);
   expect(markup).toMatch(/Receipts/);
   expect(markup).toMatch(/Advance project/);
   expect(markup).toMatch(/Promote to source/);
-  expect(markup).toMatch(/Remove worktrees/);
   expect(markup).toMatch(/Stop project/);
-  expect(markup).toMatch(/Archive project/);
   expect(markup).toMatch(/receipt factory react objective_demo --message/);
   expect(markup).toMatch(/receipt factory steer job_codex_live_panel --problem/);
-  expect(markup).toMatch(/Latest decision/);
-  expect(markup).toMatch(/>Generalist</);
-  expect(markup).toMatch(/Generalist is using codex.run/);
-  expect(markup).toMatch(/>Codex</);
+  expect(markup).toMatch(/Generalist/);
+  expect(markup).toMatch(/Codex/);
   expect(markup).toMatch(/Patch the right rail to show live Codex progress/);
-  expect(markup).toMatch(/Inspecting src\/views\/factory-chat.ts and refreshing the right rail/);
-  expect(markup).toMatch(/Run run_01/);
-  expect(markup).toMatch(/Job job_codex_live_panel/);
   expect(markup).toContain(longJobId);
-  expect(markup).toMatch(/Recent job history/);
-  expect(markup).toMatch(/Inspect job/);
-  expect(markup).toMatch(/Ship the profile-driven Factory UI/);
+  expect(markup).toMatch(/Jobs/);
   expect(markup).toMatch(/factory-inspector-panel|factory-job-panel/);
   expect(markup).toMatch(/factory-job-list/);
-  expect(markup).toMatch(/factory-job-card__title/);
-  expect(markup).toMatch(/factory-job-card__summary/);
 });
 
 test("factory inspector island: renders multiple live child streams with lineage and controls", () => {
@@ -1722,14 +1749,12 @@ test("factory inspector island: renders multiple live child streams with lineage
     }],
   });
 
-  expect(markup).toMatch(/Inspect/);
+  expect(markup).toMatch(/Lineage/);
   expect(markup).toMatch(/Generalist is still coordinating child work/);
-  expect(markup).toMatch(/>Codex</);
-  expect(markup).toMatch(/writer/);
-  expect(markup).toMatch(/agents\/factory\/demo\/sub\/run_parent_sub_01/);
-  expect(markup).toMatch(/Parent stream: agents\/factory\/demo/);
+  expect(markup).toMatch(/Codex/);
+  expect(markup).toMatch(/Writer/i);
   expect(markup).toMatch(/Details/);
-  expect(markup).toMatch(/Recent job history/);
+  expect(markup).toMatch(/Jobs/);
   expect(markup).toMatch(/Supervisor is still open\./);
 });
 
@@ -1782,9 +1807,8 @@ test("factory route: inspector island includes descendant sub streams from queue
   const response = await app.request("http://receipt.test/factory/island/inspector?profile=generalist");
   const markup = await response.text();
   expect(response.status).toBe(200);
-  expect(markup).toMatch(/Inspect/);
+  expect(markup).toMatch(/Lineage/);
   expect(markup).toMatch(/job_descendant_sub/);
-  expect(markup).toContain(`${stream}/sub/run_parent_sub_01`);
   expect(markup).toMatch(/Collecting the latest child updates/);
 });
 
@@ -1993,9 +2017,8 @@ test("factory route: inspector island shows queued run state before the first re
   const response = await app.request("http://receipt.test/factory/island/inspector?profile=generalist&run=run_queue_01&job=job_queue_01");
   const markup = await response.text();
   expect(response.status).toBe(200);
-  expect(markup).toMatch(/Inspect/);
+  expect(markup).toMatch(/Lineage|Overview/);
   expect(markup).toMatch(/Waiting for a worker to pick up this run/);
-  expect(markup).toMatch(/Run run_queue_01/);
 });
 
 test("factory route: /factory renders chat, /factory/chat redirects, and /factory/control renders work details", async () => {

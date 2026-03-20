@@ -1234,6 +1234,8 @@ const describeRunActivity = (
   if (tool === "agent.status") return `${profileLabel} is checking child status.`;
   if (tool === "codex.status") return `${profileLabel} is checking Codex progress.`;
   if (tool === "factory.status") return `${profileLabel} is checking project status.`;
+  if (tool === "repo.status") return `${profileLabel} is checking repo state.`;
+  if (tool === "agent.inspect") return `${profileLabel} is tracing child activity.`;
   if (tool === "factory.dispatch") return `${profileLabel} is updating the project.`;
   if (tool === "codex.run") return `${profileLabel} queued Codex work and is waiting for progress.`;
   if (tool === "agent.delegate") return `${profileLabel} delegated follow-up work.`;
@@ -1271,7 +1273,7 @@ const summarizeActiveRunCard = (
   const latestFailedChild = relatedJobs.find((job) => job.status === "failed" && normalizedWorkerId(job.agentId) !== "factory");
   const latestTerminalChild = relatedJobs.find((job) => isTerminalJobStatus(job.status) && normalizedWorkerId(job.agentId) !== "factory");
   const tool = state.lastTool?.name?.trim().toLowerCase();
-  const isPureStatusPoll = tool === "agent.status" || tool === "codex.status" || tool === "jobs.list" || tool === "factory.status";
+  const isPureStatusPoll = tool === "agent.status" || tool === "codex.status" || tool === "jobs.list" || tool === "factory.status" || tool === "repo.status" || tool === "agent.inspect";
   const derivedStatus = activeChild
     ? state.status
     : latestFailedChild && state.status === "running"

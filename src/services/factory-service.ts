@@ -1128,7 +1128,11 @@ export class FactoryService {
     return new Map(queued.map((state, index) => [state.objectiveId, index + 1] as const));
   }
 
-  private deriveObjectivePhase(state: FactoryState): FactoryObjectivePhase {
+  private deriveObjectivePhase(
+    state: FactoryState,
+    projection?: { readonly activeTasks: number; readonly readyTasks: number },
+  ): FactoryObjectivePhase {
+    if (state.status === "completed") return "completed";
     if (state.status === "blocked" || state.status === "failed" || state.status === "canceled") return "blocked";
     if (state.scheduler.slotState === "queued") return "waiting_for_slot";
     if (state.status === "decomposing") return "preparing_repo";
@@ -1136,6 +1140,9 @@ export class FactoryService {
     if (state.status === "integrating") return "integrating";
     if (state.status === "promoting" || state.integration.status === "ready_to_promote" || state.integration.status === "promoting" || state.integration.status === "promoted") {
       return "promoting";
+    }
+    if (state.status === "executing" && projection && projection.activeTasks === 0 && projection.readyTasks === 0) {
+      return "blocked";
     }
     return "executing";
   }
@@ -2844,7 +2851,10 @@ export class FactoryService {
       objectiveId: state.objectiveId,
       title: state.title,
       status: state.status,
-      phase: this.deriveObjectivePhase(state),
+      phase: this.deriveObjectivePhase(state, {
+        activeTasks: projection.activeTasks.length,
+        readyTasks: projection.readyTasks.length,
+      }),
       scheduler: {
         slotState,
         queuePosition,

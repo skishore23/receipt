@@ -992,7 +992,7 @@ app.get("/assets/:file", async (c) => {
     return new Response(body, {
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": ext === ".css" ? "no-cache" : "public, max-age=3600",
       },
     });
   } catch {
