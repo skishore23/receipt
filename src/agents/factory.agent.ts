@@ -1318,6 +1318,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const requestedPanel = (req: Request): string =>
     optionalTrimmedString(new URL(req.url).searchParams.get("panel")) ?? "overview";
 
+  const requestedShowAll = (req: Request): boolean =>
+    optionalTrimmedString(new URL(req.url).searchParams.get("all")) === "1";
+
   const requestedFocusKind = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("focusKind"));
 
@@ -1412,6 +1415,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
+    readonly showAll?: boolean;
   }): Promise<FactoryChatShellModel> => {
     await service.ensureBootstrap();
     const repoRoot = service.git.repoRoot;
@@ -1451,7 +1455,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       selected: profile.id === resolved.root.id,
     }));
     const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = objectives
-      .slice(0, 16)
+      .slice(0, input.showAll ? undefined : 16)
       .map((objective) => ({
         objectiveId: objective.objectiveId,
         title: objective.title,
@@ -1570,6 +1574,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeProfileLabel: resolved.root.label,
       profiles: profileNav,
       objectives: objectiveNav,
+      showAll: input.showAll,
     };
     const inspectorModel: FactoryInspectorModel = {
       panel: "overview",
@@ -1596,6 +1601,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
+    readonly showAll?: boolean;
   }): Promise<FactoryChatShellModel> => withProjectionCache(
     chatShellCache,
     JSON.stringify({
@@ -1837,6 +1843,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           objectiveId: requestedObjectiveId(c.req.raw),
           runId: requestedRunId(c.req.raw),
           jobId: requestedJobId(c.req.raw),
+          showAll: requestedShowAll(c.req.raw),
         }),
         (model) => html(factoryChatShell(model))
       ));
@@ -1894,6 +1901,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
+            showAll: requestedShowAll(c.req.raw),
           });
           return model.chat;
         },
@@ -1907,6 +1915,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
+            showAll: requestedShowAll(c.req.raw),
           });
           return model;
         },

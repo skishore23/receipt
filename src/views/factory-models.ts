@@ -173,6 +173,7 @@ export type FactoryNavModel = {
   readonly activeProfileLabel: string;
   readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
   readonly objectives: ReadonlyArray<FactoryChatObjectiveNav>;
+  readonly showAll?: boolean;
 };
 
 export type FactoryInspectorPanel = "overview" | "execution" | "live" | "receipts" | "debug";

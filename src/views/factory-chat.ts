@@ -465,8 +465,8 @@ const renderSidebarMetrics = (obj?: FactorySelectedObjectiveCard): string => {
 
 const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard): string => {
   const blankChat = !selectedObjective;
-  const visibleObjectives = model.objectives.slice(0, 5);
-  const hasMoreObjectives = model.objectives.length > visibleObjectives.length;
+  const visibleObjectives = model.showAll ? model.objectives : model.objectives.slice(0, 5);
+  const hasMoreObjectives = !model.showAll && model.objectives.length > 5;
   const selectedObjectiveQuery = selectedObjective
     ? `&thread=${encodeURIComponent(selectedObjective.objectiveId)}`
     : "";
@@ -500,7 +500,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
         ${objectives}
       </div>
       ${hasMoreObjectives ? `<div class="mt-2">
-        <a class="text-[10px] font-medium text-primary hover:underline" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">View all</a>
+        <button hx-get="/factory/island/sidebar?profile=${encodeURIComponent(model.activeProfileId)}${selectedObjectiveQuery}&all=1" hx-target="#factory-sidebar" hx-swap="innerHTML" class="text-[10px] font-medium text-primary hover:underline text-left cursor-pointer">View all</button>
       </div>` : ""}
     </section>
     ${renderSidebarMetrics(selectedObjective)}

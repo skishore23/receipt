@@ -399,24 +399,33 @@ const buildFactorySituation = async (input: {
     && typeof input.factoryService.getObjectiveDebug === "function"
     && typeof input.factoryService.listObjectiveReceipts === "function";
   if (input.objectiveId && canInspectObjective) {
-    const [detail, debug, receipts] = await Promise.all([
-      input.factoryService.getObjective(input.objectiveId),
-      input.factoryService.getObjectiveDebug(input.objectiveId),
-      input.factoryService.listObjectiveReceipts(input.objectiveId, { limit: 8 }),
-    ]);
-    lines.push(`Objective: ${detail.title} (${detail.objectiveId})`);
-    lines.push(`Status: ${detail.status} · phase ${detail.phase} · integration ${detail.integration.status}`);
-    if (detail.latestDecision?.summary) lines.push(`Latest decision: ${detail.latestDecision.summary}`);
-    if (detail.blockedExplanation?.summary) lines.push(`Blocked: ${detail.blockedExplanation.summary}`);
-    const activeJobs = debug.activeJobs.slice(0, 3);
-    if (activeJobs.length > 0) {
-      lines.push("Active jobs:");
-      lines.push(...activeJobs.map((job) => `- ${job.id}: ${job.agentId} ${job.status}`));
-    }
-    const receiptLines = summarizeObjectiveReceipts(receipts, 5);
-    if (receiptLines.length > 0) {
-      lines.push("Recent receipts:");
-      lines.push(...receiptLines);
+    try {
+      const [detail, debug, receipts] = await Promise.all([
+        input.factoryService.getObjective(input.objectiveId),
+        input.factoryService.getObjectiveDebug(input.objectiveId),
+        input.factoryService.listObjectiveReceipts(input.objectiveId, { limit: 8 }),
+      ]);
+      lines.push(`Objective: ${detail.title} (${detail.objectiveId})`);
+      lines.push(`Status: ${detail.status} · phase ${detail.phase} · integration ${detail.integration.status}`);
+      if (detail.latestDecision?.summary) lines.push(`Latest decision: ${detail.latestDecision.summary}`);
+      if (detail.blockedExplanation?.summary) lines.push(`Blocked: ${detail.blockedExplanation.summary}`);
+      const activeJobs = debug.activeJobs.slice(0, 3);
+      if (activeJobs.length > 0) {
+        lines.push("Active jobs:");
+        lines.push(...activeJobs.map((job) => `- ${job.id}: ${job.agentId} ${job.status}`));
+      }
+      const receiptLines = summarizeObjectiveReceipts(receipts, 5);
+      if (receiptLines.length > 0) {
+        lines.push("Recent receipts:");
+        lines.push(...receiptLines);
+      }
+    } catch (err: any) {
+      if (err?.status === 404 || err?.message?.includes("not found")) {
+        lines.push(`Objective: ${input.objectiveId}`);
+        lines.push("Objective has not been created yet.");
+      } else {
+        throw err;
+      }
     }
   } else if (input.objectiveId) {
     lines.push(`Objective: ${input.objectiveId}`);
