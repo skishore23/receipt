@@ -1009,22 +1009,36 @@ export const buildChatItemsForRun = (
     if (event.type === "tool.observed") {
       const key = `${event.iteration}:${event.tool}`;
       const prior = pending.get(key);
-      const card = workCardFromObservation({
-        tool: event.tool,
-        input: prior?.input ?? {},
-        output: event.output,
-        summary: prior?.summary,
-        error: prior?.error,
-        durationMs: prior?.durationMs,
-      });
-      if (card) {
+      const inputObj = prior?.input as Record<string, unknown> | undefined;
+      const outputObj = event.output as Record<string, unknown> | undefined;
+      
+      if (event.tool === "factory.dispatch" && (inputObj?.action === "create" || inputObj?.action === "promote")) {
+        const objectiveId = (outputObj?.objectiveId as string | undefined) ?? (inputObj?.objectiveId as string | undefined) ?? "";
         items.push({
           key: `${runId}-tool-${receipt.hash}`,
-          kind: "work",
-          card: card.worker === "queue"
-            ? card
-            : overlayLiveJobState(card, card.jobId ? jobsById.get(card.jobId) : undefined),
+          kind: "objective_event",
+          title: inputObj.action === "create" ? "Objective Started" : "Objective Promoted",
+          summary: prior?.summary ?? "Objective updated",
+          objectiveId,
         });
+      } else {
+        const card = workCardFromObservation({
+          tool: event.tool,
+          input: prior?.input ?? {},
+          output: event.output,
+          summary: prior?.summary,
+          error: prior?.error,
+          durationMs: prior?.durationMs,
+        });
+        if (card) {
+          items.push({
+            key: `${runId}-tool-${receipt.hash}`,
+            kind: "work",
+            card: card.worker === "queue"
+              ? card
+              : overlayLiveJobState(card, card.jobId ? jobsById.get(card.jobId) : undefined),
+          });
+        }
       }
       pending.delete(key);
     }

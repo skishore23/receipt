@@ -145,6 +145,13 @@ export type FactoryChatItem =
       readonly key: string;
       readonly kind: "work";
       readonly card: FactoryWorkCard;
+    }
+  | {
+      readonly key: string;
+      readonly kind: "objective_event";
+      readonly title: string;
+      readonly summary: string;
+      readonly objectiveId: string;
     };
 
 export type FactoryChatIslandModel = {

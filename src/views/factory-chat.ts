@@ -278,6 +278,17 @@ const renderChatItem = (
       </details>` : ""}
     </section>`;
   }
+  if (item.kind === "objective_event") {
+    return `<section class="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 cursor-pointer hover:bg-primary/20 transition"
+      hx-get="/factory/island/inspector?thread=${encodeURIComponent(item.objectiveId)}"
+      hx-target="#factory-inspector"
+      hx-swap="innerHTML">
+      <div class="flex items-center gap-2 text-sm font-semibold text-primary">
+        ${iconProject("w-4 h-4")} ${esc(item.title)}
+      </div>
+      <div class="mt-1 text-xs text-foreground">${esc(item.summary)}</div>
+    </section>`;
+  }
   const card = item.card;
   return `<section class="rounded-lg border border-border bg-muted px-3 py-2">
     <div class="flex min-w-0 items-center justify-between gap-2">
