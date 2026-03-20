@@ -54,6 +54,7 @@ export type FactorySelectedObjectiveCard = {
   readonly checks?: ReadonlyArray<string>;
   readonly latestDecisionSummary?: string;
   readonly latestDecisionAt?: number;
+  readonly tokensUsed?: number;
 };
 
 export type FactoryLiveCodexCard = {

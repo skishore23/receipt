@@ -1553,6 +1553,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           checks: selectedObjective.checks,
           latestDecisionSummary: selectedObjective.latestDecision?.summary,
           latestDecisionAt: selectedObjective.latestDecision?.at,
+          tokensUsed: selectedObjective.tokensUsed,
         }
       : undefined;
 

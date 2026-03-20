@@ -59,6 +59,7 @@ import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../module
 import {
   type FactoryAction,
   type FactoryActionTaskDraft,
+  MAX_CONSECUTIVE_TASK_FAILURES,
   buildFactoryDecisionSet,
   summarizeFactoryAction,
 } from "../engine/merge/factory-policy.js";
@@ -1219,9 +1220,13 @@ export class FactoryService {
     now = Date.now(),
     policyBlockedReason?: string,
   ): FactoryBudgetState {
+    const failureEntries = Object.entries(state.consecutiveFailuresByTask).filter(([, v]) => v > 0);
     return {
       taskRunsUsed: state.taskRunsUsed,
       candidatePassesByTask: state.candidatePassesByTask,
+      consecutiveFailuresByTask: failureEntries.length > 0
+        ? Object.fromEntries(failureEntries)
+        : {},
       reconciliationTasksUsed: state.reconciliationTasksUsed,
       elapsedMinutes: this.objectiveElapsedMinutes(state, now),
       lastMutationAt: state.lastMutationAt,
@@ -1248,6 +1253,29 @@ export class FactoryService {
     const passes = state.candidatePassesByTask[task.taskId] ?? 0;
     if (passes < state.policy.budgets.maxCandidatePassesPerTask) return undefined;
     return `Policy blocked: ${task.taskId} exhausted maxCandidatePassesPerTask (${passes}/${state.policy.budgets.maxCandidatePassesPerTask}).`;
+  }
+
+  private taskCircuitBreakerReason(state: FactoryState, taskId: string): string | undefined {
+    const failures = state.consecutiveFailuresByTask[taskId] ?? 0;
+    if (failures < MAX_CONSECUTIVE_TASK_FAILURES) return undefined;
+    return `Policy blocked: ${taskId} circuit-broken after ${failures} consecutive dispatch failures.`;
+  }
+
+  private async stampCircuitBrokenTasks(state: FactoryState): Promise<void> {
+    for (const taskId of state.taskOrder) {
+      const task = state.graph.nodes[taskId];
+      if (!task || task.status !== "blocked") continue;
+      if (task.blockedReason?.startsWith("Policy blocked:")) continue;
+      const reason = this.taskCircuitBreakerReason(state, taskId);
+      if (!reason) continue;
+      await this.emitObjective(state.objectiveId, {
+        type: "task.blocked",
+        objectiveId: state.objectiveId,
+        taskId,
+        reason,
+        blockedAt: Date.now(),
+      });
+    }
   }
 
   private resolveSelectedObjectiveId(
@@ -1697,6 +1725,9 @@ export class FactoryService {
       return;
     }
 
+    await this.stampCircuitBrokenTasks(state);
+    state = await refreshState();
+
     const elapsedBlockedReason = this.derivePolicyBlockedReason(state);
     if (elapsedBlockedReason) {
       await this.emitObjective(objectiveId, {
@@ -1995,6 +2026,7 @@ export class FactoryService {
       handoff,
       checkResults,
       artifactRefs: resultRefs,
+      tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
       producedAt: completedAt,
     });
     await this.emitObjective(payload.objectiveId, {
@@ -2921,7 +2953,10 @@ export class FactoryService {
     const projection = buildFactoryProjection(state);
     const latestCandidate = projection.candidates.at(-1);
     const resolvedReceipts = receipts ?? this.summarizedReceipts(await this.runtime.chain(objectiveStream(state.objectiveId)), 60);
-    const slotState = this.isTerminalObjectiveStatus(state.status) ? "released" : (state.scheduler.slotState ?? "active");
+    const slotState = (this.isTerminalObjectiveStatus(state.status) || this.releasesObjectiveSlot(state) || state.scheduler.releasedAt)
+      ? "released"
+      : (state.scheduler.slotState ?? "active");
+    const tokensUsed = Object.values(state.candidates).reduce((sum, c) => sum + (c.tokensUsed ?? 0), 0);
     const card = {
       objectiveId: state.objectiveId,
       title: state.title,
@@ -2947,6 +2982,7 @@ export class FactoryService {
       taskCount: projection.tasks.length,
       integrationStatus: state.integration.status,
       latestCommitHash: state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit,
+      tokensUsed: tokensUsed > 0 ? tokensUsed : undefined,
       profile: this.objectiveProfileForState(state),
     };
     this.objectiveCardCache.set(state.objectiveId, {
@@ -4721,15 +4757,27 @@ export class FactoryService {
 
   private async resolveTaskWorkerResult(
     resultPath: string,
-    execution: { readonly stdout: string; readonly lastMessage?: string },
+    execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
   ): Promise<Record<string, unknown>> {
+    let result: Record<string, unknown> | undefined;
     const rawResult = await fs.readFile(resultPath, "utf-8").catch(() => "");
-    if (rawResult.trim()) return this.parseTaskResult(rawResult);
-    const fromLastMessage = execution.lastMessage ? this.parseJsonObjectCandidate(execution.lastMessage) : undefined;
-    if (fromLastMessage) return fromLastMessage;
-    const fromStdout = this.parseJsonObjectCandidate(execution.stdout);
-    if (fromStdout) return fromStdout;
-    throw new FactoryServiceError(500, "missing structured factory task result from codex");
+    if (rawResult.trim()) {
+      result = this.parseTaskResult(rawResult);
+    } else {
+      const fromLastMessage = execution.lastMessage ? this.parseJsonObjectCandidate(execution.lastMessage) : undefined;
+      result = fromLastMessage;
+      if (!result) {
+        const fromStdout = this.parseJsonObjectCandidate(execution.stdout);
+        result = fromStdout;
+      }
+    }
+    if (!result) {
+      throw new FactoryServiceError(500, "missing structured factory task result from codex");
+    }
+    if (execution.tokensUsed !== undefined) {
+      return { ...result, tokensUsed: execution.tokensUsed };
+    }
+    return result;
   }
 
   private parseTaskResult(raw: string): Record<string, unknown> {

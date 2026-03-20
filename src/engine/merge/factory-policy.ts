@@ -52,6 +52,23 @@ const DIFF_PRODUCING_RE = /\b(edit|change|update|remove|add|implement|write|modi
 const NEEDS_SPLIT_RE = /\b(split|smaller|unblock task|before implementation can continue|missing dependency|missing detail|missing details)\b/i;
 const NEEDS_REASSIGN_RE = /\b(worker|specialist|codex|ownership)\b/i;
 
+export const MAX_CONSECUTIVE_TASK_FAILURES = 5;
+const TASK_RETRY_BASE_MS = 30_000;
+const TASK_RETRY_MAX_MS = 600_000;
+
+const taskRetryBackoffMs = (failures: number): number =>
+  Math.min(TASK_RETRY_BASE_MS * Math.pow(2, Math.max(0, failures - 1)), TASK_RETRY_MAX_MS);
+
+export const isTaskCircuitBroken = (state: FactoryState, taskId: string): boolean =>
+  (state.consecutiveFailuresByTask[taskId] ?? 0) >= MAX_CONSECUTIVE_TASK_FAILURES;
+
+const isTaskInBackoff = (state: FactoryState, task: FactoryTaskRecord, now: number): boolean => {
+  const failures = state.consecutiveFailuresByTask[task.taskId] ?? 0;
+  if (failures === 0) return false;
+  const blockedAt = task.completedAt ?? 0;
+  return now - blockedAt < taskRetryBackoffMs(failures);
+};
+
 const actionPriority = (action: FactoryAction): number => {
   switch (action.type) {
     case "promote_integration":
@@ -267,6 +284,8 @@ const buildMutationActions = (
         continue;
       }
       if (task.blockedReason?.startsWith("Policy blocked:")) continue;
+      if (isTaskCircuitBroken(state, task.taskId)) continue;
+      if (isTaskInBackoff(state, task, now)) continue;
       actions.push({
         actionId: `action_unblock_${task.taskId}`,
         type: "unblock_task",

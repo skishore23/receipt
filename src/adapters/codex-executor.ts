@@ -36,6 +36,7 @@ export type CodexRunResult = {
   readonly stdout: string;
   readonly stderr: string;
   readonly lastMessage?: string;
+  readonly tokensUsed?: number;
 };
 
 export type CodexRunControl = {
@@ -224,12 +225,19 @@ export class LocalCodexExecutor implements CodexExecutor {
         try {
           await Promise.all([closeStream(stdoutFile), closeStream(stderrFile)]);
           const lastMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
+          const match = stdout.match(/tokens used\s*\n([\d,]+)/i);
+          let tokensUsed: number | undefined;
+          if (match && match[1]) {
+            tokensUsed = parseInt(match[1].replace(/,/g, ""), 10);
+            if (isNaN(tokensUsed)) tokensUsed = undefined;
+          }
           resolve({
             exitCode: completionTriggered ? 0 : timedOut ? 124 : code,
             signal: completionTriggered ? null : signal,
             stdout,
             stderr,
             lastMessage: lastMessage.trim() || undefined,
+            tokensUsed,
           });
         } catch (err) {
           reject(err);

@@ -117,6 +117,7 @@ export type FactoryObjectiveCard = {
   readonly updatedAt: number;
   readonly latestSummary?: string;
   readonly blockedReason?: string;
+  readonly tokensUsed?: number;
   readonly blockedExplanation?: {
     readonly summary: string;
     readonly taskId?: string;

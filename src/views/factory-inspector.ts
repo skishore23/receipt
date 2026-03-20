@@ -28,6 +28,7 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
       ${statPill("Tasks", `${obj.activeTaskCount ?? 0} active / ${obj.readyTaskCount ?? 0} ready / ${obj.taskCount ?? 0} total`)}
       ${statPill("Head Commit", shortHash(obj.latestCommitHash) || "None")}
       ${statPill("Checks", obj.checks?.length ? `${obj.checks.length} checks` : "None")}
+      ${obj.tokensUsed ? statPill("Codex Tokens", obj.tokensUsed.toLocaleString()) : ''}
     </div>
 
     ${obj.nextAction ? `
@@ -100,6 +101,7 @@ const renderExecutionPanel = (model: FactoryInspectorModel): string => {
             <div class="flex items-center gap-2">
               <span class="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">${esc(task.workerType)}</span>
               ${task.taskKind !== 'planned' ? `<span class="text-[10px] bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded">${esc(task.taskKind)}</span>` : ''}
+              ${task.candidate?.tokensUsed ? `<span class="text-[10px] text-muted-foreground font-mono bg-background px-1 border border-border rounded">${task.candidate.tokensUsed.toLocaleString()} tokens</span>` : ''}
             </div>
             
             ${task.prompt ? `<div class="text-xs text-muted-foreground line-clamp-2 mt-0.5">${esc(task.prompt)}</div>` : ''}

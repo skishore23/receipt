@@ -147,6 +147,7 @@ export type FactoryNormalizedObjectivePolicy = {
 export type FactoryBudgetState = {
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;
+  readonly consecutiveFailuresByTask: Readonly<Record<string, number>>;
   readonly reconciliationTasksUsed: number;
   readonly elapsedMinutes: number;
   readonly lastMutationAt?: number;
@@ -249,6 +250,7 @@ export type FactoryCandidateRecord = {
   readonly lastScoreVector?: FactoryScoreVector;
   readonly lastScoreReason?: string;
   readonly latestReason?: string;
+  readonly tokensUsed?: number;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly approvedAt?: number;
@@ -290,6 +292,7 @@ export type FactoryState = {
   readonly blockedReason?: string;
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;
+  readonly consecutiveFailuresByTask: Readonly<Record<string, number>>;
   readonly reconciliationTasksUsed: number;
   readonly lastMutationAt?: number;
   readonly lastDispatchAt?: number;
@@ -836,6 +839,7 @@ export type FactoryEvent =
       readonly handoff: string;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
+      readonly tokensUsed?: number;
       readonly producedAt: number;
     }
   | {
@@ -1009,6 +1013,7 @@ export const initialFactoryState: FactoryState = {
   updatedAt: 0,
   taskRunsUsed: 0,
   candidatePassesByTask: {},
+  consecutiveFailuresByTask: {},
   reconciliationTasksUsed: 0,
   lastMutationAt: undefined,
   lastDispatchAt: undefined,
@@ -1054,6 +1059,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         updatedAt: event.createdAt,
         taskRunsUsed: 0,
         candidatePassesByTask: {},
+        consecutiveFailuresByTask: {},
         reconciliationTasksUsed: 0,
         lastMutationAt: undefined,
         lastDispatchAt: undefined,
@@ -1250,6 +1256,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       }), state.graph.activeNodeIds, event.reviewRequestedAt);
     case "task.approved": {
       const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
           status: "approved",
@@ -1257,10 +1264,12 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           completedAt: event.approvedAt,
         }), active, event.approvedAt),
         latestSummary: event.summary,
+        consecutiveFailuresByTask: remainingFailures,
       };
     }
     case "task.integrated": {
       const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
           status: "integrated",
@@ -1268,10 +1277,14 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           completedAt: event.integratedAt,
         }), active, event.integratedAt),
         latestSummary: event.summary,
+        consecutiveFailuresByTask: remainingFailures,
       };
     }
     case "task.blocked": {
       const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const prev = state.graph.nodes[event.taskId];
+      const wasDispatch = prev?.status === "running" || prev?.status === "reviewing";
+      const prevFailures = state.consecutiveFailuresByTask[event.taskId] ?? 0;
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
           status: "blocked",
@@ -1279,6 +1292,9 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           completedAt: event.blockedAt,
         }), active, event.blockedAt),
         latestSummary: event.reason,
+        consecutiveFailuresByTask: wasDispatch
+          ? { ...state.consecutiveFailuresByTask, [event.taskId]: prevFailures + 1 }
+          : state.consecutiveFailuresByTask,
       };
     }
     case "task.unblocked":
@@ -1318,6 +1334,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         handoff: event.handoff,
         checkResults: event.checkResults,
         artifactRefs: event.artifactRefs,
+        tokensUsed: event.tokensUsed,
         latestReason: event.summary,
         updatedAt: event.producedAt,
       });

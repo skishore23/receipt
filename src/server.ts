@@ -104,6 +104,7 @@ const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRA
 const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, 10);
 const jobIdleResyncMs = Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000);
 const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 300_000);
+const codexJobLeaseMs = Number(process.env.CODEX_JOB_LEASE_MS ?? 900_000);
 const subJobWaitMsRaw = Number(process.env.SUBJOB_WAIT_MS ?? 1_500);
 const subJobWaitMs = Number.isFinite(subJobWaitMsRaw)
   ? Math.max(0, Math.min(Math.floor(subJobWaitMsRaw), 30_000))
@@ -703,7 +704,7 @@ const workers = [
     workerId: `${jobWorkerId}:codex`,
     leaseAgentIds: ["codex"],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: jobLeaseMs,
+    leaseMs: codexJobLeaseMs,
     concurrency: codexJobConcurrency,
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:codex]`, error);
