@@ -50,24 +50,6 @@ import type {
   FactoryNavModel,
   FactoryInspectorModel,
 } from "../views/factory-models.js";
-import {
-  factoryMissionControlShell,
-  factoryMissionInspectorIsland,
-  factoryMissionLiveOutputIsland,
-  factoryMissionMainIsland,
-  factoryMissionRailIsland,
-  type FactoryMissionFocusKind,
-  type FactoryMissionFocusModel,
-  type FactoryMissionJobSummary,
-  type FactoryMissionObjectiveNav,
-  type FactoryMissionPanel,
-  type FactoryMissionReceiptSummary,
-  type FactoryMissionRunSummary,
-  type FactoryMissionSectionKey,
-  type FactoryMissionSelectedModel,
-  type FactoryMissionShellModel,
-  type FactoryMissionTaskSummary,
-} from "../views/factory-mission-control.js";
 import type { QueueJob } from "../adapters/jsonl-queue.js";
 import { parseComposerDraft } from "../factory-cli/composer.js";
 import {
@@ -282,14 +264,6 @@ const normalizedWorkerId = (agentId: string | undefined): string =>
   agentId?.trim() || "unknown";
 
 type AgentRunChain = Awaited<ReturnType<Runtime<AgentCmd, AgentEvent, AgentState>["chain"]>>;
-
-type MissionRunRecord = {
-  readonly profileId: string;
-  readonly profileLabel: string;
-  readonly runId: string;
-  readonly runChain: AgentRunChain;
-  readonly summary: FactoryMissionRunSummary;
-};
 
 const payloadRecord = (job: QueueJob): Record<string, unknown> =>
   asObject(job.payload) ?? {};
@@ -517,17 +491,6 @@ const mentionsContextRef = (
   }
   return false;
 };
-
-const filterReceiptsForContext = (
-  receipts: ReadonlyArray<FactoryMissionReceiptSummary>,
-  taskIds: ReadonlySet<string>,
-  candidateIds: ReadonlySet<string>,
-): ReadonlyArray<FactoryMissionReceiptSummary> =>
-  receipts.filter((receipt) =>
-    (receipt.taskId ? taskIds.has(receipt.taskId) : false)
-    || (receipt.candidateId ? candidateIds.has(receipt.candidateId) : false)
-    || mentionsContextRef(receipt.summary, taskIds, candidateIds)
-  );
 
 export const buildActiveCodexCard = (jobs: ReadonlyArray<QueueJob>): FactoryLiveCodexCard | undefined => {
   const codexJob = [...jobs]
@@ -989,7 +952,7 @@ export const buildChatItemsForRun = (
       const key = `${event.iteration}:${event.tool}`;
       pending.set(key, {
         tool: event.tool,
-        input: event.input,
+          input: (typeof event.input === "string" ? tryParseJson(event.input) : event.input) as Record<string, unknown> ?? {},
         summary: event.summary,
         error: event.error,
         durationMs: event.durationMs,
@@ -997,7 +960,7 @@ export const buildChatItemsForRun = (
       if (event.error) {
         const card = workCardFromObservation({
           tool: event.tool,
-          input: event.input,
+          input: (typeof event.input === 'string' ? tryParseJson(event.input) : event.input) as Record<string, unknown> ?? {},
           summary: event.summary,
           error: event.error,
           durationMs: event.durationMs,
@@ -1146,33 +1109,6 @@ const collectRunIds = (chain: Awaited<ReturnType<Runtime<AgentCmd, AgentEvent, A
   return ordered.slice(-12);
 };
 
-const parseMissionPanel = (value: string | undefined): FactoryMissionPanel => (
-  value === "execution" || value === "live" || value === "receipts" || value === "debug"
-    ? value
-    : "overview"
-);
-
-const parseMissionFocusKind = (value: string | undefined): FactoryMissionFocusKind => (
-  value === "run" || value === "job" || value === "task"
-    ? value
-    : "mission"
-);
-
-const buildMissionLink = (input: {
-  readonly objectiveId?: string;
-  readonly panel?: FactoryMissionPanel;
-  readonly focusKind?: FactoryMissionFocusKind;
-  readonly focusId?: string;
-}): string => {
-  const params = new URLSearchParams();
-  if (input.objectiveId) params.set("thread", input.objectiveId);
-  if (input.panel) params.set("panel", input.panel);
-  if (input.focusKind) params.set("focusKind", input.focusKind);
-  if (input.focusId) params.set("focusId", input.focusId);
-  const query = params.toString();
-  return `/factory/control${query ? `?${query}` : ""}`;
-};
-
 const buildChatLink = (input: {
   readonly profileId?: string;
   readonly objectiveId?: string;
@@ -1199,6 +1135,7 @@ const makeFactoryRunId = (): string =>
 const chatItemPreview = (item: FactoryChatItem): string => {
   if (item.kind === "user" || item.kind === "assistant") return item.body;
   if (item.kind === "system") return `${item.title}: ${item.body}`;
+  if (item.kind === "objective_event") return `${item.title}: ${item.summary}`;
   return `${item.card.title}: ${item.card.summary}`;
 };
 
@@ -1334,99 +1271,6 @@ const objectiveSummary = (detail: FactoryObjectiveDetail): string | undefined =>
 
 const runFocusId = (profileId: string, runId: string): string => `${profileId}:${runId}`;
 
-const buildMissionTaskSummary = (
-  objectiveId: string,
-  panel: FactoryMissionPanel,
-  task: FactoryTaskView,
-  selectedTaskId?: string,
-): FactoryMissionTaskSummary => ({
-  taskId: task.taskId,
-  title: task.title,
-  workerType: String(task.workerType),
-  status: task.status,
-  summary: task.latestSummary ?? task.candidate?.summary ?? task.blockedReason,
-  candidateId: task.candidateId,
-  candidateStatus: task.candidate?.status,
-  jobId: task.jobId,
-  jobStatus: task.jobStatus,
-  workspaceExists: task.workspaceExists,
-  workspaceDirty: task.workspaceDirty,
-  selected: selectedTaskId === task.taskId,
-  controlLink: buildMissionLink({
-    objectiveId,
-    panel,
-    focusKind: "task",
-    focusId: task.taskId,
-  }),
-});
-
-const buildMissionJobSummary = (
-  objectiveId: string,
-  panel: FactoryMissionPanel,
-  job: QueueJob,
-  selectedJobId?: string,
-): FactoryMissionJobSummary => ({
-  jobId: job.id,
-  agentId: job.agentId,
-  status: job.status,
-  summary: summarizeJob(job),
-  updatedAt: job.updatedAt,
-  runId: asString(job.payload.runId) ?? asString(job.payload.parentRunId),
-  taskId: asString(job.payload.taskId),
-  candidateId: asString(job.payload.candidateId),
-  selected: selectedJobId === job.id,
-  controlLink: buildMissionLink({
-    objectiveId,
-    panel,
-    focusKind: "job",
-    focusId: job.id,
-  }),
-  rawLink: `/jobs/${encodeURIComponent(job.id)}`,
-});
-
-const buildMissionRunSummary = (
-  input: {
-    readonly objectiveId: string;
-    readonly panel: FactoryMissionPanel;
-    readonly profileId: string;
-    readonly profileLabel: string;
-    readonly runId: string;
-    readonly runChain: Awaited<ReturnType<Runtime<AgentCmd, AgentEvent, AgentState>["chain"]>>;
-    readonly jobsById: ReadonlyMap<string, QueueJob>;
-    readonly selectedFocusId?: string;
-  },
-): FactoryMissionRunSummary => {
-  const items = buildChatItemsForRun(input.runId, input.runChain, input.jobsById);
-  const state = fold(input.runChain, reduceAgent, initialAgent);
-  const problem = input.runChain.find((receipt) => receipt.body.type === "problem.set")?.body;
-  const summarized = summarizeRunItems(items);
-  const focusId = runFocusId(input.profileId, input.runId);
-  return {
-    focusId,
-    runId: input.runId,
-    profileId: input.profileId,
-    profileLabel: input.profileLabel,
-    status: state.statusNote ?? state.status,
-    summary: summarized.summary,
-    prompt: problem?.type === "problem.set" ? problem.problem : undefined,
-    updatedAt: input.runChain.at(-1)?.ts,
-    startedAt: input.runChain[0]?.ts,
-    selected: input.selectedFocusId === focusId,
-    chatLink: buildChatLink({
-      profileId: input.profileId,
-      objectiveId: input.objectiveId,
-      runId: input.runId,
-    }),
-    controlLink: buildMissionLink({
-      objectiveId: input.objectiveId,
-      panel: input.panel,
-      focusKind: "run",
-      focusId,
-    }),
-    previewLines: summarized.previewLines,
-  };
-};
-
 const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const helpers = ctx.helpers ?? {};
   const service = (helpers.factoryService as FactoryService | undefined) ?? new FactoryService({
@@ -1470,14 +1314,14 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const requestedChatId = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("chat"));
 
-  const requestedPanel = (req: Request): FactoryMissionPanel =>
-    parseMissionPanel(optionalTrimmedString(new URL(req.url).searchParams.get("panel")));
-
-  const requestedFocusKind = (req: Request): FactoryMissionFocusKind =>
-    parseMissionFocusKind(optionalTrimmedString(new URL(req.url).searchParams.get("focusKind")));
-
   const requestedFocusId = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("focusId"));
+
+  const requestedPanel = (req: Request): string =>
+    optionalTrimmedString(new URL(req.url).searchParams.get("panel")) ?? "overview";
+
+  const requestedFocusKind = (req: Request): string | undefined =>
+    optionalTrimmedString(new URL(req.url).searchParams.get("focusKind"));
 
   const wantsJsonNavigation = (req: Request): boolean =>
     (req.headers.get("accept") ?? "").includes("application/json");
@@ -1541,10 +1385,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const chatShellCache = new Map<string, {
     readonly expiresAt: number;
     readonly value: Promise<FactoryChatShellModel>;
-  }>();
-  const missionShellCache = new Map<string, {
-    readonly expiresAt: number;
-    readonly value: Promise<FactoryMissionShellModel>;
   }>();
 
   const withProjectionCache = async <T>(
@@ -1768,386 +1608,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     () => buildChatShellModel(input),
   );
 
-  const buildMissionShellModel = async (input: {
-    readonly objectiveId?: string;
-    readonly panel: FactoryMissionPanel;
-    readonly focusKind: FactoryMissionFocusKind;
-    readonly focusId?: string;
-  }): Promise<FactoryMissionShellModel> => {
-    await service.ensureBootstrap();
-    const repoRoot = service.git.repoRoot;
-    const board = await service.buildBoardProjection(input.objectiveId);
-    const objectiveId = board.selectedObjectiveId;
-    const objectives = board.objectives.map((objective) => ({
-      objectiveId: objective.objectiveId,
-      title: objective.title,
-      status: objective.status,
-      phase: objective.phase,
-      slotState: objective.scheduler.slotState,
-      section: objective.section as FactoryMissionSectionKey,
-      summary: objective.latestSummary ?? objective.nextAction,
-      updatedAt: objective.updatedAt,
-      selected: objective.objectiveId === objectiveId,
-      activeTaskCount: objective.activeTaskCount,
-      readyTaskCount: objective.readyTaskCount,
-      taskCount: objective.taskCount,
-      integrationStatus: objective.integrationStatus,
-      queuePosition: objective.scheduler.queuePosition,
-    } satisfies FactoryMissionObjectiveNav));
-    const sections: FactoryMissionShellModel["sections"] = {
-      needs_attention: objectives.filter((objective) => objective.section === "needs_attention"),
-      active: objectives.filter((objective) => objective.section === "active"),
-      queued: objectives.filter((objective) => objective.section === "queued"),
-      completed: objectives.filter((objective) => objective.section === "completed"),
-    };
-    if (!objectiveId) {
-      return {
-        objectiveId: undefined,
-        panel: input.panel,
-        focusKind: "mission",
-        focusId: undefined,
-        objectives,
-        sections,
-      };
-    }
-
-    const [detail, debug, jobs, profiles] = await Promise.all([
-      service.getObjective(objectiveId),
-      service.getObjectiveDebug(objectiveId),
-      ctx.queue.listJobs({ limit: 120 }),
-      discoverFactoryChatProfiles(profileRoot),
-    ]);
-    const objectiveJobs = jobs
-      .filter((job) => (asString(job.payload.objectiveId) ?? asString(asObject(job.result)?.objectiveId)) === objectiveId)
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-    let resolvedFocusKind = input.focusKind;
-    let resolvedFocusId = input.focusId;
-    if ((input.panel === "live" || !resolvedFocusId) && resolvedFocusKind === "mission") {
-      const activeTask = detail.tasks.find((task) => isActiveJobStatus(task.jobStatus));
-      const activeJob = objectiveJobs.find((job) => !isTerminalJobStatus(job.status));
-      if (input.panel === "live" && activeTask) {
-        resolvedFocusKind = "task";
-        resolvedFocusId = activeTask.taskId;
-      } else if (input.panel === "live" && activeJob) {
-        resolvedFocusKind = "job";
-        resolvedFocusId = activeJob.id;
-      }
-    }
-
-    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
-    const runRecords = (await Promise.all(
-      profiles.map(async (profile) => {
-        const profileStream = factoryChatStream(repoRoot, profile.id, objectiveId);
-        const indexChain = await agentRuntime.chain(profileStream);
-        const runIds = collectRunIds(indexChain);
-        const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(profileStream, runId))));
-        return runChains.map((runChain, index) => {
-          const runId = runIds[index]!;
-          return {
-            profileId: profile.id,
-            profileLabel: profile.label,
-            runId,
-            runChain,
-            summary: buildMissionRunSummary({
-              objectiveId,
-              panel: input.panel,
-              profileId: profile.id,
-              profileLabel: profile.label,
-              runId,
-              runChain,
-              jobsById,
-              selectedFocusId: resolvedFocusId,
-            }),
-          } satisfies MissionRunRecord;
-        });
-      }),
-    ))
-      .flat()
-      .sort((left, right) => (right.summary.updatedAt ?? 0) - (left.summary.updatedAt ?? 0))
-      .slice(0, 20);
-    const runSummaries = runRecords.map((record) => record.summary);
-
-    const missionFocus = (): Extract<FactoryMissionFocusModel, { readonly kind: "mission" }> => ({
-      kind: "mission",
-      objectiveId: detail.objectiveId,
-      title: detail.title,
-      status: detail.status,
-      phase: detail.phase,
-      summary: objectiveSummary(detail),
-      nextAction: detail.nextAction,
-      blockedReason: detail.blockedReason,
-      blockedExplanation: detail.blockedExplanation?.summary,
-      debugLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/debug`,
-      receiptsLink: `/receipt`,
-      slotState: detail.scheduler.slotState,
-      queuePosition: detail.scheduler.queuePosition,
-      integrationStatus: detail.integrationStatus,
-      repoProfileStatus: detail.repoProfile.status,
-      latestCommitHash: detail.latestCommitHash,
-      latestDecisionSummary: detail.latestDecision?.summary,
-      latestDecisionAt: detail.latestDecision?.at,
-      checks: detail.checks,
-      budgetElapsedMinutes: detail.budgetState.elapsedMinutes,
-      budgetMaxMinutes: detail.policy.budgets.maxObjectiveMinutes,
-      taskRunsUsed: detail.budgetState.taskRunsUsed,
-      taskRunsMax: detail.policy.budgets.maxTaskRuns,
-    });
-
-    let focus: FactoryMissionFocusModel = missionFocus();
-    if (resolvedFocusKind === "task" && resolvedFocusId) {
-      const task = detail.tasks.find((item) => item.taskId === resolvedFocusId);
-      if (task) {
-        focus = {
-          kind: "task",
-          title: task.title,
-          status: task.status,
-          summary: task.latestSummary ?? task.candidate?.summary ?? task.blockedReason,
-          taskId: task.taskId,
-          workerType: String(task.workerType),
-          candidateId: task.candidateId,
-          candidateStatus: task.candidate?.status,
-          jobId: task.jobId,
-          jobStatus: task.jobStatus,
-          workspaceExists: task.workspaceExists,
-          workspaceDirty: task.workspaceDirty,
-          workspacePath: task.workspacePath,
-          workspaceHead: task.workspaceHead,
-          lastMessage: task.lastMessage,
-          stdoutTail: task.stdoutTail,
-          stderrTail: task.stderrTail,
-        };
-      } else {
-        resolvedFocusKind = "mission";
-        resolvedFocusId = undefined;
-      }
-    } else if (resolvedFocusKind === "job" && resolvedFocusId) {
-      const job = objectiveJobs.find((item) => item.id === resolvedFocusId);
-      if (job) {
-        focus = {
-          kind: "job",
-          title: summarizeJob(job),
-          status: job.status,
-          summary: summarizeJob(job),
-          jobId: job.id,
-          agentId: job.agentId,
-          updatedAt: job.updatedAt,
-          runId: jobRunId(job) ?? jobParentRunId(job),
-          parentRunId: jobParentRunId(job),
-          taskId: jobTaskId(job),
-          candidateId: jobCandidateId(job),
-          rawLink: `/jobs/${encodeURIComponent(job.id)}`,
-          payload: JSON.stringify(job.payload, null, 2),
-          result: job.result ? JSON.stringify(job.result, null, 2) : undefined,
-          lastError: job.lastError,
-          canceledReason: job.canceledReason,
-          active: !isTerminalJobStatus(job.status),
-        };
-      } else {
-        resolvedFocusKind = "mission";
-        resolvedFocusId = undefined;
-      }
-    } else if (resolvedFocusKind === "run" && resolvedFocusId) {
-      const run = runSummaries.find((item) => item.focusId === resolvedFocusId);
-      if (run) {
-        focus = {
-          kind: "run",
-          title: `${run.profileLabel} · ${run.runId}`,
-          status: run.status,
-          summary: run.summary,
-          runId: run.runId,
-          profileLabel: run.profileLabel,
-          prompt: run.prompt,
-          updatedAt: run.updatedAt,
-          startedAt: run.startedAt,
-          chatLink: run.chatLink,
-          previewLines: run.previewLines,
-        };
-      } else {
-        resolvedFocusKind = "mission";
-        resolvedFocusId = undefined;
-      }
-    }
-
-    const liveOutput = input.panel === "live"
-      && resolvedFocusId
-      && (resolvedFocusKind === "task" || resolvedFocusKind === "job")
-      ? await service.getObjectiveLiveOutput(objectiveId, resolvedFocusKind as FactoryLiveOutputTargetKind, resolvedFocusId)
-      : undefined;
-
-    const recentReceipts = detail.recentReceipts.map((receipt) => ({
-      type: receipt.type,
-      summary: receipt.summary,
-      ts: receipt.ts,
-      hash: receipt.hash,
-      taskId: receipt.taskId,
-      candidateId: receipt.candidateId,
-    } satisfies FactoryMissionReceiptSummary));
-
-    const runChainsById = new Map(runRecords.map((record) => [record.runId, record.runChain] as const));
-    let scopedTaskIds = new Set(detail.tasks.map((task) => task.taskId));
-    let scopedCandidateIds = new Set(candidateIdsForTaskIds(detail.tasks, scopedTaskIds));
-    let scopedRunIds = new Set(runRecords.map((record) => record.runId));
-    let scopedJobs = objectiveJobs;
-    let scopedReceipts: ReadonlyArray<FactoryMissionReceiptSummary> = recentReceipts;
-
-    if (focus.kind === "run") {
-      scopedRunIds = new Set(collectRunLineageIds([focus.runId], runChainsById, objectiveJobs));
-      scopedJobs = objectiveJobs.filter((job) => jobMatchesRunIds(job, scopedRunIds));
-      const context = buildTaskCandidateContext(
-        detail.tasks,
-        [
-          ...scopedJobs.map((job) => jobTaskId(job)),
-          ...tasksByCandidateIds(detail.tasks, seedSet(scopedJobs.map((job) => jobCandidateId(job)))),
-        ],
-        scopedJobs.map((job) => jobCandidateId(job)),
-      );
-      scopedTaskIds = new Set(context.taskIds);
-      scopedCandidateIds = new Set(context.candidateIds);
-      scopedJobs = objectiveJobs.filter((job) =>
-        jobMatchesRunIds(job, scopedRunIds)
-        || (jobTaskId(job) ? scopedTaskIds.has(jobTaskId(job)!) : false)
-        || (jobCandidateId(job) ? scopedCandidateIds.has(jobCandidateId(job)!) : false)
-      );
-      scopedReceipts = filterReceiptsForContext(recentReceipts, scopedTaskIds, scopedCandidateIds);
-    } else if (focus.kind === "job") {
-      scopedRunIds = new Set(collectRunLineageIds([focus.runId, focus.parentRunId], runChainsById, objectiveJobs));
-      const context = buildTaskCandidateContext(
-        detail.tasks,
-        [focus.taskId],
-        [focus.candidateId],
-      );
-      scopedTaskIds = new Set(context.taskIds);
-      scopedCandidateIds = new Set(context.candidateIds);
-      scopedJobs = objectiveJobs.filter((job) =>
-        job.id === focus.jobId
-        || jobMatchesRunIds(job, scopedRunIds)
-        || (jobTaskId(job) ? scopedTaskIds.has(jobTaskId(job)!) : false)
-        || (jobCandidateId(job) ? scopedCandidateIds.has(jobCandidateId(job)!) : false)
-      );
-      scopedReceipts = filterReceiptsForContext(recentReceipts, scopedTaskIds, scopedCandidateIds);
-    } else if (focus.kind === "task") {
-      const context = buildTaskCandidateContext(
-        detail.tasks,
-        [focus.taskId],
-        [focus.candidateId],
-      );
-      scopedTaskIds = new Set(context.taskIds);
-      scopedCandidateIds = new Set(context.candidateIds);
-      const seedRunIds = objectiveJobs.flatMap((job) => (
-        (jobTaskId(job) && scopedTaskIds.has(jobTaskId(job)!))
-        || (jobCandidateId(job) && scopedCandidateIds.has(jobCandidateId(job)!))
-      )
-        ? [jobRunId(job), jobParentRunId(job)]
-        : []);
-      scopedRunIds = new Set(collectRunLineageIds(seedRunIds, runChainsById, objectiveJobs));
-      scopedJobs = objectiveJobs.filter((job) =>
-        (jobTaskId(job) ? scopedTaskIds.has(jobTaskId(job)!) : false)
-        || (jobCandidateId(job) ? scopedCandidateIds.has(jobCandidateId(job)!) : false)
-        || jobMatchesRunIds(job, scopedRunIds)
-      );
-      scopedReceipts = filterReceiptsForContext(recentReceipts, scopedTaskIds, scopedCandidateIds);
-    }
-
-    const taskSummaries = detail.tasks
-      .filter((task) => scopedTaskIds.has(task.taskId))
-      .map((task) => buildMissionTaskSummary(
-        objectiveId,
-        input.panel,
-        task,
-        resolvedFocusKind === "task" ? resolvedFocusId : undefined,
-      ));
-    const jobSummaries = scopedJobs
-      .slice(0, 20)
-      .map((job) => buildMissionJobSummary(
-        objectiveId,
-        input.panel,
-        job,
-        resolvedFocusKind === "job" ? resolvedFocusId : undefined,
-      ));
-    const visibleRunIds = scopedRunIds.size > 0 ? scopedRunIds : new Set(runRecords.map((record) => record.runId));
-    const visibleRunSummaries = runRecords
-      .filter((record) => visibleRunIds.has(record.runId))
-      .map((record) => record.summary);
-
-    const integrationWorkspaceSummary = debug.integrationWorktree
-      ? `${debug.integrationWorktree.exists ? "exists" : "missing"}${debug.integrationWorktree.branch ? ` · ${debug.integrationWorktree.branch}` : ""}${debug.integrationWorktree.dirty ? " · dirty" : ""}`
-      : undefined;
-
-    const selected: FactoryMissionSelectedModel = {
-      objectiveId: detail.objectiveId,
-      title: detail.title,
-      status: detail.status,
-      phase: detail.phase,
-      profileId: detail.profile.rootProfileId,
-      profileLabel: detail.profile.rootProfileLabel,
-      profilePromptPath: detail.profile.promptPath,
-      profileSkills: detail.profile.selectedSkills,
-      prompt: detail.prompt,
-      summary: objectiveSummary(detail),
-      nextAction: detail.nextAction,
-      blockedReason: detail.blockedReason,
-      blockedExplanation: detail.blockedExplanation?.summary,
-      slotState: detail.scheduler.slotState,
-      queuePosition: detail.scheduler.queuePosition,
-      integrationStatus: detail.integrationStatus,
-      repoProfileStatus: detail.repoProfile.status,
-      latestCommitHash: detail.latestCommitHash,
-      latestDecisionSummary: detail.latestDecision?.summary,
-      latestDecisionAt: detail.latestDecision?.at,
-      activeTaskCount: detail.activeTaskCount,
-      readyTaskCount: detail.readyTaskCount,
-      taskCount: detail.taskCount,
-      checks: detail.checks,
-      budgetElapsedMinutes: detail.budgetState.elapsedMinutes,
-      budgetMaxMinutes: detail.policy.budgets.maxObjectiveMinutes,
-      taskRunsUsed: detail.budgetState.taskRunsUsed,
-      taskRunsMax: detail.policy.budgets.maxTaskRuns,
-      tasks: taskSummaries,
-      runs: visibleRunSummaries,
-      jobs: jobSummaries,
-      recentReceipts: focus.kind === "mission" ? recentReceipts : scopedReceipts,
-      debugLink: `/factory/api/objectives/${encodeURIComponent(detail.objectiveId)}/debug`,
-      receiptsLink: `/receipt`,
-      chatLink: buildChatLink({ objectiveId: detail.objectiveId }),
-      repoProfileSummary: debug.repoProfile.summary,
-      debugNextAction: debug.nextAction,
-      activeJobCount: debug.activeJobs.length,
-      recentJobCount: debug.lastJobs.length,
-      contextPackCount: debug.latestContextPacks.length,
-      worktreeCount: debug.taskWorktrees.length + (debug.integrationWorktree ? 1 : 0),
-      repoSkillCount: detail.contextSources.repoSkillPaths.length,
-      sharedArtifactCount: detail.contextSources.sharedArtifactRefs.length,
-      integrationWorkspaceSummary,
-      focus,
-    };
-
-    return {
-      objectiveId,
-      panel: input.panel,
-      focusKind: resolvedFocusKind,
-      focusId: resolvedFocusId,
-      objectives,
-      sections,
-      selected,
-      liveOutput,
-    };
-  };
-
-  const buildMissionShellModelCached = async (input: {
-    readonly objectiveId?: string;
-    readonly panel: FactoryMissionPanel;
-    readonly focusKind: FactoryMissionFocusKind;
-    readonly focusId?: string;
-  }): Promise<FactoryMissionShellModel> => withProjectionCache(
-    missionShellCache,
-    JSON.stringify({
-      input,
-      queueVersion: ctx.queue.snapshot?.().version ?? 0,
-      objectiveVersion: typeof service.projectionVersion === "function" ? service.projectionVersion() : 0,
-    }),
-    () => buildMissionShellModel(input),
-  );
-
   const collectChatSubscriptionJobIds = async (input: {
     readonly profileId?: string;
     readonly objectiveId?: string;
@@ -2181,38 +1641,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       ...scopedJobs.map((job) => job.id),
       ...(input.jobId ? [input.jobId] : []),
     ])];
-  };
-
-  const collectMissionSubscriptionJobIds = async (input: {
-    readonly objectiveId?: string;
-    readonly focusKind: FactoryMissionFocusKind;
-    readonly focusId?: string;
-  }): Promise<ReadonlyArray<string>> => {
-    if (!input.objectiveId) return [];
-    const jobs = (await ctx.queue.listJobs({ limit: 160 }))
-      .filter((job) => jobObjectiveId(job) === input.objectiveId)
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-    if (input.focusKind === "job" && input.focusId) return [input.focusId];
-    if (input.focusKind === "run" && input.focusId) {
-      const { runId } = parseRunFocusId(input.focusId);
-      const scopedRunIds = collectRunLineageIds([runId], new Map<string, AgentRunChain>(), jobs);
-      return jobs.filter((job) => jobMatchesRunIds(job, scopedRunIds)).map((job) => job.id).slice(0, 20);
-    }
-    if (input.focusKind === "task" && input.focusId) {
-      const detail = await service.getObjective(input.objectiveId);
-      const task = detail.tasks.find((item) => item.taskId === input.focusId);
-      if (!task) return [];
-      const context = buildTaskCandidateContext(detail.tasks, [task.taskId], [task.candidateId]);
-      return jobs
-        .filter((job) =>
-          job.id === task.jobId
-          || (jobTaskId(job) ? context.taskIds.has(jobTaskId(job)!) : false)
-          || (jobCandidateId(job) ? context.candidateIds.has(jobCandidateId(job)!) : false)
-        )
-        .map((job) => job.id)
-        .slice(0, 20);
-    }
-    return jobs.slice(0, 16).map((job) => job.id);
   };
 
   return {
@@ -2601,106 +2029,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           return model.inspector;
         },
         (model) => html(factoryInspectorIsland(model))
-      ));
-
-      app.get("/factory/control", async (c) => wrap(
-        async () => buildMissionShellModelCached({
-          objectiveId: requestedObjectiveId(c.req.raw),
-          panel: requestedPanel(c.req.raw),
-          focusKind: requestedFocusKind(c.req.raw),
-          focusId: requestedFocusId(c.req.raw),
-        }),
-        (model) => html(factoryMissionControlShell(model))
-      ));
-
-      app.get("/factory/control/events", async (c) => wrap(
-        async () => {
-          await service.ensureBootstrap();
-          const objectiveId = requestedObjectiveId(c.req.raw);
-          const focusKind = requestedFocusKind(c.req.raw);
-          const focusId = requestedFocusId(c.req.raw);
-          const runFocus = focusKind === "run" ? parseRunFocusId(focusId) : {};
-          return {
-            objectiveId,
-            focusKind,
-            focusId,
-            runStream: objectiveId && runFocus.profileId
-              ? factoryChatStream(service.git.repoRoot, runFocus.profileId, objectiveId)
-              : undefined,
-            jobIds: await collectMissionSubscriptionJobIds({
-              objectiveId,
-              focusKind,
-              focusId,
-            }),
-          };
-        },
-        (body) => ctx.sse.subscribeMany([
-          ...(body.objectiveId
-            ? [{ topic: "factory" as const, stream: body.objectiveId }]
-            : [{ topic: "receipt" as const }]),
-          ...(body.runStream ? [{ topic: "agent" as const, stream: body.runStream }] : []),
-          ...body.jobIds.map((jobId) => ({ topic: "jobs" as const, stream: jobId })),
-          ...(body.focusKind === "job" && body.focusId && !body.jobIds.includes(body.focusId)
-            ? [{ topic: "jobs" as const, stream: body.focusId }]
-            : []),
-        ], c.req.raw.signal)
-      ));
-
-      app.get("/factory/control/island/rail", async (c) => wrap(
-        async () => {
-          const model = await buildMissionShellModelCached({
-            objectiveId: requestedObjectiveId(c.req.raw),
-            panel: requestedPanel(c.req.raw),
-            focusKind: requestedFocusKind(c.req.raw),
-            focusId: requestedFocusId(c.req.raw),
-          });
-          return model;
-        },
-        (model) => html(factoryMissionRailIsland(model))
-      ));
-
-      app.get("/factory/control/island/main", async (c) => wrap(
-        async () => {
-          const model = await buildMissionShellModelCached({
-            objectiveId: requestedObjectiveId(c.req.raw),
-            panel: requestedPanel(c.req.raw),
-            focusKind: requestedFocusKind(c.req.raw),
-            focusId: requestedFocusId(c.req.raw),
-          });
-          return model;
-        },
-        (model) => html(factoryMissionMainIsland(model))
-      ));
-
-      app.get("/factory/control/island/inspector", async (c) => wrap(
-        async () => {
-          const model = await buildMissionShellModelCached({
-            objectiveId: requestedObjectiveId(c.req.raw),
-            panel: requestedPanel(c.req.raw),
-            focusKind: requestedFocusKind(c.req.raw),
-            focusId: requestedFocusId(c.req.raw),
-          });
-          return model;
-        },
-        (model) => html(factoryMissionInspectorIsland(model))
-      ));
-
-      app.get("/factory/control/island/live-output", async (c) => wrap(
-        async () => {
-          const objectiveId = requestedObjectiveId(c.req.raw);
-          const focusKind = requestedFocusKind(c.req.raw);
-          const focusId = requestedFocusId(c.req.raw);
-          const snapshot = objectiveId && focusId && (focusKind === "task" || focusKind === "job")
-            ? await service.getObjectiveLiveOutput(objectiveId, focusKind as FactoryLiveOutputTargetKind, focusId)
-            : undefined;
-          return {
-            objectiveId,
-            focusKind,
-            focusId,
-            snapshot,
-          };
-        },
-        (body) => html(factoryMissionLiveOutputIsland(body))
       ));
 
       app.get("/factory/api/live-output", async (c) => wrap(
