@@ -78,197 +78,22 @@ const objectiveMetaPill = (label: string, value?: string, tone: Tone = "neutral"
   return `<span class="${badgeBaseClass} ${badgeToneClass(tone)} px-2.5 py-1 text-[10px] tracking-[0.14em]">${esc(`${label} ${text}`)}</span>`;
 };
 
-export type FactoryChatProfileNav = {
-  readonly id: string;
-  readonly label: string;
-  readonly summary?: string;
-  readonly selected: boolean;
-};
-
-export type FactoryChatObjectiveNav = {
-  readonly objectiveId: string;
-  readonly title: string;
-  readonly status: string;
-  readonly phase: string;
-  readonly summary?: string;
-  readonly updatedAt?: number;
-  readonly selected: boolean;
-  readonly slotState?: string;
-  readonly activeTaskCount?: number;
-  readonly readyTaskCount?: number;
-  readonly taskCount?: number;
-  readonly integrationStatus?: string;
-};
-
-export type FactoryChatJobNav = {
-  readonly jobId: string;
-  readonly agentId: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly runId?: string;
-  readonly objectiveId?: string;
-  readonly updatedAt?: number;
-  readonly link?: string;
-  readonly selected?: boolean;
-};
-
-export type FactorySelectedObjectiveCard = {
-  readonly objectiveId: string;
-  readonly title: string;
-  readonly status: string;
-  readonly phase: string;
-  readonly summary?: string;
-  readonly debugLink: string;
-  readonly receiptsLink: string;
-  readonly nextAction?: string;
-  readonly slotState?: string;
-  readonly queuePosition?: number;
-  readonly blockedReason?: string;
-  readonly blockedExplanation?: string;
-  readonly integrationStatus?: string;
-  readonly activeTaskCount?: number;
-  readonly readyTaskCount?: number;
-  readonly taskCount?: number;
-  readonly repoProfileStatus?: string;
-  readonly latestCommitHash?: string;
-  readonly checks?: ReadonlyArray<string>;
-  readonly latestDecisionSummary?: string;
-  readonly latestDecisionAt?: number;
-};
-
-export type FactoryLiveCodexCard = {
-  readonly jobId: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly latestNote?: string;
-  readonly stderrTail?: string;
-  readonly stdoutTail?: string;
-  readonly runId?: string;
-  readonly task?: string;
-  readonly updatedAt?: number;
-  readonly abortRequested?: boolean;
-  readonly rawLink: string;
-  readonly running: boolean;
-};
-
-export type FactoryLiveChildCard = {
-  readonly jobId: string;
-  readonly agentId: string;
-  readonly worker: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly latestNote?: string;
-  readonly stderrTail?: string;
-  readonly stdoutTail?: string;
-  readonly runId?: string;
-  readonly parentRunId?: string;
-  readonly stream?: string;
-  readonly parentStream?: string;
-  readonly task?: string;
-  readonly updatedAt?: number;
-  readonly abortRequested?: boolean;
-  readonly rawLink: string;
-  readonly running: boolean;
-};
-
-export type FactoryLiveRunCard = {
-  readonly runId: string;
-  readonly profileLabel: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly updatedAt?: number;
-  readonly lastToolName?: string;
-  readonly lastToolSummary?: string;
-  readonly link?: string;
-};
-
-export type FactoryProfileSectionView = {
-  readonly title: string;
-  readonly items: ReadonlyArray<string>;
-};
-
-export type FactorySidebarModel = {
-  readonly activeProfileId: string;
-  readonly activeProfileLabel: string;
-  readonly activeProfileSummary?: string;
-  readonly activeProfileSections?: ReadonlyArray<FactoryProfileSectionView>;
-  readonly activeProfileTools: ReadonlyArray<string>;
-  readonly chatId?: string;
-  readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
-  readonly objectives: ReadonlyArray<FactoryChatObjectiveNav>;
-  readonly jobs: ReadonlyArray<FactoryChatJobNav>;
-  readonly selectedObjective?: FactorySelectedObjectiveCard;
-  readonly activeCodex?: FactoryLiveCodexCard;
-  readonly liveChildren?: ReadonlyArray<FactoryLiveChildCard>;
-  readonly activeRun?: FactoryLiveRunCard;
-};
-
-export type FactoryWorkCard = {
-  readonly key: string;
-  readonly title: string;
-  readonly worker: string;
-  readonly status: string;
-  readonly summary: string;
-  readonly detail?: string;
-  readonly meta?: string;
-  readonly link?: string;
-  readonly objectiveId?: string;
-  readonly jobId?: string;
-  readonly running?: boolean;
-};
-
-export type FactoryChatItem =
-  | {
-      readonly key: string;
-      readonly kind: "user";
-      readonly body: string;
-      readonly meta?: string;
-    }
-  | {
-      readonly key: string;
-      readonly kind: "assistant";
-      readonly body: string;
-      readonly meta?: string;
-    }
-  | {
-      readonly key: string;
-      readonly kind: "system";
-      readonly title: string;
-      readonly body: string;
-      readonly meta?: string;
-    }
-  | {
-      readonly key: string;
-      readonly kind: "work";
-      readonly card: FactoryWorkCard;
-    };
-
-export type FactoryChatIslandModel = {
-  readonly activeProfileId: string;
-  readonly activeProfileLabel: string;
-  readonly activeProfileSummary?: string;
-  readonly activeProfileSections?: ReadonlyArray<FactoryProfileSectionView>;
-  readonly activeProfileTools?: ReadonlyArray<string>;
-  readonly selectedThread?: FactorySelectedObjectiveCard;
-  readonly jobs?: ReadonlyArray<FactoryChatJobNav>;
-  readonly activeCodex?: FactoryLiveCodexCard;
-  readonly liveChildren?: ReadonlyArray<FactoryLiveChildCard>;
-  readonly activeRun?: FactoryLiveRunCard;
-  readonly items: ReadonlyArray<FactoryChatItem>;
-};
-
-export type FactoryChatShellModel = {
-  readonly activeProfileId: string;
-  readonly activeProfileLabel: string;
-  readonly activeProfileSummary?: string;
-  readonly activeProfileSections?: ReadonlyArray<FactoryProfileSectionView>;
-  readonly objectiveId?: string;
-  readonly chatId?: string;
-  readonly runId?: string;
-  readonly jobId?: string;
-  readonly chat: FactoryChatIslandModel;
-  readonly sidebar: FactorySidebarModel;
-};
+import type {
+  FactoryChatProfileNav,
+  FactoryChatObjectiveNav,
+  FactoryChatJobNav,
+  FactorySelectedObjectiveCard,
+  FactoryLiveCodexCard,
+  FactoryLiveChildCard,
+  FactoryLiveRunCard,
+  FactoryProfileSectionView,
+  FactoryWorkCard,
+  FactoryChatItem,
+  FactoryChatIslandModel,
+  FactoryChatShellModel,
+  FactoryNavModel,
+  FactoryInspectorModel
+} from "./factory-models.js";
 
 type FactoryChatRouteContext = {
   readonly profileId: string;
@@ -317,21 +142,21 @@ const shellPill = (label: string, tone: Tone = "neutral"): string =>
   `<span class="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${badgeToneClass(tone)}">${esc(label)}</span>`;
 
 const shellHeaderTitle = (model: FactoryChatShellModel): string =>
-  model.sidebar.selectedObjective?.title
+  model.inspector.selectedObjective?.title
     ?? (model.chatId ? "New chat" : model.activeProfileLabel);
 
 const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   const pills: string[] = [];
-  const objective = model.sidebar.selectedObjective;
+  const objective = model.inspector.selectedObjective;
   if (objective) {
     const phaseLabel = displayLabel(objective.phase) || displayLabel(objective.status) || "active";
     pills.push(shellPill(phaseLabel, toneForValue(objective.phase || objective.status)));
     if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning"));
   }
-  if (model.sidebar.activeCodex) {
-    pills.push(shellPill(`Codex ${displayLabel(model.sidebar.activeCodex.status) || "active"}`, toneForValue(model.sidebar.activeCodex.status)));
-  } else if (model.sidebar.activeRun?.status) {
-    pills.push(shellPill(displayLabel(model.sidebar.activeRun.status), toneForValue(model.sidebar.activeRun.status)));
+  if (model.inspector.activeCodex) {
+    pills.push(shellPill(`Codex ${displayLabel(model.inspector.activeCodex.status) || "active"}`, toneForValue(model.inspector.activeCodex.status)));
+  } else if (model.inspector.activeRun?.status) {
+    pills.push(shellPill(displayLabel(model.inspector.activeRun.status), toneForValue(model.inspector.activeRun.status)));
   }
   return pills.join("");
 };
@@ -341,10 +166,10 @@ const composerTextareaClass = "min-h-[56px] w-full resize-none rounded-xl border
 
 const composerJobId = (model: FactoryChatShellModel): string | undefined => {
   if (model.jobId) return model.jobId;
-  if (model.sidebar.activeCodex?.jobId) return model.sidebar.activeCodex.jobId;
-  const liveChild = model.sidebar.liveChildren?.find((child) => !isTerminalJobStatusValue(child.status));
+  if (model.inspector.activeCodex?.jobId) return model.inspector.activeCodex.jobId;
+  const liveChild = model.inspector.liveChildren?.find((child) => !isTerminalJobStatusValue(child.status));
   if (liveChild?.jobId) return liveChild.jobId;
-  return model.sidebar.jobs.find((job) =>
+  return model.inspector.jobs.find((job) =>
     job.status === "queued" || job.status === "leased" || job.status === "running"
   )?.jobId;
 };
@@ -590,44 +415,8 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   </div>`;
 };
 
-const renderProfileCard = (model: FactorySidebarModel): string => {
-  const skillInitials = model.activeProfileLabel
-    .split(/\s+/)
-    .map((part) => part[0] ?? "")
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-  const sections = (model.activeProfileSections ?? []).slice(0, 2);
-  const tools = model.activeProfileTools.map(skillToolLabel).filter(Boolean).slice(0, 6);
-  return `<section class="${railCardClass}">
-    <div class="${sectionLabelClass}">Profile</div>
-    <div class="mt-3 rounded-[20px] border border-border bg-muted px-4 py-4">
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0">
-          <div class="text-lg font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
-          <div class="mt-2 text-sm leading-6 text-card-foreground">${esc(model.activeProfileSummary ?? "Active profile controls how Factory inspects and routes work.")}</div>
-        </div>
-        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-border bg-secondary text-foreground">${iconAgent()}</div>
-      </div>
-    </div>
-    ${sections.length > 0 ? `<div class="mt-4 grid gap-3">
-      ${sections.map((section) => `<div class="rounded-[20px] border border-border bg-muted px-4 py-3">
-        <div class="${sectionLabelClass}">${esc(section.title)}</div>
-        <div class="mt-2 grid gap-2">
-          ${section.items.slice(0, 3).map((item) => `<div class="text-sm leading-6 text-card-foreground">${esc(truncate(item, 120))}</div>`).join("")}
-        </div>
-      </div>`).join("")}
-    </div>` : ""}
-    ${tools.length > 0 ? `<div class="mt-4">
-      <div class="${sectionLabelClass}">Tools</div>
-      <div class="mt-3 flex flex-wrap gap-2">
-        ${tools.map((tool) => badge(tool, "neutral")).join("")}
-      </div>
-    </div>` : ""}
-  </section>`;
-};
 
-const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatObjectiveNav): string => {
+const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjectiveNav): string => {
   const href = `/factory?profile=${encodeURIComponent(model.activeProfileId)}&thread=${encodeURIComponent(objective.objectiveId)}`;
   const selectedClass = objective.selected
     ? "border-primary/30 bg-primary/10"
@@ -642,8 +431,8 @@ const renderObjectiveLink = (model: FactorySidebarModel, objective: FactoryChatO
   </a>`;
 };
 
-const renderSidebarMetrics = (model: FactorySidebarModel): string => {
-  const obj = model.selectedObjective;
+const renderSidebarMetrics = (obj?: FactorySelectedObjectiveCard): string => {
+  
   if (!obj) return "";
   return `<section class="${railCardClass}">
     <div class="grid grid-cols-3 gap-1.5">
@@ -663,15 +452,15 @@ const renderSidebarMetrics = (model: FactorySidebarModel): string => {
   </section>`;
 };
 
-export const factoryRailIsland = (model: FactorySidebarModel): string => {
-  const blankChat = !model.selectedObjective;
+export const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard, chatId?: string): string => {
+  const blankChat = !selectedObjective;
   const visibleObjectives = model.objectives.slice(0, 5);
   const hasMoreObjectives = model.objectives.length > visibleObjectives.length;
-  const selectedObjectiveQuery = model.selectedObjective
-    ? `&thread=${encodeURIComponent(model.selectedObjective.objectiveId)}`
+  const selectedObjectiveQuery = selectedObjective
+    ? `&thread=${encodeURIComponent(selectedObjective.objectiveId)}`
     : "";
-  const selectedChatQuery = blankChat && model.chatId
-    ? `&chat=${encodeURIComponent(model.chatId)}`
+  const selectedChatQuery = blankChat && chatId
+    ? `&chat=${encodeURIComponent(chatId)}`
     : "";
   const objectiveCards = visibleObjectives.length > 0
     ? visibleObjectives.map((objective) => renderObjectiveLink(model, objective)).join("")
@@ -706,11 +495,11 @@ export const factoryRailIsland = (model: FactorySidebarModel): string => {
         <a class="text-[10px] font-medium text-primary hover:underline" href="/factory?profile=${encodeURIComponent(model.activeProfileId)}">View all</a>
       </div>` : ""}
     </section>
-    ${renderSidebarMetrics(model)}
+    ${renderSidebarMetrics(selectedObjective)}
   </div>`;
 };
 
-export const factorySidebarIsland = (model: FactorySidebarModel): string => factoryRailIsland(model);
+export const factorySidebarIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard, chatId?: string): string => factoryRailIsland(model, selectedObjective, chatId);
 
 const renderLocalObjectiveActions = (objective: FactorySelectedObjectiveCard): string =>
   renderObjectiveActions(objective.objectiveId, "grid gap-2");
@@ -745,7 +534,7 @@ type FactoryCodexTelemetryCard = {
   readonly abortRequested?: boolean;
 };
 
-const collectCodexTelemetryCards = (model: FactorySidebarModel): ReadonlyArray<FactoryCodexTelemetryCard> => {
+const collectCodexTelemetryCards = (model: FactoryInspectorModel): ReadonlyArray<FactoryCodexTelemetryCard> => {
   const entries = new Map<string, FactoryCodexTelemetryCard>();
   for (const child of model.liveChildren ?? []) {
     if (child.worker !== "codex") continue;
@@ -788,7 +577,7 @@ const collectCodexTelemetryCards = (model: FactorySidebarModel): ReadonlyArray<F
     .slice(0, 3);
 };
 
-const renderOpsSummary = (model: FactorySidebarModel): string => {
+const renderOpsSummary = (model: FactoryInspectorModel): string => {
   const activeJobs = model.jobs.filter((job) => job.status === "running" || job.status === "leased").length;
   const queuedJobs = model.jobs.filter((job) => job.status === "queued").length;
   const failedJobs = model.jobs.filter((job) => job.status === "failed").length;
@@ -871,7 +660,7 @@ const renderLiveStatusEntry = (entry: FactoryLiveStatusEntry, depth: number = 0)
   </article>`;
 };
 
-export const factoryInspectorIsland = (model: FactorySidebarModel): string => {
+export const factoryInspectorIsland = (model: FactoryInspectorModel): string => {
   const objective = model.selectedObjective;
   const liveChildren = model.liveChildren ?? [];
   const codexTelemetry = collectCodexTelemetryCards(model);
@@ -1028,7 +817,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       <aside class="order-2 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:order-none md:min-h-0 md:border-r md:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
           <div id="factory-sidebar" hx-get="/factory/island/sidebar${shellQuery}" hx-trigger="${sidebarTrigger}" hx-swap="innerHTML">
-            ${factoryRailIsland(model.sidebar)}
+            ${factoryRailIsland(model.nav, model.inspector.selectedObjective, model.chatId)}
           </div>
         </div>
       </aside>
@@ -1077,7 +866,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       <aside class="order-3 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:min-h-0 md:border-l md:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
           <div id="factory-inspector" class="factory-inspector-panel" hx-get="/factory/island/inspector${shellQuery}" hx-trigger="${inspectorTrigger}" hx-swap="innerHTML">
-            ${factoryInspectorIsland(model.sidebar)}
+            ${factoryInspectorIsland(model.inspector)}
           </div>
         </div>
       </aside>

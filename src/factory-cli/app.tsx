@@ -48,7 +48,7 @@ type FactoryAppMode = "board" | "objective";
 
 export type FactoryAppExit = {
   readonly code: number;
-  readonly reason: "quit" | "completed" | "failed" | "canceled" | "blocked" | "manual";
+  readonly reason: "quit" | "completed" | "failed" | "canceled" | "blocked" | "manual" | "integration_conflicted";
   readonly objectiveId?: string;
 };
 

@@ -34,19 +34,22 @@ import {
   factoryChatShell,
   factoryInspectorIsland,
   factorySidebarIsland,
-  type FactoryChatIslandModel,
-  type FactoryChatItem,
-  type FactoryChatObjectiveNav,
-  type FactoryChatProfileNav,
-  type FactoryChatShellModel,
-  type FactoryChatJobNav,
-  type FactorySidebarModel,
-  type FactoryLiveCodexCard,
-  type FactoryLiveChildCard,
-  type FactoryLiveRunCard,
-  type FactorySelectedObjectiveCard,
-  type FactoryWorkCard,
 } from "../views/factory-chat.js";
+import type {
+  FactoryChatIslandModel,
+  FactoryChatItem,
+  FactoryChatObjectiveNav,
+  FactoryChatProfileNav,
+  FactoryChatShellModel,
+  FactoryChatJobNav,
+  FactoryLiveCodexCard,
+  FactoryLiveChildCard,
+  FactoryLiveRunCard,
+  FactorySelectedObjectiveCard,
+  FactoryWorkCard,
+  FactoryNavModel,
+  FactoryInspectorModel,
+} from "../views/factory-models.js";
 import {
   factoryMissionControlShell,
   factoryMissionInspectorIsland,
@@ -1708,32 +1711,30 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeRun,
       items: chatItems,
     };
-    const sidebarModel: FactorySidebarModel = {
+    const navModel: FactoryNavModel = {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSections: activeProfileOverview.sections,
-      activeProfileTools: resolved.toolAllowlist,
-      chatId: input.chatId,
       profiles: profileNav,
       objectives: objectiveNav,
-      jobs: relevantJobs,
+    };
+    const inspectorModel: FactoryInspectorModel = {
+      panel: "overview",
       selectedObjective: selectedObjectiveCard,
       activeCodex,
       liveChildren,
       activeRun,
+      jobs: relevantJobs,
     };
     return {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSections: activeProfileOverview.sections,
       objectiveId: input.objectiveId,
       chatId: input.chatId,
       runId: activeRunId,
       jobId: input.jobId,
       chat: chatModel,
-      sidebar: sidebarModel,
+      nav: navModel,
+      inspector: inspectorModel,
     };
   };
 
@@ -2476,9 +2477,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
-          return model.sidebar;
+          return model;
         },
-        (model) => html(factorySidebarIsland(model))
+        (model) => html(factorySidebarIsland(model.nav, model.inspector.selectedObjective, model.chatId))
       ));
 
       app.get("/factory/island/inspector", async (c) => wrap(
@@ -2490,7 +2491,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
-          return model.sidebar;
+          return model.inspector;
         },
         (model) => html(factoryInspectorIsland(model))
       ));
@@ -2569,9 +2570,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
-          return model.sidebar;
+          return model;
         },
-        (model) => html(factorySidebarIsland(model))
+        (model) => html(factorySidebarIsland(model.nav, model.inspector.selectedObjective, model.chatId))
       ));
 
       app.get("/factory/chat/island/inspector", async (c) => wrap(
@@ -2583,7 +2584,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
-          return model.sidebar;
+          return model.inspector;
         },
         (model) => html(factoryInspectorIsland(model))
       ));
