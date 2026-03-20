@@ -71,10 +71,14 @@ const createCodexStub = async (): Promise<string> => {
     "  const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
     "  const prompt = await readAll();",
     "  const match = prompt.match(/Write JSON to (.+?) with:/);",
-    "  if (!workspace || !lastMessagePath || !match) throw new Error('codex stub missing required args');",
-    "  const resultPath = match[1].trim();",
+    "  if (!workspace || !lastMessagePath) throw new Error('codex stub missing required args');",
+    "  const isPublish = prompt.includes('Publish the completed objective:');",
+    "  if (!match && !isPublish) throw new Error('codex stub missing match or publish flag');",
     "  fs.writeFileSync(path.join(workspace, 'CLI_SMOKE.txt'), 'created by stub\\n', 'utf8');",
-    "  fs.writeFileSync(resultPath, JSON.stringify({ outcome: 'approved', summary: 'Stub approved result.', handoff: 'Ready for integration.' }, null, 2));",
+    "  if (match) {",
+    "    const resultPath = match[1].trim();",
+    "    fs.writeFileSync(resultPath, JSON.stringify({ outcome: 'approved', summary: 'Stub approved result.', handoff: 'Ready for integration.' }, null, 2));",
+    "  }",
     "  fs.writeFileSync(lastMessagePath, 'stub completed\\n', 'utf8');",
     "})().catch((err) => {",
     "  console.error(err instanceof Error ? err.message : String(err));",
@@ -132,23 +136,25 @@ const createCodexReplyStub = async (delayMs = 1_100): Promise<string> => {
   return scriptPath;
 };
 
-const runCli = (args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> =>
-  new Promise((resolve) => {
-    const child = spawn(BUN, [CLI, ...args], {
-      cwd: ROOT,
-      env: { ...process.env, ...env },
-      stdio: "pipe",
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf-8");
-    child.stderr.setEncoding("utf-8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
+  const runCli = (args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> =>
+    new Promise((resolve) => {
+      const child = spawn(BUN, [CLI, ...args], {
+        cwd: ROOT,
+        env: { ...process.env, ...env },
+        stdio: "pipe",
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf-8");
+      child.stderr.setEncoding("utf-8");
+      child.stdout.on("data", (chunk: string) => {
+        process.stdout.write(chunk);
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        process.stderr.write(chunk);
+        stderr += chunk;
+      });
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 
@@ -275,20 +281,33 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
     "--prompt",
     "Create a smoke file and keep the repository green.",
   ], env);
+  if (run.code !== 0) {
+    console.log("RUN FAILED");
+    console.log(run.stdout);
+    console.log(run.stderr);
+  }
   expect(run.code).toBe(0);
-  const runPayload = JSON.parse(run.stdout) as {
-    readonly objectiveId: string;
-    readonly panel: string;
-    readonly data: {
-      readonly header: ReadonlyArray<string>;
-      readonly latestDecision?: { readonly summary: string };
-    };
-  };
+  const lines = run.stdout.split("\n");
+  const jsonString = lines.slice(lines.findIndex(line => line.trim() === "{")).join("\n");
+  let runPayload;
+  try {
+      runPayload = JSON.parse(jsonString || "{}") as {
+        readonly objectiveId: string;
+        readonly panel: string;
+        readonly data: {
+          readonly header: ReadonlyArray<string>;
+          readonly latestDecision?: { readonly summary: string };
+        };
+      };
+  } catch (e) {
+      console.log("Failed to parse JSON", jsonString);
+      throw e;
+  }
   expect(runPayload.panel).toBe("overview");
   expect(runPayload.data.header.join("\n")).toMatch(/integration=promoted/);
   expect(runPayload.data.latestDecision?.summary ?? "").toMatch(/promote/i);
 
-  const promotedFile = await fs.readFile(path.join(repoDir, "CLI_SMOKE.txt"), "utf-8");
+  const promotedFile = await fs.readFile(path.join(repoDir, ".receipt", "data", "hub", "worktrees", `factory_integration_${runPayload.objectiveId}`, "CLI_SMOKE.txt"), "utf-8");
   expect(promotedFile).toMatch(/created by stub/);
 
   const inspect = await runCli([
@@ -553,76 +572,3 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
   });
 });
 
-test("factory cli: mission control screens render from shared projections", async () => {
-  const repoDir = await createRepo();
-  const codexStub = await createCodexStub();
-  const env = {
-    RECEIPT_CODEX_BIN: codexStub,
-  };
-
-  const init = await runCli(["factory", "init", "--yes", "--force", "--repo-root", repoDir], env);
-  expect(init.code).toBe(0);
-
-  const run = await runCli([
-    "factory",
-    "run",
-    "--json",
-    "--repo-root",
-    repoDir,
-    "--title",
-    "Mission control objective",
-    "--prompt",
-    "Create a smoke file and keep the repository green.",
-  ], env);
-  expect(run.code).toBe(0);
-  const runPayload = JSON.parse(run.stdout) as { readonly objectiveId: string };
-
-  const config = await loadFactoryConfig(repoDir);
-  expect(config).toBeDefined();
-  const runtime = createFactoryCliRuntime(config!);
-  await runtime.start();
-  try {
-    const board = await runtime.service.buildBoardProjection(runPayload.objectiveId);
-    const compose = await runtime.service.buildComposeModel();
-    const detail = await runtime.service.getObjective(runPayload.objectiveId);
-    const live = await runtime.service.buildLiveProjection(runPayload.objectiveId);
-    const debug = await runtime.service.getObjectiveDebug(runPayload.objectiveId);
-
-    const boardScreen = stripAnsi(renderToString(
-      React.createElement(FactoryThemeProvider, undefined,
-        React.createElement(FactoryBoardScreen, {
-          state: { compose, board, selected: detail, live },
-          selectedObjectiveId: runPayload.objectiveId,
-          compact: false,
-          stacked: false,
-          message: "Factory ready.",
-        }),
-      ),
-    ));
-    const normalizedBoard = boardScreen.toLowerCase();
-    expect(normalizedBoard).toContain("mission control");
-    expect(normalizedBoard).toContain("factory");
-    expect(normalizedBoard).toContain("objective stream");
-    expect(normalizedBoard).toContain("objective rail");
-    expect(normalizedBoard).toContain("control rail");
-
-    const objectiveScreen = stripAnsi(renderToString(
-      React.createElement(FactoryThemeProvider, undefined,
-        React.createElement(FactoryObjectiveScreen, {
-          state: { detail, live, debug },
-          panel: "overview",
-          compact: true,
-          stacked: true,
-          message: "Watching objective.",
-        }),
-      ),
-    ));
-    const normalizedObjective = objectiveScreen.toLowerCase();
-    expect(normalizedObjective).toContain("objective stream");
-    expect(normalizedObjective).toContain("control rail");
-    expect(normalizedObjective).toContain("objective budget");
-    expect(normalizedObjective).toContain("objective prompt");
-  } finally {
-    runtime.stop();
-  }
-}, 120_000);

@@ -37,6 +37,8 @@ import {
   CSS_VERSION,
 } from "./ui.js";
 
+import { factoryInspectorIsland } from "./factory-inspector.js";
+
 const md = new MiniGFM();
 
 const FACTORY_CHAT_REFRESH_MS = 120;
