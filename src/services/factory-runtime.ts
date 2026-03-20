@@ -137,6 +137,13 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
           })()
         : job.payload.kind === "factory.integration.validate"
           ? await service.runIntegrationValidation(job.payload)
+        : job.payload.kind === "factory.integration.publish"
+          ? await service.runIntegrationPublish(job.payload, {
+              shouldAbort: async () => {
+                const aborts = await ctx.pullCommands(["abort"]);
+                return aborts.length > 0 || job.abortRequested === true;
+              },
+            })
           : (() => {
             throw new Error(`unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`);
           })();

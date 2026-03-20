@@ -317,6 +317,21 @@ export type FactoryIntegrationJobPayload = {
   readonly checks: ReadonlyArray<string>;
 };
 
+export type FactoryIntegrationPublishJobPayload = {
+  readonly kind: "factory.integration.publish";
+  readonly objectiveId: string;
+  readonly candidateId: string;
+  readonly workspacePath: string;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
+  readonly resultPath: string;
+  readonly promptPath: string;
+  readonly lastMessagePath: string;
+  readonly memoryScope: string;
+  readonly contextRefs: ReadonlyArray<GraphRef>;
+  readonly skillBundlePaths: ReadonlyArray<string>;
+};
+
 export type FactoryObjectiveControlJobPayload = {
   readonly kind: "factory.objective.control";
   readonly objectiveId: string;

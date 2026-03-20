@@ -210,6 +210,7 @@ export {
   type FactoryDebugProjection,
   type FactoryTaskJobPayload,
   type FactoryIntegrationJobPayload,
+  type FactoryIntegrationPublishJobPayload,
   type FactoryObjectiveControlJobPayload,
   type FactoryObjectiveReceiptSummary,
   type FactoryObjectiveReceiptQuery,
@@ -234,6 +235,7 @@ import {
   type FactoryDebugProjection,
   type FactoryTaskJobPayload,
   type FactoryIntegrationJobPayload,
+  type FactoryIntegrationPublishJobPayload,
   type FactoryObjectiveControlJobPayload,
   type FactoryObjectiveReceiptSummary,
   type FactoryObjectiveReceiptQuery,
@@ -1799,6 +1801,39 @@ export class FactoryService {
 
     state = await refreshState();
     const finalProjection = buildFactoryProjection(state);
+
+    const readyToPromote = (
+      finalProjection.tasks.length > 0
+      && finalProjection.tasks.every((task) => ["integrated", "superseded", "blocked"].includes(task.status))
+      && finalProjection.tasks.some((task) => task.status === "integrated")
+      && state.integration.status === "validated"
+    );
+
+    if (readyToPromote) {
+      await this.emitObjective(objectiveId, {
+        type: "integration.ready_to_promote",
+        objectiveId,
+        headCommit: state.integration.headCommit ?? state.baseHash,
+        summary: state.integration.lastSummary ?? `All tasks integrated and validated. Ready to promote.`,
+        readyAt: Date.now(),
+      });
+      state = await refreshState();
+
+      if (state.policy.promotion.autoPromote && state.integration.activeCandidateId) {
+        try {
+          await this.applyAction(state, {
+            actionId: `action_promote_${state.integration.activeCandidateId}`,
+            type: "promote_integration",
+            label: `Promote integrated candidate ${state.integration.activeCandidateId}`,
+            candidateId: state.integration.activeCandidateId,
+          }, "auto-promote objective", 1.0, "runtime", { basedOn: await this.currentHeadHash(objectiveId) });
+        } catch (err) {
+          if (!(err instanceof FactoryStaleObjectiveError)) throw err;
+        }
+        state = await refreshState();
+      }
+    }
+
     const completionReady = (
       finalProjection.tasks.length > 0
       && finalProjection.tasks.every((task) => ["integrated", "superseded"].includes(task.status))
@@ -1809,8 +1844,9 @@ export class FactoryService {
       finalProjection.tasks.length > 0
       && finalProjection.readyTasks.length === 0
       && finalProjection.activeTasks.length === 0
-      && state.integration.status === "idle"
-      && finalProjection.tasks.every((task) => ["blocked", "superseded"].includes(task.status))
+      && (state.integration.status === "idle" || state.integration.status === "promoted")
+      && finalProjection.tasks.every((task) => ["blocked", "superseded", "integrated"].includes(task.status))
+      && !finalProjection.tasks.every((task) => ["integrated", "superseded"].includes(task.status))
       && state.status !== "blocked"
     );
 
@@ -2029,19 +2065,19 @@ export class FactoryService {
         const head = await this.git.worktreeStatus(parsed.workspacePath);
         const summary = `Integration checks only reproduced inherited failures for ${parsed.candidateId}.`;
         await this.emitObjective(parsed.objectiveId, {
-          type: "integration.ready_to_promote",
+          type: "integration.validated",
           objectiveId: parsed.objectiveId,
           candidateId: parsed.candidateId,
           headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
           validationResults: results,
           summary,
-          readyAt: Date.now(),
+          validatedAt: Date.now(),
         });
         await this.commitIntegrationMemory(
           state,
           parsed.candidateId,
           `${summary}\n\n${this.inheritedFailureNote(failed, classification)}`,
-          ["integration", "ready_to_promote", "inherited_failures"],
+          ["integration", "validated", "inherited_failures"],
         );
         await this.reactObjective(parsed.objectiveId);
         return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
@@ -2060,15 +2096,15 @@ export class FactoryService {
     }
     const head = await this.git.worktreeStatus(parsed.workspacePath);
     await this.emitObjective(parsed.objectiveId, {
-      type: "integration.ready_to_promote",
+      type: "integration.validated",
       objectiveId: parsed.objectiveId,
       candidateId: parsed.candidateId,
       headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
       validationResults: results,
       summary: `Integration checks passed for ${parsed.candidateId}.`,
-      readyAt: Date.now(),
+      validatedAt: Date.now(),
     });
-    await this.commitIntegrationMemory(state, parsed.candidateId, `Integration checks passed for ${parsed.candidateId}.`, ["integration", "ready_to_promote"]);
+    await this.commitIntegrationMemory(state, parsed.candidateId, `Integration checks passed for ${parsed.candidateId}.`, ["integration", "validated"]);
     await this.reactObjective(parsed.objectiveId);
     return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
   }
@@ -2434,6 +2470,11 @@ export class FactoryService {
     },
   ): Promise<void> {
     const candidate = state.candidates[candidateId];
+    if (state.integration.queuedCandidateIds.includes(candidateId) || state.integration.activeCandidateId === candidateId) {
+      // console.log(`[DEBUG queueIntegration] SKIPPING candidateId: ${candidateId} as it is already queued or active.`);
+      return;
+    }
+    // console.log(`[DEBUG queueIntegration] candidateId: ${candidateId}, candidateStatus: ${candidate?.status}, integrationStatus: ${state.integration.status}, stack: ${new Error().stack}`);
     if (!candidate?.headCommit) throw new FactoryServiceError(409, "candidate has no commit to integrate");
     const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
     const now = Date.now();
@@ -2529,6 +2570,77 @@ export class FactoryService {
     this.sse.publish("jobs", created.id);
   }
 
+  private parseIntegrationPublishPayload(payload: Record<string, unknown>): FactoryIntegrationPublishJobPayload {
+    if (payload.kind !== "factory.integration.publish") {
+      throw new FactoryServiceError(400, "invalid integration publish payload");
+    }
+    return payload as unknown as FactoryIntegrationPublishJobPayload;
+  }
+
+  async runIntegrationPublish(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
+    const parsed = this.parseIntegrationPublishPayload(payload);
+    const state = await this.getObjectiveState(parsed.objectiveId);
+    
+    const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
+    const resultSchemaPath = path.join(path.dirname(parsed.resultPath), "schema.json");
+    await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
+    await fs.writeFile(resultSchemaPath, JSON.stringify(FACTORY_TASK_RESULT_SCHEMA, null, 2), "utf-8");
+
+    const memoryConfigPath = path.join(path.dirname(parsed.resultPath), "memory.json");
+    await fs.writeFile(memoryConfigPath, JSON.stringify({ scopes: [parsed.memoryScope] }, null, 2), "utf-8");
+
+    const execution = await this.codexExecutor.run({
+      prompt: `Publish the completed objective: ${state.prompt}`,
+      workspacePath: parsed.workspacePath,
+      promptPath: parsed.promptPath,
+      lastMessagePath: parsed.lastMessagePath,
+      stdoutPath: parsed.stdoutPath,
+      stderrPath: parsed.stderrPath,
+      model: FACTORY_TASK_CODEX_MODEL,
+      outputSchemaPath: resultSchemaPath,
+      reasoningEffort: "low",
+      objectiveId: parsed.objectiveId,
+      taskId: "publish",
+      candidateId: parsed.candidateId,
+      contextRefs: parsed.contextRefs,
+      skillBundlePaths: parsed.skillBundlePaths,
+      repoSkillPaths: [],
+      env: {
+        DATA_DIR: this.dataDir,
+        PATH: prependPath(receiptBinDir, process.env.PATH),
+      },
+    }, control);
+
+    if (execution.exitCode === 0) {
+      await this.emitObjective(parsed.objectiveId, {
+        type: "integration.promoted",
+        objectiveId: parsed.objectiveId,
+        candidateId: parsed.candidateId,
+        promotedCommit: state.integration.headCommit ?? state.baseHash,
+        summary: `Published PR successfully.`,
+        promotedAt: Date.now(),
+      });
+      await this.emitObjective(parsed.objectiveId, {
+        type: "objective.completed",
+        objectiveId: parsed.objectiveId,
+        summary: `Factory objective completed. Published PR successfully.`,
+        completedAt: Date.now(),
+      });
+      await this.reactObjective(parsed.objectiveId);
+      return { objectiveId: parsed.objectiveId, status: "completed" };
+    } else {
+      await this.emitObjective(parsed.objectiveId, {
+        type: "integration.conflicted",
+        objectiveId: parsed.objectiveId,
+        candidateId: parsed.candidateId,
+        reason: `Publishing failed: exit code ${execution.exitCode}`,
+        conflictedAt: Date.now(),
+      });
+      await this.reactObjective(parsed.objectiveId);
+      return { objectiveId: parsed.objectiveId, status: "failed" };
+    }
+  }
+
   private async promoteIntegration(
     state: FactoryState,
     candidateId: string,
@@ -2550,75 +2662,33 @@ export class FactoryService {
         startedAt: Date.now(),
       },
     ], opts?.expectedPrev);
-    let promoted: Awaited<ReturnType<HubGit["promoteCommit"]>>;
-    try {
-      promoted = await this.git.promoteCommit(commit);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.match(/uncommitted changes/i)) {
-        await this.emitObjective(state.objectiveId, {
-          type: "integration.ready_to_promote",
-          objectiveId: state.objectiveId,
-          candidateId,
-          headCommit: commit,
-          validationResults: state.integration.validationResults,
-          summary: state.integration.lastSummary ?? `Integration checks passed for ${candidateId}.`,
-          readyAt: Date.now(),
-        });
-        await this.emitObjective(state.objectiveId, {
-          type: "objective.blocked",
-          objectiveId: state.objectiveId,
-          reason: `Promotion blocked: ${message}`,
-          summary: `Promotion blocked until the source branch is clean.`,
-          blockedAt: Date.now(),
-        });
-        await this.commitIntegrationMemory(state, candidateId, `Promotion blocked until the source branch is clean.`, ["integration", "blocked"]);
-        await this.rebalanceObjectiveSlots();
-        return;
-      }
-      const freshBase = await this.git.resolveBaseHash();
-      await this.git.ensureIntegrationWorkspace(state.objectiveId, freshBase, { resetToBase: true });
-      await this.emitObjective(state.objectiveId, {
-        type: "candidate.conflicted",
-        objectiveId: state.objectiveId,
-        candidateId,
-        reason: message,
-        conflictedAt: Date.now(),
-      });
-      await this.emitObjective(state.objectiveId, {
-        type: "integration.conflicted",
-        objectiveId: state.objectiveId,
-        candidateId,
-        reason: message,
-        headCommit: freshBase,
-        conflictedAt: Date.now(),
-      });
-      await this.spawnReconciliationTask(
-        state,
-        candidateId,
-        `Reconcile ${candidateId} against the current source branch after promotion conflict.`,
-        freshBase,
-      );
-      await this.commitIntegrationMemory(state, candidateId, `Promotion conflicted for ${candidateId}: ${message}`, ["integration", "conflicted"]);
-      await this.reactObjective(state.objectiveId);
-      return;
-    }
-    await this.emitObjective(state.objectiveId, {
-      type: "integration.promoted",
+
+    const files = this.integrationFilePaths(workspace.path, "publish");
+    const payload: FactoryIntegrationPublishJobPayload = {
+      kind: "factory.integration.publish",
       objectiveId: state.objectiveId,
       candidateId,
-      promotedCommit: promoted.mergedHead,
-      summary: `Promoted ${shortHash(promoted.mergedHead)} into ${promoted.targetBranch}.`,
-      promotedAt: Date.now(),
+      workspacePath: workspace.path,
+      stdoutPath: files.stdoutPath,
+      stderrPath: files.stderrPath,
+      resultPath: files.resultPath,
+      promptPath: path.join(path.dirname(files.resultPath), "prompt.txt"),
+      lastMessagePath: path.join(path.dirname(files.resultPath), "last-message.txt"),
+      memoryScope: `factory/objectives/${state.objectiveId}/publish`,
+      contextRefs: [],
+      skillBundlePaths: [path.join(this.git.repoRoot, "skills", "factory-pr-publisher", "SKILL.md")],
+    };
+
+    const created = await this.queue.enqueue({
+      jobId: `job_factory_publish_${state.objectiveId}_${candidateId}`,
+      agentId: "codex",
+      lane: "collect",
+      sessionKey: `factory:integration:${state.objectiveId}`,
+      singletonMode: "allow",
+      maxAttempts: 1,
+      payload,
     });
-    await this.commitIntegrationMemory(state, candidateId, `Promoted ${shortHash(promoted.mergedHead)} into ${promoted.targetBranch}.`, ["integration", "promoted"]);
-    await this.emitObjective(state.objectiveId, {
-      type: "objective.completed",
-      objectiveId: state.objectiveId,
-      summary: `Factory objective completed with ${shortHash(promoted.mergedHead)} on ${promoted.targetBranch}.`,
-      completedAt: Date.now(),
-    });
-    await this.rebalanceObjectiveSlots();
+    this.sse.publish("jobs", created.id);
   }
 
   private async spawnReconciliationTask(
@@ -3545,10 +3615,12 @@ export class FactoryService {
       case "integration.queued":
       case "integration.merging":
       case "integration.validating":
-      case "integration.ready_to_promote":
+      case "integration.validated":
       case "integration.promoting":
       case "integration.promoted":
         return { candidateId: event.candidateId };
+      case "integration.ready_to_promote":
+        return {};
       case "merge.applied":
         return { taskId: event.taskId, candidateId: event.candidateId };
       case "integration.conflicted":
@@ -4812,12 +4884,15 @@ export class FactoryService {
     const results: FactoryCheckResult[] = [];
     for (const command of commands) {
       const startedAt = Date.now();
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(new Error("check command timed out after 60 minutes")), 60 * 60 * 1000);
       try {
         const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
           cwd: workspacePath,
           encoding: "utf-8",
           env: process.env,
           maxBuffer: 16 * 1024 * 1024,
+          signal: ac.signal,
         });
         results.push({
           command,
@@ -4840,6 +4915,8 @@ export class FactoryService {
           finishedAt: Date.now(),
         });
         break;
+      } finally {
+        clearTimeout(timer);
       }
     }
     return results;

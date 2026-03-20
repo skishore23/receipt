@@ -460,11 +460,14 @@ const waitForObjectiveTerminal = async (
 ): Promise<FactoryAppExit> => {
   while (true) {
     const detail = await runtime.service.getObjective(objectiveId);
+    const jobs = await runtime.service.queue.listJobs({ limit: 10 });
+    console.log(`waiting... obj=${objectiveId.slice(-6)} status=${detail.status} int=${detail.integration.status} cands=${detail.candidates.length} tasks=${detail.tasks.map(t => `${t.taskId.slice(-2)}(${t.status.slice(0, 3)})`).join(",")}`);
     const terminal =
       detail.status === "completed" ? { code: 0, reason: "completed" as const, objectiveId } :
       detail.status === "failed" ? { code: 1, reason: "failed" as const, objectiveId } :
       detail.status === "canceled" ? { code: 1, reason: "canceled" as const, objectiveId } :
       detail.status === "blocked" ? { code: 2, reason: "blocked" as const, objectiveId } :
+      detail.integration.status === "conflicted" ? { code: 1, reason: "integration_conflicted" as const, objectiveId } :
       (!detail.policy.promotion.autoPromote && detail.integration.status === "ready_to_promote")
         ? { code: 2, reason: "manual" as const, objectiveId }
         : undefined;

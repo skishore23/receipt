@@ -952,7 +952,7 @@ export const buildChatItemsForRun = (
       const key = `${event.iteration}:${event.tool}`;
       pending.set(key, {
         tool: event.tool,
-          input: (typeof event.input === "string" ? tryParseJson(event.input) : event.input) as Record<string, unknown> ?? {},
+        input: (typeof event.input === 'string' ? tryParseJson(event.input) : event.input) as Record<string, unknown> ?? {},
         summary: event.summary,
         error: event.error,
         durationMs: event.durationMs,
@@ -973,7 +973,7 @@ export const buildChatItemsForRun = (
       const key = `${event.iteration}:${event.tool}`;
       const prior = pending.get(key);
       const inputObj = prior?.input as Record<string, unknown> | undefined;
-      const outputObj = event.output as Record<string, unknown> | undefined;
+      const outputObj = (typeof event.output === 'string' ? tryParseJson(event.output) : event.output) as Record<string, unknown> | undefined;
       
       if (event.tool === "factory.dispatch" && (inputObj?.action === "create" || inputObj?.action === "promote")) {
         const objectiveId = (outputObj?.objectiveId as string | undefined) ?? (inputObj?.objectiveId as string | undefined) ?? "";

@@ -164,9 +164,15 @@ export class JobWorker {
     }
 
     await this.queue.heartbeat(job.id, this.workerId, this.leaseMs);
+    const heartbeatInterval = setInterval(() => {
+      this.queue.heartbeat(job.id, this.workerId, this.leaseMs).catch((err) => {
+        this.reportError(new Error(`Failed to heartbeat job ${job.id}: ${err}`));
+      });
+    }, Math.max(1000, Math.floor(this.leaseMs / 2)));
 
     const handler = this.handlers[job.agentId];
     if (!handler) {
+      clearInterval(heartbeatInterval);
       await this.queue.fail(job.id, this.workerId, `No handler for agent '${job.agentId}'`, true);
       return;
     }
@@ -176,6 +182,7 @@ export class JobWorker {
         workerId: this.workerId,
         pullCommands,
       });
+      clearInterval(heartbeatInterval);
       const postAbort = await pullCommands(["abort"]);
       if (postAbort.length > 0) {
         await this.queue.cancel(job.id, "abort requested", this.workerId);
@@ -187,6 +194,7 @@ export class JobWorker {
         await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }
     } catch (err) {
+      clearInterval(heartbeatInterval);
       const message = err instanceof Error ? err.message : String(err);
       await this.queue.fail(job.id, this.workerId, message);
     }

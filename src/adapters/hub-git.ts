@@ -774,15 +774,28 @@ export class HubGit {
   }
 
   private async execBare(args: ReadonlyArray<string>): Promise<string> {
-    const result = await execFileAsync("git", [...args], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 });
-    return result.stdout;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error("git command timed out")), 60_000);
+    try {
+      const result = await execFileAsync("git", [...args], {
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        signal: ac.signal,
+      });
+      return result.stdout;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async execGit(
     args: ReadonlyArray<string>,
-    opts: { readonly cwd?: string; readonly gitDir?: string }
+    opts: { readonly cwd?: string; readonly gitDir?: string; readonly timeoutMs?: number }
   ): Promise<string> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error("git command timed out")), opts.timeoutMs ?? 60_000);
     try {
+      if (args[0] === "merge") console.log(`execGit merge starting in ${opts.cwd}...`);
       const result = await execFileAsync(
         "git",
         [...args],
@@ -791,16 +804,21 @@ export class HubGit {
           env: opts.gitDir ? { ...process.env, GIT_DIR: opts.gitDir } : process.env,
           encoding: "utf-8",
           maxBuffer: 16 * 1024 * 1024,
+          signal: ac.signal,
         }
       );
+      if (args[0] === "merge") console.log(`execGit merge finished`);
       return result.stdout;
     } catch (err) {
+      if (args[0] === "merge") console.log(`execGit merge threw error:`, err);
       const message = err instanceof Error && "stderr" in err
         ? String((err as Error & { stderr?: string }).stderr ?? err.message).trim()
         : err instanceof Error
           ? err.message
           : String(err);
       throw new HubGitError(500, message || "git command failed");
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

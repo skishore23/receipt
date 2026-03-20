@@ -355,8 +355,15 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   expect(detail.status).not.toBe("completed");
 
   const promoted = await service.promoteObjective(created.objectiveId);
-  expect(promoted.status).toBe("completed");
-  expect(promoted.integration.status).toBe("promoted");
+  expect(promoted.status).toBe("promoting");
+  expect(promoted.integration.status).toBe("promoting");
+
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+
+  const published = await service.getObjective(created.objectiveId);
+  expect(published.status).toBe("completed");
+  expect(published.integration.status).toBe("promoted");
 });
 
 test("factory policy: integration validation can pass through inherited failures without reconciliation churn", async () => {
@@ -374,11 +381,9 @@ test("factory policy: integration validation can pass through inherited failures
 
   const firstTaskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
   await service.runTask(firstTaskJob.payload as FactoryTaskJobPayload);
-  const secondTaskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
-  await service.runTask(secondTaskJob.payload as FactoryTaskJobPayload);
 
-  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
-  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  const firstValidateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(firstValidateJob.payload as FactoryIntegrationJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.integration.status).toBe("ready_to_promote");

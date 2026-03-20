@@ -326,8 +326,9 @@ export const buildFactoryDecisionSet = (
     .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate))
     .filter((candidate) => candidate.status === "approved");
 
-  if ((state.integration.status === "idle" || state.integration.status === "conflicted") && approvedCandidates.length > 0) {
+  if ((state.integration.status === "idle" || state.integration.status === "conflicted" || state.integration.status === "validated") && approvedCandidates.length > 0) {
     for (const candidate of approvedCandidates) {
+      if (state.integration.queuedCandidateIds.includes(candidate.candidateId) || state.integration.activeCandidateId === candidate.candidateId) continue;
       actions.push({
         actionId: `action_queue_${candidate.candidateId}`,
         type: "queue_integration",
@@ -339,13 +340,22 @@ export const buildFactoryDecisionSet = (
     }
   }
 
-  if (state.integration.status === "ready_to_promote" && state.integration.activeCandidateId && state.policy.promotion.autoPromote) {
-    actions.push({
-      actionId: `action_promote_${state.integration.activeCandidateId}`,
-      type: "promote_integration",
-      label: `Promote integrated candidate ${state.integration.activeCandidateId}`,
-      candidateId: state.integration.activeCandidateId,
+  //   // console.log(`[DEBUG buildFactoryDecisionSet] objective: ${state.objectiveId}, integrationStatus: ${state.integration.status}, approvedCandidates: ${approvedCandidates.map(c => c.candidateId).join(",")}, actions:`, actions.map(a => a.type));
+
+  if (state.integration.status === "validated" && state.integration.activeCandidateId && state.policy.promotion.autoPromote) {
+    const allDone = state.taskOrder.every((taskId) => {
+      const task = state.graph.nodes[taskId];
+      return task?.status === "integrated" || task?.status === "superseded" || task?.status === "blocked";
     });
+    const someIntegrated = state.taskOrder.some((taskId) => state.graph.nodes[taskId]?.status === "integrated");
+    if (allDone && someIntegrated) {
+      actions.push({
+        actionId: `action_promote_${state.integration.activeCandidateId}`,
+        type: "promote_integration",
+        label: `Promote integrated candidate ${state.integration.activeCandidateId}`,
+        candidateId: state.integration.activeCandidateId,
+      });
+    }
   }
 
   const dispatchLimit = Math.max(0, opts.dispatchLimit ?? 0);

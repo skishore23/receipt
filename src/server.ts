@@ -99,10 +99,9 @@ const parseWorkerConcurrency = (value: string | undefined, fallback: number): nu
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
 };
-const defaultJobConcurrency = parseWorkerConcurrency(process.env.JOB_CONCURRENCY, 2);
-const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURRENCY, defaultJobConcurrency);
-const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, defaultJobConcurrency);
-const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, defaultJobConcurrency);
+const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURRENCY, 30);
+const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, 2);
+const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, 10);
 const jobIdleResyncMs = Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000);
 const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 300_000);
 const subJobWaitMsRaw = Number(process.env.SUBJOB_WAIT_MS ?? 1_500);
@@ -543,16 +542,19 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
     };
     if (normalizedResult.status === "failed") {
       const decision = deriveJobFailureDecision(normalizedResult);
+      if (job.payload.kind === "factory.task.run" && decision.noRetry) {
+        await factoryService.applyTaskWorkerResult(job.payload as never, {
+          summary: `Codex job failed: ${decision.error}`,
+          outcome: "blocked",
+        }).catch(() => undefined);
+        await factoryService.reactObjective(String(job.payload.objectiveId ?? "")).catch(() => undefined);
+      }
       return {
         ok: false,
         error: decision.error,
         result: normalizedResult,
         noRetry: decision.noRetry,
       };
-    }
-    if (job.payload.kind === "factory.task.run") {
-      await factoryService.applyTaskWorkerResult(job.payload as never, normalizedResult);
-      await factoryService.reactObjective(String(job.payload.objectiveId ?? ""));
     }
     return { ok: true, result: normalizedResult };
   };

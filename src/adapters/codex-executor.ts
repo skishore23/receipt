@@ -24,6 +24,8 @@ export type CodexRunInput = {
   readonly contextRefs?: ReadonlyArray<{ readonly kind: string; readonly ref: string; readonly label?: string }>;
   readonly skillBundlePaths?: ReadonlyArray<string>;
   readonly repoSkillPaths?: ReadonlyArray<string>;
+  readonly memoryConfigPath?: string;
+  readonly receiptBinDir?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
 };

@@ -49,6 +49,7 @@ export type FactoryIntegrationStatus =
   | "queued"
   | "merging"
   | "validating"
+  | "validated"
   | "ready_to_promote"
   | "promoting"
   | "promoted"
@@ -916,11 +917,18 @@ export type FactoryEvent =
       readonly startedAt: number;
     }
   | {
-      readonly type: "integration.ready_to_promote";
+      readonly type: "integration.validated";
       readonly objectiveId: string;
       readonly candidateId: string;
       readonly headCommit: string;
       readonly validationResults: ReadonlyArray<FactoryCheckResult>;
+      readonly summary: string;
+      readonly validatedAt: number;
+    }
+  | {
+      readonly type: "integration.ready_to_promote";
+      readonly objectiveId: string;
+      readonly headCommit: string;
       readonly summary: string;
       readonly readyAt: number;
     }
@@ -1446,6 +1454,22 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           updatedAt: event.startedAt,
         },
       };
+    case "integration.validated":
+      return {
+        ...state,
+        status: "integrating",
+        updatedAt: event.validatedAt,
+        latestSummary: event.summary,
+        integration: {
+          ...state.integration,
+          status: "validated",
+          activeCandidateId: event.candidateId,
+          headCommit: event.headCommit,
+          validationResults: event.validationResults,
+          lastSummary: event.summary,
+          updatedAt: event.validatedAt,
+        },
+      };
     case "integration.ready_to_promote":
       return {
         ...state,
@@ -1455,9 +1479,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         integration: {
           ...state.integration,
           status: "ready_to_promote",
-          activeCandidateId: event.candidateId,
           headCommit: event.headCommit,
-          validationResults: event.validationResults,
           lastSummary: event.summary,
           updatedAt: event.readyAt,
         },
