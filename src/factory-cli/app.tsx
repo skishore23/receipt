@@ -15,7 +15,7 @@ import {
   steerJobMutation,
 } from "./actions";
 import type { FactoryCliRuntime } from "./runtime";
-import { deriveObjectiveTitle, parseComposerDraft } from "./composer";
+import { COMPOSER_COMMANDS, deriveObjectiveTitle, parseComposerDraft } from "./composer";
 import { FactoryThemeProvider, InlineAlert, statusColor, terminalTheme, tone } from "./theme";
 import {
   BOARD_SECTION_META,
@@ -611,17 +611,9 @@ const HelpOverlay = (): React.ReactElement => (
     subtitle="Plain text creates a new objective when nothing is selected, otherwise it reacts to the selected objective. Active-job commands target the latest running or queued job for the selected objective."
     marginBottom={1}
   >
-    <Text color={tone("text")}>/new &lt;prompt&gt;</Text>
-    <Text color={tone("text")}>/react [message]</Text>
-    <Text color={tone("text")}>/watch &lt;objective-id&gt;</Text>
-    <Text color={tone("text")}>/promote</Text>
-    <Text color={tone("text")}>/cancel [reason]</Text>
-    <Text color={tone("text")}>/cleanup</Text>
-    <Text color={tone("text")}>/archive</Text>
-    <Text color={tone("text")}>/steer [problem]</Text>
-    <Text color={tone("text")}>/follow-up [note]</Text>
-    <Text color={tone("text")}>/abort-job [reason]</Text>
-    <Text color={tone("text")}>/help or /?</Text>
+    {COMPOSER_COMMANDS.map((command) => (
+      <Text key={command.name} color={tone("text")}>{command.usage}</Text>
+    ))}
   </Surface>
 );
 

@@ -38,6 +38,7 @@ import {
 } from "./ui";
 
 import { factoryInspectorIsland } from "./factory-inspector";
+import { COMPOSER_COMMANDS } from "../factory-cli/composer";
 
 const md = new MiniGFM();
 
@@ -166,7 +167,17 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   return pills.join("");
 };
 
-const composerTextareaClass = "min-h-[76px] w-full flex-[1_1_0%] resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
+const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map((command) => ({
+  name: command.name,
+  label: command.label,
+  usage: command.usage,
+  description: command.description,
+  aliases: command.aliases ?? [],
+})));
+
+const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
+const composerShellClass = "mx-auto w-full max-w-6xl";
+const composerPanelClass = "relative flex flex-col gap-2 rounded-2xl border border-border/80 bg-card/95 p-2 shadow-sm ring-1 ring-border/50 sm:p-3";
 
 const composerJobId = (model: FactoryChatShellModel): string | undefined => {
   if (model.jobId) return model.jobId;
@@ -572,13 +583,16 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
             </div>
           </section>
           <section class="shrink-0 border-t border-border bg-background px-2 py-2 sm:px-3">
-            <div class="mx-auto w-full max-w-5xl">
-              <form id="factory-composer" action="/factory/compose${shellQuery}" method="post">
+            <div class="${composerShellClass}">
+              <form id="factory-composer" action="/factory/compose${shellQuery}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
                 ${currentJobId ? `<input type="hidden" name="currentJobId" value="${esc(currentJobId)}" />` : ""}
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
-                  <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass}" rows="2" placeholder="${esc(composerPlaceholder)}" autofocus></textarea>
-                  <button id="factory-composer-submit" class="inline-flex min-h-[76px] w-full shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem]" type="submit">Send</button>
+                <div class="${composerPanelClass}">
+                  <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
+                    <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass} sm:min-h-[104px]" rows="2" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
+                    <button id="factory-composer-submit" class="inline-flex min-h-[88px] w-full shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem] sm:min-h-[104px]" type="submit">Send</button>
+                  </div>
+                  <div id="factory-composer-completions" class="hidden max-h-56 overflow-auto rounded-xl border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                 </div>
                 <div id="factory-composer-status" class="mt-2 hidden rounded-lg border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
