@@ -77,6 +77,17 @@ const COMMAND_LOOKUP = new Map(
   COMPOSER_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])].map((alias) => [alias, command] as const)),
 );
 
+const parseComposerCommandToken = (draft: string): { readonly name: string; readonly payload: string } | undefined => {
+  const body = normalizeBody(draft);
+  if (!body) return undefined;
+  const match = body.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return undefined;
+  return {
+    name: match[1] ?? "",
+    payload: normalizeBody(match[2] ?? ""),
+  };
+};
+
 export type ComposerSlashContext = {
   readonly before: string;
   readonly after: string;
@@ -173,9 +184,14 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
     };
   }
 
-  const trimmed = body.slice(1).trim();
-  const [name = "", ...rest] = trimmed.split(/\s+/);
-  const payload = normalizeBody(trimmed.slice(name.length));
+  const parsedCommand = parseComposerCommandToken(body);
+  if (!parsedCommand) {
+    return {
+      ok: false,
+      error: "Type a slash command or describe the objective.",
+    };
+  }
+  const { name, payload } = parsedCommand;
   const command = resolveComposerCommand(name);
   if (!command) {
     return {
