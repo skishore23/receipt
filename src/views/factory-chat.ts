@@ -166,7 +166,7 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   return pills.join("");
 };
 
-const composerTextareaClass = "min-h-[72px] w-full flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted";
+const composerTextareaClass = "min-h-[76px] w-full flex-[1_1_0%] resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
 
 const composerJobId = (model: FactoryChatShellModel): string | undefined => {
   if (model.jobId) return model.jobId;
@@ -571,21 +571,17 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
               ${factoryChatIsland(model.chat)}
             </div>
           </section>
-          <section class="shrink-0 border-t border-border bg-background px-3 py-2">
-            <div class="mx-auto w-full max-w-4xl">
+          <section class="shrink-0 border-t border-border bg-background px-2 py-2 sm:px-3">
+            <div class="mx-auto w-full max-w-5xl">
               <form id="factory-composer" action="/factory/compose${shellQuery}" method="post">
                 ${currentJobId ? `<input type="hidden" name="currentJobId" value="${esc(currentJobId)}" />` : ""}
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
                   <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass}" rows="2" placeholder="${esc(composerPlaceholder)}" autofocus></textarea>
-                  <button id="factory-composer-submit" class="inline-flex min-h-[72px] w-full shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[7.5rem]" type="submit">Send</button>
+                  <button id="factory-composer-submit" class="inline-flex min-h-[76px] w-full shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem]" type="submit">Send</button>
                 </div>
                 <div id="factory-composer-status" class="mt-2 hidden rounded-lg border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
-              <div class="mt-2 text-[11px] leading-5 text-muted-foreground">
-                <span class="font-medium uppercase tracking-[0.18em]">Commands</span>
-                <span class="ml-2"><code>/new</code> <code>/react</code> <code>/steer</code> <code>/follow-up</code> <code>/abort-job</code> <code>/promote</code> <code>/cancel</code></span>
-              </div>
             </div>
           </section>
         </div>
