@@ -9,7 +9,7 @@ import React from "react";
 import { renderToString } from "ink";
 
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
-import { parseComposerDraft } from "../../src/factory-cli/composer";
+import { COMPOSER_COMMANDS, filterComposerCommands, findComposerSlashContext, parseComposerDraft, replaceComposerSlashContext } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
@@ -572,3 +572,13 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
   });
 });
 
+test("factory cli: slash command autocomplete helpers filter and replace token text", () => {
+  expect(filterComposerCommands("rea").map((command) => command.name)).toContain("react");
+  expect(filterComposerCommands("follow").map((command) => command.name)).toContain("follow-up");
+  const context = findComposerSlashContext("keep /ste", "keep /ste".length);
+  expect(context).toBeDefined();
+  const inserted = replaceComposerSlashContext("keep /ste", context!, "/steer ");
+  expect(inserted.value).toBe("keep /steer ");
+  expect(inserted.caret).toBe(inserted.value.length);
+  expect(COMPOSER_COMMANDS.map((command) => command.name)).toContain("help");
+});
