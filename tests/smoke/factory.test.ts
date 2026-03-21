@@ -140,6 +140,22 @@ const makeStubObjectiveDetail = (
   activity: [],
 }) as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
 
+const makeStubJobQueueResult = (jobId: string): { readonly job: QueueJob; readonly command: { readonly id: string } } => ({
+  job: {
+    id: jobId,
+    agentId: "factory",
+    lane: "steer",
+    singletonMode: "allow",
+    status: "queued",
+    attempt: 1,
+    maxAttempts: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    commands: [],
+  } as QueueJob,
+  command: { id: `cmd_${jobId}` },
+});
+
 const createRouteTestApp = (overrides?: {
   readonly liveOutput?: Record<string, unknown>;
   readonly jobs?: ReadonlyArray<QueueJob>;
@@ -1001,7 +1017,8 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
   expect(markup).not.toMatch(/id="factory-inspector"[^>]+sse:agent-refresh/);
   expect(markup).not.toMatch(/data-prompt-fill/);
   expect(markup).not.toMatch(/\/ Commands/);
-  expect(markup).toMatch(/data-composer-commands='[^']*"/);
+  expect(markup).toContain("data-composer-commands='");
+  expect(markup).toContain("&quot;name&quot;:&quot;help&quot;");
   expect(markup).toMatch(/id="factory-composer-completions"[^>]+role="listbox"/);
   expect(markup).toMatch(/id="factory-composer-submit"[^>]+min-h-\[88px\]/);
 });
@@ -1441,6 +1458,84 @@ test("factory route: composer slash commands mutate the selected objective", asy
   expect(reacted).toEqual({
     objectiveId: "objective_demo",
     message: "Keep receipts concise.",
+  });
+});
+
+test("factory route: slash commands queue the active job via the composer submit flow", async () => {
+  let steerInput: { readonly jobId: string; readonly problem?: string; readonly by?: string } | undefined;
+  let followUpInput: { readonly jobId: string; readonly note: string; readonly by?: string } | undefined;
+  let abortInput: { readonly jobId: string; readonly reason?: string; readonly by?: string } | undefined;
+  const activeJob = {
+    id: "job_01",
+    agentId: "factory",
+    lane: "steer",
+    singletonMode: "allow",
+    status: "running",
+    attempt: 1,
+    maxAttempts: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    commands: [],
+  } as QueueJob;
+  const app = createRouteTestApp({
+    jobs: [activeJob],
+    service: {
+      queueJobSteer: async (jobId: string, input: { readonly problem?: string; readonly by?: string }) => {
+        steerInput = { jobId, ...input };
+        return makeStubJobQueueResult(jobId);
+      },
+      queueJobFollowUp: async (jobId: string, note: string, by?: string) => {
+        followUpInput = { jobId, note, by };
+        return makeStubJobQueueResult(jobId);
+      },
+      queueJobAbort: async (jobId: string, reason?: string, by?: string) => {
+        abortInput = { jobId, reason, by };
+        return makeStubJobQueueResult(jobId);
+      },
+    },
+  });
+
+  const steerResponse = await app.request("http://receipt.test/factory/compose?profile=generalist&thread=objective_demo&job=job_01", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ prompt: "/steer tighten the current plan" }).toString(),
+  });
+  expect(steerResponse.status).toBe(303);
+  expect(steerResponse.headers.get("location")).toContain("/factory?profile=generalist&thread=objective_demo");
+  expect(steerInput).toEqual({
+    jobId: "job_01",
+    problem: "tighten the current plan",
+    by: "factory.web",
+  });
+
+  const followUpResponse = await app.request("http://receipt.test/factory/compose?profile=generalist&thread=objective_demo&job=job_01", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ prompt: "/follow-up keep the logs attached" }).toString(),
+  });
+  expect(followUpResponse.status).toBe(303);
+  expect(followUpInput).toEqual({
+    jobId: "job_01",
+    note: "keep the logs attached",
+    by: "factory.web",
+  });
+
+  const abortResponse = await app.request("http://receipt.test/factory/compose?profile=generalist&thread=objective_demo&job=job_01", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ prompt: "/abort-job stop the current worker" }).toString(),
+  });
+  expect(abortResponse.status).toBe(303);
+  expect(abortInput).toEqual({
+    jobId: "job_01",
+    reason: "stop the current worker",
+    by: "factory.web",
   });
 });
 

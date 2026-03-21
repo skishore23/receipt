@@ -563,6 +563,13 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       note: "keep the logs attached",
     },
   });
+  expect(parseComposerDraft("/followup keep the logs attached", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "follow-up",
+      note: "keep the logs attached",
+    },
+  });
   expect(parseComposerDraft("/abort-job stop the current worker", "obj_123")).toEqual({
     ok: true,
     command: {
@@ -581,4 +588,19 @@ test("factory cli: slash command autocomplete helpers filter and replace token t
   expect(inserted.value).toBe("keep /steer ");
   expect(inserted.caret).toBe(inserted.value.length);
   expect(COMPOSER_COMMANDS.map((command) => command.name)).toContain("help");
+});
+
+test("factory cli: composer parser rejects job commands without a selected objective", () => {
+  expect(parseComposerDraft("/steer tighten the current plan")).toEqual({
+    ok: false,
+    error: "Select an objective before steering its active job.",
+  });
+  expect(parseComposerDraft("/follow-up keep the logs attached")).toEqual({
+    ok: false,
+    error: "Select an objective before sending a follow-up note.",
+  });
+  expect(parseComposerDraft("/abort-job stop the current worker")).toEqual({
+    ok: false,
+    error: "Select an objective before aborting its active job.",
+  });
 });
