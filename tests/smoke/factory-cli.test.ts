@@ -9,7 +9,7 @@ import React from "react";
 import { renderToString } from "ink";
 
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
-import { parseComposerDraft } from "../../src/factory-cli/composer";
+import { COMPOSER_COMMANDS, filterComposerCommands, findComposerSlashContext, parseComposerDraft, replaceComposerSlashContext } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
@@ -563,6 +563,19 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       note: "keep the logs attached",
     },
   });
+  expect(parseComposerDraft("/followup keep the logs attached", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "follow-up",
+      note: "keep the logs attached",
+    },
+  });
+  expect(parseComposerDraft("   /help   ", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "help",
+    },
+  });
   expect(parseComposerDraft("/abort-job stop the current worker", "obj_123")).toEqual({
     ok: true,
     command: {
@@ -572,3 +585,28 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
   });
 });
 
+test("factory cli: slash command autocomplete helpers filter and replace token text", () => {
+  expect(filterComposerCommands("rea").map((command) => command.name)).toContain("react");
+  expect(filterComposerCommands("follow").map((command) => command.name)).toContain("follow-up");
+  const context = findComposerSlashContext("keep /ste", "keep /ste".length);
+  expect(context).toBeDefined();
+  const inserted = replaceComposerSlashContext("keep /ste", context!, "/steer ");
+  expect(inserted.value).toBe("keep /steer ");
+  expect(inserted.caret).toBe(inserted.value.length);
+  expect(COMPOSER_COMMANDS.map((command) => command.name)).toContain("help");
+});
+
+test("factory cli: composer parser rejects job commands without a selected objective", () => {
+  expect(parseComposerDraft("/steer tighten the current plan")).toEqual({
+    ok: false,
+    error: "Select an objective before steering its active job.",
+  });
+  expect(parseComposerDraft("/follow-up keep the logs attached")).toEqual({
+    ok: false,
+    error: "Select an objective before sending a follow-up note.",
+  });
+  expect(parseComposerDraft("/abort-job stop the current worker")).toEqual({
+    ok: false,
+    error: "Select an objective before aborting its active job.",
+  });
+});
