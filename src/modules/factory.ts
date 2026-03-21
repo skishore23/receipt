@@ -269,6 +269,10 @@ export type FactoryIntegrationRecord = {
   readonly lastSummary?: string;
   readonly conflictReason?: string;
   readonly promotedCommit?: string;
+  readonly publishBranch?: string;
+  readonly baseBranch?: string;
+  readonly prUrl?: string;
+  readonly repository?: string;
   readonly updatedAt: number;
 };
 
@@ -947,6 +951,10 @@ export type FactoryEvent =
       readonly objectiveId: string;
       readonly candidateId: string;
       readonly promotedCommit: string;
+      readonly publishBranch?: string;
+      readonly baseBranch?: string;
+      readonly prUrl?: string;
+      readonly repository?: string;
       readonly summary: string;
       readonly promotedAt: number;
     }
@@ -1523,6 +1531,10 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           ...state.integration,
           status: "promoted",
           promotedCommit: event.promotedCommit,
+          publishBranch: event.publishBranch ?? state.integration.publishBranch,
+          baseBranch: event.baseBranch ?? state.integration.baseBranch,
+          prUrl: event.prUrl ?? state.integration.prUrl,
+          repository: event.repository ?? state.integration.repository,
           lastSummary: event.summary,
           updatedAt: event.promotedAt,
         },

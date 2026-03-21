@@ -39,6 +39,7 @@ export type FactoryServiceOptions = {
   readonly sse: import("../framework/sse-hub").SseHub;
   readonly codexExecutor: import("../adapters/codex-executor").CodexExecutor;
   readonly memoryTools?: import("../adapters/memory-tools").MemoryTools;
+  readonly commandEnv?: NodeJS.ProcessEnv;
   readonly repoRoot?: string;
   readonly profileRoot?: string;
   readonly llmStructured?: <Schema extends import("zod").ZodTypeAny>(opts: {
@@ -323,6 +324,9 @@ export type FactoryIntegrationPublishJobPayload = {
   readonly kind: "factory.integration.publish";
   readonly objectiveId: string;
   readonly candidateId: string;
+  readonly headCommit: string;
+  readonly publishBranch: string;
+  readonly baseBranch: string;
   readonly workspacePath: string;
   readonly stdoutPath: string;
   readonly stderrPath: string;

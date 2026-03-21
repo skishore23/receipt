@@ -21,7 +21,12 @@ import {
   type FactoryState,
 } from "../../src/modules/factory";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
-import { FactoryService, type FactoryIntegrationJobPayload, type FactoryTaskJobPayload } from "../../src/services/factory-service";
+import {
+  FactoryService,
+  type FactoryIntegrationJobPayload,
+  type FactoryIntegrationPublishJobPayload,
+  type FactoryTaskJobPayload,
+} from "../../src/services/factory-service";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,7 +42,18 @@ const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> =>
   return stdout.trim();
 };
 
-const createSourceRepo = async (): Promise<string> => {
+const gitBare = async (gitDir: string, args: ReadonlyArray<string>): Promise<string> => {
+  const { stdout } = await execFileAsync("git", [`--git-dir=${gitDir}`, ...args], {
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return stdout.trim();
+};
+
+const createSourceRepo = async (opts?: { readonly withOrigin?: boolean }): Promise<{
+  readonly repoDir: string;
+  readonly originDir?: string;
+}> => {
   const repoDir = await createTempDir("receipt-factory-policy-source");
   await git(repoDir, ["init"]);
   await git(repoDir, ["config", "user.name", "Factory Policy Test"]);
@@ -46,7 +62,72 @@ const createSourceRepo = async (): Promise<string> => {
   await git(repoDir, ["add", "README.md"]);
   await git(repoDir, ["commit", "-m", "initial commit"]);
   await git(repoDir, ["branch", "-M", "main"]);
-  return repoDir;
+  if (!opts?.withOrigin) {
+    return { repoDir };
+  }
+  const originDir = await createTempDir("receipt-factory-policy-origin");
+  await execFileAsync("git", ["init", "--bare", originDir], {
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  await git(repoDir, ["remote", "add", "origin", originDir]);
+  await git(repoDir, ["push", "-u", "origin", "main"]);
+  return { repoDir, originDir };
+};
+
+const createGhStub = async (opts?: { readonly mode?: "create" | "skip"; readonly prUrl?: string }): Promise<{
+  readonly binDir: string;
+  readonly commandEnv: NodeJS.ProcessEnv;
+  readonly stateDir: string;
+}> => {
+  const binDir = await createTempDir("receipt-factory-policy-gh-bin");
+  const stateDir = await createTempDir("receipt-factory-policy-gh-state");
+  const prUrl = opts?.prUrl ?? "https://github.com/example/receipt/pull/123";
+  const scriptPath = path.join(binDir, "gh");
+  await fs.writeFile(scriptPath, [
+    "#!/bin/sh",
+    "set -eu",
+    "state_dir=\"${GH_STUB_STATE_DIR:?}\"",
+    "mkdir -p \"$state_dir\"",
+    "printf '%s\\n' \"$*\" >> \"$state_dir/commands.log\"",
+    "if [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then",
+    "  printf '%s\\n' \"${GH_STUB_REPO:-example/receipt}\"",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then",
+    "  if [ -f \"$state_dir/open-pr.json\" ]; then",
+    "    cat \"$state_dir/open-pr.json\"",
+    "  else",
+    "    printf '[]\\n'",
+    "  fi",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then",
+    "  if [ \"${GH_STUB_CREATE_MODE:-create}\" = \"skip\" ]; then",
+    "    printf 'created without url\\n'",
+    "    exit 0",
+    "  fi",
+    "  url=\"${GH_STUB_PR_URL:?}\"",
+    "  printf '%s\\n' \"$url\"",
+    "  printf '[{\"url\":\"%s\",\"number\":123}]\\n' \"$url\" > \"$state_dir/open-pr.json\"",
+    "  exit 0",
+    "fi",
+    "printf 'unsupported gh stub command: %s\\n' \"$*\" >&2",
+    "exit 1",
+    "",
+  ].join("\n"), "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return {
+    binDir,
+    stateDir,
+    commandEnv: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      GH_STUB_STATE_DIR: stateDir,
+      GH_STUB_CREATE_MODE: opts?.mode ?? "create",
+      GH_STUB_REPO: "example/receipt",
+      GH_STUB_PR_URL: prUrl,
+    },
+  };
 };
 
 const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
@@ -69,7 +150,7 @@ const createJobRuntime = (dataDir: string) =>
 const latestFactoryJob = async (
   queue: ReturnType<typeof jsonlQueue>,
   objectiveId: string,
-  kind: "factory.task.run" | "factory.integration.validate",
+  kind: "factory.task.run" | "factory.integration.validate" | "factory.integration.publish",
 ): Promise<QueueJob> => {
   const jobs = await queue.listJobs({ limit: 40 });
   const match = jobs
@@ -85,13 +166,17 @@ const createFactoryService = async (opts?: {
     readonly schema: Schema;
   }) => Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }>;
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
+  readonly withOrigin?: boolean;
+  readonly commandEnv?: NodeJS.ProcessEnv;
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
   readonly repoRoot: string;
+  readonly originDir?: string;
 }> => {
   const dataDir = await createTempDir("receipt-factory-policy");
-  const repoRoot = await createSourceRepo();
+  const source = await createSourceRepo({ withOrigin: opts?.withOrigin });
+  const repoRoot = source.repoDir;
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexOutcome = opts?.codexOutcome ?? "approved";
   const service = new FactoryService({
@@ -124,9 +209,10 @@ const createFactoryService = async (opts?: {
       },
     },
     llmStructured: opts?.llmStructured,
+    commandEnv: opts?.commandEnv,
     repoRoot,
   });
-  return { service, queue, repoRoot };
+  return { service, queue, repoRoot, originDir: source.originDir };
 };
 
 const buildState = (events: ReadonlyArray<FactoryEvent>): FactoryState =>
@@ -333,7 +419,12 @@ test("factory policy: base-commit check failures are treated as inherited on the
 });
 
 test("factory policy: autoPromote false stops at ready_to_promote until promotion is explicit", async () => {
-  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+  const gh = await createGhStub();
+  const { service, queue, originDir } = await createFactoryService({
+    codexOutcome: "approved",
+    withOrigin: true,
+    commandEnv: gh.commandEnv,
+  });
 
   const created = await service.createObjective({
     title: "Manual promotion objective",
@@ -364,6 +455,43 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   const published = await service.getObjective(created.objectiveId);
   expect(published.status).toBe("completed");
   expect(published.integration.status).toBe("promoted");
+  expect(published.integration.prUrl).toBe("https://github.com/example/receipt/pull/123");
+  expect(published.integration.publishBranch).toBe(`factory/${created.objectiveId}`);
+  expect(published.integration.baseBranch).toBe("main");
+  expect(await gitBare(String(originDir), ["rev-parse", `refs/heads/factory/${created.objectiveId}`])).toBe(published.integration.promotedCommit);
+});
+
+test("factory policy: publish requires a PR URL before the objective completes", async () => {
+  const gh = await createGhStub({ mode: "skip" });
+  const { service, queue } = await createFactoryService({
+    codexOutcome: "approved",
+    withOrigin: true,
+    commandEnv: gh.commandEnv,
+  });
+
+  const created = await service.createObjective({
+    title: "Publish proof objective",
+    prompt: "Do not mark publish complete without a visible PR.",
+    policy: {
+      promotion: { autoPromote: false },
+    },
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await service.promoteObjective(created.objectiveId);
+
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).not.toBe("completed");
+  expect(detail.integration.status).toBe("conflicted");
+  expect(detail.integration.conflictReason ?? "").toMatch(/pull request url/i);
 });
 
 test("factory policy: integration validation can pass through inherited failures without reconciliation churn", async () => {

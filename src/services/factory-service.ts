@@ -147,6 +147,11 @@ const tailText = (value: string, maxChars: number): string =>
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 const prependPath = (dir: string, currentPath: string | undefined): string =>
   currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
+const parseNonEmptyLines = (value: string): ReadonlyArray<string> =>
+  value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 const uniqueChecks = (checks?: ReadonlyArray<string>): ReadonlyArray<string> => {
   const source = (checks ?? DEFAULT_CHECKS)
     .map((item) => item.trim())
@@ -384,6 +389,15 @@ type FactoryContextPack = {
   readonly contextSources: FactoryContextSources;
 };
 
+type FactoryPublishedPullRequest = {
+  readonly summary: string;
+  readonly prUrl: string;
+  readonly publishBranch: string;
+  readonly baseBranch: string;
+  readonly repository: string;
+  readonly headCommit: string;
+};
+
 const decompositionSchema = z.object({
   tasks: z.array(z.object({
     title: z.string().min(1),
@@ -422,6 +436,7 @@ export class FactoryService {
   readonly memoryTools?: MemoryTools;
   readonly git: HubGit;
   readonly profileRoot: string;
+  private readonly commandEnv?: NodeJS.ProcessEnv;
   private readonly baselineCheckCache = new Map<string, Promise<{
     readonly digest: string;
     readonly excerpt: string;
@@ -446,6 +461,7 @@ export class FactoryService {
     this.sse = opts.sse;
     this.codexExecutor = opts.codexExecutor;
     this.memoryTools = opts.memoryTools;
+    this.commandEnv = opts.commandEnv;
     this.llmStructured = opts.llmStructured;
     this.git = new HubGit({
       dataDir: opts.dataDir,
@@ -1207,7 +1223,11 @@ export class FactoryService {
   }
 
   private deriveNextAction(state: FactoryState, queuePosition?: number): string | undefined {
-    if (state.status === "completed") return "Objective is complete.";
+    if (state.status === "completed") {
+      return state.integration.prUrl
+        ? `Objective is complete. PR ready: ${state.integration.prUrl}`
+        : "Objective is complete.";
+    }
     if (state.status === "canceled") return "Objective was canceled.";
     if (state.status === "failed") return "Objective failed.";
     if (state.status === "blocked") return "Review the blocking receipt and react or cancel the objective.";
@@ -2630,66 +2650,74 @@ export class FactoryService {
     if (payload.kind !== "factory.integration.publish") {
       throw new FactoryServiceError(400, "invalid integration publish payload");
     }
-    return payload as unknown as FactoryIntegrationPublishJobPayload;
+    return {
+      kind: "factory.integration.publish",
+      objectiveId: requireNonEmpty(payload.objectiveId, "objectiveId required"),
+      candidateId: requireNonEmpty(payload.candidateId, "candidateId required"),
+      headCommit: requireNonEmpty(payload.headCommit, "headCommit required"),
+      publishBranch: requireNonEmpty(payload.publishBranch, "publishBranch required"),
+      baseBranch: requireNonEmpty(payload.baseBranch, "baseBranch required"),
+      workspacePath: requireNonEmpty(payload.workspacePath, "workspacePath required"),
+      stdoutPath: requireNonEmpty(payload.stdoutPath, "stdoutPath required"),
+      stderrPath: requireNonEmpty(payload.stderrPath, "stderrPath required"),
+      resultPath: requireNonEmpty(payload.resultPath, "resultPath required"),
+      promptPath: requireNonEmpty(payload.promptPath, "promptPath required"),
+      lastMessagePath: requireNonEmpty(payload.lastMessagePath, "lastMessagePath required"),
+      memoryScope: requireNonEmpty(payload.memoryScope, "memoryScope required"),
+      contextRefs: Array.isArray(payload.contextRefs) ? payload.contextRefs.filter((item): item is GraphRef => isRecord(item) && typeof item.kind === "string" && typeof item.ref === "string") : [],
+      skillBundlePaths: Array.isArray(payload.skillBundlePaths)
+        ? payload.skillBundlePaths.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+    };
   }
 
   async runIntegrationPublish(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
     const parsed = this.parseIntegrationPublishPayload(payload);
     const state = await this.getObjectiveState(parsed.objectiveId);
-    
-    const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
-    const resultSchemaPath = path.join(path.dirname(parsed.resultPath), "schema.json");
-    await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
-    await fs.writeFile(resultSchemaPath, JSON.stringify(FACTORY_TASK_RESULT_SCHEMA, null, 2), "utf-8");
+    const resultDir = path.dirname(parsed.resultPath);
+    await fs.mkdir(resultDir, { recursive: true });
+    await fs.writeFile(parsed.stdoutPath, "", "utf-8");
+    await fs.writeFile(parsed.stderrPath, "", "utf-8");
+    await fs.writeFile(path.join(resultDir, "memory.json"), JSON.stringify({ scopes: [parsed.memoryScope] }, null, 2), "utf-8");
 
-    const memoryConfigPath = path.join(path.dirname(parsed.resultPath), "memory.json");
-    await fs.writeFile(memoryConfigPath, JSON.stringify({ scopes: [parsed.memoryScope] }, null, 2), "utf-8");
-
-    const execution = await this.codexExecutor.run({
-      prompt: `Publish the completed objective: ${state.prompt}`,
-      workspacePath: parsed.workspacePath,
-      promptPath: parsed.promptPath,
-      lastMessagePath: parsed.lastMessagePath,
-      stdoutPath: parsed.stdoutPath,
-      stderrPath: parsed.stderrPath,
-      model: FACTORY_TASK_CODEX_MODEL,
-      outputSchemaPath: resultSchemaPath,
-      reasoningEffort: "low",
-      objectiveId: parsed.objectiveId,
-      taskId: "publish",
-      candidateId: parsed.candidateId,
-      contextRefs: parsed.contextRefs,
-      skillBundlePaths: parsed.skillBundlePaths,
-      repoSkillPaths: [],
-      env: {
-        DATA_DIR: this.dataDir,
-        PATH: prependPath(receiptBinDir, process.env.PATH),
-      },
-    }, control);
-
-    if (execution.exitCode === 0) {
+    try {
+      const published = await this.publishIntegratedPullRequest(state, parsed, control);
+      await fs.writeFile(parsed.resultPath, JSON.stringify(published, null, 2), "utf-8");
+      await fs.writeFile(parsed.lastMessagePath, `${published.prUrl}\n`, "utf-8");
       await this.emitObjective(parsed.objectiveId, {
         type: "integration.promoted",
         objectiveId: parsed.objectiveId,
         candidateId: parsed.candidateId,
-        promotedCommit: state.integration.headCommit ?? state.baseHash,
-        summary: `Published PR successfully.`,
+        promotedCommit: published.headCommit,
+        publishBranch: published.publishBranch,
+        baseBranch: published.baseBranch,
+        prUrl: published.prUrl,
+        repository: published.repository,
+        summary: published.summary,
         promotedAt: Date.now(),
       });
       await this.emitObjective(parsed.objectiveId, {
         type: "objective.completed",
         objectiveId: parsed.objectiveId,
-        summary: `Factory objective completed. Published PR successfully.`,
+        summary: `Factory objective completed. ${published.summary}`,
         completedAt: Date.now(),
       });
       await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, status: "completed" };
-    } else {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await fs.writeFile(parsed.lastMessagePath, `${message}\n`, "utf-8").catch(() => undefined);
+      await fs.writeFile(parsed.resultPath, JSON.stringify({
+        outcome: "blocked",
+        summary: message,
+        handoff: message,
+      }, null, 2), "utf-8").catch(() => undefined);
       await this.emitObjective(parsed.objectiveId, {
         type: "integration.conflicted",
         objectiveId: parsed.objectiveId,
         candidateId: parsed.candidateId,
-        reason: `Publishing failed: exit code ${execution.exitCode}`,
+        headCommit: parsed.headCommit,
+        reason: `Publishing failed: ${message}`,
         conflictedAt: Date.now(),
       });
       await this.reactObjective(parsed.objectiveId);
@@ -2724,6 +2752,9 @@ export class FactoryService {
       kind: "factory.integration.publish",
       objectiveId: state.objectiveId,
       candidateId,
+      headCommit: commit,
+      publishBranch: this.publishBranchName(state.objectiveId),
+      baseBranch: await this.git.defaultBranch(),
       workspacePath: workspace.path,
       stdoutPath: files.stdoutPath,
       stderrPath: files.stderrPath,
@@ -4848,6 +4879,277 @@ export class FactoryService {
     await fs.writeFile(shimPath, body, "utf-8");
     if (process.platform !== "win32") await fs.chmod(shimPath, 0o755);
     return binDir;
+  }
+
+  private publishBranchName(objectiveId: string): string {
+    return `factory/${safeWorkspacePart(objectiveId)}`;
+  }
+
+  private async abortIfRequested(control?: CodexRunControl): Promise<void> {
+    if (await control?.shouldAbort?.()) {
+      throw new FactoryServiceError(499, "publish aborted");
+    }
+  }
+
+  private commandEnvWith(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      ...this.commandEnv,
+      ...extra,
+    };
+  }
+
+  private async appendCommandLog(targetPath: string, content: string): Promise<void> {
+    if (!content) return;
+    const normalized = content.endsWith("\n") ? content : `${content}\n`;
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.appendFile(targetPath, normalized, "utf-8");
+  }
+
+  private async execLoggedCommand(
+    command: string,
+    args: ReadonlyArray<string>,
+    opts: {
+      readonly cwd?: string;
+      readonly stdoutPath: string;
+      readonly stderrPath: string;
+      readonly env?: NodeJS.ProcessEnv;
+      readonly timeoutMs?: number;
+    },
+  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+    const rendered = [command, ...args.map((arg) => shellQuote(arg))].join(" ");
+    await this.appendCommandLog(opts.stdoutPath, `$ ${rendered}`);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error(`${command} command timed out`)), opts.timeoutMs ?? 60_000);
+    try {
+      const result = await execFileAsync(command, [...args], {
+        cwd: opts.cwd,
+        env: this.commandEnvWith(opts.env),
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        signal: ac.signal,
+      });
+      await this.appendCommandLog(opts.stdoutPath, result.stdout);
+      await this.appendCommandLog(opts.stderrPath, result.stderr);
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    } catch (err) {
+      const stdout = typeof (err as { stdout?: unknown }).stdout === "string" ? String((err as { stdout?: string }).stdout) : "";
+      const stderr = typeof (err as { stderr?: unknown }).stderr === "string" ? String((err as { stderr?: string }).stderr) : "";
+      await this.appendCommandLog(opts.stdoutPath, stdout);
+      await this.appendCommandLog(opts.stderrPath, stderr);
+      const details = stderr.trim() || stdout.trim() || (err instanceof Error ? err.message : String(err));
+      throw new FactoryServiceError(500, `${command} failed: ${details}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async resolveSourceOriginUrl(): Promise<string> {
+    const { stdout } = await this.execLoggedCommand("git", ["remote", "get-url", "origin"], {
+      cwd: this.git.repoRoot,
+      stdoutPath: path.join(this.dataDir, "factory", "publish.git.stdout.log"),
+      stderrPath: path.join(this.dataDir, "factory", "publish.git.stderr.log"),
+    });
+    const originUrl = stdout.trim();
+    if (!originUrl) {
+      throw new FactoryServiceError(409, "source repository has no origin remote configured");
+    }
+    return originUrl;
+  }
+
+  private async resolveSourceRepository(stdoutPath: string, stderrPath: string): Promise<string> {
+    const { stdout } = await this.execLoggedCommand("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
+      cwd: this.git.repoRoot,
+      stdoutPath,
+      stderrPath,
+    });
+    const repository = stdout.trim();
+    if (!repository) {
+      throw new FactoryServiceError(500, "unable to resolve source GitHub repository");
+    }
+    return repository;
+  }
+
+  private async findOpenPullRequest(
+    repository: string,
+    publishBranch: string,
+    baseBranch: string,
+    stdoutPath: string,
+    stderrPath: string,
+  ): Promise<{ readonly url: string; readonly number?: number } | undefined> {
+    const { stdout } = await this.execLoggedCommand("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repository,
+      "--head",
+      publishBranch,
+      "--base",
+      baseBranch,
+      "--state",
+      "open",
+      "--json",
+      "url,number",
+    ], {
+      cwd: this.git.repoRoot,
+      stdoutPath,
+      stderrPath,
+    });
+    const trimmed = stdout.trim();
+    if (!trimmed) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (err) {
+      throw new FactoryServiceError(500, `unable to parse gh pr list output: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!Array.isArray(parsed)) return undefined;
+    const match = parsed.find((item) => isRecord(item) && typeof item.url === "string");
+    if (!match || !isRecord(match) || typeof match.url !== "string") return undefined;
+    return {
+      url: match.url,
+      number: typeof match.number === "number" ? match.number : undefined,
+    };
+  }
+
+  private async changedFilesForPublish(baseHash: string, headCommit: string): Promise<ReadonlyArray<string>> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error("git diff timed out")), 60_000);
+    try {
+      const result = await execFileAsync("git", ["diff", "--name-only", `${baseHash}..${headCommit}`], {
+        cwd: this.git.repoRoot,
+        env: this.commandEnvWith({ GIT_DIR: this.git.bareDir }),
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        signal: ac.signal,
+      });
+      return parseNonEmptyLines(result.stdout);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private buildPublishTitle(state: FactoryState): string {
+    const trimmed = state.title.trim() || `Factory objective ${state.objectiveId}`;
+    return trimmed.length > 120 ? trimmed.slice(0, 117).trimEnd() + "..." : trimmed;
+  }
+
+  private async renderPublishBody(
+    state: FactoryState,
+    published: {
+      readonly repository: string;
+      readonly publishBranch: string;
+      readonly baseBranch: string;
+      readonly headCommit: string;
+    },
+  ): Promise<string> {
+    const tasks = state.taskOrder
+      .map((taskId) => state.graph.nodes[taskId])
+      .filter((task): task is FactoryTaskRecord => Boolean(task))
+      .map((task) => {
+        const candidate = task.candidateId ? state.candidates[task.candidateId] : undefined;
+        const summary = candidate?.summary ?? task.latestSummary ?? task.prompt;
+        return `- ${task.title}: ${clipText(summary, 180) ?? "Completed."}`;
+      });
+    const validations = state.integration.validationResults.map((check) => {
+      const outcome = check.ok ? "pass" : "fail";
+      const summary = clipText(check.summary, 140);
+      return `- \`${check.command}\`: ${outcome}${summary ? ` (${summary})` : ""}`;
+    });
+    const changedFiles = (await this.changedFilesForPublish(state.baseHash, published.headCommit)).slice(0, 24);
+    return [
+      "## Objective",
+      state.prompt,
+      "",
+      "## Factory Metadata",
+      `- Objective ID: \`${state.objectiveId}\``,
+      `- Repository: \`${published.repository}\``,
+      `- Base branch: \`${published.baseBranch}\``,
+      `- Publish branch: \`${published.publishBranch}\``,
+      `- Promoted commit: \`${published.headCommit}\``,
+      "",
+      "## Completed Tasks",
+      ...(tasks.length > 0 ? tasks : ["- Factory completed the integrated objective."]),
+      "",
+      "## Validation",
+      ...(validations.length > 0 ? validations : ["- Factory completed integration without named validation receipts."]),
+      "",
+      "## Changed Files",
+      ...(changedFiles.length > 0 ? changedFiles.map((file) => `- \`${file}\``) : ["- No changed files were captured in the publish summary."]),
+    ].join("\n");
+  }
+
+  private async publishIntegratedPullRequest(
+    state: FactoryState,
+    payload: FactoryIntegrationPublishJobPayload,
+    control?: CodexRunControl,
+  ): Promise<FactoryPublishedPullRequest> {
+    await this.abortIfRequested(control);
+    const originUrl = await this.resolveSourceOriginUrl();
+    await fs.writeFile(payload.promptPath, [
+      `Publish Factory objective ${state.objectiveId}`,
+      `Repository root: ${this.git.repoRoot}`,
+      `Base branch: ${payload.baseBranch}`,
+      `Publish branch: ${payload.publishBranch}`,
+      `Head commit: ${payload.headCommit}`,
+      `Origin remote: ${originUrl}`,
+    ].join("\n"), "utf-8");
+    await this.execLoggedCommand("git", [
+      "push",
+      "--force",
+      originUrl,
+      `${payload.headCommit}:refs/heads/${payload.publishBranch}`,
+    ], {
+      cwd: payload.workspacePath,
+      stdoutPath: payload.stdoutPath,
+      stderrPath: payload.stderrPath,
+    });
+    await this.abortIfRequested(control);
+    const repository = await this.resolveSourceRepository(payload.stdoutPath, payload.stderrPath);
+    const existing = await this.findOpenPullRequest(repository, payload.publishBranch, payload.baseBranch, payload.stdoutPath, payload.stderrPath);
+    const bodyPath = path.join(path.dirname(payload.resultPath), "pull-request.md");
+    const body = await this.renderPublishBody(state, {
+      repository,
+      publishBranch: payload.publishBranch,
+      baseBranch: payload.baseBranch,
+      headCommit: payload.headCommit,
+    });
+    await fs.writeFile(bodyPath, body, "utf-8");
+    if (!existing) {
+      await this.execLoggedCommand("gh", [
+        "pr",
+        "create",
+        "--repo",
+        repository,
+        "--base",
+        payload.baseBranch,
+        "--head",
+        payload.publishBranch,
+        "--title",
+        this.buildPublishTitle(state),
+        "--body-file",
+        bodyPath,
+      ], {
+        cwd: this.git.repoRoot,
+        stdoutPath: payload.stdoutPath,
+        stderrPath: payload.stderrPath,
+      });
+    }
+    const created = await this.findOpenPullRequest(repository, payload.publishBranch, payload.baseBranch, payload.stdoutPath, payload.stderrPath);
+    if (!created?.url) {
+      throw new FactoryServiceError(500, "publish finished without an open pull request URL");
+    }
+    return {
+      summary: `PR ready: ${created.url}`,
+      prUrl: created.url,
+      publishBranch: payload.publishBranch,
+      baseBranch: payload.baseBranch,
+      repository,
+      headCommit: payload.headCommit,
+    };
   }
 
   private async loadMemorySummary(scope: string, query: string): Promise<string> {
