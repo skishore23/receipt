@@ -416,6 +416,21 @@ export class HubGit {
     this.invalidateGraph();
   }
 
+  async resetWorkspace(workspacePath: string, baseHash: string): Promise<HubWorktreeStatus> {
+    await this.syncFromSource();
+    if (!fs.existsSync(workspacePath)) {
+      throw new HubGitError(404, "workspace path is missing");
+    }
+    const resolvedBase = await this.resolveCommit(baseHash);
+    const mergeHead = clean(await this.execGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"], { cwd: workspacePath }).catch(() => ""));
+    if (mergeHead) {
+      await this.execGit(["merge", "--abort"], { cwd: workspacePath });
+    }
+    await this.execGit(["reset", "--hard", resolvedBase], { cwd: workspacePath });
+    await this.execGit(["clean", "-fd", "-e", ".receipt/"], { cwd: workspacePath }).catch(() => undefined);
+    return this.worktreeStatus(workspacePath);
+  }
+
   async worktreeStatus(workspacePath: string): Promise<HubWorktreeStatus> {
     await this.ensureReady();
     if (!fs.existsSync(workspacePath)) {

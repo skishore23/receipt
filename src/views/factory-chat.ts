@@ -41,9 +41,9 @@ import { factoryInspectorIsland } from "./factory-inspector";
 
 const md = new MiniGFM();
 
-const FACTORY_CHAT_REFRESH_MS = 120;
-const FACTORY_SIDEBAR_REFRESH_MS = 180;
-const FACTORY_INSPECTOR_REFRESH_MS = 180;
+const FACTORY_CHAT_REFRESH_MS = 180;
+const FACTORY_SIDEBAR_REFRESH_MS = 450;
+const FACTORY_INSPECTOR_REFRESH_MS = 450;
 
 const renderMarkdown = (raw: string): string => {
   const text = raw.trim();
@@ -99,6 +99,7 @@ import type {
 
 type FactoryChatRouteContext = {
   readonly profileId: string;
+  readonly chatId?: string;
   readonly objectiveId?: string;
   readonly runId?: string;
   readonly jobId?: string;
@@ -107,6 +108,7 @@ type FactoryChatRouteContext = {
 const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   const params = new URLSearchParams();
   params.set("profile", input.profileId);
+  if (input.chatId) params.set("chat", input.chatId);
   if (input.objectiveId) params.set("thread", input.objectiveId);
   if (input.runId) params.set("run", input.runId);
   if (input.jobId) params.set("job", input.jobId);
@@ -116,6 +118,9 @@ const factoryChatQuery = (input: FactoryChatRouteContext): string => {
 
 const factoryChatSseTrigger = (throttleMs: number): string =>
   `load, sse:agent-refresh throttle:${throttleMs}ms, sse:factory-refresh throttle:${throttleMs}ms, sse:job-refresh throttle:${throttleMs}ms`;
+
+const factoryStatusSseTrigger = (throttleMs: number): string =>
+  `load, sse:factory-refresh throttle:${throttleMs}ms, sse:job-refresh throttle:${throttleMs}ms`;
 
 const renderJobControls = (jobId: string, running?: boolean, abortRequested?: boolean): string =>
   running ? `<div class="mt-4">${renderJobActionCards(jobId, { abortRequested })}</div>` : "";
@@ -378,7 +383,7 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
     <section class="${softPanelClass} px-4 py-2.5">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="min-w-0 flex-1 flex items-center gap-2">
-          <div class="text-sm font-semibold text-foreground truncate">${esc(thread?.title ?? `${model.activeProfileLabel} thread`)}</div>
+          <div class="text-sm font-semibold text-foreground truncate">${esc(thread?.title ?? `${model.activeProfileLabel} chat`)}</div>
           ${thread?.nextAction ? `<div class="hidden sm:block text-xs text-muted-foreground truncate">${esc(thread.nextAction)}</div>` : ""}
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
@@ -530,14 +535,15 @@ const isTerminalJobStatusValue = (status?: string): boolean =>
 export const factoryChatShell = (model: FactoryChatShellModel): string => {
   const routeContext: FactoryChatRouteContext = {
     profileId: model.activeProfileId,
+    chatId: model.chatId,
     objectiveId: model.objectiveId,
     runId: model.runId,
     jobId: model.jobId,
   };
   const shellQuery = factoryChatQuery(routeContext);
   const islandTrigger = factoryChatSseTrigger(FACTORY_CHAT_REFRESH_MS);
-  const sidebarTrigger = factoryChatSseTrigger(FACTORY_SIDEBAR_REFRESH_MS);
-  const inspectorTrigger = factoryChatSseTrigger(FACTORY_INSPECTOR_REFRESH_MS);
+  const sidebarTrigger = factoryStatusSseTrigger(FACTORY_SIDEBAR_REFRESH_MS);
+  const inspectorTrigger = factoryStatusSseTrigger(FACTORY_INSPECTOR_REFRESH_MS);
   const currentJobId = composerJobId(model);
   const composerPlaceholder = model.objectiveId
     ? "Ask for status, send guidance, or use /react, /steer, /follow-up, /promote, /cancel..."

@@ -194,6 +194,7 @@ export type FactoryInspectorModel = {
 export type FactoryChatShellModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
+  readonly chatId?: string;
   readonly objectiveId?: string;
   readonly runId?: string;
   readonly jobId?: string;

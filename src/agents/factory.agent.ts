@@ -1127,11 +1127,28 @@ const buildChatLink = (input: {
   return `/factory${query ? `?${query}` : ""}`;
 };
 
+const resolveChatViewStream = (input: {
+  readonly repoRoot: string;
+  readonly profileId: string;
+  readonly chatId?: string;
+  readonly objectiveId?: string;
+  readonly job?: QueueJob;
+}): string | undefined =>
+  input.chatId
+    ? factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId)
+    : input.objectiveId
+      ? factoryChatStream(input.repoRoot, input.profileId, input.objectiveId)
+      : asString(input.job?.payload.parentStream)
+        ?? asString(input.job?.payload.stream);
+
 const makeFactoryObjectiveId = (): string =>
   `objective_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
 const makeFactoryRunId = (): string =>
   `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+const makeFactoryChatId = (): string =>
+  `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 const chatItemPreview = (item: FactoryChatItem): string => {
   if (item.kind === "user" || item.kind === "assistant") return item.body;
@@ -1168,6 +1185,7 @@ const summarizePendingRunJob = (job: QueueJob, profileLabel: string): FactoryLiv
     updatedAt: job.updatedAt,
     link: buildChatLink({
       profileId: asString(job.payload.profileId),
+      chatId: asString(job.payload.chatId),
       objectiveId: asString(job.payload.objectiveId),
       runId: asString(job.payload.runId) ?? asString(job.payload.parentRunId),
       jobId: job.id,
@@ -1207,6 +1225,7 @@ const summarizeActiveRunCard = (
     readonly relatedJobs: ReadonlyArray<QueueJob>;
     readonly profileLabel: string;
     readonly profileId: string;
+    readonly chatId?: string;
     readonly objectiveId?: string;
   },
 ): FactoryLiveRunCard => {
@@ -1255,6 +1274,7 @@ const summarizeActiveRunCard = (
       : state.lastTool?.summary ?? state.lastTool?.error,
     link: buildChatLink({
       profileId: input.profileId,
+      chatId: input.chatId,
       objectiveId: input.objectiveId,
       runId: input.runId,
     }),
@@ -1412,6 +1432,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const buildChatShellModel = async (input: {
     readonly profileId?: string;
+    readonly chatId?: string;
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
@@ -1424,27 +1445,40 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       profileRoot,
       requestedId: input.profileId,
     });
-    const stream = factoryChatStream(repoRoot, resolved.root.id, input.objectiveId);
-    const [profiles, objectives, selectedObjective, jobs, indexChain] = await Promise.all([
+    const [profiles, objectives, jobs] = await Promise.all([
       discoverFactoryChatProfiles(profileRoot),
       service.listObjectives(),
-      input.objectiveId 
-        ? service.getObjective(input.objectiveId).catch(err => {
+      ctx.queue.listJobs({ limit: 120 }),
+    ]);
+    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
+    const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
+    const liveObjectives = objectives.filter((objective) => !objective.archivedAt);
+    const resolvedObjectiveId = liveObjectives.some((objective) => objective.objectiveId === input.objectiveId)
+      ? input.objectiveId
+      : undefined;
+    const stream = resolveChatViewStream({
+      repoRoot,
+      profileId: resolved.root.id,
+      chatId: input.chatId,
+      objectiveId: resolvedObjectiveId,
+      job: selectedJob,
+    });
+    const [selectedObjective, indexChain] = await Promise.all([
+      resolvedObjectiveId
+        ? service.getObjective(resolvedObjectiveId).catch(err => {
             if (err instanceof FactoryServiceError && err.status === 404) return undefined;
             throw err;
           })
         : Promise.resolve(undefined),
-      ctx.queue.listJobs({ limit: 120 }),
-      agentRuntime.chain(stream),
+      stream ? agentRuntime.chain(stream) : Promise.resolve([]),
     ]);
 
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
     const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
     const activeRunId = runIds.at(-1) ?? input.runId;
-    const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))));
+    const runChains = await Promise.all(runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])));
     const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
-    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
     const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(runIds[index]!, runChain, jobsById));
     const activeProfileOverview = describeProfileMarkdown(resolved.root.mdBody);
 
@@ -1455,6 +1489,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       selected: profile.id === resolved.root.id,
     }));
     const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = objectives
+      .filter((objective) => !objective.archivedAt)
       .slice(0, input.showAll ? undefined : 16)
       .map((objective) => ({
         objectiveId: objective.objectiveId,
@@ -1463,15 +1498,16 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         phase: objective.phase,
         summary: objective.latestSummary ?? objective.nextAction,
         updatedAt: objective.updatedAt,
-        selected: objective.objectiveId === input.objectiveId,
+        selected: objective.objectiveId === resolvedObjectiveId,
         slotState: objective.scheduler.slotState,
         activeTaskCount: objective.activeTaskCount,
         readyTaskCount: objective.readyTaskCount,
         taskCount: objective.taskCount,
         integrationStatus: objective.integrationStatus,
     }));
-    const baseQueueJobs = jobs.filter((job) => isRelevantShellJob(job, stream, input.objectiveId));
-    const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
+    const baseQueueJobs = stream
+      ? jobs.filter((job) => isRelevantShellJob(job, stream, resolvedObjectiveId))
+      : [];
     const selectedRunIds = collectRunLineageIds(
       [
         input.runId,
@@ -1497,7 +1533,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       ? relevantQueueJobs.filter((job) => jobMatchesRunIds(job, activeRunLineageIds))
       : relevantQueueJobs.filter((job) => jobMatchesRunIds(job, new Set([activeRunId].filter(Boolean) as string[])));
     const activeCodex = buildActiveCodexCard(relevantQueueJobs);
-    const liveChildren = buildLiveChildCards(relevantQueueJobs, stream, input.objectiveId);
+    const liveChildren = stream
+      ? buildLiveChildCards(relevantQueueJobs, stream, resolvedObjectiveId)
+      : [];
     const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
     const activeRun = activeRunIndex >= 0
       ? summarizeActiveRunCard({
@@ -1506,11 +1544,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           relatedJobs: activeRunJobs,
           profileLabel: resolved.root.label,
           profileId: resolved.root.id,
-          objectiveId: input.objectiveId,
+          chatId: input.chatId,
+          objectiveId: resolvedObjectiveId,
         })
       : selectedJob
           ? summarizePendingRunJob(selectedJob, resolved.root.label)
-      : undefined;
+          : undefined;
     const relevantJobs = relevantQueueJobs
       .slice(0, 12)
       .map((job) => ({
@@ -1524,6 +1563,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         selected: job.id === input.jobId,
         link: buildChatLink({
           profileId: resolved.root.id,
+          chatId: input.chatId,
           objectiveId: jobObjectiveId(job),
           runId: jobAnyRunId(job),
           jobId: job.id,
@@ -1588,7 +1628,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
-      objectiveId: input.objectiveId,
+      chatId: input.chatId,
+      objectiveId: resolvedObjectiveId,
       runId: activeRunId,
       jobId: input.jobId,
       chat: chatModel,
@@ -1599,6 +1640,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const buildChatShellModelCached = async (input: {
     readonly profileId?: string;
+    readonly chatId?: string;
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
@@ -1615,6 +1657,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const collectChatSubscriptionJobIds = async (input: {
     readonly profileId?: string;
+    readonly chatId?: string;
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
@@ -1624,11 +1667,19 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       profileRoot,
       requestedId: input.profileId,
     });
-    const stream = factoryChatStream(service.git.repoRoot, resolved.root.id, input.objectiveId);
     const jobs = await ctx.queue.listJobs({ limit: 120 });
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
-    const baseQueueJobs = jobs.filter((job) => isRelevantShellJob(job, stream, input.objectiveId));
     const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
+    const stream = resolveChatViewStream({
+      repoRoot: service.git.repoRoot,
+      profileId: resolved.root.id,
+      chatId: input.chatId,
+      objectiveId: input.objectiveId,
+      job: selectedJob,
+    });
+    const baseQueueJobs = stream
+      ? jobs.filter((job) => isRelevantShellJob(job, stream, input.objectiveId))
+      : [];
     const selectedRunIds = collectRunLineageIds(
       [
         input.runId,
@@ -1665,7 +1716,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           if (!prompt) return navigationError(req, 400, "Enter a chat message or slash command.");
 
           const objectiveId = requestedObjectiveId(req);
-          const requestedChat = requestedChatId(req);
+          const requestedChat = requestedChatId(req) ?? (!objectiveId ? makeFactoryChatId() : undefined);
           const requestedRun = requestedRunId(req);
           const requestedJob = optionalTrimmedString(body.currentJobId) ?? requestedJobId(req);
           const resolved = await resolveFactoryChatProfile({
@@ -1685,6 +1736,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   req,
                   `${buildChatLink({
                     profileId: resolved.root.id,
+                    chatId: requestedChat,
                     objectiveId,
                     runId: requestedRun,
                     jobId: requestedJob,
@@ -1841,6 +1893,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       app.get("/factory", async (c) => wrap(
         async () => buildChatShellModelCached({
           profileId: requestedProfileId(c.req.raw),
+          chatId: requestedChatId(c.req.raw),
           objectiveId: requestedObjectiveId(c.req.raw),
           runId: requestedRunId(c.req.raw),
           jobId: requestedJobId(c.req.raw),
@@ -1852,7 +1905,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       app.get("/factory/new-chat", async (c) => wrap(
         async () => buildChatLink({
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          objectiveId: makeFactoryObjectiveId(),
+          chatId: makeFactoryChatId(),
         }),
         (location) => new Response(null, {
           status: 303,
@@ -1871,24 +1924,31 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileRoot,
             requestedId: requestedProfileId(c.req.raw),
           });
+          const chatId = requestedChatId(c.req.raw);
+          const objectiveId = requestedObjectiveId(c.req.raw);
+          const jobId = requestedJobId(c.req.raw);
+          const selectedJob = jobId ? await ctx.queue.getJob(jobId) : undefined;
           return {
-            stream: factoryChatStream(
-              service.git.repoRoot,
-              resolved.root.id,
-              requestedObjectiveId(c.req.raw),
-            ),
-            objectiveId: requestedObjectiveId(c.req.raw),
-            jobId: requestedJobId(c.req.raw),
+            stream: resolveChatViewStream({
+              repoRoot: service.git.repoRoot,
+              profileId: resolved.root.id,
+              chatId,
+              objectiveId,
+              job: selectedJob,
+            }),
+            objectiveId,
+            jobId,
             jobIds: await collectChatSubscriptionJobIds({
               profileId: requestedProfileId(c.req.raw),
-              objectiveId: requestedObjectiveId(c.req.raw),
+              chatId,
+              objectiveId,
               runId: requestedRunId(c.req.raw),
-              jobId: requestedJobId(c.req.raw),
+              jobId,
             }),
           };
         },
         (body) => ctx.sse.subscribeMany([
-          { topic: "agent", stream: body.stream },
+          ...(body.stream ? [{ topic: "agent" as const, stream: body.stream }] : []),
           ...(body.objectiveId ? [{ topic: "factory" as const, stream: body.objectiveId }] : []),
           ...body.jobIds.map((jobId) => ({ topic: "jobs" as const, stream: jobId })),
           ...(body.jobId && !body.jobIds.includes(body.jobId) ? [{ topic: "jobs" as const, stream: body.jobId }] : []),
@@ -1899,6 +1959,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
+            chatId: requestedChatId(c.req.raw),
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
@@ -1913,6 +1974,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
+            chatId: requestedChatId(c.req.raw),
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
@@ -1925,13 +1987,14 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
       app.get("/factory/island/inspector", async (c) => wrap(
         async () => {
-          const objectiveId = requestedObjectiveId(c.req.raw);
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
-            objectiveId,
+            chatId: requestedChatId(c.req.raw),
+            objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
           });
+          const objectiveId = model.objectiveId ?? model.inspector.selectedObjective?.objectiveId;
           const panel = requestedPanel(c.req.raw) || "overview";
           let receipts;
           let debugInfo;
@@ -1968,6 +2031,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       app.get("/factory/chat", async (c) => wrap(
         async () => buildChatLink({
           profileId: requestedProfileId(c.req.raw),
+          chatId: requestedChatId(c.req.raw),
           objectiveId: requestedObjectiveId(c.req.raw),
           runId: requestedRunId(c.req.raw),
           jobId: requestedJobId(c.req.raw),
@@ -1989,24 +2053,31 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileRoot,
             requestedId: requestedProfileId(c.req.raw),
           });
+          const chatId = requestedChatId(c.req.raw);
+          const objectiveId = requestedObjectiveId(c.req.raw);
+          const jobId = requestedJobId(c.req.raw);
+          const selectedJob = jobId ? await ctx.queue.getJob(jobId) : undefined;
           return {
-            stream: factoryChatStream(
-              service.git.repoRoot,
-              resolved.root.id,
-              requestedObjectiveId(c.req.raw),
-            ),
-            objectiveId: requestedObjectiveId(c.req.raw),
-            jobId: requestedJobId(c.req.raw),
+            stream: resolveChatViewStream({
+              repoRoot: service.git.repoRoot,
+              profileId: resolved.root.id,
+              chatId,
+              objectiveId,
+              job: selectedJob,
+            }),
+            objectiveId,
+            jobId,
             jobIds: await collectChatSubscriptionJobIds({
               profileId: requestedProfileId(c.req.raw),
-              objectiveId: requestedObjectiveId(c.req.raw),
+              chatId,
+              objectiveId,
               runId: requestedRunId(c.req.raw),
-              jobId: requestedJobId(c.req.raw),
+              jobId,
             }),
           };
         },
         (body) => ctx.sse.subscribeMany([
-          { topic: "agent", stream: body.stream },
+          ...(body.stream ? [{ topic: "agent" as const, stream: body.stream }] : []),
           ...(body.objectiveId ? [{ topic: "factory" as const, stream: body.objectiveId }] : []),
           ...body.jobIds.map((jobId) => ({ topic: "jobs" as const, stream: jobId })),
           ...(body.jobId && !body.jobIds.includes(body.jobId) ? [{ topic: "jobs" as const, stream: body.jobId }] : []),
@@ -2017,6 +2088,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
+            chatId: requestedChatId(c.req.raw),
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
@@ -2030,6 +2102,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
+            chatId: requestedChatId(c.req.raw),
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),
@@ -2043,6 +2116,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => {
           const model = await buildChatShellModelCached({
             profileId: requestedProfileId(c.req.raw),
+            chatId: requestedChatId(c.req.raw),
             objectiveId: requestedObjectiveId(c.req.raw),
             runId: requestedRunId(c.req.raw),
             jobId: requestedJobId(c.req.raw),

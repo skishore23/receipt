@@ -730,6 +730,21 @@ export class FactoryService {
     return state;
   }
 
+  private async getObjectiveStateAtHead(objectiveId: string, headHash?: string): Promise<FactoryState> {
+    if (!headHash) return this.getObjectiveState(objectiveId);
+    await this.ensureBootstrap();
+    const chain = await this.runtime.chain(objectiveStream(objectiveId));
+    let state = initialFactoryState;
+    for (const receipt of chain) {
+      state = reduceFactory(state, receipt.body, receipt.ts);
+      if (receipt.hash === headHash) {
+        if (!state.objectiveId) throw new FactoryServiceError(404, "factory objective not found");
+        return state;
+      }
+    }
+    return this.getObjectiveState(objectiveId);
+  }
+
   async getObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     const states = await this.listObjectiveStates();
@@ -2172,6 +2187,8 @@ export class FactoryService {
       readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
     },
   ): Promise<void> {
+    state = await this.getObjectiveStateAtHead(state.objectiveId, opts?.expectedPrev);
+    task = state.graph.nodes[task.taskId] ?? task;
     const profile = this.objectiveProfileForState(state);
     const workerType = this.normalizeProfileWorkerType(profile, String(task.workerType));
     if (!this.objectiveAllowsWorker(state, workerType)) {
@@ -2193,6 +2210,12 @@ export class FactoryService {
       );
     }
     const candidateId = this.resolveDispatchCandidateId(state, task);
+    const dispatchBaseCommit = this.resolveTaskBaseCommit(state, task);
+    const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
+    const workspace = await this.ensureTaskWorkspace(state, task, workspaceId, dispatchBaseCommit, {
+      resetIfBaseMismatch: !state.candidates[candidateId] && !task.workspacePath,
+    });
+    const pinnedBaseCommit = workspace.baseHash;
     const candidateCreated = !state.candidates[candidateId]
       ? (() => {
         const createdAt = Date.now();
@@ -2203,11 +2226,11 @@ export class FactoryService {
           createdAt,
           candidate: {
             candidateId,
-          taskId: task.taskId,
-          status: "planned",
-          parentCandidateId: priorCandidate?.candidateId,
-          baseCommit: priorCandidate?.headCommit ?? this.resolveTaskBaseCommit(state, task),
-          checkResults: [],
+            taskId: task.taskId,
+            status: "planned",
+            parentCandidateId: priorCandidate?.candidateId,
+            baseCommit: priorCandidate?.headCommit ?? pinnedBaseCommit,
+            checkResults: [],
             artifactRefs: {},
             createdAt,
             updatedAt: createdAt,
@@ -2215,10 +2238,7 @@ export class FactoryService {
         } satisfies FactoryEvent;
       })()
       : undefined;
-
-    const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
-    const workspace = await this.ensureTaskWorkspace(state, task, workspaceId);
-    const initialManifest = await this.writeTaskPacket(state, task, candidateId, workspace.path);
+    const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, pinnedBaseCommit);
     const jobId = `job_factory_${state.objectiveId}_${task.taskId}_${candidateId}`;
     await this.emitObjectiveBatch(state.objectiveId, [
       ...(opts?.prefixEvents ?? []),
@@ -2231,14 +2251,11 @@ export class FactoryService {
         jobId,
         workspaceId,
         workspacePath: workspace.path,
-        skillBundlePaths: initialManifest.skillBundlePaths,
-        contextRefs: initialManifest.contextRefs,
+        skillBundlePaths: manifest.skillBundlePaths,
+        contextRefs: manifest.contextRefs,
         startedAt: Date.now(),
       },
     ], opts?.expectedPrev);
-    state = await this.getObjectiveState(state.objectiveId);
-    const refreshedTask = state.graph.nodes[task.taskId] ?? task;
-    const manifest = await this.writeTaskPacket(state, refreshedTask, candidateId, workspace.path);
 
     const payload: FactoryTaskJobPayload = {
       kind: "factory.task.run",
@@ -2246,7 +2263,7 @@ export class FactoryService {
       taskId: task.taskId,
       workerType,
       candidateId,
-      baseCommit: this.resolveTaskBaseCommit(state, task),
+      baseCommit: pinnedBaseCommit,
       workspaceId,
       workspacePath: workspace.path,
       promptPath: manifest.promptPath,
@@ -3948,13 +3965,23 @@ export class FactoryService {
     state: FactoryState,
     task: FactoryTaskRecord,
     workspaceId: string,
+    pinnedBaseHash?: string,
+    opts?: { readonly resetIfBaseMismatch?: boolean },
   ): Promise<{ readonly path: string; readonly branchName: string; readonly baseHash: string }> {
-    const baseHash = this.resolveTaskBaseCommit(state, task);
+    const baseHash = pinnedBaseHash ?? this.resolveTaskBaseCommit(state, task);
     const workerType = this.normalizeProfileWorkerType(this.objectiveProfileForState(state), String(task.workerType));
     const workspacePath = path.join(this.git.worktreesDir, workspaceId);
     const branchName = `hub/${workerType}/${workspaceId}`;
     const existing = await this.git.worktreeStatus(workspacePath);
     if (existing.exists) {
+      if (opts?.resetIfBaseMismatch && existing.head && existing.head !== baseHash) {
+        const reset = await this.git.resetWorkspace(workspacePath, baseHash);
+        return {
+          path: workspacePath,
+          branchName: reset.branch ?? existing.branch ?? branchName,
+          baseHash: reset.head ?? baseHash,
+        };
+      }
       return {
         path: workspacePath,
         branchName: existing.branch ?? branchName,
@@ -4050,6 +4077,7 @@ export class FactoryService {
     task: FactoryTaskRecord,
     candidateId: string,
     workspacePath: string,
+    pinnedBaseCommit?: string,
   ): Promise<{
     readonly manifestPath: string;
     readonly contextPackPath: string;
@@ -4098,7 +4126,7 @@ export class FactoryService {
         title: task.title,
         prompt: task.prompt,
         workerType: task.workerType,
-        baseCommit: this.resolveTaskBaseCommit(state, task),
+        baseCommit: pinnedBaseCommit ?? this.resolveTaskBaseCommit(state, task),
         dependsOn: task.dependsOn,
       },
       candidate: state.candidates[candidateId] ?? {

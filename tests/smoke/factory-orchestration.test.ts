@@ -549,6 +549,104 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
   expect(nextJob.taskId).toBe("task_02");
 }, 120_000);
 
+test("factory dispatch refreshes stale state before pinning the task workspace base", async () => {
+  const dataDir = await createTempDir("receipt-factory-dispatch-refresh");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Dispatch refresh objective",
+    prompt: "Ensure stale dispatches pick up the latest integration head.",
+    checks: ["true"],
+  });
+
+  const internals = service as unknown as {
+    emitObjective(objectiveId: string, event: unknown): Promise<void>;
+    currentHeadHash(objectiveId: string): Promise<string | undefined>;
+    dispatchTask(
+      state: Awaited<ReturnType<FactoryService["getObjectiveState"]>>,
+      task: Awaited<ReturnType<FactoryService["getObjectiveState"]>>["graph"]["nodes"][string],
+      opts?: { readonly expectedPrev?: string },
+    ): Promise<void>;
+  };
+
+  const taskCreatedAt = created.createdAt + 1;
+  await internals.emitObjective(created.objectiveId, {
+    type: "task.added",
+    objectiveId: created.objectiveId,
+    createdAt: taskCreatedAt,
+    task: {
+      nodeId: "task_01",
+      taskId: "task_01",
+      taskKind: "planned",
+      title: "Validate the generated module",
+      prompt: "Confirm the expected generated module already exists and only validate it.",
+      workerType: "codex",
+      baseCommit: created.baseHash,
+      dependsOn: [],
+      status: "ready",
+      skillBundlePaths: [],
+      contextRefs: [],
+      artifactRefs: {},
+      createdAt: taskCreatedAt,
+    },
+  });
+
+  const staleState = await service.getObjectiveState(created.objectiveId);
+  const staleTask = staleState.graph.nodes.task_01;
+  expect(staleTask).toBeTruthy();
+  await service.git.createWorkspace({
+    workspaceId: `${created.objectiveId}_task_01_task_01_candidate_01`,
+    agentId: "codex",
+    baseHash: created.baseHash,
+  });
+
+  await fs.writeFile(path.join(repoRoot, "SECOND.txt"), "second commit\n", "utf-8");
+  await git(repoRoot, ["add", "SECOND.txt"]);
+  await git(repoRoot, ["commit", "-m", "second commit"]);
+  const integrationHead = await git(repoRoot, ["rev-parse", "HEAD"]);
+
+  await internals.emitObjective(created.objectiveId, {
+    type: "integration.validated",
+    objectiveId: created.objectiveId,
+    candidateId: "task_00_candidate_01",
+    headCommit: integrationHead,
+    validationResults: [],
+    summary: "Integration advanced to a newer commit.",
+    validatedAt: taskCreatedAt + 10,
+  });
+  const headHash = await internals.currentHeadHash(created.objectiveId);
+  expect(headHash).toBeTruthy();
+
+  const originalGetObjectiveState = service.getObjectiveState.bind(service);
+  service.getObjectiveState = async () => staleState;
+  try {
+    await internals.dispatchTask(staleState, staleTask, { expectedPrev: headHash ?? undefined });
+  } finally {
+    service.getObjectiveState = originalGetObjectiveState;
+  }
+
+  const taskJob = await findLatestFactoryJob(queue, created.objectiveId);
+  expect(taskJob.baseCommit).toBe(integrationHead);
+  expect(await git(taskJob.workspacePath, ["rev-parse", "HEAD"])).toBe(integrationHead);
+
+  const manifest = JSON.parse(await fs.readFile(taskJob.manifestPath, "utf-8")) as {
+    readonly task: { readonly baseCommit: string };
+  };
+  expect(manifest.task.baseCommit).toBe(integrationHead);
+}, 120_000);
+
 test("factory optimistic mutation append: stale heads are rejected without mutating the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-stale-append");
   const repoRoot = await createSourceRepo();
