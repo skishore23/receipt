@@ -419,7 +419,10 @@ test("factory investigation: infrastructure task prompts require deterministic s
   await service.runTask(payload);
   const prompt = await fs.readFile(payload.promptPath, "utf-8");
   expect(prompt).toContain("## Script-First Execution");
-  expect(prompt).toContain("prefer a deterministic script over ad hoc one-off commands");
+  expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
   expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
   expect(prompt).toContain("capture `aws sts get-caller-identity` in the script first");
+  expect(prompt).toContain("use AWS only");
+  expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
+  expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
 }, 120_000);

@@ -3731,17 +3731,20 @@ export class FactoryService {
               profileId: profile.rootProfileId,
               objectiveMode: state.objectiveMode,
               objectivePrompt: prompt,
-              preferredProvider: cloudExecutionContext.preferredProvider,
             }),
             investigationMode
               ? "At least one task should synthesize or reconcile sibling findings when the investigation spans multiple services or signals."
               : "Each non-validation task should be expected to produce a tracked repository diff.",
             investigationMode
-              ? "Do not speculate across AWS, GCP, and Azure in parallel unless the prompt or context explicitly indicates multiple clouds. If provider context is ambiguous, create one context-resolution task first, make any provider-specific follow-up tasks depend on it, and make synthesis depend on the evidence tasks it summarizes."
+              ? profile.rootProfileId === "infrastructure"
+                ? "This infrastructure profile is AWS-only for now. Do not create provider-resolution, GCP, or Azure tasks unless the objective explicitly asks for them."
+                : "Do not speculate across AWS, GCP, and Azure in parallel unless the prompt or context explicitly indicates multiple clouds. If provider context is ambiguous, create one context-resolution task first, make any provider-specific follow-up tasks depend on it, and make synthesis depend on the evidence tasks it summarizes."
               : "Keep validation or synthesis tasks dependent on the implementation work they summarize.",
-            cloudExecutionContext.preferredProvider
-              ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Prefer that provider and avoid speculative tasks for other clouds unless the objective explicitly requests them.`
-              : "If local execution context shows one active provider/profile/account, use it instead of asking the user to repeat it.",
+            profile.rootProfileId === "infrastructure"
+              ? "Use AWS as the only provider for this objective. Ignore other mounted cloud sessions unless the prompt explicitly names another provider."
+              : cloudExecutionContext.preferredProvider
+                ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Prefer that provider and avoid speculative tasks for other clouds unless the objective explicitly requests them.`
+                : "If local execution context shows one active provider/profile/account, use it instead of asking the user to repeat it.",
             "Keep dependency edges between task IDs by referring to earlier returned task ids like task_01, task_02.",
           ].join("\n"),
           user: JSON.stringify({ title, prompt, cloudExecutionContext }, null, 2),
@@ -3807,7 +3810,6 @@ export class FactoryService {
       profileId: profile.rootProfileId,
       objectiveMode,
       objectivePrompt,
-      preferredProvider,
       tasks: this.normalizeInvestigationDecomposition(normalized, preferredProvider),
     });
   }
@@ -5341,9 +5343,11 @@ export class FactoryService {
       state.objectiveMode === "investigation"
         ? `Interpret command and script outputs in plain language. Do not just paste logs.`
         : `Capture implementation and validation results precisely in the handoff.`,
-      cloudExecutionContext.preferredProvider
-        ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
-        : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
+      payload.profile.rootProfileId === "infrastructure"
+        ? `For infrastructure work in this repo, use AWS only. If AWS CLI access fails, fail fast and report the exact AWS error instead of exploring other providers or asking the user to restate scope.`
+        : cloudExecutionContext.preferredProvider
+          ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
+          : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
       ``,
       ...(infrastructureTaskGuidance.length > 0 ? [...infrastructureTaskGuidance, ``] : []),
       `## Live Cloud Context`,
@@ -5363,9 +5367,8 @@ export class FactoryService {
       `Mounted profile skills for this task:`,
       payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
       `Read any mounted infrastructure or cloud profile skill before provider-sensitive commands.`,
-      `Use current-objective inspection only if the packet or memory script is insufficient, and run these sequentially, not in parallel:`,
-      `- ${FACTORY_CLI_PREFIX} factory inspect ${shellQuote(state.objectiveId)} --json --panel receipts`,
-      `- ${FACTORY_CLI_PREFIX} factory inspect ${shellQuote(state.objectiveId)} --json --panel debug`,
+      `Do not call \`${FACTORY_CLI_PREFIX} factory inspect\` from inside this task worktree. The packet already mounts recent objective receipts and state, and worktree-side inspect can fail on receipt lock files outside the workspace.`,
+      `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the task worktree.`,
       ``,
       `## Memory Access`,
       `Use the layered memory script at ${payload.memoryScriptPath} instead of raw memory dumps.`,

@@ -22,20 +22,15 @@ Then use the generated memory script:
 
 ## Current Objective Inspection
 
-Use the objective id from the manifest:
+Do not call `receipt factory inspect` from inside a task worktree by default.
 
-- `receipt factory inspect <objectiveId> --json --panel receipts`
-- `receipt factory inspect <objectiveId> --json --panel debug`
-- `receipt factory inspect <objectiveId> --json`
-Run the panel-specific commands one at a time. Start with `--panel receipts`; only fetch `--panel debug` if the packet or receipt slice is not enough.
+Use the mounted packet and memory output instead:
 
-Use the JSON output to inspect:
+- manifest and context-pack for current task/candidate state
+- mounted recent receipts for objective history
+- memory script output for task, objective, and repo summaries
 
-- current task and candidate state
-- prior candidates for the same task
-- integration state
-- latest context-pack and memory-script paths
-- recent receipts and summaries
+If live objective state is still required, use controller-side inspection instead of task-worktree inspection.
 
 ## CLI-First Factory Control
 
@@ -105,6 +100,6 @@ Use `receipt memory ...` when you need durable summaries or exact entries:
 Prefer this order:
 
 1. current task packet
-2. current objective receipts
+2. mounted current objective receipts
 3. repo-shared and objective-scoped memory
-4. broader receipt inspection only if the current objective is insufficient
+4. controller-side receipt inspection only if the current objective packet is insufficient

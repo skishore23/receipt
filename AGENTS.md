@@ -7,17 +7,14 @@ Use the checked-in skill at `skills/factory-receipt-worker/SKILL.md` when workin
 1. Read the current task manifest under `.receipt/factory/<taskId>.manifest.json`.
 2. Read the current context pack under `.receipt/factory/<taskId>.context-pack.json`.
 3. Run the generated memory script from `.receipt/factory/<taskId>.memory.cjs` for `context`, `objective`, and the relevant scope summaries before assuming the prompt told you everything.
-4. Query current-objective state with:
-   - `receipt factory inspect <objectiveId> --json --panel receipts`
-   - `receipt factory inspect <objectiveId> --json --panel debug`
-   Run these sequentially, not in parallel.
-5. Use `receipt inspect`, `receipt trace`, `receipt replay`, and `receipt memory ...` only as needed for deeper evidence.
+4. Do not call `receipt factory inspect` from inside a task worktree by default. The packet already mounts recent receipts and objective state, and worktree-side inspect can fail on receipt lock files outside the writable workspace.
+5. Use `receipt inspect`, `receipt trace`, `receipt replay`, and `receipt memory ...` only as needed for deeper evidence, and prefer controller-side inspection over task-worktree inspection when live objective state is required.
 
 ## Working Rules
 
 - Treat the prompt as bootstrap only, not as the full source of truth.
 - Prefer current worktree packet first, current objective receipts second, repo-shared memory third.
-- Query receipts before making retry, review, or inherited-failure claims.
+- Query the packet and mounted recent receipts before making retry, review, or inherited-failure claims.
 - When checks fail, inspect prior candidate and check history in the current objective before deciding the failure is inherited.
 - Write concise durable notes only after gathering evidence from the packet, receipts, or memory.
 - Do not assume generated repo-profile skills outside the worktree are required; the committed repo skill and the current packet are the default worker interface.

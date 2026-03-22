@@ -197,9 +197,9 @@ test("factory policy: task packets tell workers to inspect objective receipts se
   const promptPath = String(taskJob.payload.promptPath);
   const prompt = await fs.readFile(promptPath, "utf-8");
 
-  expect(prompt).toContain("run these sequentially, not in parallel");
-  expect(prompt).toContain(`factory inspect '${created.objectiveId}' --json --panel receipts`);
-  expect(prompt).toContain(`factory inspect '${created.objectiveId}' --json --panel debug`);
+  expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
+  expect(prompt).not.toContain(`factory inspect '${created.objectiveId}' --json --panel receipts`);
+  expect(prompt).not.toContain(`factory inspect '${created.objectiveId}' --json --panel debug`);
   expect(prompt).toContain("Do not absorb downstream work");
   expect(prompt).toContain("Do not write this file yourself.");
   expect(prompt).toContain("A later task in this objective owns the broad repo validation suite.");

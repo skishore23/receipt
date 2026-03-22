@@ -317,7 +317,8 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(/AGENTS\.md and skills\/factory-receipt-worker\/SKILL\.md/);
   expect(promptBody).toMatch(new RegExp(payload.manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(new RegExp(payload.contextPackPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  expect(promptBody).toMatch(new RegExp(`receipt factory inspect ${created.objectiveId} --json --panel debug`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  expect(promptBody).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
+  expect(promptBody).not.toMatch(new RegExp(`receipt factory inspect ${created.objectiveId} --json --panel debug`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(/## Memory Access/);
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} context`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
