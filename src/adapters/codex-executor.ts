@@ -77,10 +77,10 @@ const delay = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
-const fileExists = async (targetPath: string): Promise<boolean> => {
+const fileHasContent = async (targetPath: string): Promise<boolean> => {
   try {
-    await fsp.access(targetPath);
-    return true;
+    const stat = await fsp.stat(targetPath);
+    return stat.size > 0;
   } catch {
     return false;
   }
@@ -190,7 +190,7 @@ export class LocalCodexExecutor implements CodexExecutor {
       ? (async () => {
         while (child.exitCode === null && !child.killed && !completionTriggered) {
           if (
-            await fileExists(completionSignalPath)
+            await fileHasContent(completionSignalPath)
             && Date.now() - lastOutputAt >= completionQuietMs
           ) {
             completionTriggered = true;
