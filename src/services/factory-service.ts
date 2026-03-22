@@ -2357,6 +2357,7 @@ export class FactoryService {
       model: FACTORY_TASK_CODEX_MODEL,
       outputSchemaPath: resultSchemaPath,
       reasoningEffort: severityWorkerReasoningEffort(parsed.objectiveMode, parsed.severity, task.taskKind),
+      sandboxMode: parsed.profile.rootProfileId === "infrastructure" ? "danger-full-access" : undefined,
       objectiveId: parsed.objectiveId,
       taskId: parsed.taskId,
       candidateId: parsed.candidateId,

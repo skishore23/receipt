@@ -387,6 +387,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
       },
     },
   };
+  let capturedSandboxMode: CodexExecutorInput["sandboxMode"];
   const { service, queue } = await createFactoryService({
     llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
       parsed: input.schema.parse({
@@ -396,7 +397,8 @@ test("factory investigation: infrastructure task prompts require deterministic s
       }),
       raw: "",
     }),
-    codexRun: async () => {
+    codexRun: async (input) => {
+      capturedSandboxMode = input.sandboxMode;
       const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
@@ -418,6 +420,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
   const payload = taskJob!.payload as FactoryTaskJobPayload;
   await service.runTask(payload);
   const prompt = await fs.readFile(payload.promptPath, "utf-8");
+  expect(capturedSandboxMode).toBe("danger-full-access");
   expect(prompt).toContain("## Script-First Execution");
   expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
   expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
