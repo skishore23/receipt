@@ -5392,6 +5392,7 @@ export class FactoryService {
       `5. Repo skills from the manifest, especially any execution or permissions landscape notes`,
       `Mounted profile skills for this task:`,
       payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
+      `Use only the checked-in repo skills named in this packet. Do not load unrelated global skills from ~/.codex or other home-directory skill folders unless this packet explicitly names them.`,
       `Read any mounted infrastructure or cloud profile skill before provider-sensitive commands.`,
       `Do not call \`${FACTORY_CLI_PREFIX} factory inspect\` from inside this task worktree. The packet already mounts recent objective receipts and state, and worktree-side inspect can fail on receipt lock files outside the workspace.`,
       `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the task worktree.`,

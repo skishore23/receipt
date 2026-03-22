@@ -437,6 +437,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
   expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
+  expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");
   expect(prompt).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-infrastructure-aws/SKILL.md");
