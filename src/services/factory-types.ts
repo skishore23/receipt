@@ -20,6 +20,7 @@ import type {
   FactoryWorkerType,
 } from "../modules/factory";
 import type { JobRecord, JobStatus } from "../modules/job";
+import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
 
 export class FactoryServiceError extends Error {
   readonly status: number;
@@ -43,6 +44,7 @@ export type FactoryServiceOptions = {
   readonly memoryTools?: import("../adapters/memory-tools").MemoryTools;
   readonly repoRoot?: string;
   readonly profileRoot?: string;
+  readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
   readonly llmStructured?: <Schema extends import("zod").ZodTypeAny>(opts: {
     readonly system?: string;
     readonly user: string;

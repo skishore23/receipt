@@ -51,6 +51,11 @@ import {
   type FactoryChatCodexArtifactPaths,
 } from "./factory-codex-artifacts";
 import {
+  scanFactoryCloudExecutionContext,
+  type FactoryCloudExecutionContext,
+  type FactoryCloudProvider,
+} from "./factory-cloud-context";
+import {
   renderFactoryRepoExecutionLandscapeSkill,
   scanFactoryRepoExecutionLandscape,
   type FactoryRepoExecutionLandscape,
@@ -546,6 +551,7 @@ type FactoryContextPack = {
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
   readonly repoExecutionLandscape?: FactoryRepoExecutionLandscape;
+  readonly cloudExecutionContext?: FactoryCloudExecutionContext;
   readonly profile: FactoryObjectiveProfileSnapshot;
   readonly task: {
     readonly taskId: string;
@@ -632,10 +638,12 @@ export class FactoryService {
   readonly memoryTools?: MemoryTools;
   readonly git: HubGit;
   readonly profileRoot: string;
+  private readonly cloudExecutionContextProvider?: FactoryServiceOptions["cloudExecutionContextProvider"];
   private readonly baselineCheckCache = new Map<string, Promise<{
     readonly digest: string;
     readonly excerpt: string;
   } | undefined>>();
+  private cloudExecutionContextPromise?: Promise<FactoryCloudExecutionContext>;
 
   private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
   private readonly llmStructured?: FactoryServiceOptions["llmStructured"];
@@ -657,6 +665,7 @@ export class FactoryService {
     this.codexExecutor = opts.codexExecutor;
     this.memoryTools = opts.memoryTools;
     this.llmStructured = opts.llmStructured;
+    this.cloudExecutionContextProvider = opts.cloudExecutionContextProvider;
     this.git = new HubGit({
       dataDir: opts.dataDir,
       repoRoot: resolveRepoRoot(opts.repoRoot),
@@ -673,6 +682,21 @@ export class FactoryService {
 
   async ensureBootstrap(): Promise<void> {
     await this.git.ensureReady();
+  }
+
+  private async loadCloudExecutionContext(): Promise<FactoryCloudExecutionContext> {
+    if (!this.cloudExecutionContextPromise) {
+      this.cloudExecutionContextPromise = (this.cloudExecutionContextProvider
+        ? this.cloudExecutionContextProvider()
+        : scanFactoryCloudExecutionContext()
+      ).catch(() => ({
+        summary: "No live cloud execution context could be detected from this machine.",
+        availableProviders: [],
+        activeProviders: [],
+        guidance: ["If provider context is unclear, probe the local CLI before asking the user to restate it."],
+      }));
+    }
+    return this.cloudExecutionContextPromise;
   }
 
   projectionVersion(): number {
@@ -3673,6 +3697,7 @@ export class FactoryService {
     const prompt = state.prompt;
     const profile = this.objectiveProfileForState(state);
     const investigationMode = state.objectiveMode === "investigation";
+    const cloudExecutionContext = await this.loadCloudExecutionContext();
     if (this.llmStructured) {
       try {
         const { parsed } = await this.llmStructured({
@@ -3698,11 +3723,19 @@ export class FactoryService {
             investigationMode
               ? "Do not speculate across AWS, GCP, and Azure in parallel unless the prompt or context explicitly indicates multiple clouds. If provider context is ambiguous, create one context-resolution task first, make any provider-specific follow-up tasks depend on it, and make synthesis depend on the evidence tasks it summarizes."
               : "Keep validation or synthesis tasks dependent on the implementation work they summarize.",
+            cloudExecutionContext.preferredProvider
+              ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Prefer that provider and avoid speculative tasks for other clouds unless the objective explicitly requests them.`
+              : "If local execution context shows one active provider/profile/account, use it instead of asking the user to repeat it.",
             "Keep dependency edges between task IDs by referring to earlier returned task ids like task_01, task_02.",
           ].join("\n"),
-          user: JSON.stringify({ title, prompt }, null, 2),
+          user: JSON.stringify({ title, prompt, cloudExecutionContext }, null, 2),
         });
-        const normalized = this.normalizeDecomposedTasks(parsed.tasks, profile, state.objectiveMode);
+        const normalized = this.normalizeDecomposedTasks(
+          parsed.tasks,
+          profile,
+          state.objectiveMode,
+          cloudExecutionContext.preferredProvider,
+        );
         if (normalized.length > 0) {
           return {
             tasks: normalized,
@@ -3734,6 +3767,7 @@ export class FactoryService {
     }>,
     profile: FactoryObjectiveProfileSnapshot,
     objectiveMode: FactoryObjectiveMode,
+    preferredProvider?: FactoryCloudProvider,
   ): ReadonlyArray<DecomposedTaskSpec> {
     const normalized: DecomposedTaskSpec[] = [];
     for (const [index, task] of tasks.entries()) {
@@ -3751,30 +3785,38 @@ export class FactoryService {
       });
     }
     return objectiveMode === "investigation"
-      ? this.normalizeInvestigationDecomposition(normalized)
+      ? this.normalizeInvestigationDecomposition(normalized, preferredProvider)
       : this.collapseDiscoveryOnlyTasks(normalized);
   }
 
   private normalizeInvestigationDecomposition(
     tasks: ReadonlyArray<DecomposedTaskSpec>,
+    preferredProvider?: FactoryCloudProvider,
   ): ReadonlyArray<DecomposedTaskSpec> {
-    const contextTaskId = tasks.find((task) => this.isContextResolutionTask(task))?.taskId;
+    const providerScoped = preferredProvider
+      ? tasks.filter((task) => {
+        const provider = this.providerForTask(task);
+        return !provider || provider === preferredProvider;
+      })
+      : [...tasks];
+    const contextTaskId = providerScoped.find((task) => this.isContextResolutionTask(task))?.taskId;
     const gated = contextTaskId
-      ? tasks.map((task) => {
+      ? providerScoped.map((task) => {
         if (task.taskId === contextTaskId || !this.isProviderConditionalTask(task)) return task;
         return {
           ...task,
           dependsOn: [...new Set([contextTaskId, ...task.dependsOn])],
         };
       })
-      : [...tasks];
-    return gated.map((task, index) => {
+      : [...providerScoped];
+    const synthesized = gated.map((task, index) => {
       if (!this.isSynthesisTask(task) || task.dependsOn.length > 0 || index === 0) return task;
       return {
         ...task,
         dependsOn: gated.slice(0, index).map((candidate) => candidate.taskId),
       };
     });
+    return this.reindexDecomposedTasks(synthesized);
   }
 
   private isProviderConditionalTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
@@ -3787,6 +3829,23 @@ export class FactoryService {
 
   private isSynthesisTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
     return SYNTHESIS_TASK_RE.test(`${task.title}\n${task.prompt}`);
+  }
+
+  private providerForTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): FactoryCloudProvider | undefined {
+    const haystack = `${task.title}\n${task.prompt}`.toLowerCase();
+    if (/\baws\b|\bs3\b/.test(haystack)) return "aws";
+    if (/\bgcp\b|\bgoogle cloud\b|\bgcloud\b|\bgsutil\b|\bgcs\b/.test(haystack)) return "gcp";
+    if (/\bazure\b|\baz\b|\bblob\b|\bcontainer\b/.test(haystack)) return "azure";
+    return undefined;
+  }
+
+  private reindexDecomposedTasks(tasks: ReadonlyArray<DecomposedTaskSpec>): ReadonlyArray<DecomposedTaskSpec> {
+    const idMap = new Map(tasks.map((task, index) => [task.taskId, taskOrdinalId(index)]));
+    return tasks.map((task, index) => ({
+      ...task,
+      taskId: taskOrdinalId(index),
+      dependsOn: [...new Set(task.dependsOn.filter((dep) => idMap.has(dep)).map((dep) => idMap.get(dep)!))],
+    }));
   }
 
   private collapseDiscoveryOnlyTasks(tasks: ReadonlyArray<DecomposedTaskSpec>): ReadonlyArray<DecomposedTaskSpec> {
@@ -4387,11 +4446,12 @@ export class FactoryService {
       .filter((receipt) => !focusedReceiptKeys.has(`${receipt.type}:${receipt.at}:${receipt.summary}`))
       .slice(0, 20)
       .reverse();
-    const [overview, objectiveMemory, integrationMemory, sharedProfile] = await Promise.all([
+    const [overview, objectiveMemory, integrationMemory, sharedProfile, cloudExecutionContext] = await Promise.all([
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, `${state.title}\n${task.title}`, 520),
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, state.title, 360),
       this.summarizeScope(`factory/objectives/${state.objectiveId}/integration`, `${state.title}\nintegration`, 360),
       this.loadSharedRepoProfileArtifact(),
+      this.loadCloudExecutionContext(),
     ]);
     const repoSkillPaths = await this.collectRepoSkillPaths();
     const sharedArtifactRefs = [
@@ -4411,6 +4471,7 @@ export class FactoryService {
       objectiveMode: state.objectiveMode,
       severity: state.severity,
       repoExecutionLandscape: sharedProfile?.permissionsLandscape,
+      cloudExecutionContext,
       profile: this.objectiveProfileForState(state),
       task: {
         taskId: task.taskId,
@@ -4901,8 +4962,9 @@ export class FactoryService {
       objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy,
     }));
     const includeFactoryObjectiveSkills = Boolean(input.objectiveId);
-    const [sharedProfile, allRepoSkillPaths] = await Promise.all([
+    const [sharedProfile, cloudExecutionContext, allRepoSkillPaths] = await Promise.all([
       this.loadSharedRepoProfileArtifact(),
+      this.loadCloudExecutionContext(),
       this.collectRepoSkillPaths(),
     ]);
     const repoSkillPaths = allRepoSkillPaths.filter((skillPath) =>
@@ -5038,6 +5100,7 @@ export class FactoryService {
         ? (readOnly ? "read_only_direct_codex_probe" : "direct_codex")
         : (readOnly ? "read_only_repo_probe" : "direct_repo_probe"),
       repoExecutionLandscape: sharedProfile?.permissionsLandscape,
+      cloudExecutionContext,
       profile,
       task: {
         taskId: `direct_codex_${input.jobId}`,
@@ -5176,6 +5239,7 @@ export class FactoryService {
         latestDecision: objectiveDetail.latestDecision,
         blockedExplanation: objectiveDetail.blockedExplanation,
       } : undefined,
+      cloudExecutionContext,
       repoSkillPaths,
       recentReceipts: objectiveReceipts.slice(-10),
     });
@@ -5197,6 +5261,7 @@ export class FactoryService {
     task: FactoryTaskRecord,
     payload: FactoryTaskJobPayload,
   ): Promise<string> {
+    const cloudExecutionContext = await this.loadCloudExecutionContext();
     const dependencySummaries = task.dependsOn
       .map((depId) => state.graph.nodes[depId])
       .filter((dep): dep is FactoryTaskRecord => Boolean(dep))
@@ -5247,6 +5312,13 @@ export class FactoryService {
       state.objectiveMode === "investigation"
         ? `Interpret command and script outputs in plain language. Do not just paste logs.`
         : `Capture implementation and validation results precisely in the handoff.`,
+      cloudExecutionContext.preferredProvider
+        ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
+        : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
+      ``,
+      `## Live Cloud Context`,
+      cloudExecutionContext.summary,
+      ...cloudExecutionContext.guidance.map((item) => `- ${item}`),
       ``,
       ...validationSection,
       ``,
@@ -5339,6 +5411,7 @@ export class FactoryService {
       readonly latestDecision?: FactoryObjectiveCard["latestDecision"];
       readonly blockedExplanation?: FactoryObjectiveCard["blockedExplanation"];
     };
+    readonly cloudExecutionContext: FactoryCloudExecutionContext;
     readonly repoSkillPaths: ReadonlyArray<string>;
     readonly recentReceipts: ReadonlyArray<FactoryObjectiveReceiptSummary>;
   }): string {
@@ -5356,6 +5429,10 @@ export class FactoryService {
       input.readOnly
         ? `This Codex run is read-only. Inspect receipts, memory, files, and logs, but do not modify tracked files or generate patches. If code changes are required, explain the change and say that Factory must create or react an objective/worktree run.`
         : `This Codex run may edit the workspace.`,
+      ``,
+      `## Live Cloud Context`,
+      input.cloudExecutionContext.summary,
+      ...input.cloudExecutionContext.guidance.map((item) => `- ${item}`),
       ``,
       `## Bootstrap Context`,
       input.objective
@@ -5390,7 +5467,7 @@ export class FactoryService {
             objectiveStreamRef ? `- ${FACTORY_CLI_PREFIX} trace ${shellQuote(objectiveStreamRef)}` : "",
           ].filter(Boolean).join("\n")
         : [
-            `- Use the packet, repo files, and memory first. This probe is not a Factory objective and should not call receipt factory inspect.`,
+            `- Use the packet, repo files, and memory first. This probe is not a Factory objective and should not call the objective inspect commands.`,
             `- Do not assume skills/factory-receipt-worker/SKILL.md applies unless a real objectiveId is present.`,
             `- Use current repo search/read results before escalating to broader receipt history.`,
           ].join("\n"),

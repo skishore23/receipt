@@ -14,6 +14,7 @@ import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
+import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
 
 const execFileAsync = promisify(execFile);
 
@@ -68,6 +69,7 @@ const createFactoryService = async (opts: {
   }) => Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }>;
   readonly codexRun: (input: CodexExecutorInput) => Promise<{ readonly stdout: string; readonly stderr: string; readonly lastMessage?: string }>;
   readonly seedRepo?: (repoRoot: string) => Promise<void>;
+  readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
@@ -99,6 +101,7 @@ const createFactoryService = async (opts: {
     llmStructured: opts.llmStructured,
     repoRoot,
     profileRoot: process.cwd(),
+    cloudExecutionContextProvider: opts.cloudExecutionContextProvider,
   });
   return { service, queue };
 };
@@ -301,4 +304,58 @@ test("factory repo profile: init emits an execution landscape skill and mounts i
   expect(contextPack).toContain("\"repoExecutionLandscape\"");
   expect(contextPack).toContain("\"tooling\": [");
   expect(packet.renderedPrompt).toContain("execution landscape, permissions, or infrastructure guardrails");
+}, 120_000);
+
+test("factory cloud context: mounted AWS identity is surfaced to packets and prompts", async () => {
+  const awsContext: FactoryCloudExecutionContext = {
+    summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/csagent-api-service in account 445567089271 with region us-west-2.",
+    availableProviders: ["aws"],
+    activeProviders: ["aws"],
+    preferredProvider: "aws",
+    guidance: ["One provider is clearly usable from the local CLI context (aws). Use it by default instead of asking the user to restate provider or scope."],
+    aws: {
+      cliPath: "/opt/homebrew/bin/aws",
+      version: "aws-cli/2.34.14",
+      profiles: ["default", "localstack"],
+      selectedProfile: "default",
+      defaultRegion: "us-west-2",
+      callerIdentity: {
+        accountId: "445567089271",
+        arn: "arn:aws:iam::445567089271:user/csagent-api-service",
+        userId: "AIDATEST",
+      },
+    },
+  };
+  const { service } = await createFactoryService({
+    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
+      parsed: input.schema.parse({
+        tasks: [
+          { title: "Inspect bucket posture", prompt: "Use the local cloud context and report the active bucket scope.", workerType: "codex", dependsOn: [] },
+        ],
+      }),
+      raw: "",
+    }),
+    codexRun: async () => {
+      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+    cloudExecutionContextProvider: async () => awsContext,
+  });
+
+  const packet = await service.prepareDirectCodexProbePacket({
+    jobId: "job_cloud_context_probe",
+    prompt: "Count my buckets.",
+    profileId: "infrastructure",
+    readOnly: true,
+    parentRunId: "run_parent",
+    parentStream: "agents/factory",
+    stream: "agents/factory/infrastructure",
+    supervisorSessionId: "session_cloud_context_probe",
+  });
+  const contextPack = await fs.readFile(packet.artifactPaths.contextPackPath, "utf-8");
+  expect(contextPack).toContain("\"cloudExecutionContext\"");
+  expect(contextPack).toContain("\"preferredProvider\": \"aws\"");
+  expect(contextPack).toContain("\"accountId\": \"445567089271\"");
+  expect(packet.renderedPrompt).toContain("AWS CLI is available via profile default");
+  expect(packet.renderedPrompt).toContain("Use it by default instead of asking the user to restate provider or scope");
 }, 120_000);
