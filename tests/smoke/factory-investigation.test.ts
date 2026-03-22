@@ -170,6 +170,8 @@ test("factory investigation: no-diff reports complete without integration and sy
   expect(detail.objectiveMode).toBe("investigation");
   expect(detail.integration.status).toBe("idle");
   expect(detail.investigation.synthesized?.report.conclusion).toContain("read access");
+  expect(detail.investigation.synthesized?.report.scriptsRun).toHaveLength(1);
+  expect(detail.investigation.synthesized?.report.evidence.some((item) => item.title === "Check failed" || item.title === "Check passed")).toBe(false);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.reported")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "candidate.produced")).toBe(false);

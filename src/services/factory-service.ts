@@ -2423,7 +2423,7 @@ export class FactoryService {
 
     const status = await this.git.worktreeStatus(payload.workspacePath);
     const checkResults = isInvestigation
-      ? (state.checks.length > 0 ? await this.runChecks(state.checks, payload.workspacePath) : [])
+      ? []
       : await this.runChecks(state.checks, payload.workspacePath);
     const failedCheck = checkResults.find((check) => !check.ok);
 
