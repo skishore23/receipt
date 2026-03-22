@@ -5427,6 +5427,7 @@ export class FactoryService {
       return [
         `## Validation Guidance`,
         `This is a CLI investigation task. Do not run the broad repo validation suite unless you changed repo files or this task explicitly owns validation.`,
+        `Helper evidence files written under .receipt/ do not count as repo changes for this purpose and should not trigger bun run build, bun run verify, or the full repo suite.`,
         ...(state.checks.length > 0
           ? [
               `Reserved full-suite commands if later evidence requires them:`,

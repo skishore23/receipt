@@ -439,6 +439,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
   expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");
+  expect(prompt).toContain("Helper evidence files written under .receipt/ do not count as repo changes");
   expect(prompt).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-infrastructure-aws/SKILL.md");
