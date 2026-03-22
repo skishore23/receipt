@@ -69,6 +69,32 @@ const createSchemaCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
+const createLastMessageHungCodexStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-last-message");
+  const scriptPath = path.join(dir, "codex-last-message-hang-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "(async () => {",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  await readAll();",
+    "  fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'last-message approved', handoff: 'last-message handoff' }), 'utf8');",
+    "  process.stderr.write('last message written\\n');",
+    "  setInterval(() => {}, 1000);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
 test("local codex executor completes once a task result file exists and output goes quiet", async () => {
   const root = await mkTmp("receipt-codex-executor-workspace");
   const stub = await createHungCodexStub();
@@ -142,6 +168,41 @@ test("local codex executor extracts tokens used from stdout", async () => {
 
   expect(result.exitCode).toBe(0);
   expect(result.tokensUsed).toBe(1234);
+});
+
+test("local codex executor completes once a structured last message exists and output goes quiet", async () => {
+  const root = await mkTmp("receipt-codex-executor-last-message-workspace");
+  const stub = await createLastMessageHungCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+
+  const startedAt = Date.now();
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    completionSignalPath: lastMessagePath,
+    completionQuietMs: 300,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+  const elapsed = Date.now() - startedAt;
+
+  expect(elapsed).toBeLessThan(5_000);
+  expect(result.exitCode).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(result.lastMessage).toContain("\"summary\":\"last-message approved\"");
+  await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("last message written");
 });
 
 test("local codex executor passes output schema and reasoning effort through to codex", async () => {

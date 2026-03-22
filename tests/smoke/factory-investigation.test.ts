@@ -388,6 +388,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
     },
   };
   let capturedSandboxMode: CodexExecutorInput["sandboxMode"];
+  let capturedCompletionSignalPath: CodexExecutorInput["completionSignalPath"];
   const { service, queue } = await createFactoryService({
     llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
       parsed: input.schema.parse({
@@ -399,6 +400,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
     }),
     codexRun: async (input) => {
       capturedSandboxMode = input.sandboxMode;
+      capturedCompletionSignalPath = input.completionSignalPath;
       const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
@@ -420,7 +422,13 @@ test("factory investigation: infrastructure task prompts require deterministic s
   const payload = taskJob!.payload as FactoryTaskJobPayload;
   await service.runTask(payload);
   const prompt = await fs.readFile(payload.promptPath, "utf-8");
+  const manifest = JSON.parse(await fs.readFile(payload.manifestPath, "utf-8")) as {
+    readonly profile?: {
+      readonly selectedSkills?: ReadonlyArray<string>;
+    };
+  };
   expect(capturedSandboxMode).toBe("danger-full-access");
+  expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
   expect(prompt).toContain("## Script-First Execution");
   expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
   expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
@@ -428,4 +436,8 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(prompt).toContain("use AWS only");
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
   expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
+  expect(prompt).toContain("skills/factory-infrastructure-aws/SKILL.md");
+  expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
+  expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-infrastructure-aws/SKILL.md");
+  expect(manifest.profile?.selectedSkills ?? []).not.toContain("skills/factory-run-orchestrator/SKILL.md");
 }, 120_000);

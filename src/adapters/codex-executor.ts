@@ -116,6 +116,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     await fsp.mkdir(path.dirname(input.stderrPath), { recursive: true });
     await Promise.all([
       fsp.writeFile(input.promptPath, input.prompt, "utf-8"),
+      fsp.writeFile(input.lastMessagePath, "", "utf-8"),
       fsp.writeFile(input.stdoutPath, "", "utf-8"),
       fsp.writeFile(input.stderrPath, "", "utf-8"),
     ]);

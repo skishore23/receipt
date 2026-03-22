@@ -803,6 +803,22 @@ export class FactoryService {
     };
   }
 
+  private workerTaskSkillRefs(selectedSkills: ReadonlyArray<string>): ReadonlyArray<string> {
+    return selectedSkills.filter((skillPath) =>
+      !skillPath.includes("skills/factory-run-orchestrator/")
+      && !skillPath.includes("skills\\factory-run-orchestrator\\")
+    );
+  }
+
+  private workerTaskProfile(profile: FactoryObjectiveProfileSnapshot): FactoryObjectiveProfileSnapshot {
+    const selectedSkills = this.workerTaskSkillRefs(profile.selectedSkills);
+    if (selectedSkills.length === profile.selectedSkills.length) return profile;
+    return {
+      ...profile,
+      selectedSkills,
+    };
+  }
+
   private async writeObjectiveProfileArtifacts(
     objectiveId: string,
     profile: FactoryObjectiveProfileSnapshot,
@@ -2356,6 +2372,8 @@ export class FactoryService {
       stderrPath: parsed.stderrPath,
       model: FACTORY_TASK_CODEX_MODEL,
       outputSchemaPath: resultSchemaPath,
+      completionSignalPath: parsed.lastMessagePath,
+      completionQuietMs: 1_500,
       reasoningEffort: severityWorkerReasoningEffort(parsed.objectiveMode, parsed.severity, task.taskKind),
       sandboxMode: parsed.profile.rootProfileId === "infrastructure" ? "danger-full-access" : undefined,
       objectiveId: parsed.objectiveId,
@@ -2703,6 +2721,7 @@ export class FactoryService {
       },
     ], opts?.expectedPrev);
 
+    const workerProfile = this.workerTaskProfile(profile);
     const payload: FactoryTaskJobPayload = {
       kind: "factory.task.run",
       objectiveId: state.objectiveId,
@@ -2725,9 +2744,9 @@ export class FactoryService {
       memoryConfigPath: manifest.memoryConfigPath,
       repoSkillPaths: manifest.repoSkillPaths,
       skillBundlePaths: manifest.skillBundlePaths,
-      profile,
+      profile: workerProfile,
       profilePromptHash: profile.promptHash,
-      profileSkillRefs: profile.selectedSkills,
+      profileSkillRefs: workerProfile.selectedSkills,
       sharedArtifactRefs: manifest.sharedArtifactRefs,
       contextRefs: manifest.contextRefs,
       integrationRef: state.integration.branchRef,
@@ -3102,6 +3121,8 @@ export class FactoryService {
       stderrPath: parsed.stderrPath,
       model: FACTORY_TASK_CODEX_MODEL,
       outputSchemaPath: resultSchemaPath,
+      completionSignalPath: parsed.lastMessagePath,
+      completionQuietMs: 1_500,
       reasoningEffort: "low",
       objectiveId: parsed.objectiveId,
       taskId: "publish",
@@ -4472,7 +4493,7 @@ export class FactoryService {
       .filter((receipt) => !focusedReceiptKeys.has(`${receipt.type}:${receipt.at}:${receipt.summary}`))
       .slice(0, 20)
       .reverse();
-    const profile = this.objectiveProfileForState(state);
+    const profile = this.workerTaskProfile(this.objectiveProfileForState(state));
     const [overview, objectiveMemory, integrationMemory, sharedProfile, cloudExecutionContext] = await Promise.all([
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, `${state.title}\n${task.title}`, 520),
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, state.title, 360),
@@ -4540,7 +4561,10 @@ export class FactoryService {
           .filter((report): report is FactoryInvestigationTaskReport => Boolean(report)),
         synthesized: state.investigation.synthesized,
       },
-      contextSources: this.buildContextSources(state, repoSkillPaths, sharedArtifactRefs),
+      contextSources: {
+        ...this.buildContextSources(state, repoSkillPaths, sharedArtifactRefs),
+        profileSkillRefs: profile.selectedSkills,
+      },
     };
   }
 
@@ -4858,7 +4882,7 @@ export class FactoryService {
     readonly sharedArtifactRefs: ReadonlyArray<GraphRef>;
     readonly contextRefs: ReadonlyArray<GraphRef>;
   }> {
-    const profile = this.objectiveProfileForState(state);
+    const profile = this.workerTaskProfile(this.objectiveProfileForState(state));
     const files = this.taskFilePaths(workspacePath, task.taskId);
     await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
     await fs.rm(files.resultPath, { force: true });
