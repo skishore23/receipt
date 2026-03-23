@@ -406,7 +406,7 @@ const buildFactorySituation = async (input: {
   readonly runId: string;
   readonly stream: string;
   readonly profile: FactoryChatResolvedProfile;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
   readonly factoryService: FactoryService;
   readonly dataDir?: string;
 }): Promise<string> => {
@@ -416,12 +416,13 @@ const buildFactorySituation = async (input: {
   const canInspectObjective = typeof input.factoryService.getObjective === "function"
     && typeof input.factoryService.getObjectiveDebug === "function"
     && typeof input.factoryService.listObjectiveReceipts === "function";
-  if (input.objectiveId && canInspectObjective) {
+  const objectiveId = input.getCurrentObjectiveId();
+  if (objectiveId && canInspectObjective) {
     try {
       const [detail, debug, receipts] = await Promise.all([
-        input.factoryService.getObjective(input.objectiveId),
-        input.factoryService.getObjectiveDebug(input.objectiveId),
-        input.factoryService.listObjectiveReceipts(input.objectiveId, { limit: 8 }),
+        input.factoryService.getObjective(objectiveId),
+        input.factoryService.getObjectiveDebug(objectiveId),
+        input.factoryService.listObjectiveReceipts(objectiveId, { limit: 8 }),
       ]);
       lines.push(`Objective: ${detail.title} (${detail.objectiveId})`);
       lines.push(`Status: ${detail.status} · phase ${detail.phase} · integration ${detail.integration.status}`);
@@ -444,14 +445,14 @@ const buildFactorySituation = async (input: {
         : undefined;
       const message = err instanceof Error ? err.message : undefined;
       if (status === 404 || message?.includes("not found")) {
-        lines.push(`Objective: ${input.objectiveId}`);
+        lines.push(`Objective: ${objectiveId}`);
         lines.push("Objective has not been created yet.");
       } else {
         throw err;
       }
     }
-  } else if (input.objectiveId) {
-    lines.push(`Objective: ${input.objectiveId}`);
+  } else if (objectiveId) {
+    lines.push(`Objective: ${objectiveId}`);
     lines.push("Objective detail is not available in this runtime.");
   } else if (activeChildren.length > 0) {
     lines.push("Active child jobs:");
@@ -489,7 +490,7 @@ const createCodexRunTool = (input: {
   readonly queue: JsonlQueue;
   readonly runId: string;
   readonly stream: string;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
   readonly memoryTools: MemoryTools;
   readonly profile: FactoryChatResolvedProfile;
 }): AgentToolExecutor =>
@@ -517,7 +518,7 @@ const createCodexRunTool = (input: {
         parentStream: input.stream,
         stream: input.stream,
         profileId: input.profile.root.id,
-        ...(input.objectiveId ? { objectiveId: input.objectiveId } : {}),
+        ...(input.getCurrentObjectiveId() ? { objectiveId: input.getCurrentObjectiveId() } : {}),
         mode: "read_only_probe",
         readOnly: true,
         task: prompt,
@@ -549,7 +550,7 @@ const createAsyncDelegateTool = (input: {
   readonly runId: string;
   readonly stream: string;
   readonly repoKey: string;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
   readonly memoryTools: MemoryTools;
   readonly profile: FactoryChatResolvedProfile;
 }): AgentToolExecutor =>
@@ -579,7 +580,7 @@ const createAsyncDelegateTool = (input: {
         parentRunId: input.runId,
         parentStream: input.stream,
         profileId: input.profile.root.id,
-        ...(input.objectiveId ? { objectiveId: input.objectiveId } : {}),
+        ...(input.getCurrentObjectiveId() ? { objectiveId: input.getCurrentObjectiveId() } : {}),
       },
     });
     const snapshot = normalizeJobSnapshot(created);
@@ -619,7 +620,7 @@ const createJobsListTool = (input: {
   readonly stream: string;
   readonly profile: FactoryChatResolvedProfile;
   readonly runId: string;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const limit = typeof toolInput.limit === "number" && Number.isFinite(toolInput.limit)
@@ -627,13 +628,14 @@ const createJobsListTool = (input: {
       : 10;
     const includeCompleted = toolInput.includeCompleted === true;
     const statusFilter = asString(toolInput.status);
+    const objectiveId = input.getCurrentObjectiveId();
     const jobs = await input.queue.listJobs({ limit: 120 });
     const filtered = jobs
       .filter((job) => jobMatchesProfileContext(job, {
         runId: input.runId,
         stream: input.stream,
         profileId: input.profile.root.id,
-        objectiveId: input.objectiveId,
+        objectiveId,
       }))
       .filter((job) => includeCompleted || (job.status !== "completed" && job.status !== "failed" && job.status !== "canceled"))
       .filter((job) => !statusFilter || job.status === statusFilter)
@@ -650,12 +652,13 @@ const createCodexStatusTool = (input: {
   readonly runId: string;
   readonly stream: string;
   readonly profile: FactoryChatResolvedProfile;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
   readonly dataDir?: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildStatus = async (): Promise<Record<string, unknown>> => {
+      const objectiveId = input.getCurrentObjectiveId();
       const jobId = asString(toolInput.jobId);
       if (jobId) {
         const job = await input.queue.getJob(jobId);
@@ -679,12 +682,12 @@ const createCodexStatusTool = (input: {
           runId: input.runId,
           stream: input.stream,
           profileId: input.profile.root.id,
-          objectiveId: input.objectiveId,
+          objectiveId,
         }))
         .filter((job) => includeCompleted || isActiveJobStatus(job.status))
         .sort((left, right) =>
-          codexJobPriority(right, { runId: input.runId, objectiveId: input.objectiveId })
-          - codexJobPriority(left, { runId: input.runId, objectiveId: input.objectiveId })
+          codexJobPriority(right, { runId: input.runId, objectiveId })
+          - codexJobPriority(left, { runId: input.runId, objectiveId })
           || right.updatedAt - left.updatedAt);
       const snapshots = await Promise.all(jobs.slice(0, limit).map((job) => codexJobSnapshot(job, input.dataDir)));
       return {
@@ -723,10 +726,11 @@ const createCodexLogsTool = (input: {
   readonly runId: string;
   readonly stream: string;
   readonly profile: FactoryChatResolvedProfile;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
   readonly dataDir: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
+    const objectiveId = input.getCurrentObjectiveId();
     const requestedJobId = asString(toolInput.jobId);
     const targetJob = requestedJobId
       ? await input.queue.getJob(requestedJobId)
@@ -736,7 +740,7 @@ const createCodexLogsTool = (input: {
           runId: input.runId,
           stream: input.stream,
           profileId: input.profile.root.id,
-          objectiveId: input.objectiveId,
+          objectiveId,
         }))
         .sort((left, right) => right.updatedAt - left.updatedAt)[0];
     if (!targetJob) throw new Error(requestedJobId ? `job ${requestedJobId} not found` : "no codex jobs found for this context");
@@ -823,11 +827,12 @@ const createFactoryDispatchTool = (input: {
   readonly stream: string;
   readonly memoryTools: MemoryTools;
   readonly profileId: string;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
+  readonly setCurrentObjectiveId: (objectiveId: string | undefined) => void;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const requestedObjectiveId = asString(toolInput.objectiveId);
-    const objectiveId = requestedObjectiveId ?? input.objectiveId;
+    const objectiveId = requestedObjectiveId ?? input.getCurrentObjectiveId();
     const action = asString(toolInput.action) ?? (objectiveId ? "react" : "create");
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
     let reused = false;
@@ -839,7 +844,7 @@ const createFactoryDispatchTool = (input: {
       const existing = existingObjectiveId
         ? await input.factoryService.getObjective(existingObjectiveId).catch(() => undefined)
         : undefined;
-      if (existing && !existing.archivedAt && existing.status !== "completed") {
+      if (existing && !existing.archivedAt && !isTerminalObjectiveStatus(existing.status)) {
         detail = await input.factoryService.reactObjectiveWithNote(existing.objectiveId, prompt);
         reused = true;
         bindingReason = "dispatch_reuse";
@@ -884,7 +889,7 @@ const createFactoryDispatchTool = (input: {
       throw new Error(`unsupported factory.dispatch action '${action}'`);
     }
     const summary = summarizeObjective(detail);
-    if (detail.archivedAt || detail.status === "completed") {
+    if (detail.archivedAt || isTerminalObjectiveStatus(detail.status)) {
       latestObjectiveByStream.delete(input.stream);
     } else {
       latestObjectiveByStream.set(input.stream, detail.objectiveId);
@@ -895,6 +900,7 @@ const createFactoryDispatchTool = (input: {
       toolSummary("factory", summary.status, summary.summary),
       { runId: input.runId, objectiveId: summary.objectiveId, action },
     );
+    input.setCurrentObjectiveId(detail.objectiveId);
     const chatId = chatIdFromFactoryStream(input.stream);
     return {
       output: JSON.stringify({ worker: "factory", action, reused, ...summary }, null, 2),
@@ -913,10 +919,10 @@ const createFactoryDispatchTool = (input: {
 
 const createFactoryStatusTool = (input: {
   readonly factoryService: FactoryService;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     if (!objectiveId) throw new Error("factory.status requires objectiveId");
     const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildStatus = async (): Promise<Record<string, unknown>> => {
@@ -961,10 +967,10 @@ const createFactoryStatusTool = (input: {
 
 const createFactoryOutputTool = (input: {
   readonly factoryService: FactoryService;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     const focusKind = asString(toolInput.focusKind);
     const focusId = asString(toolInput.focusId);
     if (!objectiveId) throw new Error("factory.output requires objectiveId");
@@ -994,10 +1000,10 @@ const createFactoryOutputTool = (input: {
 
 const createFactoryReceiptsTool = (input: {
   readonly factoryService: FactoryService;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     if (!objectiveId) throw new Error("factory.receipts requires objectiveId");
     const limit = typeof toolInput.limit === "number" && Number.isFinite(toolInput.limit)
       ? Math.max(1, Math.min(Math.floor(toolInput.limit), 40))
@@ -1076,7 +1082,7 @@ const withProfileOrchestrationPolicy = (
     readonly queue: JsonlQueue;
     readonly runId: string;
     readonly factoryService: FactoryService;
-    readonly objectiveId?: string;
+    readonly getCurrentObjectiveId: () => string | undefined;
   },
   tools: Readonly<Record<string, AgentToolExecutor>>,
 ): Readonly<Record<string, AgentToolExecutor>> => {
@@ -1092,7 +1098,7 @@ const withProfileOrchestrationPolicy = (
     const terminalObjectiveRead = !blockingMonitorPoll
       && terminalObjectiveReadTools.has(name)
       && await (async (): Promise<boolean> => {
-        const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+        const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
         if (!objectiveId) return false;
         if (terminalObjectiveCache.has(objectiveId)) return true;
         const objective = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
@@ -1181,7 +1187,7 @@ const createProfileHandoffTool = (input: {
   readonly config: FactoryChatRunConfig;
   readonly memoryTools: MemoryTools;
   readonly chatId?: string;
-  readonly objectiveId?: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const targetProfileId = asString(toolInput.profileId) ?? asString(toolInput.targetProfileId);
@@ -1197,9 +1203,10 @@ const createProfileHandoffTool = (input: {
     const reason = asString(toolInput.reason) ?? `handoff from ${input.currentProfile.root.id}`;
     const handoffRunId = nextId("run");
     const chatId = input.chatId ?? chatIdFromFactoryStream(input.stream);
+    const objectiveId = input.getCurrentObjectiveId();
     const stream = chatId
       ? factoryChatSessionStream(input.repoRoot, target.root.id, chatId)
-      : factoryChatStream(input.repoRoot, target.root.id, input.objectiveId);
+      : factoryChatStream(input.repoRoot, target.root.id, objectiveId);
     const config = normalizeFactoryChatConfig({
       maxIterations: input.config.maxIterations,
       maxToolOutputChars: input.config.maxToolOutputChars,
@@ -1219,7 +1226,7 @@ const createProfileHandoffTool = (input: {
         problem: input.problem,
         profileId: target.root.id,
         ...(chatId ? { chatId } : {}),
-        ...(input.objectiveId ? { objectiveId: input.objectiveId } : {}),
+        ...(objectiveId ? { objectiveId } : {}),
         config,
       },
     });
@@ -1245,7 +1252,7 @@ const createProfileHandoffTool = (input: {
         jobId: created.id,
         runId: handoffRunId,
         stream,
-        link: `/factory?profile=${encodeURIComponent(target.root.id)}${chatId ? `&chat=${encodeURIComponent(chatId)}` : ""}${input.objectiveId ? `&thread=${encodeURIComponent(input.objectiveId)}` : ""}&job=${encodeURIComponent(created.id)}&run=${encodeURIComponent(handoffRunId)}`,
+        link: `/factory?profile=${encodeURIComponent(target.root.id)}${chatId ? `&chat=${encodeURIComponent(chatId)}` : ""}${objectiveId ? `&thread=${encodeURIComponent(objectiveId)}` : ""}&job=${encodeURIComponent(created.id)}&run=${encodeURIComponent(handoffRunId)}`,
       }, null, 2),
       summary: `queued handoff to ${target.root.label}`,
       events: [{
@@ -1280,6 +1287,11 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   const resolvedStream = resolvedChatId
     ? factoryChatSessionStream(repoRoot, resolvedProfile.root.id, resolvedChatId)
     : asString(input.stream) ?? factoryChatStream(repoRoot, resolvedProfile.root.id, input.objectiveId);
+  let currentObjectiveId = input.objectiveId;
+  const getCurrentObjectiveId = (): string | undefined => currentObjectiveId;
+  const setCurrentObjectiveId = (objectiveId: string | undefined): void => {
+    currentObjectiveId = objectiveId;
+  };
   const resolvedMemoryScope = input.config.memoryScope === FACTORY_CHAT_DEFAULT_CONFIG.memoryScope
     ? (input.objectiveId
       ? objectiveMemoryScope(repoKey, resolvedProfile.root.id, input.objectiveId)
@@ -1290,14 +1302,14 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     queue: input.queue,
     runId: input.runId,
     factoryService: input.factoryService,
-    objectiveId: input.objectiveId,
+    getCurrentObjectiveId,
   }, {
     "agent.delegate": createAsyncDelegateTool({
       queue: input.queue,
       runId: input.runId,
       stream: input.stream,
       repoKey,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
       memoryTools: input.memoryTools,
       profile: resolvedProfile,
     }),
@@ -1310,7 +1322,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       runId: input.runId,
       stream: input.stream,
       profile: resolvedProfile,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
     }),
     "repo.status": createRepoStatusTool({
       repoRoot,
@@ -1320,7 +1332,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       runId: input.runId,
       stream: input.stream,
       profile: resolvedProfile,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
       dataDir: input.dataDir,
     }),
     ...(input.dataDir ? {
@@ -1329,7 +1341,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         runId: input.runId,
         stream: input.stream,
         profile: resolvedProfile,
-        objectiveId: input.objectiveId,
+        getCurrentObjectiveId,
         dataDir: input.dataDir,
       }),
     } : {}),
@@ -1343,7 +1355,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       queue: input.queue,
       runId: input.runId,
       stream: input.stream,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
       memoryTools: input.memoryTools,
       profile: resolvedProfile,
     }),
@@ -1354,19 +1366,20 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       stream: input.stream,
       memoryTools: input.memoryTools,
       profileId: resolvedProfile.root.id,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
+      setCurrentObjectiveId,
     }),
     "factory.status": createFactoryStatusTool({
       factoryService: input.factoryService,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
     }),
     "factory.output": createFactoryOutputTool({
       factoryService: input.factoryService,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
     }),
     "factory.receipts": createFactoryReceiptsTool({
       factoryService: input.factoryService,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
     }),
     "profile.handoff": createProfileHandoffTool({
       currentProfile: resolvedProfile,
@@ -1380,7 +1393,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       config: input.config,
       memoryTools: input.memoryTools,
       chatId: resolvedChatId,
-      objectiveId: input.objectiveId,
+      getCurrentObjectiveId,
     }),
     ...(input.extraTools ?? {}),
   });
@@ -1389,6 +1402,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     const nextMaxIterations = nextIterationBudget(config.maxIterations);
     if (nextMaxIterations === undefined) return undefined;
     const nextRunId = nextId("run");
+    const objectiveId = getCurrentObjectiveId();
     const nextConfig = normalizeFactoryChatConfig({
       ...input.config,
       maxIterations: nextMaxIterations,
@@ -1407,7 +1421,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         problem,
         profileId: resolvedProfile.root.id,
         ...(resolvedChatId ? { chatId: resolvedChatId } : {}),
-        ...(input.objectiveId ? { objectiveId: input.objectiveId } : {}),
+        ...(objectiveId ? { objectiveId } : {}),
         config: nextConfig,
         continuationDepth: continuationDepth + 1,
       },
@@ -1423,7 +1437,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         nextRunId,
         nextJobId: created.id,
         profileId: resolvedProfile.root.id,
-        objectiveId: input.objectiveId,
+        objectiveId,
         previousMaxIterations: config.maxIterations,
         nextMaxIterations,
         continuationDepth: continuationDepth + 1,
@@ -1495,7 +1509,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         runId: input.runId,
         stream: input.stream,
         profile: resolvedProfile,
-        objectiveId: input.objectiveId,
+        getCurrentObjectiveId,
         factoryService: input.factoryService,
         dataDir: input.dataDir,
       }),
