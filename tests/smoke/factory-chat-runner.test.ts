@@ -945,6 +945,141 @@ test("factory chat runner: blocking monitor polls do not consume discovery budge
   expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain('"waitedMs"');
 });
 
+test("factory chat runner: terminal-objective reads do not consume discovery budget", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-terminal-read-budget");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["factory.status", "factory.receipts", "factory.output"],
+    orchestration: {
+      executionMode: "supervisor",
+      discoveryBudget: 0,
+      suspendOnAsyncChild: true,
+      allowPollingWhileChildRunning: false,
+      finalWhileChildRunning: "allow",
+      childDedupe: "by_run_and_prompt",
+    },
+  });
+
+  const actions = [
+    {
+      thought: "inspect the completed objective summary",
+      action: {
+        type: "tool",
+        name: "factory.status",
+        input: "{}",
+        text: null,
+      },
+    },
+    {
+      thought: "inspect the saved receipts",
+      action: {
+        type: "tool",
+        name: "factory.receipts",
+        input: JSON.stringify({ limit: 4 }),
+        text: null,
+      },
+    },
+    {
+      thought: "inspect the saved task output",
+      action: {
+        type: "tool",
+        name: "factory.output",
+        input: JSON.stringify({ focusKind: "task", focusId: "task_01" }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Read the completed objective directly from saved state.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_terminal_read_budget",
+    problem: "Show the saved results from the completed objective.",
+    profileId: "software",
+    objectiveId: "objective_done",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    dataDir,
+    factoryService: createFactoryServiceStub({
+      getObjective: async (objectiveId: string) => ({
+        objectiveId,
+        title: "Completed objective",
+        status: "completed",
+        phase: "completed",
+        latestSummary: "Inventory capture is complete.",
+        integration: {
+          status: "promoted",
+          queuedCandidateIds: [],
+        },
+        latestDecision: {
+          summary: "Use the saved receipts and task output.",
+          at: Date.now(),
+          source: "runtime",
+        },
+        blockedExplanation: undefined,
+        evidenceCards: [],
+        tasks: [],
+      }),
+      getObjectiveLiveOutput: async (objectiveId: string, focusKind: string, focusId: string) => ({
+        objectiveId,
+        focusKind,
+        focusId,
+        title: "Saved output",
+        status: "completed",
+        active: false,
+        summary: "Captured the completed task output.",
+        stdoutTail: "bucket-a\nbucket-b",
+      }),
+    }) as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("completed objective");
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_terminal_read_budget"));
+  const budgetError = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && typeof receipt.body.error === "string"
+    && receipt.body.error.includes("Profile discovery budget exhausted")
+  )?.body;
+  expect(budgetError).toBeUndefined();
+
+  const observations = chain.filter((receipt) => receipt.body.type === "tool.observed").map((receipt) => receipt.body);
+  expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('"status": "completed"');
+  expect(observations.find((event) => event.tool === "factory.receipts" && "output" in event)?.output ?? "").toContain('"receipts"');
+  expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain("Captured the completed task output.");
+});
+
 test("factory chat runner: software profile rejects follow-up polling while a codex child is still active", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-child-poll-guard");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -1387,7 +1522,7 @@ test("factory chat runner: startup binds the current objective to the chat sessi
   expect(bound && "reason" in bound ? bound.reason : "").toBe("startup");
 });
 
-test("factory chat runner: factory.dispatch create reuses the bound thread objective", async () => {
+test("factory chat runner: factory.dispatch create starts a new objective instead of reusing the bound thread objective", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-dispatch-thread");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1430,7 +1565,7 @@ test("factory chat runner: factory.dispatch create reuses the bound thread objec
   });
   const actions = [
     {
-      thought: "reuse the existing thread objective",
+      thought: "start a new objective for the follow-up work",
       action: {
         type: "tool",
         name: "factory.dispatch",
@@ -1444,7 +1579,7 @@ test("factory chat runner: factory.dispatch create reuses the bound thread objec
         type: "final",
         name: null,
         input: "{}",
-        text: "Reused the current thread objective.",
+        text: "Started a new objective for the follow-up work.",
       },
     },
   ];
@@ -1475,18 +1610,15 @@ test("factory chat runner: factory.dispatch create reuses the bound thread objec
   });
 
   expect(result.status).toBe("completed");
-  expect(createCalled).toBe(false);
-  expect(reacted).toEqual({
-    objectiveId: "objective_demo",
-    message: "Tighten the current thread scope.",
-  });
+  expect(createCalled).toBe(true);
+  expect(reacted).toBeUndefined();
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_thread"));
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
-  expect(observed && "output" in observed ? observed.output : "").toContain('"reused": true');
+  expect(observed && "output" in observed ? observed.output : "").toContain('"reused": false');
   const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
   const latestBound = boundEvents.at(-1);
-  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_demo");
-  expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_reuse");
+  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_created");
+  expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
 });
 
 test("factory chat runner: exhausted slices queue an automatic continuation on the same thread with a higher budget", async () => {

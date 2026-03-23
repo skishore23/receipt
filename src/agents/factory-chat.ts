@@ -98,6 +98,7 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- Profiles are orchestration-only. Do not claim this chat edited code directly.",
   "- Use `codex.run` only for lightweight read-only inspection or evidence-gathering in the current repo.",
   "- Use `factory.dispatch` for any code-changing delivery work, any substantive infrastructure investigation, or when the next step should run in an objective worktree.",
+  "- If a completed objective already contains the answer in `factory.status`, `factory.receipts`, or `factory.output`, answer directly instead of dispatching new work just to restate saved results.",
   "- Before `react`, `promote`, `cancel`, or duplicate dispatch, ground the decision in the current situation, receipts, or live output.",
   "- When child work is already active, prefer `codex.status`, `factory.status`, or `factory.output` with `waitForChangeMs` so you wait for real progress instead of tight polling.",
   "- If investigation reports disagree or reconciliation is pending, do not finalize yet. Inspect status/receipts and wait for the objective to align or block.",
@@ -825,7 +826,8 @@ const createFactoryDispatchTool = (input: {
   readonly objectiveId?: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+    const requestedObjectiveId = asString(toolInput.objectiveId);
+    const objectiveId = requestedObjectiveId ?? input.objectiveId;
     const action = asString(toolInput.action) ?? (objectiveId ? "react" : "create");
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
     let reused = false;
@@ -833,40 +835,34 @@ const createFactoryDispatchTool = (input: {
     if (action === "create") {
       const prompt = asString(toolInput.prompt);
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
-      if (objectiveId) {
-        detail = await input.factoryService.reactObjectiveWithNote(objectiveId, prompt);
+      const existingObjectiveId = latestObjectiveByStream.get(input.stream);
+      const existing = existingObjectiveId
+        ? await input.factoryService.getObjective(existingObjectiveId).catch(() => undefined)
+        : undefined;
+      if (existing && !existing.archivedAt && existing.status !== "completed") {
+        detail = await input.factoryService.reactObjectiveWithNote(existing.objectiveId, prompt);
         reused = true;
         bindingReason = "dispatch_reuse";
       } else {
-        const existingObjectiveId = latestObjectiveByStream.get(input.stream);
-        const existing = existingObjectiveId
-          ? await input.factoryService.getObjective(existingObjectiveId).catch(() => undefined)
-          : undefined;
-        if (existing && !existing.archivedAt && existing.status !== "completed") {
-          detail = await input.factoryService.reactObjectiveWithNote(existing.objectiveId, prompt);
-          reused = true;
-          bindingReason = "dispatch_reuse";
-        } else {
-          const payload: FactoryObjectiveInput = {
-            objectiveId,
-            title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
-            prompt,
-            baseHash: asString(toolInput.baseHash),
-            objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
-              ? toolInput.objectiveMode
-              : undefined,
-            severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
-              && toolInput.severity >= 1 && toolInput.severity <= 5
-              ? toolInput.severity as FactoryObjectiveInput["severity"]
-              : undefined,
-            checks: asStringList(toolInput.checks),
-            channel: asString(toolInput.channel),
-            profileId: input.profileId,
-            startImmediately: true,
-          };
-          detail = await input.factoryService.createObjective(payload);
-          bindingReason = "dispatch_create";
-        }
+        const payload: FactoryObjectiveInput = {
+          objectiveId: requestedObjectiveId,
+          title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
+          prompt,
+          baseHash: asString(toolInput.baseHash),
+          objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
+            ? toolInput.objectiveMode
+            : undefined,
+          severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
+            && toolInput.severity >= 1 && toolInput.severity <= 5
+            ? toolInput.severity as FactoryObjectiveInput["severity"]
+            : undefined,
+          checks: asStringList(toolInput.checks),
+          channel: asString(toolInput.channel),
+          profileId: input.profileId,
+          startImmediately: true,
+        };
+        detail = await input.factoryService.createObjective(payload);
+        bindingReason = "dispatch_create";
       }
     } else if (action === "react") {
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
@@ -1065,11 +1061,22 @@ const hasPositiveWaitForChangeMs = (toolInput: Record<string, unknown>): boolean
   && Number.isFinite(toolInput.waitForChangeMs)
   && toolInput.waitForChangeMs > 0;
 
+const terminalObjectiveReadTools = new Set([
+  "factory.status",
+  "factory.output",
+  "factory.receipts",
+]);
+
+const isTerminalObjectiveStatus = (status: unknown): boolean =>
+  status === "completed" || status === "failed" || status === "canceled";
+
 const withProfileOrchestrationPolicy = (
   input: {
     readonly profile: FactoryChatResolvedProfile;
     readonly queue: JsonlQueue;
     readonly runId: string;
+    readonly factoryService: FactoryService;
+    readonly objectiveId?: string;
   },
   tools: Readonly<Record<string, AgentToolExecutor>>,
 ): Readonly<Record<string, AgentToolExecutor>> => {
@@ -1077,10 +1084,22 @@ const withProfileOrchestrationPolicy = (
   let discoverySteps = 0;
   let deliveryStarted = false;
   const activeAsyncChildJobs = new Set<string>();
+  const terminalObjectiveCache = new Set<string>();
   return Object.fromEntries(Object.entries(tools).map(([name, executor]) => [name, async (toolInput) => {
     const blockingMonitorPoll = policy.allowPollingWhileChildRunning
       && monitorWhileChildRunningTools.has(name)
       && hasPositiveWaitForChangeMs(toolInput);
+    const terminalObjectiveRead = !blockingMonitorPoll
+      && terminalObjectiveReadTools.has(name)
+      && await (async (): Promise<boolean> => {
+        const objectiveId = asString(toolInput.objectiveId) ?? input.objectiveId;
+        if (!objectiveId) return false;
+        if (terminalObjectiveCache.has(objectiveId)) return true;
+        const objective = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
+        const terminal = Boolean(objective?.archivedAt) || isTerminalObjectiveStatus(objective?.status);
+        if (terminal) terminalObjectiveCache.add(objectiveId);
+        return terminal;
+      })();
     if (activeAsyncChildJobs.size > 0 && policy.suspendOnAsyncChild) {
       const activeJobs = (await Promise.all(
         [...activeAsyncChildJobs].map(async (jobId) => ({ jobId, job: await input.queue.getJob(jobId) })),
@@ -1105,6 +1124,7 @@ const withProfileOrchestrationPolicy = (
       && typeof policy.discoveryBudget === "number"
       && discoveryTools.has(name)
       && !blockingMonitorPoll
+      && !terminalObjectiveRead
     ) {
       discoverySteps += 1;
       if (discoverySteps > policy.discoveryBudget) {
@@ -1269,6 +1289,8 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     profile: resolvedProfile,
     queue: input.queue,
     runId: input.runId,
+    factoryService: input.factoryService,
+    objectiveId: input.objectiveId,
   }, {
     "agent.delegate": createAsyncDelegateTool({
       queue: input.queue,
