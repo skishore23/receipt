@@ -325,6 +325,17 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
         arn: "arn:aws:iam::445567089271:user/csagent-api-service",
         userId: "AIDATEST",
       },
+      ec2RegionScope: {
+        regions: [
+          { regionName: "us-west-2", optInStatus: "opt-in-not-required", endpoint: "ec2.us-west-2.amazonaws.com", queryable: true },
+          { regionName: "us-east-1", optInStatus: "opt-in-not-required", endpoint: "ec2.us-east-1.amazonaws.com", queryable: true },
+          { regionName: "af-south-1", optInStatus: "not-opted-in", endpoint: "ec2.af-south-1.amazonaws.com", queryable: false },
+        ],
+        queryableRegions: ["us-west-2", "us-east-1"],
+        skippedRegions: [
+          { regionName: "af-south-1", optInStatus: "not-opted-in", endpoint: "ec2.af-south-1.amazonaws.com" },
+        ],
+      },
     },
     gcp: {
       cliPath: "/opt/homebrew/bin/gcloud",
@@ -370,6 +381,13 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
         readonly callerIdentity?: {
           readonly accountId?: string;
         };
+        readonly ec2RegionScope?: {
+          readonly queryableRegions?: ReadonlyArray<string>;
+          readonly skippedRegions?: ReadonlyArray<{
+            readonly regionName?: string;
+            readonly optInStatus?: string;
+          }>;
+        };
       };
       readonly gcp?: unknown;
       readonly azure?: unknown;
@@ -379,13 +397,18 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   expect(parsedContextPack.cloudExecutionContext?.availableProviders).toEqual(["aws"]);
   expect(parsedContextPack.cloudExecutionContext?.activeProviders).toEqual(["aws"]);
   expect(parsedContextPack.cloudExecutionContext?.aws?.callerIdentity?.accountId).toBe("445567089271");
+  expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.queryableRegions).toEqual(["us-west-2", "us-east-1"]);
+  expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.skippedRegions?.[0]?.regionName).toBe("af-south-1");
+  expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.skippedRegions?.[0]?.optInStatus).toBe("not-opted-in");
   expect(parsedContextPack.cloudExecutionContext?.gcp).toBeUndefined();
   expect(parsedContextPack.cloudExecutionContext?.azure).toBeUndefined();
   expect(contextPack).toContain("Infrastructure profile is AWS-only for now");
+  expect(contextPack).toContain("skip 1 not-opted-in regions");
   expect(contextPack).not.toContain("gcloud is available");
   expect(manifest).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(packet.renderedPrompt).toContain("AWS CLI is available via profile default");
   expect(packet.renderedPrompt).toContain("Infrastructure profile is AWS-only for now");
+  expect(packet.renderedPrompt).toContain("skip 1 not-opted-in regions");
   expect(packet.renderedPrompt).not.toContain("Multiple cloud providers are active locally");
   expect(packet.renderedPrompt).not.toContain("gcloud is available");
 }, 120_000);
@@ -406,6 +429,17 @@ test("factory investigation: infrastructure task prompts require deterministic s
         accountId: "445567089271",
         arn: "arn:aws:iam::445567089271:user/csagent-api-service",
         userId: "AIDATEST",
+      },
+      ec2RegionScope: {
+        regions: [
+          { regionName: "us-west-2", optInStatus: "opt-in-not-required", endpoint: "ec2.us-west-2.amazonaws.com", queryable: true },
+          { regionName: "us-east-1", optInStatus: "opt-in-not-required", endpoint: "ec2.us-east-1.amazonaws.com", queryable: true },
+          { regionName: "af-south-1", optInStatus: "not-opted-in", endpoint: "ec2.af-south-1.amazonaws.com", queryable: false },
+        ],
+        queryableRegions: ["us-west-2", "us-east-1"],
+        skippedRegions: [
+          { regionName: "af-south-1", optInStatus: "not-opted-in", endpoint: "ec2.af-south-1.amazonaws.com" },
+        ],
       },
     },
   };
@@ -463,6 +497,9 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(prompt).toContain("capture `aws sts get-caller-identity` in the script first");
   expect(prompt).toContain("use AWS only");
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
+  expect(prompt).toContain("do not blindly loop raw `aws ec2 describe-regions --all-regions` output");
+  expect(prompt).toContain("bash skills/factory-infrastructure-aws/scripts/aws-account-scope.sh");
+  expect(prompt).toContain("Treat `not-opted-in` regions as skipped scope, not as a global credential failure");
   expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
   expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");

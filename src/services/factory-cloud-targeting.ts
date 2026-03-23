@@ -1,4 +1,9 @@
-import type { FactoryAwsExecutionContext, FactoryCloudExecutionContext } from "./factory-cloud-context";
+import {
+  buildAwsEc2RegionScopeGuidance,
+  summarizeAwsEc2RegionScope,
+  type FactoryAwsExecutionContext,
+  type FactoryCloudExecutionContext,
+} from "./factory-cloud-context";
 
 const AWS_INFRA_GUIDANCE =
   "Infrastructure profile is AWS-only for now. Ignore other mounted cloud sessions and fail fast with the exact AWS CLI error if AWS access is unavailable.";
@@ -16,7 +21,8 @@ const buildAwsInfraSummary = (aws: FactoryAwsExecutionContext | undefined): stri
   return [
     AWS_INFRA_GUIDANCE,
     `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}; active identity ${aws.callerIdentity.arn} in account ${aws.callerIdentity.accountId}${aws.defaultRegion ? ` with region ${aws.defaultRegion}` : ""}.`,
-  ].join(" ");
+    summarizeAwsEc2RegionScope(aws.ec2RegionScope) ?? "",
+  ].filter(Boolean).join(" ");
 };
 
 const buildAwsInfraGuidance = (aws: FactoryAwsExecutionContext | undefined): ReadonlyArray<string> => {
@@ -24,6 +30,8 @@ const buildAwsInfraGuidance = (aws: FactoryAwsExecutionContext | undefined): Rea
   if (aws?.callerIdentity) {
     guidance.push(`AWS bucket listing is global for the active account ${aws.callerIdentity.accountId}; region is secondary unless the objective asks for regional filtering.`);
   }
+  const ec2ScopeGuidance = buildAwsEc2RegionScopeGuidance(aws?.ec2RegionScope);
+  if (ec2ScopeGuidance) guidance.push(ec2ScopeGuidance);
   return guidance;
 };
 

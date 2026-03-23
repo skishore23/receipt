@@ -28,6 +28,24 @@ export type FactoryAwsExecutionContext = {
     readonly arn: string;
     readonly userId?: string;
   };
+  readonly ec2RegionScope?: FactoryAwsEc2RegionScope;
+};
+
+export type FactoryAwsEc2Region = {
+  readonly regionName: string;
+  readonly optInStatus?: string;
+  readonly endpoint?: string;
+  readonly queryable: boolean;
+};
+
+export type FactoryAwsEc2RegionScope = {
+  readonly regions: ReadonlyArray<FactoryAwsEc2Region>;
+  readonly queryableRegions: ReadonlyArray<string>;
+  readonly skippedRegions: ReadonlyArray<{
+    readonly regionName: string;
+    readonly optInStatus?: string;
+    readonly endpoint?: string;
+  }>;
 };
 
 export type FactoryGcpExecutionContext = {
@@ -74,6 +92,72 @@ const parseJson = <T>(value: string): T | undefined => {
   } catch {
     return undefined;
   }
+};
+
+const AWS_EC2_QUERYABLE_OPT_IN_STATUSES = new Set([
+  "opt-in-not-required",
+  "opted-in",
+]);
+
+const withOptionalAwsProfile = (
+  args: ReadonlyArray<string>,
+  selectedProfile: string | undefined,
+): string[] => {
+  if (!selectedProfile || process.env.AWS_PROFILE) return [...args];
+  return [...args, "--profile", selectedProfile];
+};
+
+const parseAwsEc2RegionScope = (value: string): FactoryAwsEc2RegionScope | undefined => {
+  const parsed = parseJson<ReadonlyArray<{
+    readonly RegionName?: string;
+    readonly OptInStatus?: string;
+    readonly Endpoint?: string;
+  }>>(value);
+  if (!Array.isArray(parsed)) return undefined;
+  const regions = parsed
+    .map((entry) => {
+      const regionName = trim(entry.RegionName);
+      if (!regionName) return undefined;
+      const optInStatus = trim(entry.OptInStatus);
+      const endpoint = trim(entry.Endpoint);
+      return {
+        regionName,
+        optInStatus,
+        endpoint,
+        queryable: optInStatus ? AWS_EC2_QUERYABLE_OPT_IN_STATUSES.has(optInStatus) : false,
+      } satisfies FactoryAwsEc2Region;
+    })
+    .filter((entry): entry is FactoryAwsEc2Region => Boolean(entry));
+  return {
+    regions,
+    queryableRegions: regions.filter((entry) => entry.queryable).map((entry) => entry.regionName),
+    skippedRegions: regions
+      .filter((entry) => !entry.queryable)
+      .map(({ regionName, optInStatus, endpoint }) => ({
+        regionName,
+        optInStatus,
+        endpoint,
+      })),
+  };
+};
+
+export const summarizeAwsEc2RegionScope = (
+  scope: FactoryAwsEc2RegionScope | undefined,
+): string | undefined => {
+  if (!scope) return undefined;
+  const skippedCount = scope.skippedRegions.length;
+  return skippedCount > 0
+    ? `EC2 regional scope for this account: ${scope.queryableRegions.length} queryable regions; skip ${skippedCount} not-opted-in regions in cross-region EC2 inventory.`
+    : `EC2 regional scope for this account: ${scope.queryableRegions.length} queryable regions.`;
+};
+
+export const buildAwsEc2RegionScopeGuidance = (
+  scope: FactoryAwsEc2RegionScope | undefined,
+): string | undefined => {
+  if (!scope) return undefined;
+  return scope.skippedRegions.length > 0
+    ? `For cross-region EC2 inventory in this account, use only the mounted queryable regions and skip not-opted-in regions instead of treating their failures as global credential problems.`
+    : `For cross-region EC2 inventory in this account, use the mounted queryable regions from the current AWS context.`;
 };
 
 const defaultRunner: FactoryCloudCommandRunner = async (command, args) => {
@@ -123,9 +207,21 @@ const scanAwsExecutionContext = async (
   const regionEnv = trim(process.env.AWS_REGION) ?? trim(process.env.AWS_DEFAULT_REGION);
   const regionArgs = selectedProfile ? ["configure", "get", "region", "--profile", selectedProfile] : ["configure", "get", "region"];
   const regionResult = regionEnv ? undefined : await runner("aws", regionArgs);
-  const identityArgs = ["sts", "get-caller-identity", "--output", "json"];
-  if (selectedProfile && !process.env.AWS_PROFILE) identityArgs.push("--profile", selectedProfile);
-  const identityResult = await runner("aws", identityArgs);
+  const identityResult = await runner("aws", withOptionalAwsProfile([
+    "sts",
+    "get-caller-identity",
+    "--output",
+    "json",
+  ], selectedProfile));
+  const ec2RegionScopeResult = await runner("aws", withOptionalAwsProfile([
+    "ec2",
+    "describe-regions",
+    "--all-regions",
+    "--query",
+    "Regions[].{RegionName:RegionName,OptInStatus:OptInStatus,Endpoint:Endpoint}",
+    "--output",
+    "json",
+  ], selectedProfile));
   const identityJson = identityResult.ok
     ? parseJson<{ readonly Account?: string; readonly Arn?: string; readonly UserId?: string }>(identityResult.stdout)
     : undefined;
@@ -142,6 +238,7 @@ const scanAwsExecutionContext = async (
           userId: trim(identityJson.UserId),
         }
       : undefined,
+    ec2RegionScope: ec2RegionScopeResult.ok ? parseAwsEc2RegionScope(ec2RegionScopeResult.stdout) : undefined,
   };
 };
 
@@ -225,6 +322,7 @@ export const scanFactoryCloudExecutionContext = async (
     aws?.callerIdentity
       ? `AWS bucket listing is global for the active account ${aws.callerIdentity.accountId}; region is secondary unless the objective asks for regional filtering.`
       : "",
+    buildAwsEc2RegionScopeGuidance(aws?.ec2RegionScope),
   ].filter(Boolean);
   const summaryParts = [
     aws
@@ -232,6 +330,7 @@ export const scanFactoryCloudExecutionContext = async (
         ? `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}; active identity ${aws.callerIdentity.arn} in account ${aws.callerIdentity.accountId}${aws.defaultRegion ? ` with region ${aws.defaultRegion}` : ""}.`
         : `AWS CLI is available${aws.selectedProfile ? ` with profile ${aws.selectedProfile}` : ""}, but no active caller identity was confirmed.`
       : "",
+    summarizeAwsEc2RegionScope(aws?.ec2RegionScope),
     gcp
       ? gcp.activeAccount
         ? `gcloud is available with account ${gcp.activeAccount}${gcp.activeProject ? ` and project ${gcp.activeProject}` : ""}.`

@@ -29,6 +29,18 @@ test("factory context instructions: checked-in skill covers commands, memory sco
   expect(failures).toContain("Do not call a failure inherited when:");
 });
 
+test("factory infrastructure aws skill: documents region-aware account scope handling and ships a reusable helper", async () => {
+  const skill = await fs.readFile(new URL("../../skills/factory-infrastructure-aws/SKILL.md", import.meta.url), "utf-8");
+  const helper = await fs.readFile(new URL("../../skills/factory-infrastructure-aws/scripts/aws-account-scope.sh", import.meta.url), "utf-8");
+
+  expect(skill).toContain("cloudExecutionContext.aws.ec2RegionScope");
+  expect(skill).toContain("scripts/aws-account-scope.sh");
+  expect(skill).toContain("Skip `not-opted-in` regions");
+  expect(helper).toContain("aws sts get-caller-identity");
+  expect(helper).toContain("describe-regions --all-regions");
+  expect(helper).toContain("\"ec2RegionScope\"");
+});
+
 test("factory orchestration docs and skills: profiles stay orchestration-only and decisions stay receipt-aware", async () => {
   const profileDoc = await fs.readFile(new URL("../../docs/factory-profile-orchestration.md", import.meta.url), "utf-8");
   const agentDoc = await fs.readFile(new URL("../../docs/factory-agent-orchestration.md", import.meta.url), "utf-8");
