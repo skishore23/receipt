@@ -4,9 +4,13 @@ import React from "react";
 import { cancel, confirm, intro, isCancel, outro, spinner, text } from "@clack/prompts";
 import { render } from "ink";
 
+import { fold } from "@receipt/core/chain";
+import { jsonlStore } from "../adapters/jsonl";
 import type { Flags } from "../cli.types";
-import type { FactoryObjectiveMode, FactoryObjectivePolicy, FactoryObjectiveSeverity } from "../modules/factory";
-import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory";
+import type { AgentEvent } from "../modules/agent";
+import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent";
+import type { FactoryObjectiveMode, FactoryObjectivePolicy, FactoryObjectiveSeverity, FactoryEvent, FactoryTaskRecord, FactoryCandidateRecord } from "../modules/factory";
+import { DEFAULT_FACTORY_OBJECTIVE_POLICY, buildFactoryProjection, initialFactoryState, reduceFactory } from "../modules/factory";
 import { bunWhich, resolveBunRuntime } from "../lib/runtime-paths";
 import {
   abortJobMutation,
@@ -225,6 +229,178 @@ const parsePanel = (value: string | undefined): FactoryObjectivePanel => {
 
 const printJson = (value: unknown): void => {
   console.log(JSON.stringify(value, null, 2));
+};
+
+const objectiveReplayStream = (objectiveIdOrStream: string): {
+  readonly objectiveId: string;
+  readonly stream: string;
+} => {
+  const raw = objectiveIdOrStream.trim();
+  const stream = raw.startsWith("factory/objectives/") ? raw : `factory/objectives/${raw}`;
+  const objectiveId = stream.replace(/^factory\/objectives\//, "");
+  return { objectiveId, stream };
+};
+
+const summarizeReplayTask = (task: FactoryTaskRecord) => ({
+  taskId: task.taskId,
+  title: task.title,
+  status: task.status,
+  dependsOn: task.dependsOn,
+  candidateId: task.candidateId,
+  jobId: task.jobId,
+  latestSummary: task.latestSummary,
+  blockedReason: task.blockedReason,
+});
+
+const summarizeReplayCandidate = (candidate: FactoryCandidateRecord) => ({
+  candidateId: candidate.candidateId,
+  taskId: candidate.taskId,
+  status: candidate.status,
+  summary: candidate.summary,
+  latestReason: candidate.latestReason,
+});
+
+const readObjectiveReplay = async (dataDir: string, objectiveIdOrStream: string) => {
+  const { objectiveId, stream } = objectiveReplayStream(objectiveIdOrStream);
+  const chain = await jsonlStore<FactoryEvent>(dataDir).read(stream);
+  if (chain.length === 0) {
+    throw new Error(`No receipts found for ${stream}`);
+  }
+  const state = fold(chain, reduceFactory, initialFactoryState);
+  const projection = buildFactoryProjection(state);
+  return {
+    objectiveId,
+    stream,
+    receiptCount: chain.length,
+    status: projection.status,
+    latestSummary: projection.latestSummary,
+    blockedReason: projection.blockedReason,
+    archivedAt: projection.archivedAt,
+    updatedAt: projection.updatedAt,
+    graph: {
+      activeTaskIds: projection.activeTasks.map((task) => task.taskId),
+      readyTaskIds: projection.readyTasks.map((task) => task.taskId),
+      pendingTaskIds: projection.pendingTasks.map((task) => task.taskId),
+      completedTaskIds: projection.completedTasks.map((task) => task.taskId),
+      blockedTaskIds: projection.blockedTasks.map((task) => task.taskId),
+    },
+    tasks: projection.tasks.map(summarizeReplayTask),
+    candidates: projection.candidates.map(summarizeReplayCandidate),
+    integration: projection.integration,
+  };
+};
+
+const renderObjectiveReplayText = (replay: Awaited<ReturnType<typeof readObjectiveReplay>>): string => {
+  const lines = [
+    `${replay.objectiveId} (${replay.status})`,
+    `Receipts: ${replay.receiptCount}`,
+    replay.latestSummary ? `Summary: ${replay.latestSummary}` : undefined,
+    replay.blockedReason ? `Blocked: ${replay.blockedReason}` : undefined,
+    `Active: ${replay.graph.activeTaskIds.join(", ") || "none"}`,
+    `Ready: ${replay.graph.readyTaskIds.join(", ") || "none"}`,
+    `Pending: ${replay.graph.pendingTaskIds.join(", ") || "none"}`,
+    `Completed: ${replay.graph.completedTaskIds.join(", ") || "none"}`,
+    `Blocked tasks: ${replay.graph.blockedTaskIds.join(", ") || "none"}`,
+    "",
+    "Tasks:",
+    ...replay.tasks.map((task) =>
+      `- ${task.taskId} [${task.status}]${task.dependsOn.length ? ` dependsOn=${task.dependsOn.join(",")}` : ""}${task.blockedReason ? ` blocked=${task.blockedReason}` : ""}`,
+    ),
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+};
+
+const readChatReplay = async (dataDir: string, stream: string) => {
+  const chain = await jsonlStore<AgentEvent>(dataDir).read(stream);
+  if (chain.length === 0) {
+    throw new Error(`No receipts found for ${stream}`);
+  }
+  const runChains = new Map<string, Array<(typeof chain)[number]>>();
+  for (const receipt of chain) {
+    const runId = typeof receipt.body.runId === "string" ? receipt.body.runId : undefined;
+    if (!runId) continue;
+    const existing = runChains.get(runId);
+    if (existing) existing.push(receipt);
+    else runChains.set(runId, [receipt]);
+  }
+  const runs = [...runChains.entries()].map(([runId, runChain]) => {
+    const state = fold(runChain, reduceAgent, initialAgent);
+    const bindings = runChain
+      .filter((receipt) => receipt.body.type === "thread.bound")
+      .map((receipt) => {
+        const body = receipt.body;
+        return {
+          at: receipt.ts,
+          objectiveId: body.objectiveId,
+          reason: body.reason,
+          created: body.created,
+        };
+      });
+    const continuationReceipt = [...runChain].reverse().find((receipt) => receipt.body.type === "run.continued")?.body;
+    const continuation = continuationReceipt && continuationReceipt.type === "run.continued"
+      ? {
+          objectiveId: continuationReceipt.objectiveId,
+          nextRunId: continuationReceipt.nextRunId,
+          nextJobId: continuationReceipt.nextJobId,
+          summary: continuationReceipt.summary,
+        }
+      : undefined;
+    return {
+      runId,
+      problem: state.problem,
+      status: state.status,
+      finalResponse: state.finalResponse,
+      startupObjectiveId: bindings.find((binding) => binding.reason === "startup")?.objectiveId,
+      latestBoundObjectiveId: bindings.at(-1)?.objectiveId,
+      bindings,
+      continuation,
+    };
+  });
+  const threadTimeline = chain
+    .filter((receipt) => receipt.body.type === "thread.bound" || receipt.body.type === "run.continued")
+    .map((receipt) => {
+      const body = receipt.body;
+      if (body.type === "thread.bound") {
+        return {
+          at: receipt.ts,
+          type: body.type,
+          runId: body.runId,
+          objectiveId: body.objectiveId,
+          reason: body.reason,
+          created: body.created,
+        };
+      }
+      return {
+        at: receipt.ts,
+        type: body.type,
+        runId: body.runId,
+        objectiveId: body.objectiveId,
+        nextRunId: body.nextRunId,
+        nextJobId: body.nextJobId,
+      };
+    });
+  return {
+    stream,
+    receiptCount: chain.length,
+    latestObjectiveId: [...threadTimeline].reverse().find((entry) => entry.type === "thread.bound")?.objectiveId,
+    runs,
+    threadTimeline,
+  };
+};
+
+const renderChatReplayText = (replay: Awaited<ReturnType<typeof readChatReplay>>): string => {
+  const lines = [
+    replay.stream,
+    `Receipts: ${replay.receiptCount}`,
+    `Latest objective: ${replay.latestObjectiveId ?? "none"}`,
+    "",
+    "Runs:",
+    ...replay.runs.flatMap((run) => [
+      `- ${run.runId} [${run.status}] ${run.problem || ""}`.trim(),
+      `  startup=${run.startupObjectiveId ?? "none"} latest=${run.latestBoundObjectiveId ?? "none"} continuation=${run.continuation?.objectiveId ?? "none"}`,
+    ]),
+  ];
+  return lines.join("\n");
 };
 
 const printMutationResult = (
@@ -697,6 +873,28 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const panelFlag = asString(flags, "panel");
         await runtime.service.ensureBootstrap();
         await printObjectiveSnapshot(runtime, objectiveId, panelFlag ? parsePanel(panelFlag) : undefined, json);
+        return;
+      }
+      case "replay": {
+        const objectiveId = args[1];
+        if (!objectiveId) throw new Error("factory replay requires <objective-id>");
+        const replay = await readObjectiveReplay(config.dataDir, objectiveId);
+        if (json || !isInteractiveTerminal()) {
+          printJson(replay);
+          return;
+        }
+        console.log(renderObjectiveReplayText(replay));
+        return;
+      }
+      case "replay-chat": {
+        const stream = args[1];
+        if (!stream) throw new Error("factory replay-chat requires <chat-or-run-stream>");
+        const replay = await readChatReplay(config.dataDir, stream);
+        if (json || !isInteractiveTerminal()) {
+          printJson(replay);
+          return;
+        }
+        console.log(renderChatReplayText(replay));
         return;
       }
       case "resume": {

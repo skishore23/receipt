@@ -18,6 +18,12 @@ import {
   runFactoryCodexJob,
 } from "../../src/agents/factory-chat";
 import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import {
+  historicalInfrastructureLoop,
+  historicalInfrastructureObjectiveId,
+  historicalInfrastructureObjectiveReceipts,
+  historicalInfrastructureStartupObjectiveId,
+} from "../fixtures/factory-infrastructure-replay";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -1871,6 +1877,163 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_slice_continue_bound_objective"));
   const continuation = chain.find((receipt) => receipt.body.type === "run.continued")?.body;
   expect(continuation && "objectiveId" in continuation ? continuation.objectiveId : "").toBe("objective_created");
+});
+
+test("factory chat runner: historical infrastructure loop continues on the latest bound objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-historical-infra-loop");
+  const repoRoot = await createTempDir("receipt-factory-chat-historical-infra-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-historical-infra-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "infrastructure",
+    label: "Infrastructure",
+    default: true,
+    toolAllowlist: ["factory.dispatch", "factory.status", "factory.receipts", "jobs.list"],
+  });
+
+  let activePoll = 0;
+  const activeDetail = (summary?: string) => ({
+    objectiveId: historicalInfrastructureObjectiveId,
+    title: "Inventory running EC2 instances and infer schedules",
+    status: "active",
+    phase: "executing",
+    latestSummary: summary ?? `Historical EC2 poll ${++activePoll}`,
+    nextAction: "Wait for the EC2 investigation to finish.",
+    integration: {
+      status: "idle",
+      queuedCandidateIds: [],
+    },
+    latestDecision: {
+      summary: "Keep watching the running EC2 inventory objective.",
+      at: Date.now(),
+      source: "runtime",
+    },
+    blockedExplanation: undefined,
+    evidenceCards: [],
+    tasks: [],
+  });
+
+  const completedStartup = {
+    objectiveId: historicalInfrastructureStartupObjectiveId,
+    title: "show list of s3 buckets",
+    status: "completed",
+    phase: "completed",
+    latestSummary: "AWS CLI inventory succeeded for account 445567089271 and returned 5 S3 buckets.",
+    nextAction: "Answer directly from saved results.",
+    integration: {
+      status: "idle",
+      queuedCandidateIds: [],
+    },
+    latestDecision: {
+      summary: "Use the completed S3 inventory objective for context.",
+      at: Date.now(),
+      source: "runtime",
+    },
+    blockedExplanation: undefined,
+    evidenceCards: [],
+    tasks: [],
+  };
+
+  const factoryService = createFactoryServiceStub({
+    createObjective: async () => activeDetail(),
+    getObjective: async (objectiveId: string) =>
+      objectiveId === historicalInfrastructureStartupObjectiveId
+        ? completedStartup
+        : activeDetail(),
+    reactObjectiveWithNote: async (objectiveId: string, message?: string) =>
+      objectiveId === historicalInfrastructureStartupObjectiveId
+        ? completedStartup
+        : activeDetail(message),
+    reactObjective: async () => undefined,
+    listObjectiveReceipts: async (objectiveId: string) =>
+      objectiveId !== historicalInfrastructureObjectiveId
+        ? []
+        : historicalInfrastructureObjectiveReceipts.map((receipt, index) => ({
+          type: receipt.type,
+          hash: `hash_${index + 1}`,
+          ts: "createdAt" in receipt
+            ? receipt.createdAt
+            : "proposedAt" in receipt
+              ? receipt.proposedAt
+              : "adoptedAt" in receipt
+                ? receipt.adoptedAt
+                : "readyAt" in receipt
+                  ? receipt.readyAt
+                  : "startedAt" in receipt
+                    ? receipt.startedAt
+                    : "notedAt" in receipt
+                      ? receipt.notedAt
+                      : "canceledAt" in receipt
+                        ? receipt.canceledAt
+                        : "releasedAt" in receipt
+                          ? receipt.releasedAt
+                          : "blockedAt" in receipt
+                            ? receipt.blockedAt
+                            : Date.now(),
+          summary: receipt.type,
+        })),
+  });
+
+  const scriptedActions = historicalInfrastructureLoop.actions
+    .filter((action) => action.name !== "factory.output")
+    .map((action) => ({
+      thought: `historical infrastructure action ${action.iteration}`,
+      action: {
+        type: "tool" as const,
+        name: action.name,
+        input: JSON.stringify(
+          typeof action.input.waitForChangeMs === "number"
+            ? { ...action.input, waitForChangeMs: 50 }
+            : action.input,
+        ),
+        text: null,
+      },
+    }));
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/historical-infra-loop",
+    runId: historicalInfrastructureLoop.runId,
+    problem: historicalInfrastructureLoop.problem,
+    config: {
+      ...FACTORY_CHAT_DEFAULT_CONFIG,
+      maxIterations: scriptedActions.length,
+    },
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = scriptedActions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: historicalInfrastructureLoop.chatId,
+    objectiveId: historicalInfrastructureStartupObjectiveId,
+  });
+
+  expect(result.status).toBe("completed");
+  const jobs = await queue.listJobs({ limit: 10 });
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]?.agentId).toBe("factory");
+  expect(jobs[0]?.payload.objectiveId).toBe(historicalInfrastructureObjectiveId);
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/historical-infra-loop", historicalInfrastructureLoop.runId));
+  const continuation = chain.find((receipt) => receipt.body.type === "run.continued")?.body;
+  expect(continuation && "objectiveId" in continuation ? continuation.objectiveId : "").toBe(historicalInfrastructureObjectiveId);
+
+  const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
+  const latestBound = boundEvents.at(-1);
+  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe(historicalInfrastructureObjectiveId);
 });
 
 test("factory chat runner: codex progress snapshots surface while the child is still running", async () => {

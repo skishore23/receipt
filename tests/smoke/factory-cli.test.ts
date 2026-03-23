@@ -8,11 +8,22 @@ import { promisify } from "node:util";
 import React from "react";
 import { renderToString } from "ink";
 
+import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { createRuntime } from "@receipt/core/runtime";
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
 import { COMPOSER_COMMANDS, filterComposerCommands, findComposerSlashContext, parseComposerDraft, replaceComposerSlashContext } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
+import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent } from "../../src/modules/agent";
+import { decideFactory, initialFactoryState, reduceFactory, type FactoryCmd, type FactoryEvent } from "../../src/modules/factory";
+import {
+  historicalInfrastructureChatReceipts,
+  historicalInfrastructureChatStream,
+  historicalInfrastructureObjectiveId,
+  historicalInfrastructureObjectiveReceipts,
+  historicalInfrastructureStartupObjectiveId,
+} from "../fixtures/factory-infrastructure-replay";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI = path.join(ROOT, "src", "cli.ts");
@@ -162,6 +173,49 @@ const createPathCodexStub = async (): Promise<string> => {
   return dir;
 };
 
+const seedObjectiveReplay = async (
+  dataDir: string,
+  objectiveId: string,
+  receipts: ReadonlyArray<FactoryEvent>,
+): Promise<void> => {
+  const runtime = createRuntime<FactoryCmd, FactoryEvent, typeof initialFactoryState>(
+    jsonlStore<FactoryEvent>(dataDir),
+    jsonBranchStore(dataDir),
+    decideFactory,
+    reduceFactory,
+    initialFactoryState,
+  );
+  const stream = `factory/objectives/${objectiveId}`;
+  for (const [index, event] of receipts.entries()) {
+    await runtime.execute(stream, {
+      type: "emit",
+      event,
+      eventId: `${stream}:${index + 1}`,
+    });
+  }
+};
+
+const seedAgentReplay = async (
+  dataDir: string,
+  stream: string,
+  receipts: ReadonlyArray<AgentEvent>,
+): Promise<void> => {
+  const runtime = createRuntime<AgentCmd, AgentEvent, typeof initialAgent>(
+    jsonlStore<AgentEvent>(dataDir),
+    jsonBranchStore(dataDir),
+    decideAgent,
+    reduceAgent,
+    initialAgent,
+  );
+  for (const [index, event] of receipts.entries()) {
+    await runtime.execute(stream, {
+      type: "emit",
+      event,
+      eventId: `${stream}:${index + 1}`,
+    });
+  }
+};
+
   const runCli = (args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> =>
     new Promise((resolve) => {
       const child = spawn(BUN, [CLI, ...args], {
@@ -217,6 +271,106 @@ test("factory cli: bun repos infer bun validation commands", async () => {
   };
   expect(initPayload.config.defaultChecks).toContain("bun run build");
   expect(initPayload.environment.sourceDirty).toBe(false);
+}, 120_000);
+
+test("factory cli: replay folds a historical infrastructure objective into the current DAG projection", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  await seedObjectiveReplay(runtimeConfig.dataDir, historicalInfrastructureObjectiveId, historicalInfrastructureObjectiveReceipts);
+
+  const replay = await runCli([
+    "factory",
+    "replay",
+    historicalInfrastructureObjectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(replay.code).toBe(0);
+  const payload = JSON.parse(replay.stdout) as {
+    readonly objectiveId: string;
+    readonly receiptCount: number;
+    readonly status: string;
+    readonly graph: {
+      readonly pendingTaskIds: ReadonlyArray<string>;
+      readonly blockedTaskIds: ReadonlyArray<string>;
+    };
+    readonly tasks: ReadonlyArray<{
+      readonly taskId: string;
+      readonly blockedReason?: string;
+    }>;
+  };
+  expect(payload.objectiveId).toBe(historicalInfrastructureObjectiveId);
+  expect(payload.receiptCount).toBe(historicalInfrastructureObjectiveReceipts.length);
+  expect(payload.status).toBe("canceled");
+  expect(payload.graph.blockedTaskIds).toEqual(["task_01"]);
+  expect(payload.graph.pendingTaskIds).toEqual(["task_02"]);
+  expect(payload.tasks.find((task) => task.taskId === "task_01")?.blockedReason).toContain("AccessDeniedException");
+}, 120_000);
+
+test("factory cli: replay-chat exposes the historical infrastructure binding path", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  await seedAgentReplay(runtimeConfig.dataDir, historicalInfrastructureChatStream, historicalInfrastructureChatReceipts);
+
+  const replay = await runCli([
+    "factory",
+    "replay-chat",
+    historicalInfrastructureChatStream,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(replay.code).toBe(0);
+  const payload = JSON.parse(replay.stdout) as {
+    readonly stream: string;
+    readonly receiptCount: number;
+    readonly latestObjectiveId?: string;
+    readonly runs: ReadonlyArray<{
+      readonly runId: string;
+      readonly startupObjectiveId?: string;
+      readonly latestBoundObjectiveId?: string;
+      readonly continuation?: {
+        readonly objectiveId?: string;
+      };
+      readonly bindings: ReadonlyArray<{
+        readonly objectiveId: string;
+        readonly reason: string;
+      }>;
+    }>;
+    readonly threadTimeline: ReadonlyArray<{
+      readonly type: string;
+      readonly objectiveId?: string;
+      readonly reason?: string;
+    }>;
+  };
+  expect(payload.stream).toBe(historicalInfrastructureChatStream);
+  expect(payload.receiptCount).toBe(historicalInfrastructureChatReceipts.length);
+  expect(payload.latestObjectiveId).toBe(historicalInfrastructureStartupObjectiveId);
+
+  const run = payload.runs[0];
+  expect(run?.startupObjectiveId).toBe(historicalInfrastructureStartupObjectiveId);
+  expect(run?.latestBoundObjectiveId).toBe(historicalInfrastructureStartupObjectiveId);
+  expect(run?.continuation?.objectiveId).toBe(historicalInfrastructureStartupObjectiveId);
+  expect(run?.bindings.map((binding) => `${binding.reason}:${binding.objectiveId}`)).toEqual([
+    `startup:${historicalInfrastructureStartupObjectiveId}`,
+    `dispatch_create:${historicalInfrastructureObjectiveId}`,
+    `dispatch_reuse:${historicalInfrastructureObjectiveId}`,
+    `dispatch_update:${historicalInfrastructureStartupObjectiveId}`,
+  ]);
+  expect(payload.threadTimeline.map((entry) => `${entry.type}:${entry.reason ?? ""}:${entry.objectiveId ?? ""}`)).toEqual([
+    `thread.bound:startup:${historicalInfrastructureStartupObjectiveId}`,
+    `thread.bound:dispatch_create:${historicalInfrastructureObjectiveId}`,
+    `thread.bound:dispatch_reuse:${historicalInfrastructureObjectiveId}`,
+    `thread.bound:dispatch_update:${historicalInfrastructureStartupObjectiveId}`,
+    `run.continued::${historicalInfrastructureStartupObjectiveId}`,
+  ]);
 }, 120_000);
 
 test("factory runtime config: shared resolver follows .receipt/config.json", async () => {
