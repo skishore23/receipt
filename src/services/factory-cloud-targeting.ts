@@ -1,36 +1,44 @@
-import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
+import type { FactoryAwsExecutionContext, FactoryCloudExecutionContext } from "./factory-cloud-context";
 
 const AWS_INFRA_GUIDANCE =
-  "Infrastructure profile currently defaults to AWS. Ignore other mounted cloud sessions and fail fast with the exact AWS CLI error if AWS access is unavailable.";
+  "Infrastructure profile is AWS-only for now. Ignore other mounted cloud sessions and fail fast with the exact AWS CLI error if AWS access is unavailable.";
 
-const stripConflictingGuidance = (text: string): string =>
-  text
-    .replace(/\s*Multiple cloud providers are active locally\. Confirm the intended provider before using high-confidence counts\./g, "")
-    .replace(/\s*Cloud CLIs are installed locally, but no single active provider context was detected\./g, "")
-    .replace(/\s*One provider is clearly usable from the local CLI context \(aws\)\. Use it by default instead of asking the user to restate provider or scope\./g, "")
-    .trim();
+const buildAwsInfraSummary = (aws: FactoryAwsExecutionContext | undefined): string => {
+  if (!aws) {
+    return `${AWS_INFRA_GUIDANCE} No live AWS CLI context was detected from this machine.`;
+  }
+  if (!aws.callerIdentity) {
+    return [
+      AWS_INFRA_GUIDANCE,
+      `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}, but no active caller identity was confirmed.`,
+    ].join(" ");
+  }
+  return [
+    AWS_INFRA_GUIDANCE,
+    `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}; active identity ${aws.callerIdentity.arn} in account ${aws.callerIdentity.accountId}${aws.defaultRegion ? ` with region ${aws.defaultRegion}` : ""}.`,
+  ].join(" ");
+};
 
-const uniq = (values: ReadonlyArray<string>): ReadonlyArray<string> => [...new Set(values.filter(Boolean))];
+const buildAwsInfraGuidance = (aws: FactoryAwsExecutionContext | undefined): ReadonlyArray<string> => {
+  const guidance = [AWS_INFRA_GUIDANCE];
+  if (aws?.callerIdentity) {
+    guidance.push(`AWS bucket listing is global for the active account ${aws.callerIdentity.accountId}; region is secondary unless the objective asks for regional filtering.`);
+  }
+  return guidance;
+};
 
 export const resolveFactoryCloudExecutionContext = (
   profileId: string | undefined,
   context: FactoryCloudExecutionContext,
 ): FactoryCloudExecutionContext => {
   if (profileId !== "infrastructure") return context;
-  const summary = [
-    stripConflictingGuidance(context.summary),
-    AWS_INFRA_GUIDANCE,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
+  const aws = context.aws;
   return {
-    ...context,
+    summary: buildAwsInfraSummary(aws),
+    availableProviders: aws ? ["aws"] : [],
+    activeProviders: aws?.callerIdentity ? ["aws"] : [],
     preferredProvider: "aws",
-    guidance: uniq([
-      AWS_INFRA_GUIDANCE,
-      ...context.guidance.map(stripConflictingGuidance).filter(Boolean),
-    ]),
-    summary,
+    guidance: buildAwsInfraGuidance(aws),
+    aws,
   };
 };

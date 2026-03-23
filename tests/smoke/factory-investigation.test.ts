@@ -361,13 +361,33 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   });
   const manifest = await fs.readFile(packet.artifactPaths.manifestPath, "utf-8");
   const contextPack = await fs.readFile(packet.artifactPaths.contextPackPath, "utf-8");
-  expect(contextPack).toContain("\"cloudExecutionContext\"");
-  expect(contextPack).toContain("\"preferredProvider\": \"aws\"");
-  expect(contextPack).toContain("\"accountId\": \"445567089271\"");
-  expect(contextPack).toContain("Infrastructure profile currently defaults to AWS");
+  const parsedContextPack = JSON.parse(contextPack) as {
+    readonly cloudExecutionContext?: {
+      readonly preferredProvider?: string;
+      readonly availableProviders?: ReadonlyArray<string>;
+      readonly activeProviders?: ReadonlyArray<string>;
+      readonly aws?: {
+        readonly callerIdentity?: {
+          readonly accountId?: string;
+        };
+      };
+      readonly gcp?: unknown;
+      readonly azure?: unknown;
+    };
+  };
+  expect(parsedContextPack.cloudExecutionContext?.preferredProvider).toBe("aws");
+  expect(parsedContextPack.cloudExecutionContext?.availableProviders).toEqual(["aws"]);
+  expect(parsedContextPack.cloudExecutionContext?.activeProviders).toEqual(["aws"]);
+  expect(parsedContextPack.cloudExecutionContext?.aws?.callerIdentity?.accountId).toBe("445567089271");
+  expect(parsedContextPack.cloudExecutionContext?.gcp).toBeUndefined();
+  expect(parsedContextPack.cloudExecutionContext?.azure).toBeUndefined();
+  expect(contextPack).toContain("Infrastructure profile is AWS-only for now");
+  expect(contextPack).not.toContain("gcloud is available");
   expect(manifest).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(packet.renderedPrompt).toContain("AWS CLI is available via profile default");
-  expect(packet.renderedPrompt).toContain("Infrastructure profile currently defaults to AWS");
+  expect(packet.renderedPrompt).toContain("Infrastructure profile is AWS-only for now");
+  expect(packet.renderedPrompt).not.toContain("Multiple cloud providers are active locally");
+  expect(packet.renderedPrompt).not.toContain("gcloud is available");
 }, 120_000);
 
 test("factory investigation: infrastructure task prompts require deterministic scripts for AWS CLI work", async () => {
@@ -391,6 +411,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
   };
   let capturedSandboxMode: CodexExecutorInput["sandboxMode"];
   let capturedCompletionSignalPath: CodexExecutorInput["completionSignalPath"];
+  let capturedReasoningEffort: CodexExecutorInput["reasoningEffort"];
   const { service, queue } = await createFactoryService({
     llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
       parsed: input.schema.parse({
@@ -403,6 +424,7 @@ test("factory investigation: infrastructure task prompts require deterministic s
     codexRun: async (input) => {
       capturedSandboxMode = input.sandboxMode;
       capturedCompletionSignalPath = input.completionSignalPath;
+      capturedReasoningEffort = input.reasoningEffort;
       const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
@@ -431,9 +453,12 @@ test("factory investigation: infrastructure task prompts require deterministic s
   };
   expect(capturedSandboxMode).toBe("danger-full-access");
   expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
+  expect(capturedReasoningEffort).toBe("medium");
   expect(prompt).toContain("## Script-First Execution");
   expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
   expect(prompt).toContain("stop bootstrap and immediately write and run the script");
+  expect(prompt).toContain("If the script succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
+  expect(prompt).toContain("Treat successful AWS CLI JSON output as sufficient machine-readable evidence");
   expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
   expect(prompt).toContain("capture `aws sts get-caller-identity` in the script first");
   expect(prompt).toContain("use AWS only");

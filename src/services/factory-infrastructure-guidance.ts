@@ -57,6 +57,8 @@ export const renderInfrastructureTaskExecutionGuidance = (input: {
     `Write the script under .receipt/factory/ when practical, make it emit machine-readable output, and fail fast on CLI, auth, or network errors.`,
     `Run the script from the worktree before interpreting the result, and base the report on the script output rather than memory or speculation.`,
     `After reading AGENTS.md, the task packet, the memory context/objective summaries, and the mounted AWS skill, stop bootstrap and immediately write and run the script. Do not keep exploring unrelated repo files for a simple AWS inventory task.`,
+    `If the script succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result. Do not spend extra turns reformatting already-valid AWS CLI JSON, re-checking git status, or doing optional follow-up probes.`,
+    `Treat successful AWS CLI JSON output as sufficient machine-readable evidence unless the task explicitly asks for a different format.`,
     `Record the script path and invocation in report.scriptsRun so the operator can rerun the exact evidence path.`,
     ...(provider === "aws"
       ? [

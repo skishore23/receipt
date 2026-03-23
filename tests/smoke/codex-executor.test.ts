@@ -242,3 +242,60 @@ test("local codex executor passes output schema and reasoning effort through to 
   expect(result.lastMessage).toContain("\"summary\":\"schema approved\"");
   expect(result.stdout).toContain("\"handoff\":\"schema handoff\"");
 }, 15_000);
+
+test("local codex executor can isolate CODEX_HOME while preserving auth/config files", async () => {
+  const root = await mkTmp("receipt-codex-executor-isolated-home-workspace");
+  const sourceCodexHome = await mkTmp("receipt-codex-home-source");
+  await fs.writeFile(path.join(sourceCodexHome, "auth.json"), "{\"token\":\"test\"}\n", "utf-8");
+  await fs.writeFile(path.join(sourceCodexHome, "config.toml"), "model = \"gpt-5.4\"\n", "utf-8");
+  await fs.mkdir(path.join(sourceCodexHome, "skills", "unwanted"), { recursive: true });
+  await fs.writeFile(path.join(sourceCodexHome, "skills", "unwanted", "SKILL.md"), "# should not be copied\n", "utf-8");
+
+  const stubPath = path.join(root, "codex-isolated-home-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const codexHome = process.env.CODEX_HOME;",
+    "if (!codexHome) throw new Error('missing CODEX_HOME');",
+    "if (!fs.existsSync(path.join(codexHome, 'auth.json'))) throw new Error('missing auth.json');",
+    "if (!fs.existsSync(path.join(codexHome, 'config.toml'))) throw new Error('missing config.toml');",
+    "if (fs.existsSync(path.join(codexHome, 'skills'))) throw new Error('skills directory should be absent');",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'isolated', handoff: 'ok' }), 'utf8');",
+    "process.stdout.write('isolated-home-ok');",
+  ].join("\n");
+  await fs.writeFile(stubPath, body, "utf-8");
+  await fs.chmod(stubPath, 0o755);
+
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: stubPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      CODEX_HOME: sourceCodexHome,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    isolateCodexHome: true,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("isolated-home-ok");
+  expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
+}, 15_000);

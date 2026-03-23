@@ -308,6 +308,7 @@ const severityMaxParallelChildren = (severity: FactoryObjectiveSeverity): number
 };
 
 const severityWorkerReasoningEffort = (
+  profileId: string | undefined,
   objectiveMode: FactoryObjectiveMode,
   severity: FactoryObjectiveSeverity,
   taskKind: FactoryTaskRecord["taskKind"],
@@ -316,6 +317,9 @@ const severityWorkerReasoningEffort = (
     return severity >= 4 ? "xhigh" : "high";
   }
   if (objectiveMode === "investigation") {
+    if (profileId === "infrastructure") {
+      return severity >= 4 ? "high" : "medium";
+    }
     return severity === 1 ? "medium" : "high";
   }
   return "low";
@@ -2374,8 +2378,9 @@ export class FactoryService {
       outputSchemaPath: resultSchemaPath,
       completionSignalPath: parsed.lastMessagePath,
       completionQuietMs: 1_500,
-      reasoningEffort: severityWorkerReasoningEffort(parsed.objectiveMode, parsed.severity, task.taskKind),
+      reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
       sandboxMode: parsed.profile.rootProfileId === "infrastructure" ? "danger-full-access" : undefined,
+      isolateCodexHome: true,
       objectiveId: parsed.objectiveId,
       taskId: parsed.taskId,
       candidateId: parsed.candidateId,
@@ -3124,6 +3129,7 @@ export class FactoryService {
       completionSignalPath: parsed.lastMessagePath,
       completionQuietMs: 1_500,
       reasoningEffort: "low",
+      isolateCodexHome: true,
       objectiveId: parsed.objectiveId,
       taskId: "publish",
       candidateId: parsed.candidateId,

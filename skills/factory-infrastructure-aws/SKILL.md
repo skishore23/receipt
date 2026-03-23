@@ -34,6 +34,7 @@ Keep infrastructure investigations AWS-only for now. If the prompt is ambiguous 
 - Default to a small deterministic shell script for provider-sensitive or repeated AWS CLI work. The script should fail fast, emit machine-readable output when practical, and make the exact evidence path reproducible.
 - Capture `aws sts get-caller-identity` in the script before resource queries so the account scope is explicit in the evidence.
 - For fail-fast behavior, prefer `AWS_PAGER=''`, `AWS_MAX_ATTEMPTS=1`, `AWS_RETRY_MODE=standard`, and `AWS_EC2_METADATA_DISABLED=true`.
+- If the script succeeds and answers the task, stop and return the final JSON result immediately. Do not spend extra turns reformatting already-valid AWS CLI JSON or running optional follow-up checks.
 - Record the script path and invocation in `report.scriptsRun`, then explain the output in plain language.
 - Summarize findings in plain language. Do not return raw command output without interpretation.
 - Do not run the broad repo validation suite for a no-code AWS investigation unless the task explicitly owns validation or you changed repo files.
