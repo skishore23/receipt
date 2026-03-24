@@ -150,6 +150,9 @@ export const iconFactory = (cls = ""): string =>
 export const iconChat = (cls = ""): string =>
   svg16(`<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`, cls);
 
+export const iconPlus = (cls = ""): string =>
+  svg16(`<path d="M12 5v14"/><path d="M5 12h14"/>`, cls);
+
 export const iconMemory = (cls = ""): string =>
   svg16(`<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>`, cls);
 

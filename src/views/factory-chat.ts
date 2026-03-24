@@ -7,13 +7,16 @@ import {
   displayLabel,
   esc,
   formatTs,
-  ghostButtonClass,
   iconChat,
+  iconCheckCircle,
   iconClock,
+  iconCommit,
   iconCodex,
   iconForEntity,
   iconNext,
+  iconPlus,
   iconProject,
+  iconPullRequest,
   iconQueue,
   iconReceipt,
   iconRun,
@@ -24,6 +27,7 @@ import {
   renderEmptyState,
   renderJobActionCards,
   sectionLabelClass,
+  shortHash,
   softPanelClass,
   statusDot,
   toneForValue,
@@ -297,7 +301,7 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
 
 const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
 const composerShellClass = "mx-auto w-full max-w-6xl";
-const composerPanelClass = "relative flex flex-col gap-2 rounded-2xl border border-border/80 bg-card/95 p-2 shadow-sm ring-1 ring-border/50 sm:p-3";
+const composerPanelClass = "relative flex flex-col gap-2";
 const assistantResponseCardClass = "overflow-hidden rounded-xl border border-border/80 bg-card/90 shadow-sm backdrop-blur-xl";
 const assistantResponseBodyClass = "max-w-[72ch] px-5 py-4 sm:px-6 sm:py-5";
 
@@ -318,6 +322,14 @@ const compactStatusText = (value: string, maxChars = 160): string => {
   const clipped = sentence.length > maxChars ? `${sentence.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…` : sentence;
   return clipped;
 };
+
+const titleCaseLabel = (value?: string): string => {
+  const label = displayLabel(value);
+  return label ? label.replace(/\b\w/g, (match) => match.toUpperCase()) : "";
+};
+
+const withQueryParam = (query: string, key: string, value: string): string =>
+  `${query}${query.includes("?") ? "&" : "?"}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
 
 const systemItemTone = (item: Extract<FactoryChatItem, { readonly kind: "system" }>): Tone => {
   const metaTone = toneForValue(item.meta);
@@ -795,6 +807,89 @@ const renderSidebarTokenHero = (tokensUsed: number): string => `<div class="roun
   </div>
 </div>`;
 
+const renderSidebarSignalCard = (obj: FactorySelectedObjectiveCard): string => {
+  const label = obj.blockedReason
+    ? "Blocked"
+    : obj.nextAction
+      ? "Next Action"
+      : obj.latestDecisionSummary
+        ? "Latest Decision"
+        : "Summary";
+  const tone: Tone = obj.blockedReason ? "warning" : obj.nextAction ? "info" : "neutral";
+  const primary = compactStatusText(
+    obj.blockedReason
+      ?? obj.nextAction
+      ?? obj.latestDecisionSummary
+      ?? obj.summary
+      ?? "No thread summary yet.",
+    140,
+  ) || "No thread summary yet.";
+  const supporting = compactStatusText(
+    obj.blockedReason
+      ? obj.blockedExplanation ?? obj.summary ?? ""
+      : obj.latestDecisionSummary && obj.latestDecisionAt
+        ? `Updated ${formatTs(obj.latestDecisionAt)}`
+        : obj.summary && primary !== compactStatusText(obj.summary, 140)
+          ? obj.summary
+          : "",
+    140,
+  );
+  const icon = obj.blockedReason
+    ? iconStatus("h-4 w-4")
+    : obj.nextAction
+      ? iconNext("h-4 w-4")
+      : iconProject("h-4 w-4");
+  return `<div class="rounded-xl border border-border/80 bg-muted/65 px-3 py-3">
+    <div class="flex items-start justify-between gap-3">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
+      <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border ${iconBadgeToneClass(tone)}">
+        ${icon}
+      </span>
+    </div>
+    <div class="mt-2 text-sm font-semibold leading-5 text-foreground">${esc(primary)}</div>
+    ${supporting ? `<div class="mt-2 text-[11px] leading-5 text-muted-foreground">${esc(supporting)}</div>` : ""}
+  </div>`;
+};
+
+const renderSidebarDetailRows = (obj: FactorySelectedObjectiveCard): string => {
+  const stateValue = `${titleCaseLabel(obj.slotState ?? obj.phase ?? obj.status) || "Idle"}${typeof obj.queuePosition === "number" ? ` (q${obj.queuePosition})` : ""}`;
+  const tasksValue = `${obj.activeTaskCount ?? 0} active / ${obj.readyTaskCount ?? 0} ready / ${obj.taskCount ?? 0} total`;
+  const checksValue = obj.checks?.length ? `${obj.checks.length} checks` : "None";
+  const outputLabel = obj.prNumber || obj.prUrl ? "Pull Request" : "Commit";
+  const outputValue = obj.prNumber
+    ? `#${obj.prNumber}`
+    : obj.prUrl
+      ? "Opened"
+      : shortHash(obj.latestCommitHash) || "None";
+  const outputIcon = obj.prNumber || obj.prUrl
+    ? iconPullRequest("h-3.5 w-3.5")
+    : iconCommit("h-3.5 w-3.5");
+  const rows = [
+    { label: "State", value: stateValue, icon: iconStatus("h-3.5 w-3.5") },
+    { label: "Tasks", value: tasksValue, icon: iconTask("h-3.5 w-3.5") },
+    { label: "Checks", value: checksValue, icon: iconCheckCircle("h-3.5 w-3.5") },
+    { label: outputLabel, value: outputValue, icon: outputIcon },
+  ];
+  return `<div class="rounded-xl border border-border/80 bg-muted/65 px-3 py-1.5">
+    ${rows.map((row, index) => `<div class="flex items-start justify-between gap-3 py-2 ${index > 0 ? "border-t border-border/70" : ""}">
+      <div class="flex min-w-0 items-center gap-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+        <span class="text-muted-foreground">${row.icon}</span>
+        <span>${esc(row.label)}</span>
+      </div>
+      <div class="min-w-0 text-right text-[12px] font-medium leading-5 text-foreground [overflow-wrap:anywhere]">${esc(row.value)}</div>
+    </div>`).join("")}
+  </div>`;
+};
+
+const renderSidebarLinks = (profileId: string, obj: FactorySelectedObjectiveCard): string => {
+  const otherThreadsHref = withQueryParam(factoryChatQuery({ profileId }), "all", "1");
+  return `<div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+    <a class="font-medium text-primary hover:underline" href="${otherThreadsHref}">See other threads</a>
+    <a class="font-medium text-primary hover:underline" href="${obj.receiptsLink}">Receipts</a>
+    <a class="font-medium text-primary hover:underline" href="${obj.debugLink}">Debug</a>
+  </div>`;
+};
+
 
 const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjectiveNav): string => {
   const href = factoryChatQuery({
@@ -843,27 +938,17 @@ const renderSidebarEmptyState = (blankChat: boolean): string =>
     minHeightClass: "min-h-[168px]",
   });
 
-const renderSidebarMetricTile = (label: string, value: string, icon: string): string => `<div class="rounded-xl border border-border/80 bg-muted/65 px-2.5 py-2">
-  <div class="flex items-center justify-between gap-2">
-    <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
-    <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background/60 text-muted-foreground">${icon}</span>
-  </div>
-  <div class="mt-1.5 text-sm font-semibold text-card-foreground">${esc(value)}</div>
-</div>`;
-
-const renderSidebarMetrics = (obj?: FactorySelectedObjectiveCard): string => {
+const renderSidebarMetrics = (profileId: string, obj?: FactorySelectedObjectiveCard): string => {
   if (!obj) return "";
   return `<section class="space-y-2">
     <div class="flex items-center justify-between gap-2">
-      <div class="${sectionLabelClass}">Snapshot</div>
-      <div class="text-[10px] text-muted-foreground">${esc(obj.slotState ?? "idle")}</div>
+      <div class="${sectionLabelClass}">Thread Snapshot</div>
+      <div class="text-[10px] text-muted-foreground">${esc(titleCaseLabel(obj.slotState ?? obj.phase ?? obj.status) || "Idle")}</div>
     </div>
     ${obj.tokensUsed ? renderSidebarTokenHero(obj.tokensUsed) : ""}
-    <div class="grid grid-cols-3 gap-1.5">
-      ${renderSidebarMetricTile("Active", String(obj.activeTaskCount ?? 0), iconRun("h-3.5 w-3.5"))}
-      ${renderSidebarMetricTile("Ready", String(obj.readyTaskCount ?? 0), iconNext("h-3.5 w-3.5"))}
-      ${renderSidebarMetricTile("Total", String(obj.taskCount ?? 0), iconTask("h-3.5 w-3.5"))}
-    </div>
+    ${renderSidebarSignalCard(obj)}
+    ${renderSidebarDetailRows(obj)}
+    ${renderSidebarLinks(profileId, obj)}
   </section>`;
 };
 
@@ -913,7 +998,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
         <button hx-get="/factory/island/sidebar${viewAllQuery}" hx-target="#factory-sidebar" hx-swap="innerHTML" class="text-[10px] font-medium text-primary hover:underline text-left cursor-pointer">View all</button>
       </div>` : ""}
     </section>
-    ${renderSidebarMetrics(selectedObjective)}
+    ${renderSidebarMetrics(model.activeProfileId, selectedObjective)}
   </div>`;
 };
 
@@ -985,7 +1070,14 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
                 ${renderShellStatusPills(model)}
               </div>
               <div class="flex shrink-0 items-center gap-1.5">
-                <a class="${ghostButtonClass}" href="/factory/new-chat?profile=${encodeURIComponent(model.activeProfileId)}">New chat</a>
+                <a
+                  class="group inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary shadow-sm transition hover:border-primary/35 hover:bg-primary/15 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  href="/factory/new-chat?profile=${encodeURIComponent(model.activeProfileId)}"
+                  aria-label="Start a new chat"
+                  title="New chat"
+                >
+                  ${iconPlus("h-3 w-3")}
+                </a>
               </div>
             </div>
           </header>

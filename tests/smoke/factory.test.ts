@@ -1252,6 +1252,15 @@ test("factory chat items: automatic slice continuations render as live thread pr
   expect(items.some((item) => item.kind === "assistant")).toBe(false);
 });
 test("factory sidebar island: limits projects to the top five and shows view all when truncated", () => {
+  const selectedObjective = {
+    objectiveId: "objective_1",
+    title: "Project 1",
+    status: "queued",
+    phase: "queued",
+    summary: "Summary 1",
+    debugLink: "/debug",
+    receiptsLink: "/receipts",
+  };
   const markup = factorySidebarIsland({
     activeProfileId: "generalist",
     activeProfileLabel: "Generalist",
@@ -1271,21 +1280,13 @@ test("factory sidebar island: limits projects to the top five and shows view all
       taskCount: 1,
     })),
     jobs: [],
-    selectedObjective: {
-      objectiveId: "objective_1",
-      title: "Project 1",
-      status: "queued",
-      phase: "queued",
-      summary: "Summary 1",
-      debugLink: "/debug",
-      receiptsLink: "/receipts",
-    },
-  });
+  }, selectedObjective);
 
   expect(markup).toMatch(/Project 1/);
   expect(markup).toMatch(/Project 5/);
   expect(markup).not.toMatch(/Project 6/);
   expect(markup).toMatch(/View all/);
+  expect(markup).toMatch(/See other threads/);
   expect(markup).not.toMatch(/Jobs/);
 });
 test("factory sidebar island: blank chat treats old objectives as recent threads instead of active context", () => {
@@ -1360,6 +1361,12 @@ test("factory sidebar island: objective cards and selected metrics show token to
   expect(markup).toContain("Token Usage");
   expect(markup).toContain("12,345");
   expect(markup).toContain("Codex tokens recorded for this thread");
+  expect(markup).toContain("Thread Snapshot");
+  expect(markup).toContain("Summary");
+  expect(markup).toContain("Surface the Codex token total.");
+  expect(markup).toContain("1 active / 0 ready / 3 total");
+  expect(markup).toContain("See other threads");
+  expect(markup).toContain("?profile=generalist&all=1");
 });
 
 test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () => {
@@ -1495,6 +1502,8 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
   expect(markup).toContain("&quot;name&quot;:&quot;help&quot;");
   expect(markup).toMatch(/id="factory-composer-completions"[^>]+role="listbox"/);
   expect(markup).toMatch(/id="factory-composer-submit"[^>]+min-h-\[88px\]/);
+  expect(markup).toContain('href="/factory/new-chat?profile=generalist"');
+  expect(markup).toContain('aria-label="Start a new chat"');
   expect(markup).toContain("Objective blocked");
   expect(markup).toContain("Codex Token Usage");
   expect(markup).toContain("Rolled up from recorded candidate executions");
@@ -1756,6 +1765,17 @@ test("factory chat island: promotes parenthetical headings, bolds list lead-ins,
 });
 
 test("factory sidebar island: humanizes objective slot labels and avoids repeating status in the compact meta row", () => {
+  const selectedObjective = {
+    objectiveId: "objective_waiting",
+    title: "Fix iteration-3 issue",
+    status: "planning",
+    phase: "queued",
+    summary: "Waiting for the repo execution slot (1 in queue).",
+    debugLink: "/factory/api/objectives/objective_waiting/debug",
+    receiptsLink: "/factory/api/objectives/objective_waiting/receipts?limit=50",
+    slotState: "waiting_for_slot",
+    queuePosition: 1,
+  };
   const markup = factorySidebarIsland({
     activeProfileId: "software",
     activeProfileLabel: "Software",
@@ -1779,19 +1799,11 @@ test("factory sidebar island: humanizes objective slot labels and avoids repeati
       integrationStatus: "queued",
     }],
     jobs: [],
-    selectedObjective: {
-      objectiveId: "objective_waiting",
-      title: "Fix iteration-3 issue",
-      status: "planning",
-      phase: "queued",
-      summary: "Waiting for the repo execution slot (1 in queue).",
-      debugLink: "/factory/api/objectives/objective_waiting/debug",
-      receiptsLink: "/factory/api/objectives/objective_waiting/receipts?limit=50",
-    },
-  });
+  }, selectedObjective);
 
   expect(markup).toMatch(/Fix iteration-3 issue/);
-  expect(markup).toMatch(/queued/i);
+  expect(markup).toMatch(/Waiting For Slot \(q1\)/);
+  expect(markup).toMatch(/See other threads/);
 });
 test("factory route: job-only events subscribe to the selected job without falling back to the profile stream", async () => {
   const subscriptions: Array<{ readonly topic: string; readonly stream?: string }> = [];
