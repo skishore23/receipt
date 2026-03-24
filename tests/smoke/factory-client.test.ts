@@ -7,8 +7,8 @@ const ROOT = process.cwd();
 const CLIENT_PATH = path.join(ROOT, "src", "client", "factory-client.js");
 const COMMANDS = JSON.stringify([
   { name: "help", label: "/help", usage: "/help or /?", description: "Show slash command help." },
-  { name: "follow-up", label: "/follow-up", usage: "/follow-up [note]", description: "Send a follow-up note to the active job." },
-  { name: "steer", label: "/steer", usage: "/steer [problem]", description: "Send guidance to the active job." },
+  { name: "react", label: "/react", usage: "/react [message]", description: "React to the selected objective." },
+  { name: "abort-job", label: "/abort-job", usage: "/abort-job [reason]", description: "Abort the active job." },
 ]);
 
 type Listener = (event: MockEvent) => void;
@@ -167,24 +167,24 @@ const createHarness = () => {
 
 test("factory client: autocomplete opens, filters, navigates, inserts, and submits", async () => {
   const { textarea, popup, status, submit, form, fetchCalls } = createHarness();
-  textarea.value = "/f";
-  textarea.selectionStart = 2;
+  textarea.value = "/ab";
+  textarea.selectionStart = 3;
   textarea.dispatchEvent(new MockEvent({ type: "input", target: textarea } as never));
   expect(textarea.getAttribute("aria-expanded")).toBe("true");
   expect(popup.classList.contains("hidden")).toBe(false);
-  expect(popup.innerHTML).toContain("/follow-up");
-  expect(popup.innerHTML).not.toContain("/steer");
+  expect(popup.innerHTML).toContain("/abort-job");
+  expect(popup.innerHTML).not.toContain("/react");
 
   textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "ArrowDown", target: textarea } as never));
   textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "Enter", target: textarea } as never));
-  expect(textarea.value).toBe("/follow-up ");
+  expect(textarea.value).toBe("/abort-job ");
 
-  textarea.value = "/follow-up add more logs";
+  textarea.value = "/abort-job stop this worker";
   textarea.selectionStart = textarea.value.length;
   textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "Escape", target: textarea } as never));
   expect(textarea.getAttribute("aria-expanded")).toBe("false");
 
-  textarea.value = "/follow-up keep receipts";
+  textarea.value = "/abort-job keep receipts concise";
   textarea.selectionStart = textarea.value.length;
   form.dispatchEvent(new MockEvent({ type: "submit", target: form } as never));
   await Promise.resolve();

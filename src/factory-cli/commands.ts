@@ -19,10 +19,8 @@ import {
   cleanupObjectiveMutation,
   composeObjectiveMutation,
   createObjectiveMutation,
-  followUpJobMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
-  steerJobMutation,
   type FactoryMutationResult,
 } from "./actions";
 import { FactoryTerminalApp, type FactoryAppExit } from "./app";
@@ -74,17 +72,6 @@ const asStrings = (flags: Flags, key: string): ReadonlyArray<string> => {
   return [];
 };
 
-const parseJsonObjectFlag = (value: string | undefined, label: string): Record<string, unknown> | undefined => {
-  if (!value?.trim()) return undefined;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error(`${label} must be valid JSON`);
-  }
-  throw new Error(`${label} must be a JSON object`);
-};
-
 const deriveTitle = (title: string | undefined, prompt: string): string => {
   const provided = title?.trim();
   if (provided) return provided;
@@ -99,7 +86,6 @@ const mergePolicy = (base: FactoryObjectivePolicy, override: FactoryObjectivePol
     concurrency: { ...(base.concurrency ?? {}), ...(override.concurrency ?? {}) },
     budgets: { ...(base.budgets ?? {}), ...(override.budgets ?? {}) },
     throttles: { ...(base.throttles ?? {}), ...(override.throttles ?? {}) },
-    mutation: { ...(base.mutation ?? {}), ...(override.mutation ?? {}) },
     promotion: { ...(base.promotion ?? {}), ...(override.promotion ?? {}) },
   };
 };
@@ -135,17 +121,6 @@ const formatDurationMs = (durationMs: number): string => {
   return `${minutes}m ${seconds}s`;
 };
 
-const friendlyProfileStep = (step: string, message: string): string =>
-  step === "bootstrap" ? "Verified git repository and Factory workspace state"
-  : step === "cache" ? "Checked repo-profile cache"
-  : step === "scan" ? "Scanned package metadata, README, and repo layout"
-  : step === "infer_checks" ? `Detected validation commands: ${message.replace(/^Detected validation commands:\s*/i, "")}`
-  : step === "llm" ? "Generated repo summary and skill suggestions"
-  : step === "write_skills" ? "Wrote generated repo skill files"
-  : step === "persist" ? "Saved repository profile artifacts"
-  : step === "complete" ? "Repository profile is ready"
-  : message;
-
 const printSetupSummary = (opts: {
   readonly repoRoot: string;
   readonly dataDir: string;
@@ -153,7 +128,7 @@ const printSetupSummary = (opts: {
   readonly codexAvailable: boolean;
   readonly branch: string;
   readonly sourceDirty: boolean;
-  readonly repoProfileStatus: string;
+  readonly profileSummary: string;
   readonly checks: ReadonlyArray<string>;
   readonly steps: ReadonlyArray<string>;
 }): void => {
@@ -167,7 +142,7 @@ const printSetupSummary = (opts: {
     `  ${marker} Repo root: ${opts.repoRoot}`,
     `  ${marker} Data dir: ${opts.dataDir}`,
     `  ${marker} Branch: ${opts.branch}${opts.sourceDirty ? " (dirty)" : ""}`,
-    `  ${marker} Repo profile: ${opts.repoProfileStatus}`,
+    `  ${marker} Profile: ${opts.profileSummary}`,
     `  ${marker} Validation: ${opts.checks.join(" | ") || "none"}`,
     `  ${marker} Codex: ${opts.codexBin}${opts.codexAvailable ? "" : " (not found on PATH)"}`,
     "",
@@ -195,7 +170,6 @@ const panelValue = (
         prompt: detail.prompt,
         checks: detail.checks,
         policy: detail.policy,
-        repoProfile: detail.repoProfile,
         blockedExplanation: detail.blockedExplanation,
         latestDecision: detail.latestDecision,
       };
@@ -277,7 +251,7 @@ const readObjectiveReplay = async (dataDir: string, objectiveIdOrStream: string)
     blockedReason: projection.blockedReason,
     archivedAt: projection.archivedAt,
     updatedAt: projection.updatedAt,
-    graph: {
+    workflow: {
       activeTaskIds: projection.activeTasks.map((task) => task.taskId),
       readyTaskIds: projection.readyTasks.map((task) => task.taskId),
       pendingTaskIds: projection.pendingTasks.map((task) => task.taskId),
@@ -296,11 +270,11 @@ const renderObjectiveReplayText = (replay: Awaited<ReturnType<typeof readObjecti
     `Receipts: ${replay.receiptCount}`,
     replay.latestSummary ? `Summary: ${replay.latestSummary}` : undefined,
     replay.blockedReason ? `Blocked: ${replay.blockedReason}` : undefined,
-    `Active: ${replay.graph.activeTaskIds.join(", ") || "none"}`,
-    `Ready: ${replay.graph.readyTaskIds.join(", ") || "none"}`,
-    `Pending: ${replay.graph.pendingTaskIds.join(", ") || "none"}`,
-    `Completed: ${replay.graph.completedTaskIds.join(", ") || "none"}`,
-    `Blocked tasks: ${replay.graph.blockedTaskIds.join(", ") || "none"}`,
+    `Active: ${replay.workflow.activeTaskIds.join(", ") || "none"}`,
+    `Ready: ${replay.workflow.readyTaskIds.join(", ") || "none"}`,
+    `Pending: ${replay.workflow.pendingTaskIds.join(", ") || "none"}`,
+    `Completed: ${replay.workflow.completedTaskIds.join(", ") || "none"}`,
+    `Blocked tasks: ${replay.workflow.blockedTaskIds.join(", ") || "none"}`,
     "",
     "Tasks:",
     ...replay.tasks.map((task) =>
@@ -326,7 +300,8 @@ const readChatReplay = async (dataDir: string, stream: string) => {
   const runs = [...runChains.entries()].map(([runId, runChain]) => {
     const state = fold(runChain, reduceAgent, initialAgent);
     const bindings = runChain
-      .filter((receipt) => receipt.body.type === "thread.bound")
+      .filter((receipt): receipt is typeof receipt & { readonly body: Extract<AgentEvent, { readonly type: "thread.bound" }> } =>
+        isThreadBoundEvent(receipt.body))
       .map((receipt) => {
         const body = receipt.body;
         return {
@@ -336,8 +311,10 @@ const readChatReplay = async (dataDir: string, stream: string) => {
           created: body.created,
         };
       });
-    const continuationReceipt = [...runChain].reverse().find((receipt) => receipt.body.type === "run.continued")?.body;
-    const continuation = continuationReceipt && continuationReceipt.type === "run.continued"
+    const continuationReceipt = [...runChain].reverse()
+      .map((receipt) => receipt.body)
+      .find(isRunContinuedEvent);
+    const continuation = continuationReceipt
       ? {
           objectiveId: continuationReceipt.objectiveId,
           nextRunId: continuationReceipt.nextRunId,
@@ -357,7 +334,9 @@ const readChatReplay = async (dataDir: string, stream: string) => {
     };
   });
   const threadTimeline = chain
-    .filter((receipt) => receipt.body.type === "thread.bound" || receipt.body.type === "run.continued")
+    .filter((receipt): receipt is typeof receipt & {
+      readonly body: Extract<AgentEvent, { readonly type: "thread.bound" | "run.continued" }>;
+    } => isThreadBoundEvent(receipt.body) || isRunContinuedEvent(receipt.body))
     .map((receipt) => {
       const body = receipt.body;
       if (body.type === "thread.bound") {
@@ -403,6 +382,16 @@ const renderChatReplayText = (replay: Awaited<ReturnType<typeof readChatReplay>>
   return lines.join("\n");
 };
 
+const isThreadBoundEvent = (
+  event: AgentEvent,
+): event is Extract<AgentEvent, { readonly type: "thread.bound" }> =>
+  event.type === "thread.bound";
+
+const isRunContinuedEvent = (
+  event: AgentEvent,
+): event is Extract<AgentEvent, { readonly type: "run.continued" }> =>
+  event.type === "run.continued";
+
 const printMutationResult = (
   result: FactoryMutationResult,
   asJson: boolean,
@@ -431,8 +420,7 @@ const printMutationResult = (
     console.log(`${verb} ${result.objectiveId}`);
     return;
   }
-  const label = result.action === "follow_up" ? "follow-up" : result.action === "abort" ? "abort" : "steer";
-  console.log(`${label} queued for ${result.jobId}`);
+  console.log(`${result.action} queued for ${result.jobId}`);
 };
 
 const parseCodexProbeMode = (value: string | undefined): CodexProbeMode => {
@@ -502,25 +490,16 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
   });
   const progress = isInteractiveTerminal() && !json ? spinner() : undefined;
   const profileStartedAt = Date.now();
-  const profileSteps: string[] = [];
+  const profileSteps = ["Using checked-in Factory profiles and skills only."];
   const updateProgress = (message: string, started = true): void => {
     if (!progress) return;
     if (started) progress.message(`Profiling repository: ${message}`);
     else progress.start(`Profiling repository: ${message}`);
   };
-  updateProgress("checking git repository and Factory state", false);
+  updateProgress("collecting repository status and Factory defaults", false);
   try {
-    const repoProfile = await runtime.service.prepareRepoProfile({
-      onProgress: (event) => {
-        updateProgress(event.message);
-        const summary = friendlyProfileStep(event.step, event.message);
-        if (!profileSteps.includes(summary)) {
-          profileSteps.push(summary);
-        }
-      },
-    });
-    updateProgress("collecting repo status and existing objectives");
     const compose = await runtime.service.buildComposeModel();
+    updateProgress("collecting repo status and existing objectives");
     progress?.stop(`Repository profile collected in ${formatDurationMs(Date.now() - profileStartedAt)}`);
     if (isInteractiveTerminal() && !json) {
       printSetupSummary({
@@ -530,7 +509,7 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
         codexAvailable: Boolean(detectedCodexPath),
         branch: compose.sourceBranch ?? compose.defaultBranch,
         sourceDirty: compose.sourceDirty,
-        repoProfileStatus: compose.repoProfile.status,
+        profileSummary: compose.profileSummary,
         checks: compose.defaultValidationCommands,
         steps: profileSteps,
       });
@@ -574,7 +553,7 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
       printJson({
         ok: true,
         config: resolved,
-        repoProfile,
+        profileSummary: compose.profileSummary,
         environment: {
           bunRuntime: resolveBunRuntime(),
           codexPath: detectedCodexPath,
@@ -955,29 +934,6 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const objectiveId = args[1];
         if (!objectiveId) throw new Error("factory archive requires <objective-id>");
         const result = await archiveObjectiveMutation(runtime, objectiveId);
-        printMutationResult(result, json);
-        return;
-      }
-      case "steer": {
-        const jobId = args[1];
-        if (!jobId) throw new Error("factory steer requires <job-id>");
-        const trailingProblem = args.slice(2).join(" ").trim();
-        const problem = asString(flags, "problem") ?? (trailingProblem || undefined);
-        const configOverride = parseJsonObjectFlag(asString(flags, "config"), "--config");
-        const result = await steerJobMutation(runtime, {
-          jobId,
-          problem,
-          config: configOverride,
-        });
-        printMutationResult(result, json);
-        return;
-      }
-      case "follow-up": {
-        const jobId = args[1];
-        if (!jobId) throw new Error("factory follow-up requires <job-id>");
-        const note = asString(flags, "note") ?? args.slice(2).join(" ").trim();
-        if (!note) throw new Error("factory follow-up requires --note or trailing note text");
-        const result = await followUpJobMutation(runtime, { jobId, note });
         printMutationResult(result, json);
         return;
       }

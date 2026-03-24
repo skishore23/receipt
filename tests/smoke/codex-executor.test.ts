@@ -121,6 +121,33 @@ const createStructuredLastMessageStreamingCodexStub = async (): Promise<string> 
   return scriptPath;
 };
 
+const createRepeatableLoggingCodexStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-repeatable");
+  const scriptPath = path.join(dir, "codex-repeatable-log-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "(async () => {",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  const prompt = await readAll();",
+    "  const label = prompt.includes('second-run') ? 'second-run' : 'first-run';",
+    "  fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: `${label} approved`, handoff: `${label} handoff` }), 'utf8');",
+    "  process.stdout.write(`${label}-stdout\\n`);",
+    "  process.stderr.write(`${label}-stderr\\n`);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
 test("local codex executor completes once a task result file exists and output goes quiet", async () => {
   const root = await mkTmp("receipt-codex-executor-workspace");
   const stub = await createHungCodexStub();
@@ -271,6 +298,64 @@ test("local codex executor completes once a structured last message stabilizes e
   expect(result.signal).toBeNull();
   expect(result.lastMessage).toContain("\"summary\":\"structured completion\"");
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("still streaming");
+}, 15_000);
+
+test("local codex executor preserves stdout and stderr breadcrumbs across consecutive runs", async () => {
+  const root = await mkTmp("receipt-codex-executor-repeatable-workspace");
+  const stub = await createRepeatableLoggingCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const outputSchemaPath = path.join(artifactDir, "task.schema.json");
+  await fs.mkdir(path.dirname(outputSchemaPath), { recursive: true });
+  await fs.writeFile(outputSchemaPath, JSON.stringify({
+    type: "object",
+    required: ["outcome", "summary", "handoff"],
+  }), "utf-8");
+
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+
+  await executor.run({
+    prompt: "# Task\nfirst-run\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    outputSchemaPath,
+    completionSignalPath: lastMessagePath,
+    completionQuietMs: 300,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  await executor.run({
+    prompt: "# Task\nsecond-run\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    outputSchemaPath,
+    completionSignalPath: lastMessagePath,
+    completionQuietMs: 300,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  const stdoutLog = await fs.readFile(stdoutPath, "utf-8");
+  const stderrLog = await fs.readFile(stderrPath, "utf-8");
+  expect(stdoutLog).toContain("first-run-stdout");
+  expect(stdoutLog).toContain("second-run-stdout");
+  expect(stdoutLog).toContain("[factory] codex restart");
+  expect(stderrLog).toContain("first-run-stderr");
+  expect(stderrLog).toContain("second-run-stderr");
+  expect(stderrLog).toContain("[factory] codex restart");
 }, 15_000);
 
 test("local codex executor passes output schema and reasoning effort through to codex", async () => {

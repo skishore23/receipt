@@ -241,7 +241,8 @@
 
   .factory-markdown h1,
   .factory-markdown h2,
-  .factory-markdown h3 {
+  .factory-markdown h3,
+  .factory-markdown h4 {
     @apply mt-6 mb-3 text-foreground tracking-tight;
   }
   
@@ -255,6 +256,10 @@
   
   .factory-markdown h3 {
     @apply text-[15px] font-medium;
+  }
+
+  .factory-markdown h4 {
+    @apply text-[14px] font-medium uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .factory-markdown p {
@@ -276,6 +281,33 @@
 
   .factory-markdown li {
     @apply leading-relaxed;
+  }
+
+  .factory-markdown table {
+    @apply my-4 rounded-xl border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
+    display: block;
+    width: max-content;
+    min-width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .factory-markdown table thead {
+    @apply bg-muted/70;
+  }
+
+  .factory-markdown table th {
+    @apply whitespace-nowrap border-b border-border px-3 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+  }
+
+  .factory-markdown table td {
+    @apply border-t border-border/70 px-3 py-2.5 align-top text-foreground;
+  }
+
+  .factory-markdown table tbody tr:first-child td {
+    @apply border-t-0;
   }
 
   .factory-markdown blockquote {

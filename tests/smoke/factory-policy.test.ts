@@ -5,12 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
-
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
 import { createRuntime } from "@receipt/core/runtime";
-import { buildFactoryDecisionSet } from "../../src/engine/merge/factory-policy";
 import { SseHub } from "../../src/framework/sse-hub";
 import {
   DEFAULT_FACTORY_OBJECTIVE_PROFILE,
@@ -80,10 +77,6 @@ const latestFactoryJob = async (
 };
 
 const createFactoryService = async (opts?: {
-  readonly llmStructured?: <Schema extends ZodTypeAny>(input: {
-    readonly schemaName: string;
-    readonly schema: Schema;
-  }) => Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }>;
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
 }): Promise<{
   readonly service: FactoryService;
@@ -123,7 +116,6 @@ const createFactoryService = async (opts?: {
         return { exitCode: 0, signal: null, stdout: raw, stderr: "", lastMessage: raw };
       },
     },
-    llmStructured: opts?.llmStructured,
     repoRoot,
   });
   return { service, queue, repoRoot };
@@ -172,19 +164,7 @@ test("factory policy: direct codex probes without an objective stay repo-scoped 
 });
 
 test("factory policy: task packets tell workers to inspect objective receipts sequentially", async () => {
-  const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: {
-      readonly schema: Schema;
-    }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Rename labels", prompt: "Rename Skill to Profile.", workerType: "codex", dependsOn: [] },
-          { title: "Run validation suite", prompt: "Run the full repo validation suite after the rename lands.", workerType: "codex", dependsOn: ["task_01"] },
-        ],
-      }),
-      raw: "",
-    }),
-  });
+  const { service, queue } = await createFactoryService();
 
   const created = await service.createObjective({
     title: "Sequential inspect prompt",
@@ -202,23 +182,13 @@ test("factory policy: task packets tell workers to inspect objective receipts se
   expect(prompt).not.toContain(`factory inspect '${created.objectiveId}' --json --panel debug`);
   expect(prompt).toContain("Do not absorb downstream work");
   expect(prompt).toContain("Do not write this file yourself.");
-  expect(prompt).toContain("A later task in this objective owns the broad repo validation suite.");
-  expect(prompt).not.toContain("## Checks");
+  expect(prompt).toContain("## Checks");
+  expect(prompt).toContain("Run the relevant repo validation for this task");
+  expect(prompt).not.toContain("A later task in this objective owns the broad repo validation suite.");
 });
 
 test("factory policy: validation-owned task packets include the full repo checks", async () => {
-  const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: {
-      readonly schema: Schema;
-    }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Run validation suite", prompt: "Run lint, build, and the full validation suite.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
-  });
+  const { service, queue } = await createFactoryService();
 
   const created = await service.createObjective({
     title: "Validation prompt owner",
@@ -237,22 +207,8 @@ test("factory policy: validation-owned task packets include the full repo checks
   expect(prompt).toContain("Run the relevant repo validation for this task");
 });
 
-test("factory policy: dispatch burst is capped and defaults are normalized per objective", async () => {
-  const { service } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(opts: {
-      readonly schemaName: string;
-      readonly schema: Schema;
-    }) => {
-      const payload = {
-        tasks: [
-          { title: "Task one", prompt: "First task.", workerType: "codex", dependsOn: [] },
-          { title: "Task two", prompt: "Second task.", workerType: "codex", dependsOn: [] },
-          { title: "Task three", prompt: "Third task.", workerType: "codex", dependsOn: [] },
-        ],
-      };
-      return { parsed: opts.schema.parse(payload), raw: JSON.stringify(payload) };
-    },
-  });
+test("factory policy: objectives stay single-task by default and still normalize dispatch policy", async () => {
+  const { service } = await createFactoryService();
 
   const created = await service.createObjective({
     title: "Dispatch cap objective",
@@ -268,7 +224,8 @@ test("factory policy: dispatch burst is capped and defaults are normalized per o
   expect(ready.policy.concurrency.maxActiveTasks).toBe(4);
   expect(ready.policy.throttles.maxDispatchesPerReact).toBe(1);
   expect(ready.activeTaskCount).toBe(1);
-  expect(ready.readyTaskCount).toBe(2);
+  expect(ready.readyTaskCount).toBe(0);
+  expect(ready.taskCount).toBe(1);
 });
 
 test("factory policy: maxTaskRuns blocks further dispatch and surfaces a deterministic reason", async () => {
@@ -313,18 +270,9 @@ test("factory policy: maxCandidatePassesPerTask blocks rework after the configur
   expect(detail.tasks[0]?.blockedReason ?? "").toMatch(/maxCandidatePassesPerTask/);
 });
 
-test("factory objective detail: blocked explanations name downstream tasks waiting on the blocked DAG node", async () => {
+test("factory objective detail: blocked explanations stay focused on the current blocker without downstream workflow text", async () => {
   const { service, queue } = await createFactoryService({
     codexOutcome: "blocked",
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Inventory spend drivers", prompt: "Query AWS inventory.", workerType: "codex", dependsOn: [] },
-          { title: "Synthesize recommendations", prompt: "Summarize the inventory findings.", workerType: "codex", dependsOn: ["task_01"] },
-        ],
-      }),
-      raw: "",
-    }),
   });
 
   const created = await service.createObjective({
@@ -340,8 +288,8 @@ test("factory objective detail: blocked explanations name downstream tasks waiti
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("blocked");
-  expect(detail.blockedExplanation?.summary ?? "").toContain("Waiting tasks:");
-  expect(detail.blockedExplanation?.summary ?? "").toContain("task_02 depends on task_01");
+  expect(detail.blockedExplanation?.receiptType).toBe("objective.blocked");
+  expect(detail.blockedExplanation?.summary ?? "").not.toContain("Waiting tasks:");
 });
 
 test("factory policy: base-commit check failures are treated as inherited on the first candidate pass", async () => {
@@ -422,283 +370,29 @@ test("factory policy: integration validation can pass through inherited failures
   expect(detail.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
 });
 
-test("factory policy: reconciliation spawning respects maxReconciliationTasks", async () => {
-  const { service } = await createFactoryService();
+test("factory policy: integration validation failures block the objective instead of spawning reconciliation work", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
   const created = await service.createObjective({
-    title: "Reconciliation cap objective",
-    prompt: "Cap reconciliation tasks at zero.",
-    policy: {
-      budgets: { maxReconciliationTasks: 0 },
-    },
-    checks: ["git status --short"],
+    title: "Validation failure objective",
+    prompt: "Block on failing integration validation and wait for react.",
+    checks: ["true"],
   });
   await runObjectiveStartup(service, created.objectiveId);
 
-  const state = await service.getObjectiveState(created.objectiveId);
-  const planned = await service.getObjective(created.objectiveId);
-  const stateWithCandidate = buildState([
-    {
-      type: "objective.created",
-      objectiveId: created.objectiveId,
-      title: created.title,
-      prompt: created.prompt,
-      channel: created.channel,
-      baseHash: created.baseHash,
-      checks: created.checks,
-      checksSource: "explicit",
-      profile: created.profile,
-      policy: created.policy,
-      createdAt: created.createdAt,
-    },
-    ...planned.tasks.map((task) => ({
-      type: "task.added" as const,
-      objectiveId: created.objectiveId,
-      createdAt: task.createdAt,
-      task,
-    })),
-    {
-      type: "candidate.created",
-      objectiveId: created.objectiveId,
-      createdAt: created.createdAt + 1,
-      candidate: {
-        candidateId: "task_01_candidate_01",
-        taskId: planned.tasks[0]!.taskId,
-        status: "approved",
-        baseCommit: created.baseHash,
-        checkResults: [],
-        artifactRefs: {},
-        createdAt: created.createdAt + 1,
-        updatedAt: created.createdAt + 1,
-      },
-    },
-  ]);
-  await (service as unknown as {
-    spawnReconciliationTask(state: FactoryState, candidateId: string, reason: string): Promise<void>;
-  }).spawnReconciliationTask(stateWithCandidate, "task_01_candidate_01", "force reconciliation");
+  const firstTaskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(firstTaskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  const validatePayload = validateJob.payload as FactoryIntegrationJobPayload;
+  await fs.writeFile(path.join(validatePayload.workspacePath, "INTEGRATION_ONLY"), "marker\n", "utf-8");
+  await service.runIntegrationValidation({
+    ...validatePayload,
+    checks: ["sh -lc '[ ! -f INTEGRATION_ONLY ]'"],
+  });
 
   const after = await service.getObjective(created.objectiveId);
   expect(after.status).toBe("blocked");
-  expect(after.blockedReason ?? "").toMatch(/maxReconciliationTasks/);
-  expect(after.tasks.length).toBe(state.taskOrder.length);
-});
-
-test("factory mutation policy: aggressiveness and cooldown gate semantic mutation actions", async () => {
-  const baseCreatedAt = Date.now();
-  const conservativeState = buildState([{
-    type: "objective.created",
-    objectiveId: "objective_demo",
-    title: "Mutation policy",
-    prompt: "Mutate runtime tasks only within policy limits.",
-    channel: "results",
-    baseHash: "abc1234",
-    checks: ["bun run build"],
-    checksSource: "explicit",
-    profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
-    policy: normalizeFactoryObjectivePolicy(),
-    createdAt: baseCreatedAt,
-  },
-    {
-      type: "task.added",
-      objectiveId: "objective_demo",
-      createdAt: baseCreatedAt + 1,
-      task: {
-        nodeId: "task_01",
-        taskId: "task_01",
-        taskKind: "planned",
-        title: "Blocked theorem task",
-        prompt: "Investigate the blocker.",
-        workerType: "theorem",
-        baseCommit: "abc1234",
-        dependsOn: [],
-        status: "blocked",
-        blockedReason: "Need a different worker.",
-        skillBundlePaths: [],
-        contextRefs: [],
-        artifactRefs: {},
-        createdAt: baseCreatedAt + 1,
-      },
-    },
-  ]);
-  const aggressiveState = buildState([
-    {
-      type: "objective.created",
-      objectiveId: "objective_aggressive",
-      title: "Aggressive mutation",
-      prompt: "Allow ready-task mutation.",
-      channel: "results",
-      baseHash: "abc1234",
-      checks: ["bun run build"],
-      checksSource: "explicit",
-      profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
-      policy: normalizeFactoryObjectivePolicy({
-        mutation: { aggressiveness: "aggressive" },
-      }),
-      createdAt: baseCreatedAt + 2,
-    },
-    {
-      type: "task.added",
-      objectiveId: "objective_aggressive",
-      createdAt: baseCreatedAt + 3,
-      task: {
-        nodeId: "task_01",
-        taskId: "task_01",
-        taskKind: "planned",
-        title: "Prerequisite task",
-        prompt: "Finish prerequisite work.",
-        workerType: "codex",
-        baseCommit: "abc1234",
-        dependsOn: [],
-        status: "integrated",
-        skillBundlePaths: [],
-        contextRefs: [],
-        artifactRefs: {},
-        createdAt: baseCreatedAt + 3,
-      },
-    },
-    {
-      type: "task.added",
-      objectiveId: "objective_aggressive",
-      createdAt: baseCreatedAt + 4,
-      task: {
-        nodeId: "task_02",
-        taskId: "task_02",
-        taskKind: "planned",
-        title: "Ready task",
-        prompt: "Proceed.",
-        workerType: "codex",
-        baseCommit: "abc1234",
-        dependsOn: ["task_01"],
-        status: "ready",
-        skillBundlePaths: [],
-        contextRefs: [],
-        artifactRefs: {},
-        createdAt: baseCreatedAt + 4,
-      },
-    },
-  ]);
-  const cooldownState = {
-    ...aggressiveState,
-    policy: normalizeFactoryObjectivePolicy({
-      mutation: { aggressiveness: "aggressive" },
-      throttles: { mutationCooldownMs: 300_000 },
-    }),
-    lastMutationAt: Date.now(),
-  } satisfies FactoryState;
-
-  const conservativeActions = buildFactoryDecisionSet({
-    ...conservativeState,
-    policy: normalizeFactoryObjectivePolicy({
-      mutation: { aggressiveness: "conservative" },
-    }),
-  }, {
-    now: baseCreatedAt + 10,
-    dispatchLimit: 0,
-  }).actions.filter((action) => action.type !== "block_objective");
-  expect(conservativeActions.length > 0).toBeTruthy();
-  expect(conservativeActions.every((action) => action.type === "reassign_task" || action.type === "unblock_task")).toBeTruthy();
-
-  const aggressiveActions = buildFactoryDecisionSet(aggressiveState, {
-    now: baseCreatedAt + 20,
-    dispatchLimit: 0,
-  }).actions;
-  expect(aggressiveActions.some((action) => action.type === "update_dependencies")).toBeTruthy();
-
-  const offActions = buildFactoryDecisionSet({
-    ...conservativeState,
-    policy: normalizeFactoryObjectivePolicy({
-      mutation: { aggressiveness: "off" },
-    }),
-  }, {
-    now: baseCreatedAt + 30,
-    dispatchLimit: 0,
-  }).actions.filter((action) => action.type !== "block_objective");
-  expect(offActions).toEqual([]);
-
-  const cooldownActions = buildFactoryDecisionSet(cooldownState, {
-    now: cooldownState.lastMutationAt,
-    dispatchLimit: 0,
-  }).actions.filter((action) => action.type === "update_dependencies" || action.type === "reassign_task" || action.type === "unblock_task" || action.type === "split_task" || action.type === "supersede_task");
-  expect(cooldownActions).toEqual([]);
-});
-
-test("factory policy: hard IAM blockers do not auto-unblock and block the objective frontier instead", () => {
-  const baseCreatedAt = Date.now();
-  const state = buildState([
-    {
-      type: "objective.created",
-      objectiveId: "objective_hard_block",
-      title: "Hard blocker",
-      prompt: "Investigate spend drivers.",
-      channel: "results",
-      baseHash: "abc1234",
-      checks: ["bun run build"],
-      checksSource: "explicit",
-      profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
-      policy: normalizeFactoryObjectivePolicy(),
-      createdAt: baseCreatedAt,
-    },
-    {
-      type: "task.added",
-      objectiveId: "objective_hard_block",
-      createdAt: baseCreatedAt + 1,
-      task: {
-        nodeId: "task_03",
-        taskId: "task_03",
-        taskKind: "planned",
-        title: "Inventory spend drivers",
-        prompt: "Query ELB, EBS, NAT, and CloudWatch.",
-        workerType: "codex",
-        baseCommit: "abc1234",
-        dependsOn: [],
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs: [],
-        artifactRefs: {},
-        createdAt: baseCreatedAt + 1,
-      },
-    },
-    {
-      type: "task.added",
-      objectiveId: "objective_hard_block",
-      createdAt: baseCreatedAt + 2,
-      task: {
-        nodeId: "task_04",
-        taskId: "task_04",
-        taskKind: "planned",
-        title: "Synthesize recommendations",
-        prompt: "Combine the inventory findings.",
-        workerType: "codex",
-        baseCommit: "abc1234",
-        dependsOn: ["task_03"],
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs: [],
-        artifactRefs: {},
-        createdAt: baseCreatedAt + 2,
-      },
-    },
-    {
-      type: "task.ready",
-      objectiveId: "objective_hard_block",
-      taskId: "task_03",
-      readyAt: baseCreatedAt + 3,
-    },
-    {
-      type: "task.blocked",
-      objectiveId: "objective_hard_block",
-      taskId: "task_03",
-      reason: "AccessDenied: User is not authorized to perform elasticloadbalancing:DescribeLoadBalancers because no identity-based policy allows the action.",
-      blockedAt: baseCreatedAt + 4,
-    },
-  ]);
-
-  const actions = buildFactoryDecisionSet(state, {
-    now: baseCreatedAt + 5,
-    dispatchLimit: 0,
-  }).actions;
-
-  expect(actions.some((action) => action.type === "unblock_task")).toBe(false);
-  expect(actions.some((action) => action.type === "block_objective" && action.taskId === "task_03")).toBe(true);
+  expect(after.blockedReason ?? "").toMatch(/Integration validation failed/i);
+  expect(after.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
 });
 
 test("factory reducer: blocked task clears the latest running candidate status", () => {
@@ -773,7 +467,7 @@ test("factory reducer: blocked task clears the latest running candidate status",
     },
   ]);
 
-  expect(state.graph.nodes.task_03?.status).toBe("blocked");
+  expect(state.workflow.tasksById.task_03?.status).toBe("blocked");
   expect(state.candidates.task_03_candidate_01?.status).toBe("changes_requested");
   expect(state.candidates.task_03_candidate_01?.latestReason).toContain("DescribeLoadBalancers");
 });

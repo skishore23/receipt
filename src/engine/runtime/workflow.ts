@@ -1,14 +1,7 @@
 import type { Runtime } from "@receipt/core/runtime";
-import type { Chain } from "@receipt/core/types";
 
 export const clampNumber = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
-
-export const parseFormNum = (value: string | undefined): number | undefined => {
-  if (value === undefined) return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-};
 
 export type AgentRunCommand = {
   readonly command: "steer" | "follow_up";
@@ -19,17 +12,6 @@ export type AgentRunControl = {
   readonly jobId?: string;
   readonly checkAbort?: () => Promise<boolean>;
   readonly pullCommands?: () => Promise<ReadonlyArray<AgentRunCommand>>;
-};
-
-export const getLatestRunId = <Event extends { readonly type: string; readonly runId?: string }>(
-  chain: Chain<Event>,
-  startType = "problem.set"
-): string | undefined => {
-  for (let i = chain.length - 1; i >= 0; i -= 1) {
-    const event = chain[i].body;
-    if (event.type === startType && event.runId) return event.runId;
-  }
-  return undefined;
 };
 
 export const runStream = (base: string, runId: string): string =>

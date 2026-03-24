@@ -3,6 +3,7 @@
 // ============================================================================
 
 import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
+import type { JobLane } from "../../modules/job";
 
 export type JobExecutionContext = {
   readonly workerId: string;
@@ -23,6 +24,7 @@ export type JobWorkerOptions = {
   readonly handlers: Readonly<Record<string, JobHandler>>;
   readonly workerId: string;
   readonly leaseAgentIds?: ReadonlyArray<string>;
+  readonly leaseLanes?: ReadonlyArray<JobLane>;
   readonly idleResyncMs?: number;
   readonly pollMs?: number;
   readonly leaseMs?: number;
@@ -36,6 +38,7 @@ export class JobWorker {
   private readonly handlers: Readonly<Record<string, JobHandler>>;
   private readonly workerId: string;
   private readonly leaseAgentIds?: ReadonlyArray<string>;
+  private readonly leaseLanes?: ReadonlyArray<JobLane>;
   private readonly idleResyncMs: number;
   private readonly leaseMs: number;
   private readonly concurrency: number;
@@ -49,6 +52,9 @@ export class JobWorker {
     this.handlers = opts.handlers;
     this.workerId = opts.workerId;
     this.leaseAgentIds = opts.leaseAgentIds?.map((agentId) => agentId.trim()).filter(Boolean);
+    this.leaseLanes = opts.leaseLanes?.filter((lane) =>
+      lane === "chat" || lane === "collect" || lane === "steer" || lane === "follow_up"
+    );
     this.idleResyncMs = Math.max(1_000, opts.idleResyncMs ?? opts.pollMs ?? 5_000);
     this.leaseMs = Math.max(5_000, opts.leaseMs ?? 30_000);
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
@@ -137,6 +143,7 @@ export class JobWorker {
         workerId: this.workerId,
         leaseMs: this.leaseMs,
         ...(this.leaseAgentIds?.length ? { agentIds: this.leaseAgentIds } : {}),
+        ...(this.leaseLanes?.length ? { lanes: this.leaseLanes } : {}),
       });
       if (!leased) break;
       leasedAny = true;

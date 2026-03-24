@@ -1,9 +1,8 @@
 // ============================================================================
 // Factory client — shared front-end module for all Receipt views
 // Self-initializes based on DOM markers:
-//   [data-factory-chat]    → chat composer, scroll, prompt-fill
-//   [data-factory-control] → SPA nav, EventSource, island refresh
-//   [data-receipt-browser]  → receipt row expand/collapse
+//   [data-factory-chat]   → chat composer, scroll, prompt-fill
+//   [data-receipt-browser] → receipt row expand/collapse
 // ============================================================================
 
 (function () {
@@ -335,131 +334,6 @@
     });
   }
 
-  // ── Mission control ───────────────────────────────────────────────────────
-
-  function initControl() {
-    var controlSource = null;
-
-    var getState = function () {
-      return {
-        objective: document.body.dataset.objective || "",
-        panel: document.body.dataset.panel || "overview",
-        focusKind: document.body.dataset.focusKind || "mission",
-        focusId: document.body.dataset.focusId || "",
-      };
-    };
-
-    var query = function () {
-      var state = getState();
-      var params = new URLSearchParams();
-      if (state.objective) params.set("objective", state.objective);
-      if (state.panel) params.set("panel", state.panel);
-      if (state.focusKind) params.set("focusKind", state.focusKind);
-      if (state.focusId) params.set("focusId", state.focusId);
-      var built = params.toString();
-      return built ? "?" + built : "";
-    };
-
-    var updateIslandUrls = function () {
-      var q = query();
-      var rail = document.getElementById("factory-mission-rail");
-      var main = document.getElementById("factory-mission-main");
-      var inspector = document.getElementById("factory-mission-inspector");
-      if (rail) rail.setAttribute("hx-get", "/factory/control/island/rail" + q);
-      if (main) main.setAttribute("hx-get", "/factory/control/island/main" + q);
-      if (inspector) inspector.setAttribute("hx-get", "/factory/control/island/inspector" + q);
-    };
-
-    var refreshRail = function () {
-      document.body.dispatchEvent(new CustomEvent("factory-rail-refresh", { bubbles: true }));
-    };
-
-    var refreshMain = function () {
-      document.body.dispatchEvent(new CustomEvent("factory-main-refresh", { bubbles: true }));
-    };
-
-    var refreshInspector = function () {
-      document.body.dispatchEvent(new CustomEvent("factory-inspector-refresh", { bubbles: true }));
-    };
-
-    var refreshLive = function () {
-      document.body.dispatchEvent(new CustomEvent("factory-live-refresh", { bubbles: true }));
-    };
-
-    var hasLiveFocus = function () {
-      var focusKind = document.body.dataset.focusKind || "mission";
-      var focusId = document.body.dataset.focusId || "";
-      return (focusKind === "task" || focusKind === "job") && Boolean(focusId);
-    };
-
-    var refreshFromStream = function () {
-      refreshRail();
-      refreshMain();
-      refreshInspector();
-      if (hasLiveFocus()) refreshLive();
-    };
-
-    var connectControl = function () {
-      if (controlSource) controlSource.close();
-      controlSource = new EventSource("/factory/control/events" + query());
-      controlSource.addEventListener("factory-refresh", refreshFromStream);
-      controlSource.addEventListener("receipt-refresh", refreshFromStream);
-      controlSource.addEventListener("job-refresh", function () {
-        refreshRail();
-        refreshMain();
-        refreshInspector();
-        if (hasLiveFocus()) refreshLive();
-      });
-    };
-
-    var applyUrl = function (url) {
-      document.body.dataset.objective = url.searchParams.get("objective") || "";
-      document.body.dataset.panel = url.searchParams.get("panel") || "overview";
-      document.body.dataset.focusKind = url.searchParams.get("focusKind") || "mission";
-      document.body.dataset.focusId = url.searchParams.get("focusId") || "";
-      history.replaceState({}, "", url.pathname + url.search);
-      updateIslandUrls();
-      connectControl();
-    };
-
-    document.addEventListener("click", function (event) {
-      var target = event.target;
-      if (!(target instanceof HTMLElement)) return;
-      var link = target.closest("[data-factory-nav]");
-      if (!(link instanceof HTMLAnchorElement)) return;
-      event.preventDefault();
-      var url = new URL(link.href, window.location.origin);
-      applyUrl(url);
-      var mode = link.getAttribute("data-factory-nav") || "";
-      if (mode === "objective") {
-        refreshRail();
-        refreshMain();
-        refreshInspector();
-        return;
-      }
-      refreshMain();
-      refreshInspector();
-    });
-
-    updateIslandUrls();
-    connectControl();
-
-    document.addEventListener("htmx:afterRequest", function (event) {
-      var detail = event && event.detail;
-      var elt = detail && detail.elt;
-      if (!elt || !(elt instanceof HTMLElement) || detail.failed) return;
-      if (elt.tagName === "FORM") {
-        refreshMain();
-        refreshInspector();
-        if (hasLiveFocus()) refreshLive();
-      }
-    });
-
-    window.addEventListener("beforeunload", function () {
-      if (controlSource) controlSource.close();
-    });
-  }
-
   // ── Receipt browser ───────────────────────────────────────────────────────
 
   function initReceipt() {
@@ -474,7 +348,6 @@
 
   function boot() {
     if (document.querySelector("[data-factory-chat]")) initChat();
-    if (document.querySelector("[data-factory-control]")) initControl();
     if (document.querySelector("[data-receipt-browser]")) initReceipt();
   }
 

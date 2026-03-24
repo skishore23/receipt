@@ -5,8 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
-
 import { type CodexExecutor } from "../../src/adapters/codex-executor";
 import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryState } from "../../src/adapters/memory-tools";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
@@ -115,25 +113,6 @@ test("factory scheduling: queued objectives preserve FIFO order without invoking
   const dataDir = await createTempDir("receipt-factory-scheduling-fifo");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
-  let llmCalls = 0;
-  const llmStructured = async <Schema extends ZodTypeAny>(opts: {
-    readonly schemaName: string;
-    readonly schema: Schema;
-  }): Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }> => {
-    llmCalls += 1;
-    const payload = {
-      tasks: [{
-        title: "Should not run during queue admission",
-        prompt: "This decomposition path should stay untouched in this test.",
-        workerType: "codex",
-        dependsOn: [],
-      }],
-    };
-    return {
-      parsed: opts.schema.parse(payload),
-      raw: JSON.stringify(payload),
-    };
-  };
   const service = new FactoryService({
     dataDir,
     queue,
@@ -142,7 +121,6 @@ test("factory scheduling: queued objectives preserve FIFO order without invoking
     codexExecutor: {
       run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
     },
-    llmStructured,
     repoRoot,
   });
 
@@ -162,7 +140,6 @@ test("factory scheduling: queued objectives preserve FIFO order without invoking
     checks: ["git status --short"],
   });
 
-  expect(llmCalls).toBe(0);
   expect(first.scheduler.slotState).toBe("active");
   expect(second.scheduler.slotState).toBe("queued");
   expect(second.scheduler.queuePosition).toBe(1);
@@ -253,7 +230,7 @@ test("factory scheduling: archiving an active objective cancels queued task jobs
 
   const admitted = await service.getObjective(second.objectiveId);
   expect(admitted.scheduler.slotState).toBe("active");
-  expect(admitted.phase).toBe("preparing_repo");
+  expect(admitted.phase).toBe("planning");
   const admittedControlJob = await findLatestObjectiveJob(queue, second.objectiveId, "factory.objective.control");
   const admittedPayload = admittedControlJob?.payload as {
     readonly kind?: string;
@@ -303,7 +280,7 @@ test("factory scheduling: resume ignores archived objectives instead of re-enque
   expect(active.scheduler.slotState).toBe("active");
 }, 120_000);
 
-test("factory runtime: blocked tasks emit split/supersede mutation receipts at runtime", async () => {
+test("factory runtime: blocked tasks stay blocked instead of spawning mutation follow-ups", async () => {
   const dataDir = await createTempDir("receipt-factory-mutation");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -322,23 +299,6 @@ test("factory runtime: blocked tasks emit split/supersede mutation receipts at r
       return { exitCode: 0, signal: null, stdout: raw, stderr: "", lastMessage: raw };
     },
   };
-  const llmStructured = async <Schema extends ZodTypeAny>(opts: {
-    readonly schemaName: string;
-    readonly schema: Schema;
-  }): Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }> => {
-    const payload = {
-      tasks: [{
-        title: "Build the implementation",
-        prompt: "Implement the requested factory change.",
-        workerType: "codex",
-        dependsOn: [],
-      }],
-    };
-    return {
-      parsed: opts.schema.parse(payload),
-      raw: JSON.stringify(payload),
-    };
-  };
   const service = new FactoryService({
     dataDir,
     queue,
@@ -346,7 +306,6 @@ test("factory runtime: blocked tasks emit split/supersede mutation receipts at r
     sse: new SseHub(),
     codexExecutor,
     memoryTools: createMemoryToolsForTest(dataDir),
-    llmStructured,
     repoRoot,
   });
 
@@ -362,9 +321,11 @@ test("factory runtime: blocked tasks emit split/supersede mutation receipts at r
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.latestRebracket?.source).toBe("runtime");
-  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("superseded");
-  expect(detail.tasks.some((task) => task.title.startsWith("Unblock "))).toBeTruthy();
-  expect(detail.tasks.some((task) => task.title.startsWith("Finish "))).toBeTruthy();
+  expect(detail.tasks).toHaveLength(1);
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
+  expect(detail.tasks.some((task) => task.title.startsWith("Unblock "))).toBe(false);
+  expect(detail.tasks.some((task) => task.title.startsWith("Finish "))).toBe(false);
+  expect(detail.blockedReason ?? "").toMatch(/No runnable tasks remained|blocked/i);
 }, 120_000);
 
 test("factory candidate lineage: rework dispatch mints a fresh candidate id", async () => {
@@ -421,23 +382,6 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
   const dataDir = await createTempDir("receipt-factory-profile-policy");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
-  const llmStructured = async <Schema extends ZodTypeAny>(opts: {
-    readonly schemaName: string;
-    readonly schema: Schema;
-  }): Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }> => {
-    const payload = {
-      tasks: [{
-        title: "Review release notes",
-        prompt: "Summarize the release implications without editing code.",
-        workerType: "writer",
-        dependsOn: [],
-      }],
-    };
-    return {
-      parsed: opts.schema.parse(payload),
-      raw: JSON.stringify(payload),
-    };
-  };
   const service = new FactoryService({
     dataDir,
     queue,
@@ -447,7 +391,6 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
       run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
     },
     memoryTools: createMemoryToolsForTest(dataDir),
-    llmStructured,
     repoRoot,
   });
 
@@ -468,7 +411,7 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
   expect(queuedJob?.agentId).toBe("codex");
 }, 120_000);
 
-test("factory no-diff discovery tasks are bypassed so downstream implementation can continue", async () => {
+test("factory no-diff discovery tasks block and wait for an explicit react instead of auto-bypassing", async () => {
   const dataDir = await createTempDir("receipt-factory-no-diff-bypass");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -543,10 +486,10 @@ test("factory no-diff discovery tasks are bypassed so downstream implementation 
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("executing");
-  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("superseded");
-  expect(detail.tasks.find((task) => task.taskId === "task_02")?.status).toBe("running");
-  const nextJob = await findLatestFactoryJob(queue, created.objectiveId);
-  expect(nextJob.taskId).toBe("task_02");
+  expect(detail.phase).toBe("blocked");
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.blockedReason ?? "").toMatch(/no tracked diff/i);
+  expect(detail.tasks.find((task) => task.taskId === "task_02")?.status).toBe("pending");
 }, 120_000);
 
 test("factory dispatch refreshes stale state before pinning the task workspace base", async () => {
@@ -604,7 +547,7 @@ test("factory dispatch refreshes stale state before pinning the task workspace b
   });
 
   const staleState = await service.getObjectiveState(created.objectiveId);
-  const staleTask = staleState.graph.nodes.task_01;
+  const staleTask = staleState.workflow.tasksById.task_01;
   expect(staleTask).toBeTruthy();
   await service.git.createWorkspace({
     workspaceId: `${created.objectiveId}_task_01_task_01_candidate_01`,
@@ -692,7 +635,7 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
       task: {
         nodeId: "task_02",
         taskId: "task_02",
-        taskKind: "reconciliation",
+        taskKind: "planned",
         title: "Stale reconciliation task",
         prompt: "This mutation should be rejected.",
         workerType: "codex",
@@ -710,58 +653,4 @@ test("factory optimistic mutation append: stale heads are rejected without mutat
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.tasks.length).toBe(1);
   expect(detail.tasks.some((task) => task.taskId === "task_02")).toBe(false);
-});
-
-test("factory reconciliation spawning refreshes stale state and keeps task ids unique", async () => {
-  const dataDir = await createTempDir("receipt-factory-reconciliation-ids");
-  const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
-  const service = new FactoryService({
-    dataDir,
-    queue,
-    jobRuntime: createJobRuntime(dataDir),
-    sse: new SseHub(),
-    codexExecutor: {
-      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
-    },
-    repoRoot,
-  });
-
-  const created = await service.createObjective({
-    title: "Reconciliation ids objective",
-    prompt: "Ensure stale reconciliation spawns do not collide.",
-    checks: ["git status --short"],
-  });
-  await runObjectiveStartup(service, created.objectiveId);
-
-  const createdAt = created.createdAt + 10;
-  const internals = service as unknown as {
-    emitObjective(objectiveId: string, event: unknown): Promise<void>;
-    spawnReconciliationTask(state: Awaited<ReturnType<FactoryService["getObjectiveState"]>>, candidateId: string, reason: string): Promise<void>;
-  };
-  await internals.emitObjective(created.objectiveId, {
-    type: "candidate.created",
-    objectiveId: created.objectiveId,
-    createdAt,
-    candidate: {
-      candidateId: "task_01_candidate_01",
-      taskId: "task_01",
-      status: "approved",
-      baseCommit: created.baseHash,
-      checkResults: [],
-      artifactRefs: {},
-      createdAt,
-      updatedAt: createdAt,
-    },
-  });
-
-  const staleState = await service.getObjectiveState(created.objectiveId);
-  await internals.spawnReconciliationTask(staleState, "task_01_candidate_01", "First reconciliation task.");
-  await internals.spawnReconciliationTask(staleState, "task_01_candidate_01", "Second reconciliation task.");
-
-  const detail = await service.getObjective(created.objectiveId);
-  const taskIds = detail.tasks.map((task) => task.taskId);
-  expect(taskIds.includes("task_02")).toBeTruthy();
-  expect(taskIds.includes("task_03")).toBeTruthy();
-  expect(new Set(taskIds).size).toBe(taskIds.length);
 });

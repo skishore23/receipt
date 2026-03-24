@@ -1,23 +1,10 @@
 import { expect, test } from "bun:test";
 
 import {
-  buildInfrastructureDecompositionGuidance,
   rewriteInfrastructureTaskPromptForExecution,
   renderInfrastructureTaskExecutionGuidance,
 } from "../../src/services/factory-infrastructure-guidance";
 import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
-
-test("factory infrastructure guidance: decomposition guidance distinguishes global AWS failure from per-service denial", () => {
-  const guidance = buildInfrastructureDecompositionGuidance({
-    profileId: "infrastructure",
-    objectiveMode: "investigation",
-    objectivePrompt: "analyze aws spend and validate cost drivers with resource inventory",
-  });
-
-  expect(guidance).toContain(
-    "Differentiate account-level AWS access failures from one denied service API. For broad multi-service inventory, prefer tasks that report per-service AccessDenied gaps and continue on the remaining allowed services when the denied API is not the primary scope.",
-  );
-});
 
 test("factory infrastructure guidance: execution guidance allows partial progress on multi-service AccessDenied", () => {
   const cloudExecutionContext: FactoryCloudExecutionContext = {
@@ -47,7 +34,7 @@ test("factory infrastructure guidance: execution guidance allows partial progres
   };
 
   const guidance = renderInfrastructureTaskExecutionGuidance({
-    profileId: "infrastructure",
+    profileCloudProvider: "aws",
     objectiveMode: "investigation",
     cloudExecutionContext,
   });
@@ -62,7 +49,7 @@ test("factory infrastructure guidance: execution guidance allows partial progres
 
 test("factory infrastructure guidance: broad multi-service prompts do not keep contradictory fail-fast-on-any-denial wording", () => {
   const rewritten = rewriteInfrastructureTaskPromptForExecution({
-    profileId: "infrastructure",
+    profileCloudProvider: "aws",
     objectiveMode: "investigation",
     taskPrompt: "Run targeted AWS CLI inventory across EC2, EBS, RDS, S3, NAT, ELB, and CloudWatch. Output counts and notable outliers. Fail fast if any AWS CLI call is denied and report exact error.",
   });

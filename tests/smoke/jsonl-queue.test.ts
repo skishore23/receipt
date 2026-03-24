@@ -56,6 +56,51 @@ test("jsonl queue: lease/retry/wait lifecycle", async () => {
   }
 });
 
+test("jsonl queue: lane filters keep fast chat work separate from heavy jobs", async () => {
+  const dir = await mkTmp("receipt-queue-lanes");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    const heavy = await queue.enqueue({
+      agentId: "factory",
+      lane: "collect",
+      payload: { kind: "factory.task.run", runId: "r_heavy" },
+      maxAttempts: 1,
+    });
+    const chat = await queue.enqueue({
+      agentId: "factory",
+      lane: "chat",
+      payload: { kind: "factory.run", runId: "r_chat" },
+      maxAttempts: 1,
+    });
+
+    const chatLease = await queue.leaseNext({
+      workerId: "w_chat",
+      leaseMs: 5_000,
+      agentId: "factory",
+      lanes: ["chat"],
+    });
+    expect(chatLease?.id).toBe(chat.id);
+
+    const heavyLease = await queue.leaseNext({
+      workerId: "w_heavy",
+      leaseMs: 5_000,
+      agentId: "factory",
+      lanes: ["collect"],
+    });
+    expect(heavyLease?.id).toBe(heavy.id);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: steer/follow-up/abort command lanes", async () => {
   const dir = await mkTmp("receipt-queue-cmd");
   try {

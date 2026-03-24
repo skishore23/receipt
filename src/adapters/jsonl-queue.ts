@@ -7,12 +7,22 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Runtime } from "@receipt/core/runtime";
-import type { JobCmd, JobCommandRecord, JobEvent, JobLane, JobRecord, JobState, JobStatus, QueueCommandType } from "../modules/job";
+import type {
+  JobCmd,
+  JobCommandRecord,
+  JobEvent,
+  JobLane,
+  JobRecord,
+  JobState,
+  JobStatus,
+  QueueCommandLane,
+  QueueCommandType,
+} from "../modules/job";
 
 export type QueueCommandRecord = {
   readonly id: string;
   readonly command: QueueCommandType;
-  readonly lane: Exclude<JobLane, "collect">;
+  readonly lane: QueueCommandLane;
   readonly payload?: Record<string, unknown>;
   readonly by?: string;
   readonly createdAt: number;
@@ -61,6 +71,7 @@ export type LeaseOptions = {
   readonly leaseMs: number;
   readonly agentId?: string;
   readonly agentIds?: ReadonlyArray<string>;
+  readonly lanes?: ReadonlyArray<JobLane>;
 };
 
 export type QueueCommandInput = {
@@ -131,12 +142,13 @@ type JsonlQueueOptions = {
 const TERMINAL = new Set<JobStatus>(["completed", "failed", "canceled"]);
 
 const lanePriority: Record<JobLane, number> = {
-  steer: 0,
+  chat: 0,
   collect: 1,
-  follow_up: 2,
+  steer: 2,
+  follow_up: 3,
 };
 
-const commandLane = (command: QueueCommandType): Exclude<JobLane, "collect"> =>
+const commandLane = (command: QueueCommandType): QueueCommandLane =>
   command === "follow_up" ? "follow_up" : "steer";
 
 const cloneJob = (job: QueueJob): QueueJob => ({
@@ -584,6 +596,16 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     return agentIds;
   };
 
+  const matchingLanes = (lease: LeaseOptions): ReadonlySet<JobLane> => {
+    const lanes = new Set<JobLane>();
+    for (const candidate of lease.lanes ?? []) {
+      if (candidate === "chat" || candidate === "collect" || candidate === "steer" || candidate === "follow_up") {
+        lanes.add(candidate);
+      }
+    }
+    return lanes;
+  };
+
   const requestAbort = async (
     job: QueueJob,
     reason: string,
@@ -702,11 +724,13 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         const ts = nowTs();
         await handleExpiredLeases(ts, changed);
         const agentIds = matchingAgentIds(lease);
+        const lanes = matchingLanes(lease);
         let next: QueueJob | undefined;
         for (const jobId of [...index.queuedJobIds]) {
           const current = await loadAuthoritativeJob(jobId, changed);
           if (!current || !shouldQueueJob(current)) continue;
           if (agentIds.size > 0 && !agentIds.has(current.agentId)) continue;
+          if (lanes.size > 0 && !lanes.has(current.lane)) continue;
           next = current;
           break;
         }

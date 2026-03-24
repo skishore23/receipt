@@ -678,6 +678,7 @@ const workers = [
     handlers: jobHandlers,
     workerId: `${jobWorkerId}:chat`,
     leaseAgentIds: ["factory"],
+    leaseLanes: ["chat"],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: chatJobConcurrency,
@@ -828,7 +829,7 @@ app.post("/agents/:id/jobs", async (c) => {
   const payload = (typeof body.payload === "object" && body.payload)
     ? body.payload as Record<string, unknown>
     : body;
-  const lane = body.lane === "steer" || body.lane === "follow_up" || body.lane === "collect"
+  const lane = body.lane === "chat" || body.lane === "steer" || body.lane === "follow_up" || body.lane === "collect"
     ? body.lane
     : "collect";
   const jobId = typeof body.jobId === "string" ? body.jobId : undefined;

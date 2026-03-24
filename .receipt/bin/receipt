@@ -1,0 +1,4 @@
+#!/bin/sh
+export DATA_DIR='/Users/kishore/receipt/.receipt/data'
+export RECEIPT_DATA_DIR='/Users/kishore/receipt/.receipt/data'
+exec '/Users/kishore/.bun/bin/bun' '/Users/kishore/receipt/src/cli.ts' "$@"

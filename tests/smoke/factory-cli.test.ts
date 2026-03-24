@@ -11,12 +11,13 @@ import { renderToString } from "ink";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
-import { COMPOSER_COMMANDS, filterComposerCommands, findComposerSlashContext, parseComposerDraft, replaceComposerSlashContext } from "../../src/factory-cli/composer";
+import { parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent } from "../../src/modules/agent";
-import { decideFactory, initialFactoryState, reduceFactory, type FactoryCmd, type FactoryEvent } from "../../src/modules/factory";
+import { decideFactory, initialFactoryState, reduceFactory, DEFAULT_FACTORY_OBJECTIVE_POLICY, type FactoryCmd, type FactoryEvent } from "../../src/modules/factory";
+import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
 import {
   historicalInfrastructureChatReceipts,
   historicalInfrastructureChatStream,
@@ -238,15 +239,243 @@ const seedAgentReplay = async (
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 
+const makeWorkbenchSnapshot = () => {
+  const detail = {
+    objectiveId: "objective_demo",
+    title: "CLI workbench objective",
+    status: "executing",
+    phase: "executing",
+    objectiveMode: "delivery",
+    severity: 2,
+    scheduler: { slotState: "active" },
+    updatedAt: 2,
+    latestSummary: "The workbench task is still running.",
+    nextAction: "Keep the focused task visible.",
+    activeTaskCount: 1,
+    readyTaskCount: 1,
+    taskCount: 2,
+    integrationStatus: "idle",
+    prompt: "Implement the running task workbench.",
+    channel: "results",
+    baseHash: "abc123",
+    checks: ["bun test"],
+    profile: {
+      rootProfileLabel: "Generalist",
+      rootProfileId: "generalist",
+      promptPath: "prompts/factory/orchestrator.md",
+      selectedSkills: [],
+    },
+    policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    contextSources: {
+      repoSharedMemoryScope: "factory/repo/shared",
+      objectiveMemoryScope: "factory/objectives/objective_demo",
+      integrationMemoryScope: "factory/objectives/objective_demo/integration",
+      profileSkillRefs: [],
+      repoSkillPaths: [],
+      sharedArtifactRefs: [],
+    },
+    budgetState: {
+      elapsedMinutes: 7,
+      taskRunsUsed: 2,
+      candidatePassesByTask: {},
+    },
+    createdAt: 1,
+    latestDecision: {
+      summary: "Focus task_01 until the logs settle.",
+      at: 3,
+      source: "runtime",
+    },
+    investigation: {
+      reports: [],
+      finalReport: {
+        conclusion: "",
+        evidence: [],
+        scriptsRun: [],
+        disagreements: [],
+        nextSteps: [],
+      },
+    },
+    tasks: [{
+      taskId: "task_01",
+      title: "Implement workbench shell",
+      prompt: "Render the running task workbench in the CLI rail.",
+      workerType: "codex",
+      taskKind: "planned",
+      status: "running",
+      dependsOn: [],
+      workspaceExists: true,
+      workspaceDirty: true,
+      workspaceHead: "abc12345",
+      jobId: "job_01",
+      jobStatus: "running",
+      candidateId: "candidate_01",
+      candidate: {
+        candidateId: "candidate_01",
+        taskId: "task_01",
+        status: "running",
+        summary: "Applying the CLI workbench patch.",
+        tokensUsed: 144,
+      },
+      manifestPath: "/tmp/task_01.manifest.json",
+      contextPackPath: "/tmp/task_01.context-pack.json",
+      promptPath: "/tmp/task_01.prompt.md",
+      memoryScriptPath: "/tmp/task_01.memory.cjs",
+      stdoutPath: "/tmp/task_01.stdout.log",
+      stderrPath: "/tmp/task_01.stderr.log",
+      lastMessagePath: "/tmp/task_01.last-message.md",
+      lastMessage: "Rendering the CLI workbench.",
+      stdoutTail: "build ok",
+      stderrTail: "",
+    }, {
+      taskId: "task_02",
+      title: "Follow-up validation",
+      prompt: "Run the validation follow-up after task_01.",
+      workerType: "codex",
+      taskKind: "planned",
+      status: "ready",
+      dependsOn: ["task_01"],
+      workspaceExists: true,
+      workspaceDirty: false,
+      workspaceHead: "abc12345",
+      jobStatus: "queued",
+      latestSummary: "Waiting on task_01.",
+    }],
+    candidates: [],
+    integration: {
+      status: "idle",
+      queuedCandidateIds: [],
+    },
+    recentReceipts: [{
+      type: "rebracket.applied",
+      hash: "hash_live_01",
+      ts: 4,
+      summary: "Stayed on task_01.",
+      taskId: "task_01",
+    }],
+    evidenceCards: [],
+    activity: [{
+      kind: "job",
+      title: "Worker running",
+      summary: "Codex is still streaming logs for task_01.",
+      at: 5,
+      taskId: "task_01",
+    }],
+  } as const;
+  const live = {
+    selectedObjectiveId: "objective_demo",
+    objectiveTitle: detail.title,
+    objectiveStatus: detail.status,
+    phase: detail.phase,
+    activeTasks: detail.tasks.slice(0, 1),
+    recentJobs: [{
+      id: "job_01",
+      agentId: "codex",
+      lane: "collect",
+      singletonMode: "allow",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId: "objective_demo",
+        taskId: "task_01",
+        candidateId: "candidate_01",
+      },
+      status: "running",
+      attempt: 1,
+      maxAttempts: 1,
+      createdAt: 1,
+      updatedAt: 2,
+      commands: [],
+    }],
+  } as const;
+  return {
+    compose: {
+      defaultBranch: "main",
+      sourceDirty: false,
+      sourceBranch: "main",
+      objectiveCount: 1,
+      defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      profileSummary: "Using checked-in Factory profiles and skills only.",
+      defaultValidationCommands: ["bun test"],
+    },
+    board: {
+      objectives: [{
+        objectiveId: detail.objectiveId,
+        title: detail.title,
+        status: detail.status,
+        phase: detail.phase,
+        objectiveMode: detail.objectiveMode,
+        severity: detail.severity,
+        scheduler: detail.scheduler,
+        updatedAt: detail.updatedAt,
+        latestSummary: detail.latestSummary,
+        latestDecision: detail.latestDecision,
+        nextAction: detail.nextAction,
+        activeTaskCount: detail.activeTaskCount,
+        readyTaskCount: detail.readyTaskCount,
+        taskCount: detail.taskCount,
+        integrationStatus: detail.integration.status,
+        profile: detail.profile,
+        section: "active",
+      }],
+      sections: {
+        needs_attention: [],
+        active: [{
+          objectiveId: detail.objectiveId,
+          title: detail.title,
+          status: detail.status,
+          phase: detail.phase,
+          objectiveMode: detail.objectiveMode,
+          severity: detail.severity,
+          scheduler: detail.scheduler,
+          updatedAt: detail.updatedAt,
+          latestSummary: detail.latestSummary,
+          latestDecision: detail.latestDecision,
+          nextAction: detail.nextAction,
+          activeTaskCount: detail.activeTaskCount,
+          readyTaskCount: detail.readyTaskCount,
+          taskCount: detail.taskCount,
+          integrationStatus: detail.integration.status,
+          profile: detail.profile,
+          section: "active",
+        }],
+        queued: [],
+        completed: [],
+      },
+      selectedObjectiveId: detail.objectiveId,
+    },
+    detail,
+    live,
+    debug: {
+      objectiveId: detail.objectiveId,
+      title: detail.title,
+      status: detail.status,
+      phase: detail.phase,
+      scheduler: detail.scheduler,
+      latestDecision: detail.latestDecision,
+      nextAction: detail.nextAction,
+      profile: detail.profile,
+      policy: detail.policy,
+      contextSources: detail.contextSources,
+      budgetState: detail.budgetState,
+      recentReceipts: detail.recentReceipts,
+      evidenceCards: detail.evidenceCards,
+      activeJobs: live.recentJobs,
+      lastJobs: live.recentJobs,
+      latestContextPacks: [],
+      taskWorktrees: [],
+      integrationWorktree: undefined,
+    },
+  };
+};
+
 test("factory cli: init writes config and board snapshot stays clean", async () => {
   const repoDir = await createRepo();
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
   expect(init.code).toBe(0);
   const initPayload = JSON.parse(init.stdout) as {
     readonly config: { readonly configPath: string; readonly defaultChecks: ReadonlyArray<string> };
-    readonly repoProfile: { readonly summary: string };
+    readonly profileSummary: string;
   };
-  expect(initPayload.repoProfile.summary.length).toBeGreaterThan(0);
+  expect(initPayload.profileSummary.length).toBeGreaterThan(0);
   expect(initPayload.config.defaultChecks).toContain("bun run build");
   await fs.access(initPayload.config.configPath);
 
@@ -273,7 +502,7 @@ test("factory cli: bun repos infer bun validation commands", async () => {
   expect(initPayload.environment.sourceDirty).toBe(false);
 }, 120_000);
 
-test("factory cli: replay folds a historical infrastructure objective into the current DAG projection", async () => {
+test("factory cli: replay folds a historical infrastructure objective into the current workflow projection", async () => {
   const repoDir = await createRepo();
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
   expect(init.code).toBe(0);
@@ -294,7 +523,7 @@ test("factory cli: replay folds a historical infrastructure objective into the c
     readonly objectiveId: string;
     readonly receiptCount: number;
     readonly status: string;
-    readonly graph: {
+    readonly workflow: {
       readonly pendingTaskIds: ReadonlyArray<string>;
       readonly blockedTaskIds: ReadonlyArray<string>;
     };
@@ -306,8 +535,8 @@ test("factory cli: replay folds a historical infrastructure objective into the c
   expect(payload.objectiveId).toBe(historicalInfrastructureObjectiveId);
   expect(payload.receiptCount).toBe(historicalInfrastructureObjectiveReceipts.length);
   expect(payload.status).toBe("canceled");
-  expect(payload.graph.blockedTaskIds).toEqual(["task_01"]);
-  expect(payload.graph.pendingTaskIds).toEqual(["task_02"]);
+  expect(payload.workflow.blockedTaskIds).toEqual(["task_01"]);
+  expect(payload.workflow.pendingTaskIds).toEqual(["task_02"]);
   expect(payload.tasks.find((task) => task.taskId === "task_01")?.blockedReason).toContain("AccessDeniedException");
 }, 120_000);
 
@@ -611,7 +840,7 @@ test("factory cli: create, compose, and react expose structured mutation results
   expect(reactedPayload.objective.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
 }, 120_000);
 
-test("factory cli: steer, follow-up, and abort-job queue structured job commands", async () => {
+test("factory cli: abort-job queues a structured abort command", async () => {
   const repoDir = await createRepo();
 
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
@@ -633,48 +862,6 @@ test("factory cli: steer, follow-up, and abort-job queue structured job commands
       },
       maxAttempts: 1,
     });
-
-    const steer = await runCli([
-      "factory",
-      "steer",
-      job.id,
-      "--json",
-      "--repo-root",
-      repoDir,
-      "--problem",
-      "Retarget the current job.",
-    ]);
-    expect(steer.code).toBe(0);
-    const steerPayload = JSON.parse(steer.stdout) as {
-      readonly kind: string;
-      readonly action: string;
-      readonly jobId: string;
-      readonly commandId: string;
-    };
-    expect(steerPayload.kind).toBe("job");
-    expect(steerPayload.action).toBe("steer");
-    expect(steerPayload.jobId).toBe(job.id);
-    expect(steerPayload.commandId.length).toBeGreaterThan(0);
-
-    const followUp = await runCli([
-      "factory",
-      "follow-up",
-      job.id,
-      "--json",
-      "--repo-root",
-      repoDir,
-      "--note",
-      "Keep the objective context attached.",
-    ]);
-    expect(followUp.code).toBe(0);
-    const followUpPayload = JSON.parse(followUp.stdout) as {
-      readonly action: string;
-      readonly jobId: string;
-      readonly commandId: string;
-    };
-    expect(followUpPayload.action).toBe("follow_up");
-    expect(followUpPayload.jobId).toBe(job.id);
-    expect(followUpPayload.commandId.length).toBeGreaterThan(0);
 
     const abort = await runCli([
       "factory",
@@ -705,8 +892,6 @@ test("factory cli: steer, follow-up, and abort-job queue structured job commands
     await runtime.queue.refresh();
     const refreshed = await runtime.queue.getJob(job.id);
     expect(refreshed).toBeDefined();
-    expect(refreshed?.commands.some((command) => command.command === "steer")).toBe(true);
-    expect(refreshed?.commands.some((command) => command.command === "follow_up")).toBe(true);
     expect(refreshed?.commands.some((command) => command.command === "abort")).toBe(true);
   } finally {
     runtime.stop();
@@ -742,27 +927,6 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       type: "help",
     },
   });
-  expect(parseComposerDraft("/steer tighten the current plan", "obj_123")).toEqual({
-    ok: true,
-    command: {
-      type: "steer",
-      problem: "tighten the current plan",
-    },
-  });
-  expect(parseComposerDraft("/follow-up keep the logs attached", "obj_123")).toEqual({
-    ok: true,
-    command: {
-      type: "follow-up",
-      note: "keep the logs attached",
-    },
-  });
-  expect(parseComposerDraft("/followup keep the logs attached", "obj_123")).toEqual({
-    ok: true,
-    command: {
-      type: "follow-up",
-      note: "keep the logs attached",
-    },
-  });
   expect(parseComposerDraft("   /help   ", "obj_123")).toEqual({
     ok: true,
     command: {
@@ -778,28 +942,46 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
   });
 });
 
-test("factory cli: slash command autocomplete helpers filter and replace token text", () => {
-  expect(filterComposerCommands("rea").map((command) => command.name)).toContain("react");
-  expect(filterComposerCommands("follow").map((command) => command.name)).toContain("follow-up");
-  const context = findComposerSlashContext("keep /ste", "keep /ste".length);
-  expect(context).toBeDefined();
-  const inserted = replaceComposerSlashContext("keep /ste", context!, "/steer ");
-  expect(inserted.value).toBe("keep /steer ");
-  expect(inserted.caret).toBe(inserted.value.length);
-  expect(COMPOSER_COMMANDS.map((command) => command.name)).toContain("help");
-});
-
 test("factory cli: composer parser rejects job commands without a selected objective", () => {
-  expect(parseComposerDraft("/steer tighten the current plan")).toEqual({
-    ok: false,
-    error: "Select an objective before steering its active job.",
-  });
-  expect(parseComposerDraft("/follow-up keep the logs attached")).toEqual({
-    ok: false,
-    error: "Select an objective before sending a follow-up note.",
-  });
   expect(parseComposerDraft("/abort-job stop the current worker")).toEqual({
     ok: false,
     error: "Select an objective before aborting its active job.",
   });
+});
+
+test("factory workbench: shared projection keeps rich task data and defaults focus to the active task", () => {
+  const snapshot = makeWorkbenchSnapshot();
+  const workbench = buildFactoryWorkbench({
+    detail: snapshot.detail as never,
+    recentJobs: snapshot.live.recentJobs as never,
+  });
+
+  expect(workbench?.focus).toMatchObject({
+    focusKind: "task",
+    focusId: "task_01",
+    taskId: "task_01",
+  });
+  expect(workbench?.focusedTask).toMatchObject({
+    prompt: "Render the running task workbench in the CLI rail.",
+    workspaceDirty: true,
+    workspaceHead: "abc12345",
+    candidateTokensUsed: 144,
+    manifestPath: "/tmp/task_01.manifest.json",
+    contextPackPath: "/tmp/task_01.context-pack.json",
+    memoryScriptPath: "/tmp/task_01.memory.cjs",
+  });
+});
+
+test("factory cli: objective screen renders the running task workbench", () => {
+  const snapshot = makeWorkbenchSnapshot();
+  const output = stripAnsi(renderToString(
+    React.createElement(FactoryThemeProvider, undefined,
+      React.createElement(FactoryObjectiveScreen, { snapshot: snapshot as never }),
+    ),
+  ));
+
+  expect(output).toContain("Running Task");
+  expect(output).toContain("Focus Detail");
+  expect(output).toContain("Recent Activity");
+  expect(output).toContain("Render the running task");
 });

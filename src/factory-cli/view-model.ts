@@ -116,7 +116,7 @@ export type MissionControlFocusArea = "rail" | "timeline" | "composer";
 
 export type TimelineEntry = {
   readonly id: string;
-  readonly kind: "plan" | "decision" | "task" | "candidate" | "integration" | "blocked" | "operator" | "log" | "system";
+  readonly kind: "decision" | "task" | "candidate" | "integration" | "blocked" | "operator" | "log" | "system";
   readonly title: string;
   readonly summary: string;
   readonly meta: string;
@@ -132,8 +132,7 @@ export type MissionControlViewModel = {
     readonly objectiveCount: number;
     readonly checks: string;
     readonly queueSummary: string;
-    readonly repoProfileStatus: string;
-    readonly repoProfileSummary: string;
+    readonly profileSummary: string;
     readonly selectedObjectiveLabel: string;
   };
   readonly timeline: {
@@ -156,13 +155,12 @@ const emphasisForReceipt = (type: string): TimelineEntry["emphasis"] => {
   if (type.includes("blocked") || type.includes("conflicted")) return "warning";
   if (type.includes("failed") || type.includes("error")) return "danger";
   if (type.includes("promoted") || type.includes("ready_to_promote") || type.includes("completed")) return "success";
-  if (type.includes("plan") || type.includes("rebracket")) return "accent";
+  if (type.includes("rebracket")) return "accent";
   return "muted";
 };
 
 const kindForReceipt = (type: string): TimelineEntry["kind"] =>
-  type.startsWith("objective.plan") ? "plan"
-  : type === "rebracket.applied" ? "decision"
+  type === "rebracket.applied" ? "decision"
   : type === "objective.operator.noted" ? "operator"
   : type.startsWith("task.") ? "task"
   : type.startsWith("candidate.") ? "candidate"
@@ -250,8 +248,7 @@ export const buildMissionControlViewModel = (opts: {
       objectiveCount: opts.compose.objectiveCount,
       checks: formatList(opts.compose.defaultValidationCommands, "none"),
       queueSummary,
-      repoProfileStatus: labelize(opts.compose.repoProfile.status),
-      repoProfileSummary: opts.compose.repoProfile.summary || "Factory will generate a repository profile on demand.",
+      profileSummary: opts.compose.profileSummary,
       selectedObjectiveLabel,
     },
     timeline: {

@@ -134,11 +134,7 @@ export const historicalInfrastructureObjectiveReceipts: ReadonlyArray<FactoryEve
       objectivePolicy: {
         allowedWorkerTypes: ["codex", "infra", "agent"],
         defaultWorkerType: "codex",
-        worktreeModeByWorker: {
-          codex: "required",
-          infra: "required",
-          agent: "forbidden",
-        },
+        defaultTaskExecutionMode: "isolated",
         defaultValidationMode: "repo_profile",
         defaultObjectiveMode: "investigation",
         defaultSeverity: 2,
@@ -153,29 +149,16 @@ export const historicalInfrastructureObjectiveReceipts: ReadonlyArray<FactoryEve
       budgets: {
         maxTaskRuns: 50,
         maxCandidatePassesPerTask: 4,
-        maxReconciliationTasks: 8,
         maxObjectiveMinutes: 1440,
       },
       throttles: {
         maxDispatchesPerReact: 4,
-        mutationCooldownMs: 15000,
-      },
-      mutation: {
-        aggressiveness: "balanced",
       },
       promotion: {
         autoPromote: false,
       },
     },
     createdAt: 1774231216248,
-  },
-  {
-    type: "objective.plan.proposed",
-    objectiveId: historicalInfrastructureObjectiveId,
-    taskCount: 2,
-    summary: "Adopted a 2-task graph for Inventory running EC2 instances and infer schedules.",
-    fallback: false,
-    proposedAt: 1774231236683,
   },
   {
     type: "task.added",
@@ -238,14 +221,6 @@ export const historicalInfrastructureObjectiveReceipts: ReadonlyArray<FactoryEve
       createdAt: 1774231236686,
     },
     createdAt: 1774231236686,
-  },
-  {
-    type: "objective.plan.adopted",
-    objectiveId: historicalInfrastructureObjectiveId,
-    taskIds: ["task_01", "task_02"],
-    summary: "Adopted a 2-task graph for Inventory running EC2 instances and infer schedules.",
-    fallback: false,
-    adoptedAt: 1774231236687,
   },
   {
     type: "task.ready",

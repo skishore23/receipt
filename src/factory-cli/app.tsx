@@ -8,11 +8,9 @@ import {
   cancelObjectiveMutation,
   cleanupObjectiveMutation,
   createObjectiveMutation,
-  followUpJobMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
   requireActiveObjectiveJob,
-  steerJobMutation,
 } from "./actions";
 import type { FactoryCliRuntime } from "./runtime";
 import { COMPOSER_COMMANDS, deriveObjectiveTitle, parseComposerDraft } from "./composer";
@@ -44,6 +42,7 @@ import type {
   FactoryTaskView,
 } from "../services/factory-service";
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory";
+import { buildFactoryWorkbench } from "../views/factory-workbench";
 
 type FactoryAppMode = "board" | "objective";
 
@@ -320,7 +319,6 @@ const OverviewPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
     <Box marginTop={1} flexWrap="wrap">
       <MetricCell label="Mode" value={labelize(detail.objectiveMode)} />
       <MetricCell label="Severity" value={String(detail.severity)} />
-      <MetricCell label="Reconcile" value={labelize(detail.reconciliationStatus)} />
     </Box>
     <Box marginTop={1} flexDirection="column">
       <Text bold color={tone("text")}>Initiating profile</Text>
@@ -338,7 +336,6 @@ const OverviewPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
       <MetricCell label="Head" value={shortHash(detail.latestCommitHash)} />
       <MetricCell label="Checks" value={formatList(detail.checks, "none")} />
     </Box>
-    <Text color={tone("muted")}>{detail.repoProfile.summary || "No repository profile summary yet."}</Text>
   </Box>
 );
 
@@ -437,8 +434,6 @@ const LivePanel = ({ live }: { readonly live: FactoryLiveProjection }): React.Re
 
 const DebugPanel = ({ debug }: { readonly debug: FactoryDebugProjection }): React.ReactElement => (
   <Box flexDirection="column">
-    <Text color={tone("text")}>Repo profile {labelize(debug.repoProfile.status)}</Text>
-    <Text color={tone("muted")}>{truncate(debug.repoProfile.summary, 220) || "No repo profile summary available."}</Text>
     <Text color={tone("muted")}>
       Profile {debug.profile.rootProfileLabel} · skills {debug.profile.selectedSkills.length} · shared artifacts {debug.contextSources.sharedArtifactRefs.length}
     </Text>
@@ -463,6 +458,75 @@ const ReceiptsPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
     )) : <Text color={tone("muted")}>No receipts yet.</Text>}
   </Box>
 );
+
+const ExecutionWorkbenchRail = ({
+  detail,
+  live,
+}: {
+  readonly detail: FactoryObjectiveDetail;
+  readonly live: FactoryLiveProjection;
+}): React.ReactElement | null => {
+  const workbench = buildFactoryWorkbench({
+    detail,
+    recentJobs: live.recentJobs,
+  });
+  if (!workbench || !workbench.hasActiveExecution) return null;
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text bold color={tone("text")}>Running Task</Text>
+      <Text color={tone("muted")}>
+        {formatDuration(workbench.summary.elapsedMinutes * 60_000)} · {workbench.summary.activeTaskCount} active · {workbench.summary.activeJobCount} jobs
+      </Text>
+      <Box marginTop={1} flexDirection="column">
+        {workbench.tasks.map((task) => (
+          <Box key={task.taskId} flexDirection="column" marginBottom={1}>
+            <Text color={task.taskId === workbench.focusedTask?.taskId ? tone("selection") : tone("text")} bold={task.taskId === workbench.focusedTask?.taskId}>
+              {task.taskId} · {truncate(task.title, 34)}
+            </Text>
+            <Text color={tone("muted")}>
+              {labelize(task.jobStatus ?? task.status)} · {task.workerType}
+              {task.isActive ? " · active" : task.isReady ? " · ready" : ""}
+            </Text>
+            {task.dependencySummary ? <Text color={tone("muted")}>{truncate(task.dependencySummary, 64)}</Text> : null}
+          </Box>
+        ))}
+      </Box>
+      {workbench.focusedTask ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color={tone("text")}>Focus Detail</Text>
+          <Text color={tone("text")}>{truncate(workbench.focusedTask.title, 50)}</Text>
+          <Text color={tone("muted")}>{truncate(workbench.focusedTask.prompt, 220)}</Text>
+          <Text color={tone("muted")}>
+            Workspace {workbench.focusedTask.workspaceExists ? (workbench.focusedTask.workspaceDirty ? "dirty" : "clean") : "missing"}
+            {workbench.focusedTask.workspaceHead ? ` · ${shortHash(workbench.focusedTask.workspaceHead)}` : ""}
+          </Text>
+          <Text color={tone("muted")}>
+            Checks {detail.checks.length ? formatList(detail.checks, "none") : "none"}
+          </Text>
+        </Box>
+      ) : null}
+      {workbench.focus ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color={tone("text")}>Live Stream</Text>
+          {workbench.focus.lastMessage ? <Text color={tone("text")}>{truncate(workbench.focus.lastMessage, 180)}</Text> : null}
+          {workbench.focus.stdoutTail ? <Text color={tone("muted")}>{truncate(workbench.focus.stdoutTail, 180)}</Text> : null}
+          {workbench.focus.stderrTail ? <Text color={tone("danger")}>{truncate(workbench.focus.stderrTail, 180)}</Text> : null}
+        </Box>
+      ) : null}
+      {workbench.activity.length ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color={tone("text")}>Recent Activity</Text>
+          {workbench.activity.slice(0, 4).map((entry) => (
+            <Box key={entry.id} flexDirection="column" marginBottom={1}>
+              <Text color={tone("text")}>{truncate(entry.title, 42)}</Text>
+              <Text color={tone("muted")}>{truncate(entry.summary, 180)}</Text>
+            </Box>
+          ))}
+        </Box>
+      ) : null}
+    </Box>
+  );
+};
 
 const ObjectivePanelContent = ({
   detail,
@@ -542,8 +606,8 @@ const RightRail = ({
         <Box marginTop={1} flexWrap="wrap">
           <MetricCell label="Mode" value={labelize(detail.objectiveMode)} />
           <MetricCell label="Severity" value={String(detail.severity)} />
-          <MetricCell label="Reconcile" value={labelize(detail.reconciliationStatus)} />
         </Box>
+        <ExecutionWorkbenchRail detail={detail} live={live} />
         <Box marginTop={1} flexDirection="column">
           <Text bold color={tone("text")}>Panel</Text>
           <PanelTabs panel={panel} />
@@ -683,7 +747,7 @@ const MissionControlScreen = ({
           title="Factory"
           subtitle="Receipt-native software automation with a live objective timeline, control rail, and operator composer."
           marginBottom={1}
-          right={<StateBadge value={snapshot.detail?.integration.status ?? snapshot.compose.repoProfile.status} />}
+          right={<StateBadge value={snapshot.detail?.integration.status ?? "planning"} />}
         >
           <Box flexWrap="wrap">
             <MetricCell label="Repo" value={model.header.repo} />
@@ -692,7 +756,7 @@ const MissionControlScreen = ({
             <MetricCell label="Checks" value={model.header.checks} />
             <MetricCell label="Queue" value={model.header.queueSummary} />
           </Box>
-          <Text color={tone("muted")}>{model.header.repoProfileSummary}</Text>
+          <Text color={tone("muted")}>{model.header.profileSummary}</Text>
           <Text color={tone("muted")}>Selected: {model.header.selectedObjectiveLabel}</Text>
         </Surface>
         {showHelp ? <HelpOverlay /> : null}
@@ -738,6 +802,52 @@ const MissionControlScreen = ({
     </FactoryThemeProvider>
   );
 };
+
+export const FactoryBoardScreen = ({
+  snapshot,
+  message = "Factory ready.",
+}: {
+  readonly snapshot: MissionControlSnapshot;
+  readonly message?: string;
+}): React.ReactElement => (
+  <MissionControlScreen
+    snapshot={snapshot}
+    selectedObjectiveId={snapshot.board.selectedObjectiveId}
+    panel="overview"
+    draft=""
+    focusArea="timeline"
+    compact={false}
+    stacked={false}
+    railVisible
+    showComposer={false}
+    message={message}
+    showHelp={false}
+  />
+);
+
+export const FactoryObjectiveScreen = ({
+  snapshot,
+  panel = "overview",
+  message = "Watching objective.",
+}: {
+  readonly snapshot: MissionControlSnapshot;
+  readonly panel?: FactoryObjectivePanel;
+  readonly message?: string;
+}): React.ReactElement => (
+  <MissionControlScreen
+    snapshot={snapshot}
+    selectedObjectiveId={snapshot.detail?.objectiveId ?? snapshot.board.selectedObjectiveId}
+    panel={panel}
+    draft=""
+    focusArea="timeline"
+    compact={false}
+    stacked={false}
+    railVisible
+    showComposer={false}
+    message={message}
+    showHelp={false}
+  />
+);
 
 const cycleFocus = (
   current: MissionControlFocusArea,
@@ -1006,26 +1116,6 @@ export const FactoryTerminalApp = ({
         });
         setDraft("");
         return;
-      case "steer":
-        await runAction("Queueing steer", async () => {
-          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
-          await steerJobMutation(runtime, {
-            jobId: activeJob.id,
-            problem: command.problem,
-          });
-        });
-        setDraft("");
-        return;
-      case "follow-up":
-        await runAction("Queueing follow-up", async () => {
-          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
-          await followUpJobMutation(runtime, {
-            jobId: activeJob.id,
-            note: command.note ?? "Follow up on the current active job.",
-          });
-        });
-        setDraft("");
-        return;
       case "abort-job":
         await runAction("Requesting job abort", async () => {
           const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
@@ -1178,12 +1268,7 @@ export const FactoryTerminalApp = ({
         sourceBranch: "main",
         objectiveCount: 0,
         defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
-        repoProfile: {
-          status: "missing",
-          inferredChecks: [],
-          generatedSkillRefs: [],
-          summary: "",
-        },
+        profileSummary: "Using checked-in Factory profiles and skills only.",
         defaultValidationCommands: runtime.config.defaultChecks,
       },
       board: {

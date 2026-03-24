@@ -2,50 +2,13 @@
 {
   "id": "software",
   "label": "Software",
-  "capabilities": [
-    "memory.read",
-    "skill.read",
-    "status.read",
-    "async.dispatch",
-    "async.control",
-    "objective.control",
-    "profile.handoff"
-  ],
-  "handoffTargets": [
-    "generalist",
-    "infrastructure"
-  ],
-  "routeHints": [
-    "bug",
-    "fix",
-    "ui",
-    "css",
-    "tailwind",
-    "layout",
-    "overflow",
-    "scrollbar",
-    "truncate",
-    "wrapping",
-    "wrap",
-    "patch",
-    "regression",
-    "failing test",
-    "broken"
-  ],
   "skills": [
     "skills/repo-software/SKILL.md",
     "skills/factory-run-orchestrator/SKILL.md"
   ],
-  "mode": "supervisor",
-  "discoveryBudget": 2,
-  "suspendOnAsyncChild": false,
-  "allowPollingWhileChildRunning": true,
-  "finalWhileChildRunning": "allow",
-  "childDedupe": "by_run_and_prompt",
-  "objective": {
-    "defaultWorker": "codex",
-    "maxParallelChildren": 4
-  }
+  "defaultObjectiveMode": "delivery",
+  "defaultValidationMode": "repo_profile",
+  "allowObjectiveCreation": true
 }
 ---
 

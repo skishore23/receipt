@@ -372,3 +372,90 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(afterTask?.candidate?.artifactRefs.memoryScript).toBeTruthy();
   expect(afterTask?.candidate?.artifactRefs.memoryConfig).toBeTruthy();
 }, 120_000);
+
+test("factory investigation synthesis commits a sectioned operator report to objective memory", async () => {
+  const dataDir = await createTempDir("receipt-factory-investigation-memory");
+  const repoDir = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createTestMemoryTools(dataDir);
+
+  const codexExecutor: CodexExecutor = {
+    run: async (input) => {
+      await fs.mkdir(path.dirname(input.promptPath), { recursive: true });
+      await fs.writeFile(input.promptPath, input.prompt, "utf-8");
+      await fs.writeFile(input.stdoutPath, "", "utf-8");
+      await fs.writeFile(input.stderrPath, "", "utf-8");
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Collected the current AWS account inventory evidence.",
+        artifacts: [{
+          label: "Inventory snapshot",
+          path: path.join(input.workspacePath, ".receipt", "factory", "inventory.json"),
+          summary: "Machine-readable inventory evidence.",
+        }],
+        nextAction: "Investigation is ready for synthesis.",
+        report: {
+          conclusion: "The AWS inventory completed successfully and the evidence is internally consistent.",
+          evidence: [{
+            title: "AWS identity",
+            summary: "Confirmed the active account before running the inventory script.",
+            detail: null,
+          }],
+          scriptsRun: [{
+            command: "bash .receipt/factory/task_01_inventory.sh",
+            summary: "Captured the inventory and wrote a JSON snapshot.",
+            status: "ok",
+          }],
+          disagreements: [],
+          nextSteps: ["Escalate only if deeper service-specific attribution is required."],
+        },
+      });
+      await fs.writeFile(input.lastMessagePath, raw, "utf-8");
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        lastMessage: raw,
+      };
+    },
+  };
+
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor,
+    memoryTools,
+    repoRoot: repoDir,
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate AWS inventory",
+    prompt: "Inspect the current AWS inventory and summarize the evidence.",
+    objectiveMode: "investigation",
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const jobs = await queue.listJobs({ limit: 20 });
+  const taskJob = jobs.find((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+
+  const objectiveMemory = await memoryTools.read({
+    scope: `factory/objectives/${created.objectiveId}`,
+    limit: 10,
+  });
+  const richReport = objectiveMemory.find((entry) =>
+    entry.text.includes("Conclusion\n")
+    && entry.text.includes("Evidence\n- AWS identity:")
+    && entry.text.includes("Scripts Run\n- ok: bash .receipt/factory/task_01_inventory.sh")
+    && entry.text.includes("Artifacts\n-")
+    && entry.text.includes("task result:")
+    && entry.text.includes("Next Steps\n- Escalate only if deeper service-specific attribution is required."),
+  );
+  expect(richReport).toBeTruthy();
+}, 120_000);

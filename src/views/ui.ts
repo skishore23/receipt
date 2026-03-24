@@ -21,13 +21,8 @@ export const badgeBaseClass = "inline-flex max-w-full items-center justify-cente
 // ── Button class constants ──────────────────────────────────────────────────
 
 export const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
-export const primaryButtonClass = `${buttonBaseClass} border-success/40 bg-success text-success-foreground hover:bg-success/90`;
 export const ghostButtonClass = `${buttonBaseClass} border-border bg-secondary text-secondary-foreground hover:bg-accent`;
 export const dangerButtonClass = `${buttonBaseClass} border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/20`;
-
-// ── Nav class constants ─────────────────────────────────────────────────────
-
-export const navPillClass = "inline-flex items-center rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.16em] transition";
 
 // ── Tone system ─────────────────────────────────────────────────────────────
 
@@ -46,7 +41,7 @@ export const toneForValue = (value?: string): Tone => {
   ].includes(normalized)) return "danger";
   if ([
     "queued", "pending", "waiting_for_slot", "waiting", "idle",
-    "needs_attention", "degraded", "decomposing", "planning",
+    "needs_attention", "degraded", "planning",
   ].includes(normalized)) return "warning";
   if ([
     "executing", "running", "active", "in_progress",
@@ -100,15 +95,6 @@ export const displayLabel = (value?: string): string => {
   const text = value?.trim();
   if (!text) return "";
   return text.replace(/[_-]+/g, " ");
-};
-
-export const startCase = (value?: string): string => {
-  const text = value?.trim();
-  if (!text) return "";
-  return text
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
 };
 
 // ── Inline SVG icons (16×16, stroke-based, Lucide-style) ────────────────────
@@ -191,40 +177,6 @@ export const renderCliActionCard = (input: {
     <code class="mt-3 block overflow-x-auto rounded-lg border border-border bg-muted px-3 py-3 text-[12px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(input.command)}</code>
   </div>`;
 
-
-// ── Shared objective action cards ───────────────────────────────────────────
-
-export const renderObjectiveActions = (objectiveId: string, gridClass = "grid gap-3"): string =>
-  `<div class="${gridClass}">
-    ${renderCliActionCard({
-      label: "Advance project",
-      description: "Re-evaluate this project and dispatch the next eligible step from the CLI.",
-      command: `receipt factory react ${objectiveId} --message "<operator note>"`,
-      badgeClass: primaryButtonClass,
-    })}
-    ${renderCliActionCard({
-      label: "Promote to source",
-      description: "Merge the ready integration branch into the source branch.",
-      command: `receipt factory promote ${objectiveId}`,
-    })}
-    ${renderCliActionCard({
-      label: "Remove worktrees",
-      description: "Delete this project's task worktrees and integration workspace from disk.",
-      command: `receipt factory cleanup ${objectiveId}`,
-    })}
-    ${renderCliActionCard({
-      label: "Stop project",
-      description: "Stop active jobs and mark this project as canceled.",
-      command: `receipt factory cancel ${objectiveId} --reason "cancel requested"`,
-      badgeClass: dangerButtonClass,
-    })}
-    ${renderCliActionCard({
-      label: "Archive project",
-      description: "Hide this project from the main list without deleting its receipts.",
-      command: `receipt factory archive ${objectiveId}`,
-    })}
-  </div>`;
-
 // ── Shared job action cards ─────────────────────────────────────────────────
 
 export const renderJobActionCards = (
@@ -232,16 +184,6 @@ export const renderJobActionCards = (
   opts?: { readonly abortRequested?: boolean },
 ): string =>
   `<div class="grid gap-3">
-    ${renderCliActionCard({
-      label: "Steer job",
-      description: "Queue updated direction for this active Factory child.",
-      command: `receipt factory steer ${jobId} --problem "<updated direction>"`,
-    })}
-    ${renderCliActionCard({
-      label: "Follow up",
-      description: "Attach extra context without replacing the active job goal.",
-      command: `receipt factory follow-up ${jobId} --note "<extra context>"`,
-    })}
     ${opts?.abortRequested
       ? `<div class="rounded-xl border border-warning/20 bg-warning/10 px-4 py-3 text-sm leading-6 text-warning">Abort requested. Waiting for the worker to stop cleanly.</div>`
       : renderCliActionCard({

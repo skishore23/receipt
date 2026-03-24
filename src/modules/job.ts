@@ -4,7 +4,8 @@
 
 import type { Decide, Reducer } from "@receipt/core/types";
 
-export type JobLane = "collect" | "steer" | "follow_up";
+export type QueueCommandLane = "steer" | "follow_up";
+export type JobLane = "chat" | "collect" | QueueCommandLane;
 export type JobStatus = "queued" | "leased" | "running" | "completed" | "failed" | "canceled";
 export type QueueCommandType = "steer" | "follow_up" | "abort";
 
@@ -65,7 +66,7 @@ export type JobEvent =
       readonly jobId: string;
       readonly commandId: string;
       readonly command: QueueCommandType;
-      readonly lane: Exclude<JobLane, "collect">;
+      readonly lane: QueueCommandLane;
       readonly payload?: Readonly<Record<string, unknown>>;
       readonly by?: string;
       readonly createdAt?: number;
@@ -93,7 +94,7 @@ export type JobCmd = {
 export type JobCommandRecord = {
   readonly id: string;
   readonly command: QueueCommandType;
-  readonly lane: Exclude<JobLane, "collect">;
+  readonly lane: QueueCommandLane;
   readonly payload?: Readonly<Record<string, unknown>>;
   readonly by?: string;
   readonly createdAt: number;

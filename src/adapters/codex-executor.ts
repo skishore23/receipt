@@ -74,7 +74,7 @@ export class CodexExecutionError extends Error {
   }
 }
 
-export class CodexControlSignalError extends Error {
+class CodexControlSignalError extends Error {
   readonly signal: CodexControlSignal;
   readonly result: CodexRunResult;
 
@@ -104,6 +104,20 @@ const fileContentMtimeMs = async (targetPath: string): Promise<number | undefine
   } catch {
     return undefined;
   }
+};
+
+const prepareAttemptLog = async (targetPath: string, label: "stdout" | "stderr"): Promise<void> => {
+  try {
+    const stat = await fsp.stat(targetPath);
+    if (stat.isFile() && stat.size > 0) {
+      const marker = `\n\n[factory] codex restart ${new Date().toISOString()} (${label})\n`;
+      await fsp.appendFile(targetPath, marker, "utf-8");
+      return;
+    }
+  } catch {
+    // create a fresh file below
+  }
+  await fsp.writeFile(targetPath, "", "utf-8");
 };
 
 const copyPathIfExists = async (sourcePath: string, targetPath: string): Promise<void> => {
@@ -173,8 +187,8 @@ export class LocalCodexExecutor implements CodexExecutor {
     await Promise.all([
       fsp.writeFile(input.promptPath, input.prompt, "utf-8"),
       fsp.writeFile(input.lastMessagePath, "", "utf-8"),
-      fsp.writeFile(input.stdoutPath, "", "utf-8"),
-      fsp.writeFile(input.stderrPath, "", "utf-8"),
+      prepareAttemptLog(input.stdoutPath, "stdout"),
+      prepareAttemptLog(input.stderrPath, "stderr"),
     ]);
 
     const sandboxMode = input.sandboxMode

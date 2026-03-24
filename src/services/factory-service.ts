@@ -5,11 +5,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { z } from "zod";
-
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
-import { CodexControlSignalError, type CodexExecutor, type CodexRunControl } from "../adapters/codex-executor";
+import type { CodexExecutor, CodexRunControl, CodexRunInput } from "../adapters/codex-executor";
 import { HubGit } from "../adapters/hub-git";
 import type { MemoryTools } from "../adapters/memory-tools";
 import {
@@ -20,6 +18,7 @@ import {
   factoryActivatableTasks,
   factoryReadyTasks,
   initialFactoryState,
+  normalizeFactoryState,
   normalizeFactoryObjectiveProfileSnapshot,
   normalizeFactoryObjectivePolicy,
   reduceFactory,
@@ -30,15 +29,14 @@ import {
   type FactoryInvestigationTaskReport,
   type FactoryObjectivePhase,
   type FactoryObjectiveMode,
-  type FactoryRepoProfileRecord,
   type FactoryCheckResult,
   type FactoryCmd,
   type FactoryEvent,
   type FactoryObjectiveProfileSnapshot,
-  type FactoryObjectiveProfileWorktreeMode,
   type FactoryObjectiveSeverity,
   type FactoryObjectiveStatus,
   type FactoryState,
+  type FactoryTaskExecutionMode,
   type FactoryTaskRecord,
   type FactoryTaskStatus,
   type FactoryWorkerType,
@@ -57,16 +55,10 @@ import {
 } from "./factory-cloud-context";
 import { resolveFactoryCloudExecutionContext } from "./factory-cloud-targeting";
 import {
-  buildInfrastructureDecompositionGuidance,
-  normalizeInfrastructureInvestigationTasks,
+  cloudProviderDefaultsToAws,
   rewriteInfrastructureTaskPromptForExecution,
   renderInfrastructureTaskExecutionGuidance,
 } from "./factory-infrastructure-guidance";
-import {
-  renderFactoryRepoExecutionLandscapeSkill,
-  scanFactoryRepoExecutionLandscape,
-  type FactoryRepoExecutionLandscape,
-} from "./factory-repo-landscape";
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
 import { type GraphRef } from "@receipt/core/graph";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
@@ -74,20 +66,12 @@ import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString
 import type { SseHub } from "../framework/sse-hub";
 import { resolveCliInvocation } from "../lib/runtime-paths";
 import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../modules/job";
-import {
-  type FactoryAction,
-  type FactoryActionTaskDraft,
-  MAX_CONSECUTIVE_TASK_FAILURES,
-  buildFactoryDecisionSet,
-  summarizeFactoryAction,
-} from "../engine/merge/factory-policy";
 
 const execFileAsync = promisify(execFile);
 
 const FACTORY_STREAM_PREFIX = "factory/objectives";
 const DEFAULT_CHECKS = ["bun run build"] as const;
 const FACTORY_DATA_DIR = ".receipt/factory";
-const FACTORY_SHARED_REPO_PROFILE_DIR = path.join("factory", "repo-profile");
 const DEFAULT_FACTORY_PROFILE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const FACTORY_CONTROL_AGENT_ID = "factory-control";
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "infra"]);
@@ -97,40 +81,31 @@ const resolveRepoRoot = (repoRoot?: string): string =>
   || process.env.RECEIPT_REPO_ROOT?.trim()
   || process.env.HUB_REPO_ROOT?.trim()
   || process.cwd();
-const DISCOVERY_ONLY_RE = /\b(search|locate|identify|inspect|find|trace|look\s+for|determine|record)\b/i;
-const DIFF_PRODUCING_RE = /\b(edit|change|update|remove|add|implement|write|modify|refactor|fix|test|verify|run|create)\b/i;
-const MAX_FACTORY_SUPERVISOR_RESTARTS = 3;
+const FACTORY_TASK_ARTIFACT_SCHEMA = {
+  type: "object",
+  properties: {
+    label: { type: "string" },
+    path: { type: ["string", "null"] },
+    summary: { type: ["string", "null"] },
+  },
+  required: ["label", "path", "summary"],
+  additionalProperties: false,
+} as const;
 const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
-    outcome: { type: "string", enum: ["approved", "changes_requested", "blocked"] },
+    outcome: { type: "string", enum: ["approved", "changes_requested", "blocked", "partial"] },
     summary: { type: "string" },
-    handoff: { type: "string" },
+    artifacts: {
+      type: "array",
+      items: FACTORY_TASK_ARTIFACT_SCHEMA,
+    },
+    nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff"],
+  required: ["outcome", "summary", "artifacts", "nextAction"],
   additionalProperties: false,
 } as const;
 
-const withSupervisorGuidance = (
-  prompt: string,
-  notes: ReadonlyArray<string>,
-): string => {
-  if (notes.length === 0) return prompt;
-  const guidance = notes
-    .map((note) => note.trim())
-    .filter(Boolean)
-    .map((note, index) => `${index + 1}. ${note}`)
-    .join("\n");
-  if (!guidance) return prompt;
-  return [
-    prompt,
-    "",
-    "## Supervisor Guidance",
-    guidance,
-    "",
-    "Honor the latest supervisor guidance above before doing more work. If you already have enough evidence to answer the task, stop and return the structured result now.",
-  ].join("\n");
-};
 const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
   type: "object",
   properties: {
@@ -177,15 +152,19 @@ const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
     ...FACTORY_TASK_RESULT_SCHEMA.properties,
-    report: FACTORY_INVESTIGATION_REPORT_SCHEMA,
+    report: {
+      ...FACTORY_INVESTIGATION_REPORT_SCHEMA,
+      type: ["object", "null"],
+    },
   },
-  required: ["outcome", "summary", "handoff", "report"],
+  required: ["outcome", "summary", "artifacts", "nextAction", "report"],
   additionalProperties: false,
 } as const;
 const FACTORY_TASK_CODEX_MODEL =
   process.env.RECEIPT_FACTORY_TASK_MODEL?.trim()
   || process.env.HUB_FACTORY_TASK_MODEL?.trim()
   || "gpt-5.4-mini";
+const MAX_CONSECUTIVE_TASK_FAILURES = 5;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -197,38 +176,14 @@ const requireNonEmpty = (value: unknown, message: string): string => {
   }
 };
 
-const fileExists = async (targetPath: string): Promise<boolean> => {
-  try {
-    await fs.access(targetPath);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const repoUsesBun = async (
-  repoRoot: string,
-  packageJson: {
-    readonly packageManager?: string;
-    readonly scripts?: Record<string, string>;
-  } | undefined,
-): Promise<boolean> => {
-  const packageManager = packageJson?.packageManager?.trim().toLowerCase();
-  if (packageManager?.startsWith("bun@")) return true;
-  const scripts = Object.values(packageJson?.scripts ?? {});
-  if (scripts.some((script) => /\bbun(?:x)?\b/i.test(script))) return true;
-  return await fileExists(path.join(repoRoot, "bun.lock"))
-    || await fileExists(path.join(repoRoot, "bun.lockb"));
-};
-
-const scriptCommand = (scriptName: string, bunFirst: boolean): string =>
-  `${bunFirst ? "bun" : "npm"} run ${scriptName}`;
 const clipText = (value: string | undefined, max = 280): string | undefined => {
   if (!value) return undefined;
   const trimmed = trimmedString(value);
   if (!trimmed) return undefined;
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 };
+const pathExists = async (targetPath: string): Promise<boolean> =>
+  fs.access(targetPath).then(() => true).catch(() => false);
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 const tailText = (value: string, maxChars: number): string =>
@@ -257,9 +212,94 @@ const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "queued" || status === "leased" || status === "running";
 const ansiRe = /\x1b\[[0-9;]*m/g;
 const salientFailureLineRe = /(fail|error|enoent|eperm|expected|received|exited with code|unable to|no such file|missing)/i;
-const PROVIDER_CONDITIONAL_RE = /\bif the context is\b|\bif the provider is\b/i;
-const CONTEXT_RESOLUTION_RE = /\b(determine|identify|locate|establish|resolve)\b.*\b(provider|cloud|storage system|credentials?|scope|account|project|region|profile|what ['"`].+['"`] refers)\b/i;
-const SYNTHESIS_TASK_RE = /\b(synthesi[sz]e|reconcile|compile|authoritative count|final report|summari[sz]e findings|produce final)\b/i;
+const INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "count",
+  "current",
+  "describe",
+  "engineer",
+  "for",
+  "from",
+  "have",
+  "how",
+  "infra",
+  "infrastructure",
+  "inventory",
+  "investigate",
+  "list",
+  "me",
+  "my",
+  "of",
+  "show",
+  "the",
+  "what",
+  "which",
+  "without",
+  "you",
+]);
+const INFRASTRUCTURE_KNOWLEDGE_MAX_SELECTIONS = 3;
+const INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY = 3;
+const INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY = 3;
+const INFRASTRUCTURE_KNOWLEDGE_MAX_STORED_FILE_BYTES = 1024 * 1024;
+const INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE = /\.(?:sh|bash|py|js|mjs|cjs|ts)$/i;
+const INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE = /\.(?:sh|bash|py|js|mjs|cjs|ts|json|md|txt|csv|ya?ml)$/i;
+
+const normalizeInfrastructureKnowledgeText = (value: string): string =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+const infrastructureKnowledgeKeywords = (
+  value: string,
+  ignoredTokens: ReadonlyArray<string> = [],
+): ReadonlyArray<string> => {
+  const ignored = new Set(
+    ignoredTokens
+      .flatMap((token) => normalizeInfrastructureKnowledgeText(token).split(/\s+/))
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3),
+  );
+  return [...new Set(
+    normalizeInfrastructureKnowledgeText(value)
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) =>
+        token.length >= 3
+        && !INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS.has(token)
+        && !ignored.has(token)
+      ),
+  )];
+};
+
+const infrastructureKnowledgeFingerprint = (value: string): string =>
+  createHash("sha1").update(normalizeInfrastructureKnowledgeText(value)).digest("hex").slice(0, 16);
+
+const unquoteShellToken = (token: string): string =>
+  token.replace(/^['"]|['"]$/g, "").trim();
+
+const commandPathCandidates = (command: string): ReadonlyArray<string> =>
+  [...new Set(
+    (command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [])
+      .map((token) => unquoteShellToken(token))
+      .filter((token) => {
+        if (!token) return false;
+        const lower = token.toLowerCase();
+        if (["aws", "bash", "bun", "env", "jq", "node", "python", "python3", "sh"].includes(lower)) return false;
+        if (token.includes("=") && !token.includes("/") && !token.startsWith(".")) return false;
+        return token.startsWith("/")
+          || token.startsWith("./")
+          || token.startsWith("../")
+          || token.startsWith(".receipt/")
+          || INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE.test(token);
+      }),
+  )];
+
+const preferredInfrastructureKnowledgePath = (value: { readonly storedPath?: string; readonly originalPath?: string }): string | undefined =>
+  value.storedPath ?? value.originalPath;
 
 const boardSectionForObjective = (
   objective: Pick<FactoryObjectiveCard, "status" | "scheduler">,
@@ -331,18 +371,12 @@ const severityMaxParallelChildren = (severity: FactoryObjectiveSeverity): number
 };
 
 const severityWorkerReasoningEffort = (
-  profileId: string | undefined,
+  _profileId: string | undefined,
   objectiveMode: FactoryObjectiveMode,
   severity: FactoryObjectiveSeverity,
-  taskKind: FactoryTaskRecord["taskKind"],
+  _taskKind: FactoryTaskRecord["taskKind"],
 ): "low" | "medium" | "high" | "xhigh" => {
-  if (taskKind === "reconciliation") {
-    return severity >= 4 ? "xhigh" : "high";
-  }
   if (objectiveMode === "investigation") {
-    if (profileId === "infrastructure") {
-      return severity >= 4 ? "high" : "medium";
-    }
     return severity === 1 ? "medium" : "high";
   }
   return "low";
@@ -387,73 +421,6 @@ const normalizeInvestigationReport = (
   };
 };
 
-const conclusionFingerprint = (value: string): string =>
-  value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
-const formatInvestigationReportMarkdown = (input: {
-  readonly lead?: string;
-  readonly report: FactoryInvestigationReport;
-  readonly artifactLines?: ReadonlyArray<string>;
-}): string => {
-  const lines: string[] = [];
-  const pushSection = (title: string, body: string): void => {
-    if (lines.length > 0) lines.push("");
-    lines.push(title, body);
-  };
-  if (input.lead?.trim()) lines.push(input.lead.trim(), "");
-  pushSection("Conclusion", input.report.conclusion.trim());
-  pushSection(
-    "Evidence",
-    input.report.evidence.length
-      ? input.report.evidence.map((item) => `- ${item.title}: ${item.summary}${item.detail ? ` (${item.detail})` : ""}`).join("\n")
-      : "- none",
-  );
-  pushSection(
-    "Disagreements",
-    input.report.disagreements.length ? input.report.disagreements.map((item) => `- ${item}`).join("\n") : "- none",
-  );
-  pushSection(
-    "Scripts Run",
-    input.report.scriptsRun.length
-      ? input.report.scriptsRun.map((item) => `- ${item.command}${item.status ? ` [${item.status}]` : ""}${item.summary ? `: ${item.summary}` : ""}`).join("\n")
-      : "- none",
-  );
-  pushSection(
-    "Artifacts",
-    input.artifactLines && input.artifactLines.length > 0 ? input.artifactLines.map((line) => `- ${line}`).join("\n") : "- none",
-  );
-  pushSection(
-    "Next Steps",
-    input.report.nextSteps.length ? input.report.nextSteps.map((item) => `- ${item}`).join("\n") : "- none",
-  );
-  return lines.join("\n");
-};
-
-export {
-  FactoryServiceError,
-  type FactoryServiceOptions,
-  type FactoryObjectiveInput,
-  type FactoryObjectiveComposeInput,
-  type FactoryQueuedJobCommand,
-  type FactoryContextSources,
-  type FactoryTaskView,
-  type FactoryObjectiveCard,
-  type FactoryObjectiveDetail,
-  type FactoryComposeModel,
-  type FactoryBoardSection,
-  type FactoryBoardProjection,
-  type FactoryLiveProjection,
-  type FactoryLiveOutputTargetKind,
-  type FactoryLiveOutputSnapshot,
-  type FactoryDebugProjection,
-  type FactoryTaskJobPayload,
-  type FactoryIntegrationJobPayload,
-  type FactoryIntegrationPublishJobPayload,
-  type FactoryObjectiveControlJobPayload,
-  type FactoryObjectiveReceiptSummary,
-  type FactoryObjectiveReceiptQuery,
-  type FactoryRepoProfileProgress,
-} from "./factory-types";
 import {
   FactoryServiceError,
   type FactoryServiceOptions,
@@ -461,6 +428,7 @@ import {
   type FactoryObjectiveComposeInput,
   type FactoryQueuedJobCommand,
   type FactoryContextSources,
+  type FactoryArtifactActivity,
   type FactoryTaskView,
   type FactoryObjectiveCard,
   type FactoryObjectiveDetail,
@@ -477,7 +445,37 @@ import {
   type FactoryObjectiveControlJobPayload,
   type FactoryObjectiveReceiptSummary,
   type FactoryObjectiveReceiptQuery,
-  type FactoryRepoProfileProgress,
+  FACTORY_PROFILE_SUMMARY,
+} from "./factory-types";
+
+export {
+  FactoryServiceError,
+  FACTORY_PROFILE_SUMMARY,
+};
+
+export type {
+  FactoryServiceOptions,
+  FactoryObjectiveInput,
+  FactoryObjectiveComposeInput,
+  FactoryQueuedJobCommand,
+  FactoryContextSources,
+  FactoryArtifactActivity,
+  FactoryTaskView,
+  FactoryObjectiveCard,
+  FactoryObjectiveDetail,
+  FactoryComposeModel,
+  FactoryBoardSection,
+  FactoryBoardProjection,
+  FactoryLiveProjection,
+  FactoryLiveOutputTargetKind,
+  FactoryLiveOutputSnapshot,
+  FactoryDebugProjection,
+  FactoryTaskJobPayload,
+  FactoryIntegrationJobPayload,
+  FactoryIntegrationPublishJobPayload,
+  FactoryObjectiveControlJobPayload,
+  FactoryObjectiveReceiptSummary,
+  FactoryObjectiveReceiptQuery,
 } from "./factory-types";
 
 class FactoryStaleObjectiveError extends Error {
@@ -491,35 +489,6 @@ class FactoryStaleObjectiveError extends Error {
   }
 }
 
-
-
-
-
-
-
-
-type DecomposedTaskSpec = {
-  readonly taskId: string;
-  readonly title: string;
-  readonly prompt: string;
-  readonly workerType: FactoryWorkerType;
-  readonly dependsOn: ReadonlyArray<string>;
-};
-
-type FactoryRepoProfileArtifact = {
-  readonly status: FactoryRepoProfileRecord["status"];
-  readonly generatedAt: number;
-  readonly repoSignature?: string;
-  readonly inferredChecks: ReadonlyArray<string>;
-  readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
-  readonly generatedSkillPaths: ReadonlyArray<string>;
-  readonly summary: string;
-  readonly permissionsLandscape?: FactoryRepoExecutionLandscape;
-};
-
-type FactoryRepoProfilePrepareOptions = {
-  readonly onProgress?: (progress: FactoryRepoProfileProgress) => void;
-};
 
 type FactoryMemoryScopeSpec = {
   readonly key: string;
@@ -535,7 +504,6 @@ type FactoryContextTaskNode = {
   readonly status: FactoryTaskStatus;
   readonly workerType: FactoryWorkerType;
   readonly sourceTaskId?: string;
-  readonly sourceCandidateId?: string;
   readonly latestSummary?: string;
   readonly blockedReason?: string;
   readonly candidateId?: string;
@@ -551,8 +519,7 @@ type FactoryContextRelatedTask = {
   readonly status: FactoryTaskStatus;
   readonly workerType: FactoryWorkerType;
   readonly sourceTaskId?: string;
-  readonly sourceCandidateId?: string;
-  readonly relations: ReadonlyArray<"focus" | "dependency" | "dependent" | "split_source" | "split_child">;
+  readonly relations: ReadonlyArray<"focus" | "dependency" | "dependent">;
   readonly latestSummary?: string;
   readonly blockedReason?: string;
   readonly candidateId?: string;
@@ -583,7 +550,6 @@ type FactoryContextPack = {
   readonly prompt: string;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
-  readonly repoExecutionLandscape?: FactoryRepoExecutionLandscape;
   readonly cloudExecutionContext?: FactoryCloudExecutionContext;
   readonly profile: FactoryObjectiveProfileSnapshot;
   readonly task: {
@@ -591,6 +557,7 @@ type FactoryContextPack = {
     readonly title: string;
     readonly prompt: string;
     readonly workerType: FactoryWorkerType;
+    readonly executionMode: FactoryTaskExecutionMode;
     readonly status: FactoryTaskStatus;
     readonly candidateId: string;
   };
@@ -622,39 +589,97 @@ type FactoryContextPack = {
     readonly reports: ReadonlyArray<FactoryInvestigationTaskReport>;
     readonly synthesized?: FactoryInvestigationSynthesisRecord;
   };
+  readonly infrastructureKnowledge?: FactoryInfrastructureKnowledgeContext;
   readonly contextSources: FactoryContextSources;
 };
 
-const hasExecutionLandscapeSkill = (
-  skills: ReadonlyArray<{ readonly slug: string; readonly title: string; readonly content: string }>,
-): boolean =>
-  skills.some((skill) =>
-    /\bexecution\b|\bpermission\b|\blandscape\b/i.test(skill.slug)
-    || /\bexecution\b|\bpermission\b|\blandscape\b/i.test(skill.title)
-  );
+type FactoryInfrastructureKnowledgeScript = {
+  readonly command: string;
+  readonly summary?: string;
+  readonly status?: FactoryInvestigationReport["scriptsRun"][number]["status"];
+  readonly originalPath?: string;
+  readonly storedPath?: string;
+};
 
-const decompositionSchema = z.object({
-  tasks: z.array(z.object({
-    title: z.string().min(1),
-    prompt: z.string().min(1),
-    workerType: z.string().min(1).default("codex"),
-    dependsOn: z.array(z.string().min(1)).max(12).default([]),
-  })).min(1).max(8),
-});
+type FactoryInfrastructureKnowledgeArtifact = {
+  readonly label: string;
+  readonly summary?: string;
+  readonly originalPath?: string;
+  readonly storedPath?: string;
+};
 
-const repoProfileSchema = z.object({
-  summary: z.string().min(1),
-  inferredChecks: z.array(z.string().min(1)).min(1).max(6).default(["bun run build"]),
-  generatedSkills: z.array(z.object({
-    slug: z.string().min(1).max(48),
-    title: z.string().min(1).max(120),
-    content: z.string().min(1),
-  })).max(4).default([]),
-});
+type FactoryInfrastructureKnowledgeEntry = {
+  readonly entryId: string;
+  readonly repoKey: string;
+  readonly profileId: string;
+  readonly provider: FactoryCloudProvider;
+  readonly accountId?: string;
+  readonly promptFingerprint: string;
+  readonly keywords: ReadonlyArray<string>;
+  readonly objectiveId: string;
+  readonly objectiveTitle: string;
+  readonly objectivePrompt: string;
+  readonly objectiveMode: FactoryObjectiveMode;
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly taskPrompt: string;
+  readonly candidateId: string;
+  readonly summary: string;
+  readonly conclusion?: string;
+  readonly scripts: ReadonlyArray<FactoryInfrastructureKnowledgeScript>;
+  readonly artifacts: ReadonlyArray<FactoryInfrastructureKnowledgeArtifact>;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+};
+
+type FactoryInfrastructureKnowledgeIndexEntry = {
+  readonly entryId: string;
+  readonly knowledgePath: string;
+  readonly provider: FactoryCloudProvider;
+  readonly profileId: string;
+  readonly accountId?: string;
+  readonly promptFingerprint: string;
+  readonly keywords: ReadonlyArray<string>;
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly summary: string;
+  readonly updatedAt: number;
+  readonly scriptPaths: ReadonlyArray<string>;
+  readonly artifactPaths: ReadonlyArray<string>;
+};
+
+type FactoryInfrastructureKnowledgeSelection = {
+  readonly entryId: string;
+  readonly knowledgePath: string;
+  readonly provider: FactoryCloudProvider;
+  readonly accountId?: string;
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly summary: string;
+  readonly updatedAt: number;
+  readonly score: number;
+  readonly scriptPaths: ReadonlyArray<string>;
+  readonly artifactPaths: ReadonlyArray<string>;
+};
+
+type FactoryInfrastructureKnowledgeContext = {
+  readonly roleLabel: string;
+  readonly guidance: ReadonlyArray<string>;
+  readonly selectedEntries: ReadonlyArray<FactoryInfrastructureKnowledgeSelection>;
+};
 
 const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
   const normalized = (value ?? "codex").trim().toLowerCase() || "codex";
   return SUPPORTED_WORKER_TYPES.has(normalized) ? normalized : "codex";
+};
+
+const sandboxModeForTask = (input: {
+  readonly profileCloudProvider?: string;
+  readonly objectiveMode: FactoryObjectiveMode;
+}): CodexRunInput["sandboxMode"] | undefined => {
+  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return undefined;
+  // Infrastructure investigations need live cloud API access, which the default Codex sandbox blocks.
+  return "danger-full-access";
 };
 
 const taskOrdinalId = (index: number): string => `task_${String(index + 1).padStart(2, "0")}`;
@@ -679,7 +704,6 @@ export class FactoryService {
   private cloudExecutionContextPromise?: Promise<FactoryCloudExecutionContext>;
 
   private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
-  private readonly llmStructured?: FactoryServiceOptions["llmStructured"];
   private objectiveProjectionVersion = 0;
   private objectiveListCache?: {
     readonly version: number;
@@ -697,7 +721,6 @@ export class FactoryService {
     this.sse = opts.sse;
     this.codexExecutor = opts.codexExecutor;
     this.memoryTools = opts.memoryTools;
-    this.llmStructured = opts.llmStructured;
     this.cloudExecutionContextProvider = opts.cloudExecutionContextProvider;
     this.git = new HubGit({
       dataDir: opts.dataDir,
@@ -732,8 +755,10 @@ export class FactoryService {
     return this.cloudExecutionContextPromise;
   }
 
-  private async loadObjectiveCloudExecutionContext(profileId: string | undefined): Promise<FactoryCloudExecutionContext> {
-    return resolveFactoryCloudExecutionContext(profileId, await this.loadCloudExecutionContext());
+  private async loadObjectiveCloudExecutionContext(
+    profile: Pick<FactoryObjectiveProfileSnapshot, "cloudProvider">,
+  ): Promise<FactoryCloudExecutionContext> {
+    return resolveFactoryCloudExecutionContext(profile.cloudProvider, await this.loadCloudExecutionContext());
   }
 
   projectionVersion(): number {
@@ -762,24 +787,24 @@ export class FactoryService {
     return path.join(this.objectiveArtifactsDir(objectiveId), "profile.skills.json");
   }
 
+  private taskRuntimeDir(workspaceId: string): string {
+    return path.join(this.dataDir, "factory", "runtimes", workspaceId);
+  }
+
+  private taskRuntimesRoot(): string {
+    return path.join(this.dataDir, "factory", "runtimes");
+  }
+
   private normalizeProfileWorkerType(
     profile: FactoryObjectiveProfileSnapshot,
     requestedWorkerType: string | undefined,
   ): FactoryWorkerType {
     const requested = normalizeWorkerType(requestedWorkerType);
-    const requestedMode = profile.objectivePolicy.worktreeModeByWorker[requested] ?? "required";
-    if (
-      profile.objectivePolicy.allowedWorkerTypes.includes(requested)
-      && requestedMode !== "forbidden"
-    ) {
+    if (profile.objectivePolicy.allowedWorkerTypes.includes(requested)) {
       return requested;
     }
     const fallback = normalizeWorkerType(String(profile.objectivePolicy.defaultWorkerType));
-    const fallbackMode = profile.objectivePolicy.worktreeModeByWorker[fallback] ?? "required";
-    if (
-      profile.objectivePolicy.allowedWorkerTypes.includes(fallback)
-      && fallbackMode !== "forbidden"
-    ) {
+    if (profile.objectivePolicy.allowedWorkerTypes.includes(fallback)) {
       return fallback;
     }
     const codex = normalizeWorkerType("codex");
@@ -796,12 +821,11 @@ export class FactoryService {
     return this.objectiveProfileForState(state).objectivePolicy.allowedWorkerTypes.includes(normalized);
   }
 
-  private objectiveWorktreeMode(
+  private taskExecutionMode(
     state: FactoryState,
-    workerType: string | undefined,
-  ): FactoryObjectiveProfileWorktreeMode {
-    const normalized = normalizeWorkerType(workerType);
-    return this.objectiveProfileForState(state).objectivePolicy.worktreeModeByWorker[normalized] ?? "required";
+    task?: Pick<FactoryTaskRecord, "executionMode">,
+  ): FactoryTaskExecutionMode {
+    return task?.executionMode ?? this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode;
   }
 
   private effectiveMaxParallelChildren(state: FactoryState): number {
@@ -868,6 +892,382 @@ export class FactoryService {
     ];
   }
 
+  private repoInfrastructureKnowledgeRoot(): string {
+    return path.join(this.dataDir, "factory", "knowledge", repoKeyForRoot(this.git.repoRoot), "infrastructure");
+  }
+
+  private repoInfrastructureKnowledgeEntriesDir(): string {
+    return path.join(this.repoInfrastructureKnowledgeRoot(), "entries");
+  }
+
+  private repoInfrastructureKnowledgeIndexPath(): string {
+    return path.join(this.repoInfrastructureKnowledgeRoot(), "index.json");
+  }
+
+  private repoInfrastructureKnowledgeEntryDir(entryId: string): string {
+    return path.join(this.repoInfrastructureKnowledgeEntriesDir(), entryId);
+  }
+
+  private repoInfrastructureKnowledgeEntryPath(entryId: string): string {
+    return path.join(this.repoInfrastructureKnowledgeEntryDir(entryId), "entry.json");
+  }
+
+  private buildInfrastructureKnowledgeQueryText(input: {
+    readonly objectiveTitle?: string;
+    readonly objectivePrompt: string;
+    readonly taskTitle?: string;
+    readonly taskPrompt?: string;
+  }): string {
+    return [
+      input.objectiveTitle,
+      input.objectivePrompt,
+      input.taskTitle,
+      input.taskPrompt,
+    ].filter(Boolean).join("\n");
+  }
+
+  private resolveInfrastructureKnowledgePath(candidatePath: string | undefined, workspacePath: string): string | undefined {
+    const trimmed = optionalTrimmedString(candidatePath);
+    if (!trimmed) return undefined;
+    return path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(workspacePath, trimmed);
+  }
+
+  private async copyInfrastructureKnowledgeFile(
+    sourcePath: string | undefined,
+    targetDir: string,
+    targetName: string,
+  ): Promise<string | undefined> {
+    const resolved = optionalTrimmedString(sourcePath);
+    if (!resolved) return undefined;
+    try {
+      const stat = await fs.stat(resolved);
+      if (!stat.isFile() || stat.size > INFRASTRUCTURE_KNOWLEDGE_MAX_STORED_FILE_BYTES) return undefined;
+      await fs.mkdir(targetDir, { recursive: true });
+      const targetPath = path.join(targetDir, targetName);
+      await fs.copyFile(resolved, targetPath);
+      return targetPath;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async materializeInfrastructureKnowledgeScripts(input: {
+    readonly report: FactoryInvestigationReport;
+    readonly workspacePath: string;
+    readonly entryDir: string;
+  }): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeScript>> {
+    const scriptsDir = path.join(input.entryDir, "scripts");
+    const materialized: FactoryInfrastructureKnowledgeScript[] = [];
+    for (const [index, item] of input.report.scriptsRun.entries()) {
+      if (materialized.length >= INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY) break;
+      const originalPath = commandPathCandidates(item.command)
+        .map((candidate) => this.resolveInfrastructureKnowledgePath(candidate, input.workspacePath))
+        .find((candidate): candidate is string => Boolean(candidate) && INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(candidate));
+      const baseName = safeWorkspacePart(path.basename(originalPath ?? `script_${index + 1}.sh`));
+      const storedPath = originalPath
+        ? await this.copyInfrastructureKnowledgeFile(originalPath, scriptsDir, `${String(index + 1).padStart(2, "0")}_${baseName}`)
+        : undefined;
+      materialized.push({
+        command: item.command,
+        summary: item.summary ?? undefined,
+        status: item.status ?? undefined,
+        originalPath,
+        storedPath,
+      });
+    }
+    return materialized;
+  }
+
+  private async materializeInfrastructureKnowledgeArtifacts(input: {
+    readonly artifacts: ReadonlyArray<{
+      readonly label: string;
+      readonly path?: string;
+      readonly summary?: string;
+    }>;
+    readonly workspacePath: string;
+    readonly entryDir: string;
+  }): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeArtifact>> {
+    const artifactsDir = path.join(input.entryDir, "artifacts");
+    const materialized: FactoryInfrastructureKnowledgeArtifact[] = [];
+    for (const [index, item] of input.artifacts.entries()) {
+      if (materialized.length >= INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY) break;
+      const originalPath = this.resolveInfrastructureKnowledgePath(item.path, input.workspacePath);
+      const baseName = safeWorkspacePart(path.basename(originalPath ?? item.label ?? `artifact_${index + 1}`));
+      const storedPath = originalPath && INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE.test(originalPath)
+        ? await this.copyInfrastructureKnowledgeFile(originalPath, artifactsDir, `${String(index + 1).padStart(2, "0")}_${baseName}`)
+        : undefined;
+      materialized.push({
+        label: item.label,
+        summary: item.summary,
+        originalPath,
+        storedPath,
+      });
+    }
+    return materialized;
+  }
+
+  private async readInfrastructureKnowledgeIndex(): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeIndexEntry>> {
+    try {
+      const raw = await fs.readFile(this.repoInfrastructureKnowledgeIndexPath(), "utf-8");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((item): item is Record<string, unknown> => isRecord(item))
+        .map((item) => ({
+          entryId: requireNonEmpty(item.entryId, "entryId required"),
+          knowledgePath: requireNonEmpty(item.knowledgePath, "knowledgePath required"),
+          provider: requireNonEmpty(item.provider, "provider required") as FactoryCloudProvider,
+          profileId: requireNonEmpty(item.profileId, "profileId required"),
+          accountId: optionalTrimmedString(item.accountId),
+          promptFingerprint: requireNonEmpty(item.promptFingerprint, "promptFingerprint required"),
+          keywords: Array.isArray(item.keywords) ? item.keywords.filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim().length > 0) : [],
+          objectiveId: requireNonEmpty(item.objectiveId, "objectiveId required"),
+          taskId: requireNonEmpty(item.taskId, "taskId required"),
+          summary: requireNonEmpty(item.summary, "summary required"),
+          updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
+          scriptPaths: Array.isArray(item.scriptPaths) ? item.scriptPaths.filter((target): target is string => typeof target === "string" && target.trim().length > 0) : [],
+          artifactPaths: Array.isArray(item.artifactPaths) ? item.artifactPaths.filter((target): target is string => typeof target === "string" && target.trim().length > 0) : [],
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  private scoreInfrastructureKnowledgeMatch(
+    entry: FactoryInfrastructureKnowledgeIndexEntry,
+    query: {
+      readonly provider: FactoryCloudProvider;
+      readonly profileId: string;
+      readonly accountId?: string;
+      readonly promptFingerprint: string;
+      readonly keywords: ReadonlyArray<string>;
+    },
+  ): number {
+    if (entry.provider !== query.provider) return 0;
+    if (entry.profileId !== query.profileId) return 0;
+    if (query.accountId && entry.accountId && entry.accountId !== query.accountId) return 0;
+    const keywordOverlap = query.keywords.filter((keyword) => entry.keywords.includes(keyword)).length;
+    const exactPromptMatch = entry.promptFingerprint === query.promptFingerprint;
+    if (!exactPromptMatch && keywordOverlap === 0) return 0;
+    return (exactPromptMatch ? 100 : 0)
+      + (query.accountId && entry.accountId === query.accountId ? 20 : 0)
+      + keywordOverlap * 10;
+  }
+
+  private async loadInfrastructureKnowledgeContext(input: {
+    readonly profileId: string | undefined;
+    readonly profileCloudProvider?: FactoryCloudProvider;
+    readonly objectiveTitle?: string;
+    readonly objectivePrompt: string;
+    readonly taskTitle?: string;
+    readonly taskPrompt?: string;
+    readonly cloudExecutionContext: FactoryCloudExecutionContext;
+  }): Promise<FactoryInfrastructureKnowledgeContext | undefined> {
+    if (!cloudProviderDefaultsToAws(input.profileCloudProvider)) return undefined;
+    const provider = input.profileCloudProvider ?? input.cloudExecutionContext.preferredProvider ?? "aws";
+    const queryText = this.buildInfrastructureKnowledgeQueryText(input);
+    const query = {
+      provider,
+      profileId: input.profileId ?? "infrastructure",
+      accountId: provider === "aws" ? input.cloudExecutionContext.aws?.callerIdentity?.accountId : undefined,
+      promptFingerprint: infrastructureKnowledgeFingerprint(queryText),
+      keywords: infrastructureKnowledgeKeywords(queryText, [provider]),
+    };
+    const index = await this.readInfrastructureKnowledgeIndex();
+    const ranked = await Promise.all(index.map(async (entry) => {
+      const score = this.scoreInfrastructureKnowledgeMatch(entry, query);
+      if (score <= 0) return undefined;
+      if (!(await pathExists(entry.knowledgePath))) return undefined;
+      const scriptPaths = (await Promise.all(entry.scriptPaths.map(async (target) => (await pathExists(target)) ? target : undefined)))
+        .filter((target): target is string => Boolean(target))
+        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY);
+      const artifactPaths = (await Promise.all(entry.artifactPaths.map(async (target) => (await pathExists(target)) ? target : undefined)))
+        .filter((target): target is string => Boolean(target))
+        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY);
+      return {
+        entryId: entry.entryId,
+        knowledgePath: entry.knowledgePath,
+        provider: entry.provider,
+        accountId: entry.accountId,
+        objectiveId: entry.objectiveId,
+        taskId: entry.taskId,
+        summary: entry.summary,
+        updatedAt: entry.updatedAt,
+        score,
+        scriptPaths,
+        artifactPaths,
+      } satisfies FactoryInfrastructureKnowledgeSelection;
+    }));
+    return {
+      roleLabel: "Infrastructure engineer",
+      guidance: [
+        "These files are curated repo-scoped infrastructure memory, not the full receipt history.",
+        "Reuse a stored script when the account and question still match; rerun it when freshness matters.",
+      ],
+      selectedEntries: ranked
+        .filter((entry): entry is FactoryInfrastructureKnowledgeSelection => Boolean(entry))
+        .sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt || a.entryId.localeCompare(b.entryId))
+        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SELECTIONS),
+    };
+  }
+
+  private infrastructureKnowledgeSharedArtifactRefs(
+    context: FactoryInfrastructureKnowledgeContext | undefined,
+  ): ReadonlyArray<GraphRef> {
+    if (!context?.selectedEntries.length) return [];
+    const seen = new Set<string>();
+    const refs: GraphRef[] = [];
+    const pushRef = (ref: string, label: string): void => {
+      if (!ref || seen.has(ref)) return;
+      seen.add(ref);
+      refs.push(artifactRef(ref, label));
+    };
+    for (const entry of context.selectedEntries) {
+      pushRef(entry.knowledgePath, "reusable infrastructure knowledge");
+      for (const scriptPath of entry.scriptPaths) pushRef(scriptPath, "reusable infrastructure script");
+      for (const artifactPath of entry.artifactPaths) pushRef(artifactPath, "reusable infrastructure evidence");
+    }
+    return refs;
+  }
+
+  private renderInfrastructureKnowledgePromptSection(
+    context: FactoryInfrastructureKnowledgeContext | undefined,
+  ): ReadonlyArray<string> {
+    if (!context) return [];
+    const lines = [
+      `## Infrastructure Role`,
+      `Act as the ${context.roleLabel.toLowerCase()} for this task.`,
+      `Reuse the mounted infrastructure knowledge and stored scripts before inventing a new workflow.`,
+      ...context.guidance.map((item) => `- ${item}`),
+      `Selected reusable knowledge for this scope:`,
+    ];
+    if (context.selectedEntries.length === 0) {
+      lines.push(`- none yet. If this run produces a useful script or structured output, return it in artifacts so Factory can promote it into reusable infrastructure knowledge.`);
+    } else {
+      for (const entry of context.selectedEntries) {
+        lines.push(
+          `- knowledge: ${entry.knowledgePath} | ${entry.summary}${entry.accountId ? ` | account ${entry.accountId}` : ""} | recorded ${new Date(entry.updatedAt).toISOString()}`,
+        );
+        for (const scriptPath of entry.scriptPaths) lines.push(`- reusable script: ${scriptPath}`);
+        for (const artifactPath of entry.artifactPaths) lines.push(`- reusable evidence: ${artifactPath}`);
+      }
+      lines.push(`If freshness is uncertain, rerun or adapt the stored script instead of trusting cached output blindly.`);
+    }
+    lines.push(``);
+    return lines;
+  }
+
+  private async promoteInfrastructureKnowledge(input: {
+    readonly state: FactoryState;
+    readonly task: FactoryTaskRecord;
+    readonly payload: FactoryTaskJobPayload;
+    readonly outcome: string;
+    readonly summary: string;
+    readonly report: FactoryInvestigationReport;
+    readonly workerArtifacts: ReadonlyArray<{
+      readonly label: string;
+      readonly path?: string;
+      readonly summary?: string;
+    }>;
+  }): Promise<Readonly<Record<string, GraphRef>>> {
+    const profile = this.objectiveProfileForState(input.state);
+    const profileId = profile.rootProfileId;
+    if (!cloudProviderDefaultsToAws(profile.cloudProvider) || input.state.objectiveMode !== "investigation") return {};
+    if (input.outcome === "blocked" && input.report.evidence.length === 0 && input.workerArtifacts.length === 0) return {};
+    const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(profile);
+    const provider = profile.cloudProvider ?? cloudExecutionContext.preferredProvider ?? "aws";
+    const accountId = provider === "aws" ? cloudExecutionContext.aws?.callerIdentity?.accountId : undefined;
+    const queryText = this.buildInfrastructureKnowledgeQueryText({
+      objectiveTitle: input.state.title,
+      objectivePrompt: input.state.prompt,
+      taskTitle: input.task.title,
+      taskPrompt: this.effectiveTaskPrompt(input.state, input.task),
+    });
+    const createdAt = Date.now();
+    const entryId = createHash("sha1")
+      .update([input.payload.objectiveId, input.payload.taskId, input.payload.candidateId, provider, accountId ?? "", String(createdAt)].join(":"))
+      .digest("hex")
+      .slice(0, 16);
+    const entryDir = this.repoInfrastructureKnowledgeEntryDir(entryId);
+    await fs.mkdir(entryDir, { recursive: true });
+    const scripts = await this.materializeInfrastructureKnowledgeScripts({
+      report: input.report,
+      workspacePath: input.payload.workspacePath,
+      entryDir,
+    });
+    const artifacts = await this.materializeInfrastructureKnowledgeArtifacts({
+      artifacts: input.workerArtifacts,
+      workspacePath: input.payload.workspacePath,
+      entryDir,
+    });
+    const entry: FactoryInfrastructureKnowledgeEntry = {
+      entryId,
+      repoKey: repoKeyForRoot(this.git.repoRoot),
+      profileId,
+      provider,
+      accountId,
+      promptFingerprint: infrastructureKnowledgeFingerprint(queryText),
+      keywords: infrastructureKnowledgeKeywords(queryText, [provider]),
+      objectiveId: input.payload.objectiveId,
+      objectiveTitle: input.state.title,
+      objectivePrompt: input.state.prompt,
+      objectiveMode: input.state.objectiveMode,
+      taskId: input.payload.taskId,
+      taskTitle: input.task.title,
+      taskPrompt: this.effectiveTaskPrompt(input.state, input.task),
+      candidateId: input.payload.candidateId,
+      summary: input.summary,
+      conclusion: clipText(input.report.conclusion, 600),
+      scripts,
+      artifacts,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const entryPath = this.repoInfrastructureKnowledgeEntryPath(entryId);
+    await fs.writeFile(entryPath, JSON.stringify(entry, null, 2), "utf-8");
+
+    const indexPath = this.repoInfrastructureKnowledgeIndexPath();
+    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    const scriptPaths = [
+      ...scripts.map((item) => preferredInfrastructureKnowledgePath(item)).filter((target): target is string => Boolean(target)),
+      ...artifacts
+        .filter((item) => {
+          const target = preferredInfrastructureKnowledgePath(item);
+          return Boolean(target) && INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(target);
+        })
+        .map((item) => preferredInfrastructureKnowledgePath(item))
+        .filter((target): target is string => Boolean(target)),
+    ].slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY);
+    const artifactPaths = artifacts
+      .map((item) => preferredInfrastructureKnowledgePath(item))
+      .filter((target): target is string => Boolean(target) && !INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(target))
+      .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY);
+    const indexEntry: FactoryInfrastructureKnowledgeIndexEntry = {
+      entryId,
+      knowledgePath: entryPath,
+      provider,
+      profileId,
+      accountId,
+      promptFingerprint: entry.promptFingerprint,
+      keywords: entry.keywords,
+      objectiveId: input.payload.objectiveId,
+      taskId: input.payload.taskId,
+      summary: input.summary,
+      updatedAt: createdAt,
+      scriptPaths,
+      artifactPaths,
+    };
+    const existingIndex = await this.readInfrastructureKnowledgeIndex();
+    const nextIndex = [
+      indexEntry,
+      ...existingIndex.filter((item) => item.entryId !== entryId),
+    ].slice(0, 200);
+    await fs.writeFile(indexPath, JSON.stringify(nextIndex, null, 2), "utf-8");
+    return {
+      infrastructureKnowledge: fileRef(entryPath, "reusable infrastructure knowledge"),
+    };
+  }
+
   private async resolveObjectiveProfileSnapshot(profileId?: string): Promise<FactoryObjectiveProfileSnapshot> {
     const resolved = await resolveFactoryChatProfile({
       repoRoot: this.git.repoRoot,
@@ -886,15 +1286,11 @@ export class FactoryService {
       promptHash: resolved.promptHash,
       promptPath: resolved.promptPath,
       selectedSkills: resolved.skills,
+      cloudProvider: resolved.cloudProvider,
       objectivePolicy: {
         allowedWorkerTypes,
         defaultWorkerType,
-        worktreeModeByWorker: Object.fromEntries(
-          Object.entries(objectivePolicy.worktreeModeByWorker).map(([workerType, mode]) => [
-            normalizeWorkerType(workerType),
-            mode,
-          ]),
-        ),
+        defaultTaskExecutionMode: objectivePolicy.defaultTaskExecutionMode,
         defaultValidationMode: objectivePolicy.defaultValidationMode,
         defaultObjectiveMode: objectivePolicy.defaultObjectiveMode,
         defaultSeverity: objectivePolicy.defaultSeverity,
@@ -904,25 +1300,50 @@ export class FactoryService {
     };
   }
 
-  async prepareRepoProfile(
-    opts: FactoryRepoProfilePrepareOptions = {},
-  ): Promise<FactoryRepoProfileRecord> {
-    opts.onProgress?.({
-      step: "bootstrap",
-      message: "Checking git repository and Factory workspace state",
-    });
-    await this.ensureBootstrap();
-    const artifact = await this.generateSharedRepoProfile(opts);
-    opts.onProgress?.({
-      step: "complete",
-      message: "Repository profile is ready",
-    });
+  private buildObjectiveTaskPrompt(prompt: string, note?: string): string {
+    const normalized = optionalTrimmedString(note);
+    if (!normalized) return prompt;
+    return [
+      prompt,
+      "",
+      "Operator follow-up for this attempt:",
+      normalized,
+    ].join("\n");
+  }
+
+  private createObjectiveTaskRecord(input: {
+    readonly objectiveId: string;
+    readonly title: string;
+    readonly prompt: string;
+    readonly workerType: FactoryWorkerType;
+    readonly executionMode: FactoryTaskExecutionMode;
+    readonly baseCommit: string;
+    readonly createdAt: number;
+    readonly taskId?: string;
+    readonly sourceTaskId?: string;
+    readonly basedOn?: string;
+  }): FactoryTaskRecord {
+    const taskId = input.taskId ?? taskOrdinalId(0);
     return {
-      status: artifact.status,
-      generatedAt: artifact.generatedAt,
-      inferredChecks: artifact.inferredChecks,
-      generatedSkillRefs: artifact.generatedSkillRefs,
-      summary: artifact.summary,
+      nodeId: taskId,
+      taskId,
+      taskKind: "planned",
+      title: clipText(input.title, 120) ?? input.title,
+      prompt: input.prompt,
+      workerType: input.workerType,
+      executionMode: input.executionMode,
+      ...(input.sourceTaskId ? { sourceTaskId: input.sourceTaskId } : {}),
+      baseCommit: input.baseCommit,
+      dependsOn: [],
+      status: "pending",
+      skillBundlePaths: [],
+      contextRefs: [
+        stateRef(`${objectiveStream(input.objectiveId)}:objective`, "objective"),
+        commitRef(input.baseCommit, "base commit"),
+      ],
+      artifactRefs: {},
+      createdAt: input.createdAt,
+      ...(input.basedOn ? { basedOn: input.basedOn } : {}),
     };
   }
 
@@ -967,7 +1388,7 @@ export class FactoryService {
         }
       : normalizedPolicy;
     const sourceStatus = await this.git.sourceStatus();
-    if (!input.baseHash && sourceStatus.dirty) {
+    if (!input.baseHash && sourceStatus.dirty && profile.objectivePolicy.defaultTaskExecutionMode === "worktree") {
       throw new FactoryServiceError(
         409,
         "source repository has uncommitted changes. Factory objectives only see committed Git history. Commit or stash changes first, or provide baseHash explicitly.",
@@ -977,6 +1398,15 @@ export class FactoryService {
     const baseHash = await this.git.resolveBaseHash(input.baseHash);
     const createdAt = Date.now();
     await this.writeObjectiveProfileArtifacts(objectiveId, profile);
+    const initialTask = this.createObjectiveTaskRecord({
+      objectiveId,
+      title,
+      prompt,
+      workerType: this.normalizeProfileWorkerType(profile, profile.objectivePolicy.defaultWorkerType),
+      executionMode: profile.objectivePolicy.defaultTaskExecutionMode,
+      baseCommit: baseHash,
+      createdAt: createdAt + 2,
+    });
     const hasActiveSlot = await this.hasActiveObjectiveSlot();
     await this.emitObjectiveBatch(objectiveId, [
       {
@@ -1005,6 +1435,12 @@ export class FactoryService {
             objectiveId,
             admittedAt: createdAt + 1,
           },
+      {
+        type: "task.added",
+        objectiveId,
+        task: initialTask,
+        createdAt: initialTask.createdAt,
+      },
     ]);
     if (input.startImmediately && !hasActiveSlot) {
       await this.processObjectiveStartup(objectiveId, "startup");
@@ -1014,7 +1450,23 @@ export class FactoryService {
     return this.getObjective(objectiveId);
   }
 
-  async listObjectives(): Promise<ReadonlyArray<FactoryObjectiveCard>> {
+  async listObjectives(query?: {
+    readonly objectiveIds?: ReadonlyArray<string>;
+  }): Promise<ReadonlyArray<FactoryObjectiveCard>> {
+    const objectiveIds = (query?.objectiveIds ?? [])
+      .map((objectiveId) => objectiveId.trim())
+      .filter(Boolean);
+    if (objectiveIds.length > 0) {
+      const states = await this.listObjectiveStates();
+      const queuePositions = this.queuePositionsForStates(states);
+      const objectiveIdSet = new Set(objectiveIds);
+      const details = await Promise.all(
+        states
+          .filter((state) => objectiveIdSet.has(state.objectiveId))
+          .map((state) => this.buildObjectiveCard(state, queuePositions.get(state.objectiveId))),
+      );
+      return details.sort((a, b) => b.updatedAt - a.updatedAt);
+    }
     const cached = this.objectiveListCache;
     if (cached && cached.version === this.objectiveProjectionVersion) {
       return cached.cards;
@@ -1034,7 +1486,7 @@ export class FactoryService {
 
   async getObjectiveState(objectiveId: string): Promise<FactoryState> {
     await this.ensureBootstrap();
-    const state = await this.runtime.state(objectiveStream(objectiveId));
+    const state = normalizeFactoryState(await this.runtime.state(objectiveStream(objectiveId)));
     if (!state.objectiveId) throw new FactoryServiceError(404, "factory objective not found");
     return state;
   }
@@ -1048,7 +1500,7 @@ export class FactoryService {
       state = reduceFactory(state, receipt.body, receipt.ts);
       if (receipt.hash === headHash) {
         if (!state.objectiveId) throw new FactoryServiceError(404, "factory objective not found");
-        return state;
+        return normalizeFactoryState(state);
       }
     }
     return this.getObjectiveState(objectiveId);
@@ -1105,10 +1557,6 @@ export class FactoryService {
   }
 
   async buildComposeModel(): Promise<FactoryComposeModel> {
-    let repoProfile = await this.loadSharedRepoProfileArtifact();
-    if (!repoProfile && await this.repoProfileArtifactExists()) {
-      repoProfile = await this.generateSharedRepoProfile();
-    }
     const [sourceStatus, defaultBranch, objectives] = await Promise.all([
       this.git.sourceStatus(),
       this.git.defaultBranch(),
@@ -1120,13 +1568,8 @@ export class FactoryService {
       sourceBranch: sourceStatus.branch,
       objectiveCount: objectives.filter((objective) => !objective.archivedAt).length,
       defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
-      repoProfile: repoProfile ?? {
-        status: "missing",
-        inferredChecks: [],
-        generatedSkillRefs: [],
-        summary: "",
-      },
-      defaultValidationCommands: repoProfile?.inferredChecks?.length ? repoProfile.inferredChecks : [...DEFAULT_CHECKS],
+      profileSummary: FACTORY_PROFILE_SUMMARY,
+      defaultValidationCommands: [...DEFAULT_CHECKS],
     };
   }
 
@@ -1175,13 +1618,15 @@ export class FactoryService {
         title: task.title,
         status: task.jobStatus ?? task.status,
         active: isActiveJobStatus(task.jobStatus),
-        summary: task.latestSummary ?? task.candidate?.summary,
+        summary: task.latestSummary ?? task.candidate?.summary ?? task.artifactSummary,
         taskId: task.taskId,
         candidateId: task.candidateId,
         jobId: task.jobId,
         lastMessage: task.lastMessage,
         stdoutTail: task.stdoutTail,
         stderrTail: task.stderrTail,
+        artifactSummary: task.artifactSummary,
+        artifactActivity: task.artifactActivity && task.artifactActivity.length > 0 ? task.artifactActivity : undefined,
       };
     }
 
@@ -1207,12 +1652,19 @@ export class FactoryService {
     let lastMessage: string | undefined;
     let stdoutTail: string | undefined;
     let stderrTail: string | undefined;
+    let artifactSummary: string | undefined;
+    let artifactActivity: ReadonlyArray<FactoryArtifactActivity> | undefined;
 
     if (payloadKind === "factory.task.run") {
       title = taskId ? `Task ${taskId}` : "Task run";
       lastMessage = await this.readTextTail(optionalTrimmedString(payload.lastMessagePath), 400);
       stdoutTail = await this.readTextTail(optionalTrimmedString(payload.stdoutPath), 900);
       stderrTail = await this.readTextTail(optionalTrimmedString(payload.stderrPath), 600);
+      const workspacePath = optionalTrimmedString(payload.workspacePath);
+      if (workspacePath && taskId) {
+        artifactActivity = await this.taskArtifactActivity(workspacePath, taskId);
+        artifactSummary = this.summarizeTaskArtifactActivity(artifactActivity);
+      }
     } else if (payloadKind === "factory.integration.validate") {
       title = candidateId ? `Integration ${candidateId}` : "Integration validation";
       stdoutTail = await this.readTextTail(optionalTrimmedString(payload.stdoutPath), 900);
@@ -1226,13 +1678,15 @@ export class FactoryService {
       title,
       status: job.status,
       active: isActiveJobStatus(job.status),
-      summary,
+      summary: artifactSummary ?? summary,
       taskId,
       candidateId,
       jobId: job.id,
       lastMessage,
       stdoutTail,
       stderrTail,
+      artifactSummary,
+      artifactActivity: artifactActivity && artifactActivity.length > 0 ? artifactActivity : undefined,
     };
   }
 
@@ -1314,8 +1768,8 @@ export class FactoryService {
   async cleanupObjectiveWorkspaces(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     const workspacePaths = new Set<string>();
-    for (const taskId of state.taskOrder) {
-      const task = state.graph.nodes[taskId];
+    for (const taskId of state.workflow.taskIds) {
+      const task = state.workflow.tasksById[taskId];
       if (task?.workspacePath) workspacePaths.add(task.workspacePath);
     }
     const diskEntries = await fs.readdir(this.git.worktreesDir, { withFileTypes: true }).catch(() => []);
@@ -1324,47 +1778,21 @@ export class FactoryService {
       if (!entry.name.startsWith(`${objectiveId}_`) && !entry.name.startsWith(`factory_integration_${objectiveId}`)) continue;
       workspacePaths.add(path.join(this.git.worktreesDir, entry.name));
     }
+    const runtimeEntries = await fs.readdir(this.taskRuntimesRoot(), { withFileTypes: true }).catch(() => []);
+    for (const entry of runtimeEntries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.startsWith(`${objectiveId}_`)) continue;
+      workspacePaths.add(path.join(this.taskRuntimesRoot(), entry.name));
+    }
     if (state.integration.branchRef?.kind === "workspace") {
       workspacePaths.add(state.integration.branchRef.ref);
     }
     await Promise.all(
       [...workspacePaths].map(async (workspacePath) => {
-        await this.git.removeWorkspace(workspacePath).catch(() => undefined);
+        await this.removeTaskRuntimeWorkspace(workspacePath);
       }),
     );
     return this.getObjective(objectiveId);
-  }
-
-  async queueJobSteer(
-    jobId: string,
-    input: {
-      readonly problem?: string;
-      readonly config?: Record<string, unknown>;
-      readonly by?: string;
-    },
-  ): Promise<FactoryQueuedJobCommand> {
-    const payload: Record<string, unknown> = {};
-    const problem = optionalTrimmedString(input.problem);
-    if (problem) payload.problem = problem;
-    if (input.config && isRecord(input.config) && Object.keys(input.config).length > 0) payload.config = input.config;
-    if (Object.keys(payload).length === 0) throw new FactoryServiceError(400, "provide problem and/or config");
-    return this.queueJobCommand(jobId, {
-      command: "steer",
-      payload,
-      by: input.by ?? "factory.cli",
-    });
-  }
-
-  async queueJobFollowUp(
-    jobId: string,
-    note: string,
-    by = "factory.cli",
-  ): Promise<FactoryQueuedJobCommand> {
-    return this.queueJobCommand(jobId, {
-      command: "follow_up",
-      payload: { note: requireNonEmpty(note, "note required") },
-      by,
-    });
   }
 
   async queueJobAbort(
@@ -1394,7 +1822,7 @@ export class FactoryService {
   private async queueJobCommand(
     jobId: string,
     input: {
-      readonly command: "steer" | "follow_up" | "abort";
+      readonly command: "abort";
       readonly payload?: Record<string, unknown>;
       readonly by?: string;
     },
@@ -1435,8 +1863,8 @@ export class FactoryService {
     state: FactoryState,
     reason: string,
   ): Promise<void> {
-    for (const taskId of state.taskOrder) {
-      const task = state.graph.nodes[taskId];
+    for (const taskId of state.workflow.taskIds) {
+      const task = state.workflow.tasksById[taskId];
       if (!task?.jobId) continue;
       await this.queue.cancel(task.jobId, reason, "factory");
     }
@@ -1446,7 +1874,7 @@ export class FactoryService {
     await this.ensureBootstrap();
     const streams = await this.discoverObjectiveStreams();
     const states = await Promise.all(
-      streams.map(async (stream) => this.runtime.state(stream)),
+      streams.map(async (stream) => normalizeFactoryState(await this.runtime.state(stream))),
     );
     return states
       .filter((state) => Boolean(state.objectiveId))
@@ -1472,8 +1900,7 @@ export class FactoryService {
     if (state.status === "completed") return "completed";
     if (state.status === "blocked" || state.status === "failed" || state.status === "canceled") return "blocked";
     if (state.scheduler.slotState === "queued") return "waiting_for_slot";
-    if (state.status === "decomposing") return "preparing_repo";
-    if (state.status === "planning") return "planning_graph";
+    if (state.status === "planning") return "planning";
     if (state.status === "integrating") return "integrating";
     if (state.status === "promoting" || state.integration.status === "ready_to_promote" || state.integration.status === "promoting" || state.integration.status === "promoted") {
       return "promoting";
@@ -1491,20 +1918,6 @@ export class FactoryService {
         at: state.latestRebracket.appliedAt,
         source: state.latestRebracket.source,
         selectedActionId: state.latestRebracket.selectedActionId,
-      };
-    }
-    if (state.plan.adoptedAt && state.plan.summary) {
-      return {
-        summary: state.plan.summary,
-        at: state.plan.adoptedAt,
-        source: "plan",
-      };
-    }
-    if (state.plan.proposedAt && state.plan.summary) {
-      return {
-        summary: state.plan.summary,
-        at: state.plan.proposedAt,
-        source: "plan",
       };
     }
     if (state.integration.status === "ready_to_promote" && state.integration.lastSummary) {
@@ -1531,24 +1944,22 @@ export class FactoryService {
         ? `Waiting for the repo execution slot (${queuePosition} in queue).`
         : "Waiting for the repo execution slot.";
     }
-    if (state.status === "decomposing") return "Preparing the repo profile and generated skill bundle.";
-    if (state.status === "planning") return "Adopting the first task graph.";
-    if (state.objectiveMode === "investigation") {
-      const reconciliation = this.reconciliationStatus(state);
-      if (reconciliation === "running") return "Wait for the reconciliation task to resolve the conflicting findings.";
-      if (reconciliation === "pending") return "Wait for the reconciliation task to start.";
+    if (state.status === "planning") {
+      return state.workflow.taskIds.length === 0
+        ? "Preparing the objective."
+        : "Preparing the next task attempt.";
     }
     if (state.integration.status === "ready_to_promote" && !state.policy.promotion.autoPromote) {
       return "Promote the integration branch into source when ready.";
     }
-    if (state.integration.status === "conflicted") return "Resolve the integration conflict or let reconciliation tasks run.";
+    if (state.integration.status === "conflicted") return "Review the integration conflict and react with the next task attempt.";
     const readyCount = factoryReadyTasks(state).length;
     if (readyCount > 0) {
       return readyCount === 1
         ? "One task is ready to dispatch."
         : `${readyCount} tasks are ready to dispatch.`;
     }
-    if (state.graph.activeNodeIds.length > 0) return "Wait for the active task pass to finish.";
+    if (state.workflow.activeTaskIds.length > 0) return "Wait for the active task pass to finish.";
     if (state.integration.status === "queued" || state.integration.status === "merging" || state.integration.status === "validating") {
       return "Wait for integration validation to finish.";
     }
@@ -1567,9 +1978,7 @@ export class FactoryService {
       consecutiveFailuresByTask: failureEntries.length > 0
         ? Object.fromEntries(failureEntries)
         : {},
-      reconciliationTasksUsed: state.reconciliationTasksUsed,
       elapsedMinutes: this.objectiveElapsedMinutes(state, now),
-      lastMutationAt: state.lastMutationAt,
       lastDispatchAt: state.lastDispatchAt,
       policyBlockedReason: policyBlockedReason ?? this.derivePolicyBlockedReason(state, now),
     };
@@ -1602,8 +2011,8 @@ export class FactoryService {
   }
 
   private async stampCircuitBrokenTasks(state: FactoryState): Promise<void> {
-    for (const taskId of state.taskOrder) {
-      const task = state.graph.nodes[taskId];
+    for (const taskId of state.workflow.taskIds) {
+      const task = state.workflow.tasksById[taskId];
       if (!task || task.status !== "blocked") continue;
       if (task.blockedReason?.startsWith("Policy blocked:")) continue;
       const reason = this.taskCircuitBreakerReason(state, taskId);
@@ -1616,6 +2025,49 @@ export class FactoryService {
         blockedAt: Date.now(),
       });
     }
+  }
+
+  private runtimeFrontierTaskIds(state: FactoryState): ReadonlyArray<string> {
+    const frontier = state.workflow.taskIds.filter((taskId) => {
+      const task = state.workflow.tasksById[taskId];
+      return Boolean(task) && ["ready", "running", "reviewing", "blocked"].includes(task.status);
+    });
+    return frontier.length > 0 ? frontier : state.workflow.taskIds;
+  }
+
+  private runtimeDecisionEvent(
+    state: FactoryState,
+    selectedActionId: string,
+    reason: string,
+    opts: {
+      readonly basedOn?: string;
+      readonly frontierTaskIds?: ReadonlyArray<string>;
+    } = {},
+  ): Extract<FactoryEvent, { readonly type: "rebracket.applied" }> {
+    return {
+      type: "rebracket.applied",
+      objectiveId: state.objectiveId,
+      frontierTaskIds: opts.frontierTaskIds ?? this.runtimeFrontierTaskIds(state),
+      selectedActionId,
+      reason,
+      confidence: 1,
+      source: "runtime",
+      basedOn: opts.basedOn,
+      appliedAt: Date.now(),
+    };
+  }
+
+  private nextApprovedIntegrationCandidate(state: FactoryState): FactoryCandidateRecord | undefined {
+    for (const taskId of state.workflow.taskIds) {
+      const task = state.workflow.tasksById[taskId];
+      if (!task || task.status !== "approved") continue;
+      const candidate = this.latestTaskCandidate(state, taskId);
+      if (!candidate || candidate.status !== "approved") continue;
+      if (state.integration.activeCandidateId === candidate.candidateId) continue;
+      if (state.integration.queuedCandidateIds.includes(candidate.candidateId)) continue;
+      return candidate;
+    }
+    return undefined;
   }
 
   private resolveSelectedObjectiveId(
@@ -1660,7 +2112,7 @@ export class FactoryService {
       throw new FactoryServiceError(400, "invalid factory control payload");
     }
     const objectiveId = requireNonEmpty(payload.objectiveId, "objectiveId required");
-    const reason = payload.reason === "admitted" ? "admitted" : (payload.reason === "reconcile" ? "reconcile" : "startup");
+    const reason = payload.reason === "admitted" ? "admitted" : "startup";
     await this.ensureBootstrap();
     await this.processObjectiveStartup(objectiveId, reason as FactoryObjectiveControlJobPayload["reason"]);
     return {
@@ -1668,352 +2120,6 @@ export class FactoryService {
       status: "completed",
       reason,
     };
-  }
-
-  private repoProfileDir(): string {
-    return path.join(this.dataDir, FACTORY_SHARED_REPO_PROFILE_DIR);
-  }
-
-  private repoProfileArtifactPath(): string {
-    return path.join(this.repoProfileDir(), "profile.json");
-  }
-
-  private repoProfileSkillsDir(): string {
-    return path.join(this.repoProfileDir(), "skills");
-  }
-
-  private async currentRepoProfileSignature(): Promise<string> {
-    const [packageJsonRaw, readmeRaw] = await Promise.all([
-      fs.readFile(path.join(this.git.repoRoot, "package.json"), "utf-8").catch(() => ""),
-      fs.readFile(path.join(this.git.repoRoot, "README.md"), "utf-8").catch(() => ""),
-    ]);
-    return createHash("sha256")
-      .update(this.git.repoRoot)
-      .update("\n--package.json--\n")
-      .update(packageJsonRaw)
-      .update("\n--README.md--\n")
-      .update(readmeRaw)
-      .digest("hex");
-  }
-
-  private async repoProfileArtifactExists(): Promise<boolean> {
-    try {
-      await fs.access(this.repoProfileArtifactPath());
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async loadSharedRepoProfileArtifact(): Promise<FactoryRepoProfileArtifact | undefined> {
-    try {
-      const raw = await fs.readFile(this.repoProfileArtifactPath(), "utf-8");
-      const parsed = JSON.parse(raw) as FactoryRepoProfileArtifact;
-      if (!parsed || typeof parsed !== "object") return undefined;
-      if (!Array.isArray(parsed.inferredChecks) || !Array.isArray(parsed.generatedSkillPaths) || !Array.isArray(parsed.generatedSkillRefs)) {
-        return undefined;
-      }
-      const signature = await this.currentRepoProfileSignature();
-      if (typeof parsed.repoSignature !== "string" || parsed.repoSignature !== signature) {
-        return undefined;
-      }
-      return {
-        status: parsed.status,
-        generatedAt: parsed.generatedAt,
-        repoSignature: parsed.repoSignature,
-        inferredChecks: parsed.inferredChecks.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
-        generatedSkillRefs: parsed.generatedSkillRefs.filter((item): item is GraphRef => isRecord(item) && typeof item.kind === "string" && typeof item.ref === "string"),
-        generatedSkillPaths: parsed.generatedSkillPaths.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
-        summary: typeof parsed.summary === "string" ? parsed.summary : "",
-        permissionsLandscape: isRecord(parsed.permissionsLandscape) && typeof parsed.permissionsLandscape.summary === "string"
-          ? {
-              summary: parsed.permissionsLandscape.summary,
-              tooling: Array.isArray(parsed.permissionsLandscape.tooling)
-                ? parsed.permissionsLandscape.tooling.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                : [],
-              authSurfaces: Array.isArray(parsed.permissionsLandscape.authSurfaces)
-                ? parsed.permissionsLandscape.authSurfaces.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                : [],
-              policySurfaces: Array.isArray(parsed.permissionsLandscape.policySurfaces)
-                ? parsed.permissionsLandscape.policySurfaces.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                : [],
-              guardrails: Array.isArray(parsed.permissionsLandscape.guardrails)
-                ? parsed.permissionsLandscape.guardrails.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                : [],
-              notablePaths: Array.isArray(parsed.permissionsLandscape.notablePaths)
-                ? parsed.permissionsLandscape.notablePaths.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                : [],
-            }
-          : undefined,
-      };
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async inferRepoProfileFallback(): Promise<{
-    readonly summary: string;
-    readonly inferredChecks: ReadonlyArray<string>;
-    readonly generatedSkills: ReadonlyArray<{ readonly slug: string; readonly title: string; readonly content: string }>;
-    readonly permissionsLandscape: FactoryRepoExecutionLandscape;
-  }> {
-    const packageJsonPath = path.join(this.git.repoRoot, "package.json");
-    const readmePath = path.join(this.git.repoRoot, "README.md");
-    const packageJsonRaw = await fs.readFile(packageJsonPath, "utf-8").catch(() => "");
-    const readmeRaw = await fs.readFile(readmePath, "utf-8").catch(() => "");
-    const packageJson = (() => {
-      if (!packageJsonRaw.trim()) return undefined;
-      try {
-        return JSON.parse(packageJsonRaw) as {
-          readonly name?: string;
-          readonly packageManager?: string;
-          readonly scripts?: Record<string, string>;
-        };
-      } catch {
-        return undefined;
-      }
-    })();
-    const scripts = packageJson?.scripts ?? {};
-    const bunFirst = await repoUsesBun(this.git.repoRoot, packageJson);
-    const inferredChecks = [
-      "build" in scripts ? scriptCommand("build", bunFirst) : undefined,
-      "test" in scripts ? scriptCommand("test", bunFirst) : undefined,
-      "lint" in scripts ? scriptCommand("lint", bunFirst) : undefined,
-    ].filter((item): item is string => Boolean(item));
-    const checks = inferredChecks.length ? inferredChecks : [...DEFAULT_CHECKS];
-    const topEntries = (await fs.readdir(this.git.repoRoot, { withFileTypes: true }).catch(() => []))
-      .map((entry) => ({
-        name: entry.name,
-        kind: (entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other") as "dir" | "file" | "other",
-      }))
-      .slice(0, 40);
-    const permissionsLandscape = await scanFactoryRepoExecutionLandscape({
-      repoRoot: this.git.repoRoot,
-      packageScripts: scripts,
-      topEntries,
-    });
-    const summary = [
-      `Repo ${packageJson?.name ?? path.basename(this.git.repoRoot)} is prepared for Factory objectives.`,
-      bunFirst ? "Bun was detected as the package runner." : "npm-compatible scripts were detected for validation.",
-      Object.keys(scripts).length
-        ? `Primary scripts: ${Object.keys(scripts).slice(0, 8).join(", ")}.`
-        : "No package.json scripts were detected, so Factory will fall back to basic validation commands.",
-      readmeRaw.trim()
-        ? `README focus: ${clipText(readmeRaw.replace(/\s+/g, " "), 220) ?? ""}`
-        : "No README summary was available.",
-      `Execution landscape: ${permissionsLandscape.summary}`,
-    ].join(" ");
-    return {
-      summary,
-      inferredChecks: checks,
-      generatedSkills: [
-        {
-          slug: "repo-operating-notes",
-          title: "Repo Operating Notes",
-          content: [
-            "# Repo Operating Notes",
-            "",
-            summary,
-            "",
-            "## Validation Commands",
-            ...checks.map((check) => `- ${check}`),
-            "",
-            "## Factory Guidance",
-            "- Reuse existing repository conventions before introducing new build or test paths.",
-            "- Prefer the repository's current package manager and script names.",
-            "- Keep task changes aligned with committed Git history and objective integration flow.",
-          ].join("\n"),
-        },
-        renderFactoryRepoExecutionLandscapeSkill(permissionsLandscape),
-      ],
-      permissionsLandscape,
-    };
-  }
-
-  private async generateSharedRepoProfile(
-    opts: FactoryRepoProfilePrepareOptions = {},
-  ): Promise<FactoryRepoProfileArtifact> {
-    const existing = await this.loadSharedRepoProfileArtifact();
-    if (existing) {
-      opts.onProgress?.({
-        step: "cache",
-        message: "Reusing cached repository profile",
-      });
-      return existing;
-    }
-
-    opts.onProgress?.({
-      step: "scan",
-      message: "Reading package.json, README, and repository layout",
-    });
-    const fallback = await this.inferRepoProfileFallback();
-    const generatedAt = Date.now();
-    const repoSignature = await this.currentRepoProfileSignature();
-    let profile = fallback;
-    let status: FactoryRepoProfileRecord["status"] = "ready";
-
-    opts.onProgress?.({
-      step: "infer_checks",
-      message: `Detected validation commands: ${fallback.inferredChecks.join(" | ") || "none"}`,
-    });
-
-    if (this.llmStructured) {
-      opts.onProgress?.({
-        step: "llm",
-        message: "Generating repo summary and skills with OpenAI",
-      });
-      const topEntries = (await fs.readdir(this.git.repoRoot, { withFileTypes: true }).catch(() => []))
-        .map((entry) => ({
-          name: entry.name,
-          kind: entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other",
-        }))
-        .slice(0, 40);
-      const checkedInSkills = await this.collectCheckedInRepoSkillPaths();
-      const packageJsonRaw = await fs.readFile(path.join(this.git.repoRoot, "package.json"), "utf-8").catch(() => "");
-      const readmeRaw = await fs.readFile(path.join(this.git.repoRoot, "README.md"), "utf-8").catch(() => "");
-      try {
-        const { parsed } = await this.llmStructured({
-          schema: repoProfileSchema,
-          schemaName: "factory_repo_profile",
-          system: [
-            "You are preparing a software repo for Receipt Factory objectives.",
-            "Infer the best default validation commands for this repo.",
-            "Write a short repo summary and generate concise repo-specific skill markdown files that future code workers can use.",
-            "One generated skill should make the repo execution and permission landscape explicit so CLI-native Codex workers understand auth surfaces, policy surfaces, and guardrails.",
-            "Do not invent commands that do not match the repository's likely tooling.",
-          ].join("\n"),
-          user: JSON.stringify({
-            repoRoot: this.git.repoRoot,
-            topEntries,
-            checkedInSkills,
-            packageJson: packageJsonRaw ? JSON.parse(packageJsonRaw) : undefined,
-            readme: clipText(readmeRaw.replace(/\s+/g, " "), 2_000),
-            permissionsLandscape: fallback.permissionsLandscape,
-            fallback,
-          }, null, 2),
-        });
-        const generatedSkills = parsed.generatedSkills.length ? parsed.generatedSkills : fallback.generatedSkills;
-        profile = {
-          summary: parsed.summary,
-          inferredChecks: parsed.inferredChecks.length ? parsed.inferredChecks : fallback.inferredChecks,
-          generatedSkills: hasExecutionLandscapeSkill(generatedSkills)
-            ? generatedSkills
-            : [...generatedSkills, renderFactoryRepoExecutionLandscapeSkill(fallback.permissionsLandscape)],
-          permissionsLandscape: fallback.permissionsLandscape,
-        };
-      } catch {
-        status = "ready";
-      }
-    }
-
-    opts.onProgress?.({
-      step: "write_skills",
-      message: "Writing generated repository skills and notes",
-    });
-    await fs.mkdir(this.repoProfileSkillsDir(), { recursive: true });
-    const generatedSkillPaths: string[] = [];
-    const generatedSkillRefs: GraphRef[] = [];
-    for (const [index, skill] of profile.generatedSkills.entries()) {
-      const fileName = `${String(index + 1).padStart(2, "0")}-${skill.slug.replace(/[^a-z0-9._-]+/gi, "-").toLowerCase()}.md`;
-      const filePath = path.join(this.repoProfileSkillsDir(), fileName);
-      await fs.writeFile(filePath, skill.content.trimEnd() + "\n", "utf-8");
-      generatedSkillPaths.push(filePath);
-      generatedSkillRefs.push(artifactRef(filePath, skill.title));
-    }
-    const artifact: FactoryRepoProfileArtifact = {
-      status,
-      generatedAt,
-      repoSignature,
-      inferredChecks: profile.inferredChecks,
-      generatedSkillRefs,
-      generatedSkillPaths,
-      summary: profile.summary,
-      permissionsLandscape: profile.permissionsLandscape,
-    };
-    opts.onProgress?.({
-      step: "persist",
-      message: "Saving repository profile cache",
-    });
-    await fs.mkdir(this.repoProfileDir(), { recursive: true });
-    await fs.writeFile(this.repoProfileArtifactPath(), JSON.stringify(artifact, null, 2), "utf-8");
-    return artifact;
-  }
-
-  private async ensureRepoProfileForObjective(state: FactoryState): Promise<void> {
-    if (state.repoProfile.status === "ready" && state.repoProfile.generatedAt) return;
-    const requestedAt = Date.now();
-    await this.emitObjective(state.objectiveId, {
-      type: "repo.profile.requested",
-      objectiveId: state.objectiveId,
-      requestedAt,
-    });
-    const prior = await this.loadSharedRepoProfileArtifact();
-    const artifact = prior ?? await this.generateSharedRepoProfile();
-    await this.emitObjective(state.objectiveId, {
-      type: "repo.profile.generated",
-      objectiveId: state.objectiveId,
-      generatedAt: artifact.generatedAt,
-      status: artifact.status,
-      inferredChecks: artifact.inferredChecks,
-      generatedSkillRefs: artifact.generatedSkillRefs,
-      summary: artifact.summary,
-      source: prior ? "reused" : "generated",
-    });
-  }
-
-  private async planObjective(state: FactoryState): Promise<void> {
-    if (state.taskOrder.length > 0) return;
-    const { tasks, fallback } = await this.decomposeObjective(state);
-    const proposedAt = Date.now();
-    const summary = tasks.length === 1
-      ? `Adopted a single-task execution plan for ${state.title}.`
-      : `Adopted a ${tasks.length}-task graph for ${state.title}.`;
-    const taskRecords = tasks.map((spec, index) => {
-      const createdAt = proposedAt + index + 2;
-      const taskId = spec.taskId;
-      return {
-        nodeId: taskId,
-        taskId,
-        taskKind: "planned",
-        title: spec.title,
-        prompt: spec.prompt,
-        workerType: this.normalizeProfileWorkerType(this.objectiveProfileForState(state), spec.workerType),
-        baseCommit: state.baseHash,
-        dependsOn: spec.dependsOn,
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs: [
-          stateRef(`${objectiveStream(state.objectiveId)}:objective`, "objective"),
-          commitRef(state.baseHash, "base commit"),
-        ],
-        artifactRefs: {},
-        createdAt,
-      } satisfies FactoryTaskRecord;
-    });
-    await this.emitObjectiveBatch(state.objectiveId, [
-      {
-        type: "objective.plan.proposed",
-        objectiveId: state.objectiveId,
-        taskCount: taskRecords.length,
-        summary: fallback ? `${summary} Factory used the deterministic fallback planner.` : summary,
-        fallback,
-        proposedAt,
-      },
-      ...taskRecords.map((task) => ({
-        type: "task.added" as const,
-        objectiveId: state.objectiveId,
-        task,
-        createdAt: task.createdAt,
-      })),
-      {
-        type: "objective.plan.adopted",
-        objectiveId: state.objectiveId,
-        taskIds: taskRecords.map((task) => task.taskId),
-        summary: fallback ? `${summary} Factory used the deterministic fallback planner.` : summary,
-        fallback,
-        adoptedAt: proposedAt + taskRecords.length + 2,
-      },
-    ]);
   }
 
   private async rebalanceObjectiveSlots(): Promise<void> {
@@ -2073,9 +2179,68 @@ export class FactoryService {
     await this.rebalanceObjectiveSlots();
   }
 
+  private async latestObjectiveOperatorNote(objectiveId: string): Promise<string | undefined> {
+    const chain = await this.runtime.chain(objectiveStream(objectiveId));
+    for (const receipt of [...chain].reverse()) {
+      const body = receipt.body;
+      if (body.type === "objective.operator.noted") return body.message;
+    }
+    return undefined;
+  }
+
+  private async queueFollowUpTaskFromLatestNote(state: FactoryState): Promise<boolean> {
+    if (state.workflow.activeTaskIds.length > 0) return false;
+    const latestNote = await this.latestObjectiveOperatorNote(state.objectiveId);
+    if (!latestNote) return false;
+    const latestTask = [...state.workflow.taskIds]
+      .map((taskId) => state.workflow.tasksById[taskId])
+      .filter((task): task is FactoryTaskRecord => Boolean(task))
+      .at(-1);
+    if (latestTask?.prompt.includes(`Operator follow-up for this attempt:\n${latestNote}`)) return false;
+    const now = Date.now();
+    const basedOn = await this.currentHeadHash(state.objectiveId);
+    const nextTask = this.createObjectiveTaskRecord({
+      objectiveId: state.objectiveId,
+      title: latestTask?.title ?? state.title,
+      prompt: this.buildObjectiveTaskPrompt(state.prompt, latestNote),
+      workerType: this.normalizeProfileWorkerType(
+        this.objectiveProfileForState(state),
+        latestTask?.workerType ?? this.objectiveProfileForState(state).objectivePolicy.defaultWorkerType,
+      ),
+      executionMode: latestTask?.executionMode ?? this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode,
+      baseCommit: latestTask ? this.resolveTaskBaseCommit(state, latestTask) : (state.integration.headCommit ?? state.baseHash),
+      createdAt: now + 1,
+      taskId: this.nextTaskId(state),
+      sourceTaskId: latestTask?.taskId,
+      basedOn,
+    });
+    const events: FactoryEvent[] = [];
+    if (
+      latestTask
+      && latestTask.status !== "integrated"
+      && latestTask.status !== "superseded"
+    ) {
+      events.push({
+        type: "task.superseded",
+        objectiveId: state.objectiveId,
+        taskId: latestTask.taskId,
+        reason: "Superseded by operator follow-up.",
+        supersededAt: now,
+      });
+    }
+    events.push({
+      type: "task.added",
+      objectiveId: state.objectiveId,
+      task: nextTask,
+      createdAt: nextTask.createdAt,
+    });
+    await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
+    return true;
+  }
+
   private async syncFailedActiveTasks(state: FactoryState): Promise<void> {
-    for (const taskId of [...state.graph.activeNodeIds]) {
-      const task = state.graph.nodes[taskId];
+    for (const taskId of [...state.workflow.activeTaskIds]) {
+      const task = state.workflow.tasksById[taskId];
       if (!task?.jobId) continue;
       const job = await this.loadFreshJob(task.jobId);
       if (!job || !isTerminalJobStatus(job.status)) continue;
@@ -2100,11 +2265,11 @@ export class FactoryService {
       await this.rebalanceObjectiveSlots();
       return;
     }
-    if (state.status === "blocked" || state.scheduler.slotState === "queued") return;
+    if (state.scheduler.slotState === "queued") return;
 
     await this.syncFailedActiveTasks(state);
     state = await refreshState();
-    if (this.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
+    if (this.isTerminalObjectiveStatus(state.status)) {
       await this.rebalanceObjectiveSlots();
       return;
     }
@@ -2125,14 +2290,46 @@ export class FactoryService {
       return;
     }
 
-    if (state.repoProfile.status !== "ready" || !state.repoProfile.generatedAt) {
-      await this.ensureRepoProfileForObjective(state);
+    if (state.workflow.taskIds.length === 0) {
+      const createdAt = Date.now();
+      const initialTask = this.createObjectiveTaskRecord({
+        objectiveId,
+        title: state.title,
+        prompt: state.prompt,
+        workerType: this.normalizeProfileWorkerType(
+          this.objectiveProfileForState(state),
+          this.objectiveProfileForState(state).objectivePolicy.defaultWorkerType,
+        ),
+        executionMode: this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode,
+        baseCommit: state.baseHash,
+        createdAt,
+      });
+      await this.emitObjective(objectiveId, {
+        type: "task.added",
+        objectiveId,
+        task: initialTask,
+        createdAt,
+      });
       state = await refreshState();
     }
 
-    if (state.taskOrder.length === 0) {
-      await this.planObjective(state);
+    if (await this.queueFollowUpTaskFromLatestNote(state)) {
       state = await refreshState();
+    }
+
+    if (state.status === "blocked") {
+      const blockedTasks = state.workflow.taskIds
+        .map((taskId) => state.workflow.tasksById[taskId])
+        .filter((task): task is FactoryTaskRecord => Boolean(task) && task.status === "blocked");
+      if (blockedTasks.length > 0) {
+        await this.emitObjectiveBatch(objectiveId, blockedTasks.map((task, index) => ({
+          type: "task.unblocked" as const,
+          objectiveId,
+          taskId: task.taskId,
+          readyAt: Date.now() + index,
+        })));
+        state = await refreshState();
+      }
     }
 
     const activatable = factoryActivatableTasks(state);
@@ -2160,71 +2357,48 @@ export class FactoryService {
     }
     state = await refreshState();
 
-    const activeCount = state.graph.activeNodeIds.length;
-    const capacity = Math.max(0, this.effectiveMaxParallelChildren(state) - activeCount);
     const dispatchPolicyBlockedReason = state.taskRunsUsed >= state.policy.budgets.maxTaskRuns
       ? `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`
       : undefined;
-    const decisionSet = buildFactoryDecisionSet(state, {
-      now: Date.now(),
-      dispatchLimit: capacity,
-      policyBlockedReason: dispatchPolicyBlockedReason,
-    });
+    if (dispatchPolicyBlockedReason && state.workflow.activeTaskIds.length === 0 && factoryReadyTasks(state).length > 0) {
+      await this.emitObjective(objectiveId, {
+        type: "objective.blocked",
+        objectiveId,
+        reason: dispatchPolicyBlockedReason,
+        summary: dispatchPolicyBlockedReason,
+        blockedAt: Date.now(),
+      });
+      await this.rebalanceObjectiveSlots();
+      return;
+    }
 
-    const basedOn = await this.currentHeadHash(objectiveId);
-    for (const selectedAction of decisionSet.actions) {
-      const reason = summarizeFactoryAction(selectedAction);
+    while (true) {
+      state = await refreshState();
+      if (this.isTerminalObjectiveStatus(state.status) || state.scheduler.slotState === "queued") break;
+      const capacity = Math.max(0, this.effectiveMaxParallelChildren(state) - state.workflow.activeTaskIds.length);
+      if (capacity <= 0) break;
+      const nextTask = factoryReadyTasks(state)[0];
+      if (!nextTask) break;
+      const basedOn = await this.currentHeadHash(objectiveId);
       try {
-        await this.applyAction(state, selectedAction, reason, 1.0, "runtime", { basedOn });
+        await this.dispatchTask(state, nextTask, {
+          expectedPrev: basedOn,
+          prefixEvents: [
+            this.runtimeDecisionEvent(
+              state,
+              `dispatch_${nextTask.taskId}`,
+              `Dispatch ready task ${nextTask.taskId}.`,
+              { basedOn, frontierTaskIds: [nextTask.taskId] },
+            ),
+          ],
+        });
       } catch (err) {
         if (err instanceof FactoryStaleObjectiveError) break;
         throw err;
       }
-      state = await refreshState();
     }
 
     state = await refreshState();
-    const postActionActivatable = factoryActivatableTasks(state);
-    for (const task of postActionActivatable) {
-      await this.emitObjective(objectiveId, {
-        type: "task.ready",
-        objectiveId,
-        taskId: task.taskId,
-        readyAt: Date.now(),
-      });
-    }
-    if (postActionActivatable.length > 0) {
-      state = await refreshState();
-      const postBasedOn = await this.currentHeadHash(objectiveId);
-      const postCapacity = Math.max(0, this.effectiveMaxParallelChildren(state) - state.graph.activeNodeIds.length);
-      if (postCapacity > 0) {
-        const postDecisionSet = buildFactoryDecisionSet(state, {
-          now: Date.now(),
-          dispatchLimit: postCapacity,
-        });
-        for (const selectedAction of postDecisionSet.actions) {
-          if (selectedAction.type !== "dispatch_child") continue;
-          const reason = summarizeFactoryAction(selectedAction);
-          try {
-            await this.applyAction(state, selectedAction, reason, 1.0, "runtime", { basedOn: postBasedOn });
-          } catch (err) {
-            if (err instanceof FactoryStaleObjectiveError) break;
-            throw err;
-          }
-          state = await refreshState();
-        }
-      }
-    }
-
-    state = await refreshState();
-    if (state.objectiveMode === "investigation") {
-      const conflict = this.findInvestigationConflict(state);
-      if (conflict) {
-        await this.spawnInvestigationReconciliationTask(state, conflict.taskIds, conflict.reason);
-        await this.reactObjective(objectiveId);
-        return;
-      }
-    }
     const finalProjection = buildFactoryProjection(state);
 
     if (state.objectiveMode === "investigation") {
@@ -2261,6 +2435,7 @@ export class FactoryService {
               synthesizedAt: synthesis.synthesizedAt,
             });
             state = await refreshState();
+            await this.commitInvestigationSynthesisMemory(state, state.investigation.synthesized ?? synthesis);
           }
         }
         if (state.status !== "completed") {
@@ -2293,10 +2468,41 @@ export class FactoryService {
       return;
     }
 
+    const integrationCandidate = (
+      finalProjection.activeTasks.length === 0
+      && (state.integration.status === "idle" || state.integration.status === "conflicted")
+    )
+      ? this.nextApprovedIntegrationCandidate(state)
+      : undefined;
+    if (integrationCandidate) {
+      const basedOn = await this.currentHeadHash(objectiveId);
+      try {
+        await this.queueIntegration(state, integrationCandidate.candidateId, {
+          expectedPrev: basedOn,
+          prefixEvents: [
+            this.runtimeDecisionEvent(
+              state,
+              `queue_integration_${integrationCandidate.candidateId}`,
+              `Queue approved candidate ${integrationCandidate.candidateId} for integration.`,
+              { basedOn, frontierTaskIds: [integrationCandidate.taskId] },
+            ),
+          ],
+        });
+      } catch (err) {
+        if (!(err instanceof FactoryStaleObjectiveError)) throw err;
+      }
+      state = await refreshState();
+    }
+
     const readyToPromote = (
-      finalProjection.tasks.length > 0
-      && finalProjection.tasks.every((task) => ["integrated", "superseded", "blocked"].includes(task.status))
-      && finalProjection.tasks.some((task) => task.status === "integrated")
+      state.workflow.taskIds.length > 0
+      && state.workflow.taskIds
+        .map((taskId) => state.workflow.tasksById[taskId])
+        .filter((task): task is FactoryTaskRecord => Boolean(task))
+        .every((task) => ["integrated", "superseded", "blocked"].includes(task.status))
+      && state.workflow.taskIds
+        .map((taskId) => state.workflow.tasksById[taskId])
+        .some((task) => Boolean(task) && task.status === "integrated")
       && state.integration.status === "validated"
     );
 
@@ -2312,12 +2518,18 @@ export class FactoryService {
 
       if (state.policy.promotion.autoPromote && state.integration.activeCandidateId) {
         try {
-          await this.applyAction(state, {
-            actionId: `action_promote_${state.integration.activeCandidateId}`,
-            type: "promote_integration",
-            label: `Promote integrated candidate ${state.integration.activeCandidateId}`,
-            candidateId: state.integration.activeCandidateId,
-          }, "auto-promote objective", 1.0, "runtime", { basedOn: await this.currentHeadHash(objectiveId) });
+          const basedOn = await this.currentHeadHash(objectiveId);
+          await this.promoteIntegration(state, state.integration.activeCandidateId, {
+            expectedPrev: basedOn,
+            prefixEvents: [
+              this.runtimeDecisionEvent(
+                state,
+                `promote_integration_${state.integration.activeCandidateId}`,
+                `Promote integrated candidate ${state.integration.activeCandidateId}.`,
+                { basedOn },
+              ),
+            ],
+          });
         } catch (err) {
           if (!(err instanceof FactoryStaleObjectiveError)) throw err;
         }
@@ -2365,21 +2577,49 @@ export class FactoryService {
     await this.ensureBootstrap();
     const parsed = this.parseTaskPayload(payload);
     const state = await this.getObjectiveState(parsed.objectiveId);
-    const task = state.graph.nodes[parsed.taskId];
+    const task = state.workflow.tasksById[parsed.taskId];
     if (!task) throw new FactoryServiceError(404, "factory task not found");
-    const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
-    let rebuiltPacket = false;
-    if (!workspaceStatus.exists) {
-      await this.git.restoreWorkspace({
-        workspaceId: parsed.workspaceId,
-        branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
-        workspacePath: parsed.workspacePath,
-        baseHash: parsed.baseCommit,
+    if (parsed.executionMode === "isolated" && parsed.objectiveMode !== "investigation") {
+      const blockedAt = Date.now();
+      const reason = `factory delivery task ${parsed.taskId} cannot run in isolated mode; reroute it into a git worktree runtime before dispatching Codex.`;
+      await this.commitTaskMemory(state, task, parsed.candidateId, reason, "blocked_isolated_runtime");
+      await this.emitObjective(parsed.objectiveId, {
+        type: "task.blocked",
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        reason,
+        blockedAt,
       });
-      rebuiltPacket = true;
+      await this.reactObjective(parsed.objectiveId);
+      return {
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        candidateId: parsed.candidateId,
+        status: "blocked",
+      };
     }
-    const manifestPresent = await fs.access(parsed.manifestPath).then(() => true).catch(() => false);
-    if (rebuiltPacket || !manifestPresent) {
+    let rebuiltPacket = false;
+    if (parsed.executionMode === "worktree") {
+      const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
+      if (!workspaceStatus.exists) {
+        await this.git.restoreWorkspace({
+          workspaceId: parsed.workspaceId,
+          branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
+          workspacePath: parsed.workspacePath,
+          baseHash: parsed.baseCommit,
+        });
+        rebuiltPacket = true;
+      }
+    } else {
+      const exists = await pathExists(parsed.workspacePath);
+      if (!exists) {
+        await fs.mkdir(parsed.workspacePath, { recursive: true });
+        rebuiltPacket = true;
+      }
+      await this.materializeIsolatedTaskSupportFiles(parsed.workspacePath, this.workerTaskProfile(parsed.profile));
+    }
+    const packetPresent = await this.taskPacketPresent(parsed);
+    if (rebuiltPacket || !packetPresent) {
       await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
     }
     const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
@@ -2390,56 +2630,36 @@ export class FactoryService {
       JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
       "utf-8",
     );
-    const supervisorNotes: string[] = [];
-    let execution: Awaited<ReturnType<CodexExecutor["run"]>> | undefined;
-    for (;;) {
-      const renderedPrompt = withSupervisorGuidance(
-        await this.renderTaskPrompt(state, task, parsed),
-        supervisorNotes,
-      );
-      try {
-        execution = await this.codexExecutor.run({
-          prompt: renderedPrompt,
-          workspacePath: parsed.workspacePath,
-          promptPath: parsed.promptPath,
-          lastMessagePath: parsed.lastMessagePath,
-          stdoutPath: parsed.stdoutPath,
-          stderrPath: parsed.stderrPath,
-          model: FACTORY_TASK_CODEX_MODEL,
-          outputSchemaPath: resultSchemaPath,
-          completionSignalPath: parsed.lastMessagePath,
-          completionQuietMs: 1_500,
-          reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
-          sandboxMode: parsed.profile.rootProfileId === "infrastructure" ? "danger-full-access" : undefined,
-          isolateCodexHome: true,
-          objectiveId: parsed.objectiveId,
-          taskId: parsed.taskId,
-          candidateId: parsed.candidateId,
-          integrationRef: parsed.integrationRef,
-          contextRefs: parsed.contextRefs,
-          skillBundlePaths: parsed.skillBundlePaths,
-          repoSkillPaths: parsed.repoSkillPaths,
-          env: {
-            DATA_DIR: this.dataDir,
-            PATH: prependPath(receiptBinDir, process.env.PATH),
-          },
-        }, control);
-        break;
-      } catch (err) {
-        if (err instanceof CodexControlSignalError && err.signal.kind === "restart") {
-          const note = optionalTrimmedString(err.signal.note)
-            ?? "Supervisor requested a restart with tighter scope and a clearer finish condition.";
-          supervisorNotes.push(note);
-          if (supervisorNotes.length > MAX_FACTORY_SUPERVISOR_RESTARTS) {
-            throw new Error(`factory task restart budget exhausted after ${MAX_FACTORY_SUPERVISOR_RESTARTS} supervisor restarts`);
-          }
-          continue;
-        }
-        throw err;
-      }
-    }
-    if (!execution) throw new Error("factory task execution produced no result");
-    const taskResult = await this.resolveTaskWorkerResult(parsed.resultPath, execution);
+    const execution = await this.codexExecutor.run({
+      prompt: await this.renderTaskPrompt(state, task, parsed),
+      workspacePath: parsed.workspacePath,
+      promptPath: parsed.promptPath,
+      lastMessagePath: parsed.lastMessagePath,
+      stdoutPath: parsed.stdoutPath,
+      stderrPath: parsed.stderrPath,
+      model: FACTORY_TASK_CODEX_MODEL,
+      outputSchemaPath: resultSchemaPath,
+      completionSignalPath: parsed.lastMessagePath,
+      completionQuietMs: 1_500,
+      reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
+      sandboxMode: sandboxModeForTask({
+        profileCloudProvider: parsed.profile.cloudProvider,
+        objectiveMode: parsed.objectiveMode,
+      }),
+      isolateCodexHome: true,
+      objectiveId: parsed.objectiveId,
+      taskId: parsed.taskId,
+      candidateId: parsed.candidateId,
+      integrationRef: parsed.integrationRef,
+      contextRefs: parsed.contextRefs,
+      skillBundlePaths: parsed.skillBundlePaths,
+      repoSkillPaths: parsed.repoSkillPaths,
+      env: {
+        DATA_DIR: this.dataDir,
+        PATH: prependPath(receiptBinDir, process.env.PATH),
+      },
+    }, control);
+    const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
     await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
     await this.applyTaskWorkerResult(parsed, taskResult);
     await this.reactObjective(parsed.objectiveId);
@@ -2453,16 +2673,31 @@ export class FactoryService {
 
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
     const state = await this.getObjectiveState(payload.objectiveId);
-    const task = state.graph.nodes[payload.taskId];
+    const task = state.workflow.tasksById[payload.taskId];
     if (!task) throw new FactoryServiceError(404, "factory task not found");
     const summary = requireNonEmpty(rawResult.summary, "task result summary required");
-    const handoff = optionalTrimmedString(rawResult.handoff) ?? summary;
+    const workerArtifacts = Array.isArray(rawResult.artifacts)
+      ? rawResult.artifacts
+        .filter((item): item is Record<string, unknown> => isRecord(item))
+        .map((item) => ({
+          label: requireNonEmpty(item.label, "task artifact label required"),
+          path: optionalTrimmedString(item.path),
+          summary: optionalTrimmedString(item.summary),
+        }))
+      : [];
+    const nextAction = optionalTrimmedString(rawResult.nextAction);
+    const workerArtifactSummary = workerArtifacts.length > 0
+      ? `Artifacts:\n${workerArtifacts.map((item) =>
+        `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`
+      ).join("\n")}`
+      : undefined;
+    const handoff = [nextAction ?? summary, workerArtifactSummary].filter(Boolean).join("\n\n") || summary;
     const outcome = optionalTrimmedString(rawResult.outcome) ?? "approved";
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
 
-    if (outcome === "blocked" && !hasStructuredInvestigationReport) {
+    if ((outcome === "blocked" || (outcome === "partial" && !isInvestigation)) && !hasStructuredInvestigationReport) {
       await this.emitObjective(payload.objectiveId, {
         type: "task.blocked",
         objectiveId: payload.objectiveId,
@@ -2473,11 +2708,24 @@ export class FactoryService {
       return;
     }
 
-    const status = await this.git.worktreeStatus(payload.workspacePath);
+    const status = await this.taskWorkspaceStatus(payload.workspacePath, payload.executionMode);
     const checkResults = isInvestigation
       ? []
       : await this.runChecks(state.checks, payload.workspacePath);
     const failedCheck = checkResults.find((check) => !check.ok);
+
+    if (payload.executionMode === "isolated" && !isInvestigation) {
+      const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${summary}`;
+      await this.commitTaskMemory(state, task, payload.candidateId, `${summary}\n\n${handoff}`, "blocked_no_diff");
+      await this.emitObjective(payload.objectiveId, {
+        type: "task.blocked",
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        reason,
+        blockedAt: completedAt,
+      });
+      return;
+    }
 
     if (!status.dirty && !isInvestigation) {
       const noDiffReason = `factory task produced no tracked diff: ${summary}`;
@@ -2492,7 +2740,7 @@ export class FactoryService {
       return;
     }
 
-    const committed = status.dirty
+    const committed = status.dirty && payload.executionMode === "worktree"
       ? await this.git.commitWorkspace(
           payload.workspacePath,
           isInvestigation
@@ -2500,7 +2748,7 @@ export class FactoryService {
             : `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
         )
       : undefined;
-    const resultRefs = {
+    const baseResultRefs = {
       manifest: fileRef(payload.manifestPath, "task manifest"),
       prompt: fileRef(payload.promptPath, "task prompt"),
       result: fileRef(payload.resultPath, "task result"),
@@ -2510,11 +2758,25 @@ export class FactoryService {
       contextPack: fileRef(payload.contextPackPath, "task recursive context pack"),
       memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
       memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
-      ...(committed ? { commit: commitRef(committed.hash, isInvestigation ? "evidence commit" : "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
     if (isInvestigation) {
-      const report = normalizeInvestigationReport(rawResult.report, summary);
+      const report = normalizeInvestigationReport(
+        hasStructuredInvestigationReport
+          ? rawResult.report
+          : {
+              conclusion: summary,
+              evidence: workerArtifacts.map((item) => ({
+                title: item.label,
+                summary: item.summary ?? item.path ?? item.label,
+                detail: item.path ?? null,
+              })),
+              scriptsRun: [],
+              disagreements: [],
+              nextSteps: nextAction ? [nextAction] : [],
+            },
+        summary,
+      );
       const reportWithChecks: FactoryInvestigationReport = checkResults.length > 0
         ? {
             ...report,
@@ -2536,6 +2798,20 @@ export class FactoryService {
             ],
           }
         : report;
+      const infrastructureKnowledgeRefs = await this.promoteInfrastructureKnowledge({
+        state,
+        task,
+        payload,
+        outcome,
+        summary,
+        report: reportWithChecks,
+        workerArtifacts,
+      });
+      const resultRefs = {
+        ...baseResultRefs,
+        ...infrastructureKnowledgeRefs,
+        ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
+      } satisfies Readonly<Record<string, GraphRef>>;
       await this.emitObjective(payload.objectiveId, {
         type: "investigation.reported",
         objectiveId: payload.objectiveId,
@@ -2552,11 +2828,16 @@ export class FactoryService {
         state,
         task,
         payload.candidateId,
-        summary,
-        outcome === "blocked" ? "investigation_reported_partial" : "investigation_reported",
+        this.renderInvestigationReportText(summary, reportWithChecks, [resultRefs]),
+        outcome === "blocked" || outcome === "partial" ? "investigation_reported_partial" : "investigation_reported",
       );
       return;
     }
+
+    const resultRefs = {
+      ...baseResultRefs,
+      ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
+    } satisfies Readonly<Record<string, GraphRef>>;
 
     await this.emitObjective(payload.objectiveId, {
       type: "candidate.produced",
@@ -2666,7 +2947,13 @@ export class FactoryService {
         reason: `integration validation failed: ${failed.command}`,
         conflictedAt: Date.now(),
       });
-      await this.spawnReconciliationTask(state, parsed.candidateId, `Resolve integration failure in ${failed.command}.`);
+      await this.emitObjective(parsed.objectiveId, {
+        type: "objective.blocked",
+        objectiveId: parsed.objectiveId,
+        reason: `Integration validation failed for ${parsed.candidateId}: ${failed.command}`,
+        summary: `Integration validation failed for ${parsed.candidateId}. React with the next task attempt once the fix is clear.`,
+        blockedAt: Date.now(),
+      });
       await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "failed" };
     }
@@ -2690,7 +2977,7 @@ export class FactoryService {
   }
 
   private nextTaskOrdinal(state: FactoryState): number {
-    return state.taskOrder
+    return state.workflow.taskIds
       .map((taskId) => /^task_(\d+)$/i.exec(taskId)?.[1])
       .map((value) => Number.parseInt(value ?? "", 10))
       .filter((value) => Number.isFinite(value))
@@ -2710,7 +2997,7 @@ export class FactoryService {
     },
   ): Promise<void> {
     state = await this.getObjectiveStateAtHead(state.objectiveId, opts?.expectedPrev);
-    task = state.graph.nodes[task.taskId] ?? task;
+    task = state.workflow.tasksById[task.taskId] ?? task;
     const profile = this.objectiveProfileForState(state);
     const workerType = this.normalizeProfileWorkerType(profile, String(task.workerType));
     if (!this.objectiveAllowsWorker(state, workerType)) {
@@ -2719,22 +3006,17 @@ export class FactoryService {
         `worker '${workerType}' is not allowed by objective profile '${profile.rootProfileId}'`,
       );
     }
-    if (this.objectiveWorktreeMode(state, workerType) === "forbidden") {
+    if (state.workflow.activeTaskIds.length >= this.effectiveMaxParallelChildren(state)) {
       throw new FactoryServiceError(
         409,
-        `worker '${workerType}' is configured without a task worktree in objective profile '${profile.rootProfileId}'`,
-      );
-    }
-    if (state.graph.activeNodeIds.length >= this.effectiveMaxParallelChildren(state)) {
-      throw new FactoryServiceError(
-        409,
-        `objective already has ${state.graph.activeNodeIds.length} active child runs; profile limit is ${this.effectiveMaxParallelChildren(state)}`,
+        `objective already has ${state.workflow.activeTaskIds.length} active child runs; profile limit is ${this.effectiveMaxParallelChildren(state)}`,
       );
     }
     const candidateId = this.resolveDispatchCandidateId(state, task);
     const dispatchBaseCommit = this.resolveTaskBaseCommit(state, task);
     const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
-    const workspace = await this.ensureTaskWorkspace(state, task, workspaceId, dispatchBaseCommit, {
+    const executionMode = this.taskExecutionMode(state, task);
+    const workspace = await this.ensureTaskRuntime(state, task, workspaceId, dispatchBaseCommit, {
       resetIfBaseMismatch: !state.candidates[candidateId] && !task.workspacePath,
     });
     const pinnedBaseCommit = workspace.baseHash;
@@ -2789,6 +3071,7 @@ export class FactoryService {
       severity: state.severity,
       candidateId,
       baseCommit: pinnedBaseCommit,
+      executionMode,
       workspaceId,
       workspacePath: workspace.path,
       promptPath: manifest.promptPath,
@@ -2825,221 +3108,6 @@ export class FactoryService {
       payload,
     });
     this.sse.publish("jobs", created.id);
-  }
-
-  private async applyAction(
-    state: FactoryState,
-    action: FactoryAction,
-    reason: string,
-    confidence: number,
-    source: "orchestrator" | "fallback" | "runtime",
-    opts: {
-      readonly basedOn?: string;
-      readonly frontierTaskIds?: ReadonlyArray<string>;
-      readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
-    } = {},
-  ): Promise<void> {
-    const appliedAt = Date.now();
-    const basedOn = opts.basedOn ?? await this.currentHeadHash(state.objectiveId);
-    const rebracket = opts.prefixEvents?.find((event): event is Extract<FactoryEvent, { readonly type: "rebracket.applied" }> => event.type === "rebracket.applied")
-      ?? {
-        type: "rebracket.applied",
-        objectiveId: state.objectiveId,
-        frontierTaskIds: opts.frontierTaskIds ?? state.taskOrder,
-        selectedActionId: action.actionId,
-        reason,
-        confidence,
-        source,
-        basedOn,
-        appliedAt,
-      } satisfies FactoryEvent;
-    const prefixEvents = opts.prefixEvents?.length
-      ? [...opts.prefixEvents, ...(opts.prefixEvents.includes(rebracket) ? [] : [rebracket])]
-      : [rebracket];
-
-    if (action.type === "dispatch_child" && action.taskId) {
-      const task = state.graph.nodes[action.taskId];
-      if (!task) return;
-      await this.dispatchTask(state, task, {
-        expectedPrev: basedOn,
-        prefixEvents,
-      });
-      return;
-    }
-    if (action.type === "queue_integration" && action.candidateId) {
-      await this.queueIntegration(state, action.candidateId, {
-        expectedPrev: basedOn,
-        prefixEvents,
-      });
-      return;
-    }
-    if (action.type === "promote_integration" && action.candidateId) {
-      await this.promoteIntegration(state, action.candidateId, {
-        expectedPrev: basedOn,
-        prefixEvents,
-      });
-      return;
-    }
-    if (action.type === "split_task" && action.taskId && action.tasks?.length) {
-      await this.applySplitTaskAction(state, action.taskId, action.tasks, reason, prefixEvents, basedOn);
-      return;
-    }
-    if (action.type === "reassign_task" && action.taskId && action.workerType) {
-      const nextWorkerType = this.normalizeProfileWorkerType(this.objectiveProfileForState(state), action.workerType);
-      const events: FactoryEvent[] = [...prefixEvents, {
-        type: "task.worker.reassigned",
-        objectiveId: state.objectiveId,
-        taskId: action.taskId,
-        workerType: nextWorkerType,
-        reason,
-        basedOn,
-        updatedAt: appliedAt,
-      }];
-      const current = state.graph.nodes[action.taskId];
-      if (current?.status === "blocked") {
-        events.push({
-          type: "task.unblocked",
-          objectiveId: state.objectiveId,
-          taskId: action.taskId,
-          readyAt: appliedAt + 1,
-        });
-      }
-      await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
-      return;
-    }
-    if (action.type === "update_dependencies" && action.taskId && action.dependsOn) {
-      const events: FactoryEvent[] = [...prefixEvents, {
-        type: "task.dependency.updated",
-        objectiveId: state.objectiveId,
-        taskId: action.taskId,
-        dependsOn: action.dependsOn,
-        reason,
-        basedOn,
-        updatedAt: appliedAt,
-      }];
-      const current = state.graph.nodes[action.taskId];
-      if (current?.status === "blocked") {
-        events.push({
-          type: "task.unblocked",
-          objectiveId: state.objectiveId,
-          taskId: action.taskId,
-          readyAt: appliedAt + 1,
-        });
-      }
-      await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
-      return;
-    }
-    if (action.type === "unblock_task" && action.taskId) {
-      await this.emitObjectiveBatch(state.objectiveId, [...prefixEvents, {
-        type: "task.unblocked",
-        objectiveId: state.objectiveId,
-        taskId: action.taskId,
-        readyAt: appliedAt,
-      }], basedOn);
-      return;
-    }
-    if (action.type === "supersede_task" && action.taskId) {
-      const dependencyUpdates = this.buildDependencyReplacementEvents(
-        state,
-        action.taskId,
-        state.graph.nodes[action.taskId]?.dependsOn ?? [],
-        reason,
-        basedOn,
-        appliedAt,
-      );
-      await this.emitObjectiveBatch(state.objectiveId, [
-        ...prefixEvents,
-        ...dependencyUpdates,
-        {
-          type: "task.superseded",
-          objectiveId: state.objectiveId,
-          taskId: action.taskId,
-          reason,
-          supersededAt: appliedAt + dependencyUpdates.length,
-        },
-      ], basedOn);
-      return;
-    }
-    if (action.type === "block_objective") {
-      const blockReason = action.summary ?? reason;
-      await this.emitObjectiveBatch(state.objectiveId, [...prefixEvents, {
-        type: "objective.blocked",
-        objectiveId: state.objectiveId,
-        reason: blockReason,
-        summary: blockReason,
-        blockedAt: appliedAt,
-      }], basedOn);
-    }
-  }
-
-  private async applySplitTaskAction(
-    state: FactoryState,
-    sourceTaskId: string,
-    drafts: ReadonlyArray<FactoryActionTaskDraft>,
-    reason: string,
-    prefixEvents: ReadonlyArray<FactoryEvent>,
-    basedOn: string | undefined,
-  ): Promise<void> {
-    const source = state.graph.nodes[sourceTaskId];
-    if (!source) return;
-    const createdAt = Date.now();
-    const newTasks: FactoryTaskRecord[] = [];
-    let previousNewTaskId: string | undefined;
-    for (const [index, draft] of drafts.entries()) {
-      const taskId = this.nextTaskId(state, index);
-      const dependsOn = index === 0
-        ? [...new Set(source.dependsOn)]
-        : [previousNewTaskId!];
-      newTasks.push({
-        nodeId: taskId,
-        taskId,
-        taskKind: "split",
-        title: clipText(draft.title, 120) ?? draft.title,
-        prompt: draft.prompt,
-        workerType: this.normalizeProfileWorkerType(this.objectiveProfileForState(state), String(draft.workerType)),
-        sourceTaskId,
-        baseCommit: this.resolveTaskBaseCommit(state, source),
-        dependsOn,
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs: [
-          stateRef(`${objectiveStream(state.objectiveId)}:task/${sourceTaskId}`, `source task ${sourceTaskId}`),
-          ...source.contextRefs,
-        ],
-        artifactRefs: {},
-        createdAt: createdAt + index,
-        basedOn,
-      });
-      previousNewTaskId = taskId;
-    }
-    const dependencyUpdates = this.buildDependencyReplacementEvents(
-      state,
-      sourceTaskId,
-      previousNewTaskId ? [previousNewTaskId] : [...source.dependsOn],
-      reason,
-      basedOn,
-      createdAt + newTasks.length,
-    );
-    await this.emitObjectiveBatch(state.objectiveId, [
-      ...prefixEvents,
-      {
-        type: "task.split",
-        objectiveId: state.objectiveId,
-        sourceTaskId,
-        tasks: newTasks,
-        reason,
-        basedOn,
-        createdAt,
-      },
-      ...dependencyUpdates,
-      {
-        type: "task.superseded",
-        objectiveId: state.objectiveId,
-        taskId: sourceTaskId,
-        reason,
-        supersededAt: createdAt + newTasks.length + dependencyUpdates.length,
-      },
-    ], basedOn);
   }
 
   private async queueIntegration(
@@ -3116,7 +3184,13 @@ export class FactoryService {
         reason: message,
         conflictedAt: Date.now(),
       });
-      await this.spawnReconciliationTask(state, candidateId, `Reconcile ${candidateId} against the integration branch.`);
+      await this.emitObjective(state.objectiveId, {
+        type: "objective.blocked",
+        objectiveId: state.objectiveId,
+        reason: `Integration merge conflicted for ${candidateId}: ${message}`,
+        summary: `Integration merge conflicted for ${candidateId}. React with the next task attempt after deciding how to resolve it.`,
+        blockedAt: Date.now(),
+      });
       await this.commitIntegrationMemory(state, candidateId, `Integration merge conflicted for ${candidateId}: ${message}`, ["integration", "conflicted"]);
       await this.reactObjective(state.objectiveId);
     }
@@ -3275,65 +3349,6 @@ export class FactoryService {
     this.sse.publish("jobs", created.id);
   }
 
-  private async spawnReconciliationTask(
-    state: FactoryState,
-    candidateId: string,
-    reason: string,
-    baseCommit?: string,
-  ): Promise<void> {
-    const current = await this.getObjectiveState(state.objectiveId);
-    const candidate = current.candidates[candidateId];
-    if (!candidate) return;
-    if (current.reconciliationTasksUsed >= current.policy.budgets.maxReconciliationTasks) {
-      const blockedReason = `Policy blocked: objective exhausted maxReconciliationTasks (${current.reconciliationTasksUsed}/${current.policy.budgets.maxReconciliationTasks}).`;
-      await this.emitObjective(current.objectiveId, {
-        type: "objective.blocked",
-        objectiveId: current.objectiveId,
-        reason: blockedReason,
-        summary: blockedReason,
-        blockedAt: Date.now(),
-      });
-      return;
-    }
-    const basedOn = await this.currentHeadHash(current.objectiveId);
-    const taskId = this.nextTaskId(current);
-    const createdAt = Date.now();
-    try {
-      await this.emitObjectiveBatch(current.objectiveId, [{
-        type: "task.added",
-        objectiveId: current.objectiveId,
-        createdAt,
-        task: {
-          nodeId: taskId,
-          taskId,
-          taskKind: "reconciliation",
-          title: `Reconcile ${candidateId}`,
-          prompt: `${reason}\nCurrent candidate: ${candidateId}\nObjective: ${current.prompt}`,
-          workerType: this.normalizeProfileWorkerType(current.profile, "codex"),
-          sourceTaskId: candidate.taskId,
-          sourceCandidateId: candidateId,
-          baseCommit: baseCommit ?? current.integration.headCommit ?? current.baseHash,
-          dependsOn: [],
-          status: "pending",
-          skillBundlePaths: [],
-          contextRefs: [
-            stateRef(`${objectiveStream(current.objectiveId)}:task/${candidate.taskId}`, "prior task"),
-            commitRef(baseCommit ?? current.integration.headCommit ?? current.baseHash, "integration head"),
-          ],
-          artifactRefs: {},
-          createdAt,
-          basedOn,
-        },
-      }], basedOn);
-    } catch (err) {
-      if (err instanceof FactoryStaleObjectiveError) {
-        await this.spawnReconciliationTask(current, candidateId, reason, baseCommit);
-        return;
-      }
-      throw err;
-    }
-  }
-
   private summarizedReceipts(
     chain: ReadonlyArray<{ readonly body: FactoryEvent; readonly hash: string; readonly ts: number }>,
     limit = 40,
@@ -3398,14 +3413,14 @@ export class FactoryService {
 
   private blockedDependentSummary(state: FactoryState): string | undefined {
     const blockedTaskIds = new Set(
-      state.taskOrder
-        .map((taskId) => state.graph.nodes[taskId])
+      state.workflow.taskIds
+        .map((taskId) => state.workflow.tasksById[taskId])
         .filter((task): task is FactoryTaskRecord => Boolean(task) && task.status === "blocked")
         .map((task) => task.taskId),
     );
     if (blockedTaskIds.size === 0) return undefined;
-    const waiting = state.taskOrder
-      .map((taskId) => state.graph.nodes[taskId])
+    const waiting = state.workflow.taskIds
+      .map((taskId) => state.workflow.tasksById[taskId])
       .filter((task): task is FactoryTaskRecord => Boolean(task) && task.status === "pending")
       .map((task) => ({
         taskId: task.taskId,
@@ -3433,9 +3448,7 @@ export class FactoryService {
   ): FactoryObjectiveDetail["evidenceCards"] {
     return receipts
       .filter((receipt) =>
-        receipt.type === "objective.plan.proposed"
-        || receipt.type === "objective.plan.adopted"
-        || receipt.type === "rebracket.applied"
+        receipt.type === "rebracket.applied"
         || receipt.type === "investigation.reported"
         || receipt.type === "investigation.synthesized"
         || receipt.type === "objective.blocked"
@@ -3449,15 +3462,12 @@ export class FactoryService {
       .map((receipt) => ({
         kind:
           receipt.type === "rebracket.applied" ? "decision"
-          : receipt.type.startsWith("objective.plan") ? "plan"
           : receipt.type.startsWith("investigation.") ? "report"
           : receipt.type === "merge.applied" ? "merge"
           : receipt.type === "integration.ready_to_promote" || receipt.type === "integration.promoted" ? "promotion"
           : "blocked",
         title:
           receipt.type === "rebracket.applied" ? "Latest decision"
-          : receipt.type === "objective.plan.proposed" ? "Plan proposed"
-          : receipt.type === "objective.plan.adopted" ? "Plan adopted"
           : receipt.type === "investigation.reported" ? "Investigation report"
           : receipt.type === "investigation.synthesized" ? "Investigation synthesis"
           : receipt.type === "merge.applied" ? "Integration merge"
@@ -3548,12 +3558,10 @@ export class FactoryService {
       }),
       objectiveMode: state.objectiveMode,
       severity: state.severity,
-      reconciliationStatus: this.reconciliationStatus(state),
       scheduler: {
         slotState,
         queuePosition,
       },
-      repoProfile: state.repoProfile,
       archivedAt: state.archivedAt,
       updatedAt: state.updatedAt,
       latestSummary: state.latestSummary,
@@ -3586,16 +3594,19 @@ export class FactoryService {
     const sharedArtifactRefs = [
       artifactRef(this.objectiveProfileArtifactPath(state.objectiveId), "objective profile snapshot"),
       artifactRef(this.objectiveSkillSelectionArtifactPath(state.objectiveId), "objective profile skills"),
-      ...state.repoProfile.generatedSkillRefs,
     ];
     const tasks = await Promise.all(
-      state.taskOrder.map(async (taskId) => {
-        const task = state.graph.nodes[taskId];
+      state.workflow.taskIds.map(async (taskId) => {
+        const task = state.workflow.tasksById[taskId];
         const job = task?.jobId ? await this.loadFreshJob(task.jobId) : undefined;
         const workspaceStatus = task?.workspacePath
-          ? await this.git.worktreeStatus(task.workspacePath)
+          ? await this.taskWorkspaceStatus(task.workspacePath, task.executionMode ?? this.taskExecutionMode(state, task))
           : { exists: false, dirty: false };
         const filePaths = task?.workspacePath ? this.taskFilePaths(task.workspacePath, task.taskId) : undefined;
+        const artifactActivity = task?.workspacePath
+          ? await this.taskArtifactActivity(task.workspacePath, task.taskId)
+          : [];
+        const artifactSummary = this.summarizeTaskArtifactActivity(artifactActivity);
         return {
           ...task,
           candidate: task?.candidateId ? state.candidates[task.candidateId] : undefined,
@@ -3606,12 +3617,18 @@ export class FactoryService {
           workspaceDirty: workspaceStatus.dirty,
           workspaceHead: workspaceStatus.head,
           elapsedMs: task?.startedAt ? Math.max(0, Date.now() - task.startedAt) : undefined,
+          manifestPath: filePaths?.manifestPath,
+          contextPackPath: filePaths?.contextPackPath,
+          promptPath: filePaths?.promptPath,
+          memoryScriptPath: filePaths?.memoryScriptPath,
           stdoutPath: filePaths?.stdoutPath,
           stderrPath: filePaths?.stderrPath,
           lastMessagePath: filePaths?.lastMessagePath,
           stdoutTail: filePaths ? await this.readTextTail(filePaths.stdoutPath, 900) : undefined,
           stderrTail: filePaths ? await this.readTextTail(filePaths.stderrPath, 600) : undefined,
           lastMessage: filePaths ? await this.readTextTail(filePaths.lastMessagePath, 400) : undefined,
+          artifactSummary,
+          artifactActivity,
         } satisfies FactoryTaskView;
       })
     );
@@ -3665,7 +3682,7 @@ export class FactoryService {
     const taskWorktrees = await Promise.all(
       detail.tasks.map(async (task) => {
         const status = task.workspacePath
-          ? await this.git.worktreeStatus(task.workspacePath)
+          ? await this.taskWorkspaceStatus(task.workspacePath, task.executionMode ?? this.taskExecutionMode(state, task))
           : { exists: false, dirty: false };
         return {
           taskId: task.taskId,
@@ -3692,7 +3709,6 @@ export class FactoryService {
       status: state.status,
       phase: detail.phase,
       scheduler: detail.scheduler,
-      repoProfile: detail.repoProfile,
       latestDecision: detail.latestDecision,
       nextAction: detail.nextAction,
       profile: detail.profile,
@@ -3804,301 +3820,6 @@ export class FactoryService {
     return [...discovered];
   }
 
-  private async decomposeObjective(
-    state: FactoryState,
-  ): Promise<{
-    readonly tasks: ReadonlyArray<DecomposedTaskSpec>;
-    readonly fallback: boolean;
-  }> {
-    const title = state.title;
-    const prompt = state.prompt;
-    const profile = this.objectiveProfileForState(state);
-    const investigationMode = state.objectiveMode === "investigation";
-    const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(profile.rootProfileId);
-    if (this.llmStructured) {
-      try {
-        const { parsed } = await this.llmStructured({
-          schema: decompositionSchema,
-          schemaName: "factory_task_decomposition",
-          system: [
-            investigationMode
-              ? "Decompose the objective into a small DAG of investigation tasks."
-              : "Decompose the objective into a small DAG of implementation tasks.",
-            investigationMode
-              ? `Return only actionable investigation or synthesis tasks. Use workerType ${profile.objectivePolicy.defaultWorkerType} unless a specialist is clearly better.`
-              : `Return only actionable implementation or validation tasks. Use workerType ${profile.objectivePolicy.defaultWorkerType} unless a specialist is clearly better.`,
-            `Allowed worker types for this objective: ${profile.objectivePolicy.allowedWorkerTypes.join(", ")}.`,
-            investigationMode
-              ? "Tasks may investigate, script, summarize evidence, and reconcile disagreements. They do not need to produce a tracked repository diff."
-              : "Avoid pure search, locate, identify, or report-only tasks when the overall objective is to change code.",
-            investigationMode
-              ? "Prefer parallel evidence-gathering tasks only when they answer distinct subquestions."
-              : "Fold discovery work into the implementation task prompt unless the objective is explicitly investigation-only.",
-            ...buildInfrastructureDecompositionGuidance({
-              profileId: profile.rootProfileId,
-              objectiveMode: state.objectiveMode,
-              objectivePrompt: prompt,
-            }),
-            investigationMode
-              ? "At least one task should synthesize or reconcile sibling findings when the investigation spans multiple services or signals."
-              : "Each non-validation task should be expected to produce a tracked repository diff.",
-            investigationMode
-              ? profile.rootProfileId === "infrastructure"
-                ? "This infrastructure profile is AWS-only for now. Do not create provider-resolution, GCP, or Azure tasks unless the objective explicitly asks for them."
-                : "Do not speculate across AWS, GCP, and Azure in parallel unless the prompt or context explicitly indicates multiple clouds. If provider context is ambiguous, create one context-resolution task first, make any provider-specific follow-up tasks depend on it, and make synthesis depend on the evidence tasks it summarizes."
-              : "Keep validation or synthesis tasks dependent on the implementation work they summarize.",
-            profile.rootProfileId === "infrastructure"
-              ? "Use AWS as the only provider for this objective. Ignore other mounted cloud sessions unless the prompt explicitly names another provider."
-              : cloudExecutionContext.preferredProvider
-                ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Prefer that provider and avoid speculative tasks for other clouds unless the objective explicitly requests them.`
-                : "If local execution context shows one active provider/profile/account, use it instead of asking the user to repeat it.",
-            "Keep dependency edges between task IDs by referring to earlier returned task ids like task_01, task_02.",
-          ].join("\n"),
-          user: JSON.stringify({ title, prompt, cloudExecutionContext }, null, 2),
-        });
-        const normalized = this.normalizeDecomposedTasks(
-          parsed.tasks,
-          profile,
-          state.objectiveMode,
-          cloudExecutionContext.preferredProvider,
-          state.prompt,
-        );
-        if (normalized.length > 0) {
-          return {
-            tasks: normalized,
-            fallback: false,
-          };
-        }
-      } catch {
-        // fall through to deterministic fallback
-      }
-    }
-    return {
-      tasks: [{
-        taskId: taskOrdinalId(0),
-        title: clipText(title, 120) ?? title,
-        prompt,
-        workerType: profile.objectivePolicy.defaultWorkerType,
-        dependsOn: [],
-      }],
-      fallback: true,
-    };
-  }
-
-  private normalizeDecomposedTasks(
-    tasks: ReadonlyArray<{
-      readonly title: string;
-      readonly prompt: string;
-      readonly workerType: string;
-      readonly dependsOn: ReadonlyArray<string>;
-    }>,
-    profile: FactoryObjectiveProfileSnapshot,
-    objectiveMode: FactoryObjectiveMode,
-    preferredProvider?: FactoryCloudProvider,
-    objectivePrompt = "",
-  ): ReadonlyArray<DecomposedTaskSpec> {
-    const normalized: DecomposedTaskSpec[] = [];
-    for (const [index, task] of tasks.entries()) {
-      const taskId = taskOrdinalId(index);
-      const title = clipText(task.title, 120) ?? task.title.trim();
-      const prompt = task.prompt.trim();
-      if (!title || !prompt) continue;
-      const dependsOn = this.normalizeDecompositionDependencies(index, task.dependsOn);
-      normalized.push({
-        taskId,
-        title,
-        prompt,
-        workerType: this.normalizeProfileWorkerType(profile, task.workerType),
-        dependsOn,
-      });
-    }
-    if (objectiveMode !== "investigation") return this.collapseDiscoveryOnlyTasks(normalized);
-    return normalizeInfrastructureInvestigationTasks({
-      profileId: profile.rootProfileId,
-      objectiveMode,
-      objectivePrompt,
-      tasks: this.normalizeInvestigationDecomposition(normalized, preferredProvider),
-    });
-  }
-
-  private normalizeInvestigationDecomposition(
-    tasks: ReadonlyArray<DecomposedTaskSpec>,
-    preferredProvider?: FactoryCloudProvider,
-  ): ReadonlyArray<DecomposedTaskSpec> {
-    const providerScoped = preferredProvider
-      ? tasks.filter((task) => {
-        const provider = this.providerForTask(task);
-        return !provider || provider === preferredProvider;
-      })
-      : [...tasks];
-    const contextTaskId = providerScoped.find((task) => this.isContextResolutionTask(task))?.taskId;
-    const gated = contextTaskId
-      ? providerScoped.map((task) => {
-        if (task.taskId === contextTaskId || !this.isProviderConditionalTask(task)) return task;
-        return {
-          ...task,
-          dependsOn: [...new Set([contextTaskId, ...task.dependsOn])],
-        };
-      })
-      : [...providerScoped];
-    const synthesized = gated.map((task, index) => {
-      if (!this.isSynthesisTask(task) || task.dependsOn.length > 0 || index === 0) return task;
-      return {
-        ...task,
-        dependsOn: gated.slice(0, index).map((candidate) => candidate.taskId),
-      };
-    });
-    return this.reindexDecomposedTasks(synthesized);
-  }
-
-  private isProviderConditionalTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
-    return PROVIDER_CONDITIONAL_RE.test(`${task.title}\n${task.prompt}`);
-  }
-
-  private isContextResolutionTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
-    return CONTEXT_RESOLUTION_RE.test(`${task.title}\n${task.prompt}`);
-  }
-
-  private isSynthesisTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
-    return SYNTHESIS_TASK_RE.test(`${task.title}\n${task.prompt}`);
-  }
-
-  private providerForTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): FactoryCloudProvider | undefined {
-    const haystack = `${task.title}\n${task.prompt}`.toLowerCase();
-    if (/\baws\b|\bs3\b/.test(haystack)) return "aws";
-    if (/\bgcp\b|\bgoogle cloud\b|\bgcloud\b|\bgsutil\b|\bgcs\b/.test(haystack)) return "gcp";
-    if (/\bazure\b|\baz\b|\bblob\b|\bcontainer\b/.test(haystack)) return "azure";
-    return undefined;
-  }
-
-  private reindexDecomposedTasks(tasks: ReadonlyArray<DecomposedTaskSpec>): ReadonlyArray<DecomposedTaskSpec> {
-    const idMap = new Map(tasks.map((task, index) => [task.taskId, taskOrdinalId(index)]));
-    return tasks.map((task, index) => ({
-      ...task,
-      taskId: taskOrdinalId(index),
-      dependsOn: [...new Set(task.dependsOn.filter((dep) => idMap.has(dep)).map((dep) => idMap.get(dep)!))],
-    }));
-  }
-
-  private collapseDiscoveryOnlyTasks(tasks: ReadonlyArray<DecomposedTaskSpec>): ReadonlyArray<DecomposedTaskSpec> {
-    let current = tasks.map((task) => ({
-      ...task,
-      dependsOn: [...task.dependsOn],
-    }));
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const removedTaskIds = new Set<string>();
-      const inheritedDeps = new Map<string, string[]>();
-      const inheritedPrompts = new Map<string, string[]>();
-      for (const task of current) {
-        if (!this.isDiscoveryOnlyTask(task)) continue;
-        const children = current.filter((candidate) => candidate.dependsOn.includes(task.taskId));
-        if (children.length === 0) continue;
-        changed = true;
-        removedTaskIds.add(task.taskId);
-        for (const child of children) {
-          inheritedDeps.set(child.taskId, [
-            ...(inheritedDeps.get(child.taskId) ?? []),
-            ...task.dependsOn,
-          ]);
-          inheritedPrompts.set(child.taskId, [
-            ...(inheritedPrompts.get(child.taskId) ?? []),
-            `Before making changes, ${task.prompt}`,
-          ]);
-        }
-      }
-      if (!changed) break;
-      const filtered = current
-        .filter((task) => !removedTaskIds.has(task.taskId))
-        .map((task) => ({
-          ...task,
-          prompt: [...(inheritedPrompts.get(task.taskId) ?? []), task.prompt].join("\n\n"),
-          dependsOn: [...new Set([
-            ...(inheritedDeps.get(task.taskId) ?? []),
-            ...task.dependsOn.filter((depId) => !removedTaskIds.has(depId)),
-          ])],
-        }));
-      const idMap = new Map(filtered.map((task, index) => [task.taskId, taskOrdinalId(index)] as const));
-      current = filtered.map((task, index) => ({
-        ...task,
-        taskId: taskOrdinalId(index),
-        dependsOn: [...new Set(task.dependsOn
-          .map((depId) => idMap.get(depId))
-          .filter((depId): depId is string => Boolean(depId)))],
-      }));
-    }
-    return current;
-  }
-
-  private isDiscoveryOnlyTask(task: Pick<DecomposedTaskSpec, "title" | "prompt">): boolean {
-    const text = `${task.title}\n${task.prompt}`;
-    return DISCOVERY_ONLY_RE.test(text) && !DIFF_PRODUCING_RE.test(text);
-  }
-
-  private normalizeDecompositionDependencies(
-    taskIndex: number,
-    requested: ReadonlyArray<string>,
-  ): ReadonlyArray<string> {
-    const normalized: string[] = [];
-    const seen = new Set<string>();
-    for (const dep of requested) {
-      const trimmed = dep.trim();
-      const match = /^task_(\d+)$/i.exec(trimmed);
-      if (!match) continue;
-      const ordinal = Number.parseInt(match[1] ?? "", 10);
-      if (!Number.isFinite(ordinal) || ordinal <= 0 || ordinal >= taskIndex + 1) continue;
-      const canonical = taskOrdinalId(ordinal - 1);
-      if (seen.has(canonical)) continue;
-      seen.add(canonical);
-      normalized.push(canonical);
-    }
-    return normalized;
-  }
-
-  private directDependents(
-    state: FactoryState,
-    taskId: string,
-  ): ReadonlyArray<FactoryTaskRecord> {
-    return state.taskOrder
-      .map((id) => state.graph.nodes[id])
-      .filter((task): task is FactoryTaskRecord => Boolean(task))
-      .filter((task) => task.dependsOn.includes(taskId));
-  }
-
-  private buildDependencyReplacementEvents(
-    state: FactoryState,
-    sourceTaskId: string,
-    replacementDependsOn: ReadonlyArray<string>,
-    reason: string,
-    basedOn: string | undefined,
-    updatedAt: number,
-  ): ReadonlyArray<FactoryEvent> {
-    const replacement = [...new Set(replacementDependsOn.filter((depId) => depId && depId !== sourceTaskId))];
-    const events: FactoryEvent[] = [];
-    for (const [index, dependent] of this.directDependents(state, sourceTaskId).entries()) {
-      const nextDependsOn = [...new Set(dependent.dependsOn.flatMap((depId) =>
-        depId === sourceTaskId ? replacement : [depId]
-      ))];
-      if (
-        nextDependsOn.length === dependent.dependsOn.length
-        && nextDependsOn.every((depId, dependencyIndex) => depId === dependent.dependsOn[dependencyIndex])
-      ) {
-        continue;
-      }
-      events.push({
-        type: "task.dependency.updated",
-        objectiveId: state.objectiveId,
-        taskId: dependent.taskId,
-        dependsOn: nextDependsOn,
-        reason,
-        basedOn,
-        updatedAt: updatedAt + index,
-      });
-    }
-    return events;
-  }
-
   private dependsTransitivelyOn(
     state: FactoryState,
     taskId: string,
@@ -4107,7 +3828,7 @@ export class FactoryService {
   ): boolean {
     if (seen.has(taskId)) return false;
     seen.add(taskId);
-    const task = state.graph.nodes[taskId];
+    const task = state.workflow.tasksById[taskId];
     if (!task) return false;
     if (task.dependsOn.includes(targetTaskId)) return true;
     return task.dependsOn.some((depId) => this.dependsTransitivelyOn(state, depId, targetTaskId, seen));
@@ -4147,7 +3868,7 @@ export class FactoryService {
   ): ReadonlyArray<string> {
     if (seen.has(taskId)) return [];
     seen.add(taskId);
-    const task = state.graph.nodes[taskId];
+    const task = state.workflow.tasksById[taskId];
     if (!task) return [];
     const collected: string[] = [];
     for (const depId of task.dependsOn) {
@@ -4178,7 +3899,7 @@ export class FactoryService {
     state: FactoryState,
     taskId: string,
   ): Promise<FactoryContextTaskNode | undefined> {
-    const task = state.graph.nodes[taskId];
+    const task = state.workflow.tasksById[taskId];
     if (!task) return undefined;
     const candidate = this.latestTaskCandidate(state, taskId);
     const memorySummary = await this.summarizeScope(
@@ -4194,7 +3915,6 @@ export class FactoryService {
       status: task.status,
       workerType: task.workerType,
       sourceTaskId: task.sourceTaskId,
-      sourceCandidateId: task.sourceCandidateId,
       latestSummary: task.latestSummary,
       blockedReason: task.blockedReason,
       candidateId: candidate?.candidateId,
@@ -4207,9 +3927,9 @@ export class FactoryService {
   private async buildRelatedContextTask(
     state: FactoryState,
     taskId: string,
-    relations: ReadonlySet<"focus" | "dependency" | "dependent" | "split_source" | "split_child">,
+    relations: ReadonlySet<"focus" | "dependency" | "dependent">,
   ): Promise<FactoryContextRelatedTask | undefined> {
-    const task = state.graph.nodes[taskId];
+    const task = state.workflow.tasksById[taskId];
     if (!task) return undefined;
     const candidate = this.latestTaskCandidate(state, taskId);
     const memorySummary = await this.summarizeScope(
@@ -4217,7 +3937,7 @@ export class FactoryService {
       `${task.title}\n${task.prompt}`,
       320,
     );
-    const relationOrder = ["focus", "dependency", "dependent", "split_source", "split_child"] as const;
+    const relationOrder = ["focus", "dependency", "dependent"] as const;
     return {
       taskId: task.taskId,
       taskKind: task.taskKind,
@@ -4225,7 +3945,6 @@ export class FactoryService {
       status: task.status,
       workerType: task.workerType,
       sourceTaskId: task.sourceTaskId,
-      sourceCandidateId: task.sourceCandidateId,
       relations: relationOrder.filter((relation) => relations.has(relation)),
       latestSummary: task.latestSummary,
       blockedReason: task.blockedReason,
@@ -4237,14 +3956,6 @@ export class FactoryService {
 
   private summarizeReceipt(event: FactoryEvent): string {
     switch (event.type) {
-      case "repo.profile.requested":
-        return "Repo profile requested.";
-      case "repo.profile.generated":
-        return `Repo profile ${event.source === "reused" ? "reused" : "generated"}: ${event.summary}`;
-      case "objective.plan.proposed":
-        return `Plan proposed: ${event.summary}`;
-      case "objective.plan.adopted":
-        return `Plan adopted: ${event.summary}`;
       case "objective.operator.noted":
         return `Operator note: ${event.message}`;
       case "objective.slot.queued":
@@ -4255,12 +3966,6 @@ export class FactoryService {
         return `Objective released its slot: ${event.reason}`;
       case "task.added":
         return `${event.task.taskId} added: ${event.task.title}`;
-      case "task.split":
-        return `${event.sourceTaskId} split into ${event.tasks.map((task) => task.taskId).join(", ")}`;
-      case "task.worker.reassigned":
-        return `${event.taskId} reassigned to ${event.workerType}: ${event.reason}`;
-      case "task.dependency.updated":
-        return `${event.taskId} deps -> ${event.dependsOn.join(", ") || "none"}: ${event.reason}`;
       case "task.blocked":
         return `${event.taskId} blocked: ${event.reason}`;
       case "task.unblocked":
@@ -4294,10 +3999,6 @@ export class FactoryService {
     switch (event.type) {
       case "task.added":
         return { taskId: event.task.taskId };
-      case "task.split":
-        return { taskId: event.sourceTaskId };
-      case "task.dependency.updated":
-      case "task.worker.reassigned":
       case "task.ready":
       case "task.review.requested":
       case "task.approved":
@@ -4317,7 +4018,6 @@ export class FactoryService {
       case "investigation.synthesized":
         return {};
       case "candidate.conflicted":
-      case "merge.candidate.scored":
       case "integration.queued":
       case "integration.merging":
       case "integration.validating":
@@ -4336,22 +4036,6 @@ export class FactoryService {
     }
   }
 
-  private buildSplitIndex(chain: ReadonlyArray<{ readonly body: FactoryEvent }>): {
-    readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
-    readonly parentByChild: ReadonlyMap<string, string>;
-  } {
-    const childrenBySource = new Map<string, string[]>();
-    const parentByChild = new Map<string, string>();
-    for (const receipt of chain) {
-      const event = receipt.body;
-      if (event.type !== "task.split") continue;
-      const children = event.tasks.map((task) => task.taskId);
-      childrenBySource.set(event.sourceTaskId, [...(childrenBySource.get(event.sourceTaskId) ?? []), ...children]);
-      for (const child of children) parentByChild.set(child, event.sourceTaskId);
-    }
-    return { childrenBySource, parentByChild };
-  }
-
   private collectDependentClosure(
     state: FactoryState,
     taskId: string,
@@ -4359,8 +4043,8 @@ export class FactoryService {
   ): ReadonlyArray<string> {
     if (seen.has(taskId)) return [];
     seen.add(taskId);
-    const directDependents = state.taskOrder
-      .map((id) => state.graph.nodes[id])
+    const directDependents = state.workflow.taskIds
+      .map((id) => state.workflow.tasksById[id])
       .filter((task): task is FactoryTaskRecord => Boolean(task))
       .filter((task) => task.dependsOn.includes(taskId))
       .map((task) => task.taskId);
@@ -4374,51 +4058,19 @@ export class FactoryService {
     return collected;
   }
 
-  private collectSplitClosure(
-    taskId: string,
-    splitIndex: {
-      readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
-      readonly parentByChild: ReadonlyMap<string, string>;
-    },
-    seen = new Set<string>(),
-  ): ReadonlyArray<{ readonly taskId: string; readonly relation: "split_source" | "split_child" }> {
-    if (seen.has(taskId)) return [];
-    seen.add(taskId);
-    const collected: Array<{ readonly taskId: string; readonly relation: "split_source" | "split_child" }> = [];
-    const parent = splitIndex.parentByChild.get(taskId);
-    if (parent) {
-      collected.push({ taskId: parent, relation: "split_source" });
-      for (const nested of this.collectSplitClosure(parent, splitIndex, seen)) {
-        if (!collected.some((item) => item.taskId === nested.taskId && item.relation === nested.relation)) collected.push(nested);
-      }
-    }
-    for (const child of splitIndex.childrenBySource.get(taskId) ?? []) {
-      collected.push({ taskId: child, relation: "split_child" });
-      for (const nested of this.collectSplitClosure(child, splitIndex, seen)) {
-        if (!collected.some((item) => item.taskId === nested.taskId && item.relation === nested.relation)) collected.push(nested);
-      }
-    }
-    return collected;
-  }
-
-  private collectContextSubgraphRelations(
+  private collectRelatedTaskRelations(
     state: FactoryState,
     taskId: string,
-    splitIndex: {
-      readonly childrenBySource: ReadonlyMap<string, ReadonlyArray<string>>;
-      readonly parentByChild: ReadonlyMap<string, string>;
-    },
-  ): ReadonlyMap<string, ReadonlySet<"focus" | "dependency" | "dependent" | "split_source" | "split_child">> {
-    const relations = new Map<string, Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">>();
-    const mark = (targetTaskId: string, relation: "focus" | "dependency" | "dependent" | "split_source" | "split_child"): void => {
-      const current = relations.get(targetTaskId) ?? new Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">();
+  ): ReadonlyMap<string, ReadonlySet<"focus" | "dependency" | "dependent">> {
+    const relations = new Map<string, Set<"focus" | "dependency" | "dependent">>();
+    const mark = (targetTaskId: string, relation: "focus" | "dependency" | "dependent"): void => {
+      const current = relations.get(targetTaskId) ?? new Set<"focus" | "dependency" | "dependent">();
       current.add(relation);
       relations.set(targetTaskId, current);
     };
     mark(taskId, "focus");
     for (const depId of this.collectDependencyClosure(state, taskId)) mark(depId, "dependency");
     for (const dependentId of this.collectDependentClosure(state, taskId)) mark(dependentId, "dependent");
-    for (const relation of this.collectSplitClosure(taskId, splitIndex)) mark(relation.taskId, relation.relation);
     return relations;
   }
 
@@ -4435,7 +4087,7 @@ export class FactoryService {
         this.buildRelatedContextTask(
           state,
           taskId,
-          new Set<"focus" | "dependency" | "dependent" | "split_source" | "split_child">(),
+          new Set<"focus" | "dependency" | "dependent">(),
         )
       ),
     );
@@ -4450,12 +4102,11 @@ export class FactoryService {
   ): Promise<FactoryContextPack> {
     const contextPackBuiltAt = Date.now();
     const chain = await this.runtime.chain(objectiveStream(state.objectiveId));
-    const splitIndex = this.buildSplitIndex(chain);
     const dependencyIds = this.collectDependencyClosure(state, task.taskId);
     const dependencyTree = await Promise.all(task.dependsOn.map((depId) => this.buildContextNode(state, depId)));
-    const subgraphRelations = this.collectContextSubgraphRelations(state, task.taskId, splitIndex);
+    const relatedTaskRelations = this.collectRelatedTaskRelations(state, task.taskId);
     const relatedTasks = await Promise.all(
-      [...subgraphRelations.entries()].map(([relatedTaskId, relations]) =>
+      [...relatedTaskRelations.entries()].map(([relatedTaskId, relations]) =>
         this.buildRelatedContextTask(state, relatedTaskId, relations)
       ),
     );
@@ -4489,7 +4140,7 @@ export class FactoryService {
         headCommit: candidate.headCommit,
         latestReason: candidate.latestReason,
       }));
-    const relatedTaskIds = new Set<string>([...subgraphRelations.keys(), ...dependencyIds]);
+    const relatedTaskIds = new Set<string>([...relatedTaskRelations.keys(), ...dependencyIds]);
     const relatedCandidateIds = new Set<string>([
       candidateId,
       ...lineage.map((candidate) => candidate.candidateId),
@@ -4538,8 +4189,8 @@ export class FactoryService {
       );
     }
     const focusedReceiptKeys = new Set(recentReceipts.map((receipt) => `${receipt.type}:${receipt.at}:${receipt.summary}`));
-    const objectiveTasks = state.taskOrder
-      .map((taskId) => state.graph.nodes[taskId])
+    const objectiveTasks = state.workflow.taskIds
+      .map((taskId) => state.workflow.tasksById[taskId])
       .filter((node): node is FactoryTaskRecord => Boolean(node));
     const frontierTaskIds = objectiveTasks
       .filter((item) => ["ready", "running", "reviewing", "blocked"].includes(item.status))
@@ -4580,18 +4231,26 @@ export class FactoryService {
       .slice(0, 20)
       .reverse();
     const profile = this.workerTaskProfile(this.objectiveProfileForState(state));
-    const [overview, objectiveMemory, integrationMemory, sharedProfile, cloudExecutionContext] = await Promise.all([
+    const [overview, objectiveMemory, integrationMemory, cloudExecutionContext] = await Promise.all([
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, `${state.title}\n${task.title}`, 520),
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, state.title, 360),
       this.summarizeScope(`factory/objectives/${state.objectiveId}/integration`, `${state.title}\nintegration`, 360),
-      this.loadSharedRepoProfileArtifact(),
-      this.loadObjectiveCloudExecutionContext(profile.rootProfileId),
+      this.loadObjectiveCloudExecutionContext(profile),
     ]);
     const repoSkillPaths = await this.collectRepoSkillPaths();
+    const infrastructureKnowledge = await this.loadInfrastructureKnowledgeContext({
+      profileId: profile.rootProfileId,
+      profileCloudProvider: profile.cloudProvider,
+      objectiveTitle: state.title,
+      objectivePrompt: state.prompt,
+      taskTitle: task.title,
+      taskPrompt,
+      cloudExecutionContext,
+    });
     const sharedArtifactRefs = [
       artifactRef(this.objectiveProfileArtifactPath(state.objectiveId), "objective profile snapshot"),
       artifactRef(this.objectiveSkillSelectionArtifactPath(state.objectiveId), "objective profile skills"),
-      ...state.repoProfile.generatedSkillRefs,
+      ...this.infrastructureKnowledgeSharedArtifactRefs(infrastructureKnowledge),
     ];
     const [frontierTasks, recentCompletedTasks, integrationTasks] = await Promise.all([
       this.buildObjectiveSliceTasks(state, frontierTaskIds),
@@ -4604,7 +4263,6 @@ export class FactoryService {
       prompt: state.prompt,
       objectiveMode: state.objectiveMode,
       severity: state.severity,
-      repoExecutionLandscape: sharedProfile?.permissionsLandscape,
       cloudExecutionContext,
       profile,
       task: {
@@ -4612,6 +4270,7 @@ export class FactoryService {
         title: task.title,
         prompt: taskPrompt,
         workerType: task.workerType,
+        executionMode: task.executionMode ?? profile.objectivePolicy.defaultTaskExecutionMode,
         status: task.status,
         candidateId,
       },
@@ -4625,7 +4284,7 @@ export class FactoryService {
       dependencyTree: dependencyTree.filter((node): node is FactoryContextTaskNode => Boolean(node)),
       relatedTasks: relatedTasks
         .filter((node): node is FactoryContextRelatedTask => Boolean(node))
-        .sort((a, b) => state.taskOrder.indexOf(a.taskId) - state.taskOrder.indexOf(b.taskId)),
+        .sort((a, b) => state.workflow.taskIds.indexOf(a.taskId) - state.workflow.taskIds.indexOf(b.taskId)),
       candidateLineage: lineage,
       recentReceipts,
       objectiveSlice: {
@@ -4647,6 +4306,7 @@ export class FactoryService {
           .filter((report): report is FactoryInvestigationTaskReport => Boolean(report)),
         synthesized: state.investigation.synthesized,
       },
+      infrastructureKnowledge,
       contextSources: {
         ...this.buildContextSources(state, repoSkillPaths, sharedArtifactRefs),
         profileSkillRefs: profile.selectedSkills,
@@ -4660,32 +4320,104 @@ export class FactoryService {
       .filter((report): report is FactoryInvestigationTaskReport => Boolean(report));
   }
 
-  private reconciliationStatus(state: FactoryState): FactoryObjectiveCard["reconciliationStatus"] {
-    const tasks = state.taskOrder
-      .map((taskId) => state.graph.nodes[taskId])
-      .filter((task): task is FactoryTaskRecord => Boolean(task) && task.taskKind === "reconciliation" && task.status !== "superseded");
-    if (tasks.length === 0) return "none";
-    if (tasks.some((task) => task.status === "running" || task.status === "reviewing")) return "running";
-    if (tasks.some((task) => task.status === "pending" || task.status === "ready")) return "pending";
-    return "completed";
-  }
-
   private finalInvestigationReports(
     state: FactoryState,
   ): ReadonlyArray<FactoryInvestigationTaskReport> {
-    const reports = this.investigationReports(state);
-    const coveredTaskIds = new Set<string>();
-    for (const taskId of state.taskOrder) {
-      const task = state.graph.nodes[taskId];
-      if (!task || task.taskKind !== "reconciliation" || task.status !== "approved") continue;
-      for (const depId of task.dependsOn) coveredTaskIds.add(depId);
-    }
-    return reports.filter((report) => {
-      const task = state.graph.nodes[report.taskId];
+    return this.investigationReports(state).filter((report) => {
+      const task = state.workflow.tasksById[report.taskId];
       if (!task || task.status !== "approved") return false;
-      if (task.taskKind === "reconciliation") return true;
-      return !coveredTaskIds.has(report.taskId);
+      return true;
     });
+  }
+
+  private investigationArtifactLines(
+    artifactRefs: ReadonlyArray<Readonly<Record<string, GraphRef>>>,
+  ): ReadonlyArray<string> {
+    const seen = new Set<string>();
+    const lines: string[] = [];
+    for (const refs of artifactRefs) {
+      for (const ref of Object.values(refs)) {
+        if (!ref?.ref) continue;
+        const key = `${ref.kind}:${ref.ref}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        lines.push(`${ref.label ?? ref.kind}: ${ref.ref}`);
+      }
+    }
+    return lines;
+  }
+
+  private renderInvestigationReportText(
+    summary: string,
+    report: FactoryInvestigationReport,
+    artifactRefs: ReadonlyArray<Readonly<Record<string, GraphRef>>> = [],
+  ): string {
+    const sections = [
+      {
+        title: "Conclusion",
+        lines: [report.conclusion || summary || "No conclusion recorded."],
+        bulletize: false,
+      },
+      {
+        title: "Evidence",
+        lines: report.evidence.length
+          ? report.evidence.map((item) =>
+            `${item.title}: ${item.summary}${item.detail ? ` | ${item.detail}` : ""}`)
+          : ["none recorded"],
+        bulletize: true,
+      },
+      {
+        title: "Disagreements",
+        lines: report.disagreements.length ? report.disagreements : ["none"],
+        bulletize: true,
+      },
+      {
+        title: "Scripts Run",
+        lines: report.scriptsRun.length
+          ? report.scriptsRun.map((item) =>
+            `${item.status ?? "ok"}: ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
+          : ["none recorded"],
+        bulletize: true,
+      },
+      {
+        title: "Artifacts",
+        lines: this.investigationArtifactLines(artifactRefs).length
+          ? this.investigationArtifactLines(artifactRefs)
+          : ["none recorded"],
+        bulletize: true,
+      },
+      {
+        title: "Next Steps",
+        lines: report.nextSteps.length ? report.nextSteps : ["none"],
+        bulletize: true,
+      },
+    ] as const;
+    return sections.map((section) => [
+      section.title,
+      ...section.lines.map((line) => section.bulletize ? `- ${line}` : line),
+    ].join("\n")).join("\n\n");
+  }
+
+  private async commitInvestigationSynthesisMemory(
+    state: FactoryState,
+    synthesis: FactoryInvestigationSynthesisRecord,
+  ): Promise<void> {
+    if (!this.memoryTools) return;
+    const reports = this.finalInvestigationReports(state).filter((report) => synthesis.taskIds.includes(report.taskId));
+    const text = this.renderInvestigationReportText(
+      synthesis.summary,
+      synthesis.report,
+      reports.map((report) => report.artifactRefs),
+    );
+    try {
+      await this.memoryTools.commit({
+        scope: `factory/objectives/${state.objectiveId}`,
+        text,
+        tags: ["factory", "objective", "investigation", "synthesized"],
+      });
+    } catch {
+      // memory is auxiliary
+    }
   }
 
   private buildFinalInvestigationReport(
@@ -4727,113 +4459,25 @@ export class FactoryService {
     };
   }
 
-  private findInvestigationConflict(
-    state: FactoryState,
-  ): { readonly taskIds: ReadonlyArray<string>; readonly reason: string } | undefined {
-    if (state.objectiveMode !== "investigation") return undefined;
-    const sourceReports = this.investigationReports(state)
-      .filter((report) => {
-        const task = state.graph.nodes[report.taskId];
-        return Boolean(task) && task.status === "approved" && task.taskKind !== "reconciliation";
-      });
-    if (sourceReports.length < 2) return undefined;
-    const disagreements = sourceReports.some((report) => report.report.disagreements.length > 0);
-    const conclusions = [...new Set(sourceReports.map((report) => conclusionFingerprint(report.report.conclusion)).filter(Boolean))];
-    if (!disagreements && conclusions.length <= 1) return undefined;
-    const taskIds = [...new Set(sourceReports.map((report) => report.taskId))].sort();
-    const signature = taskIds.join(",");
-    const existing = state.taskOrder
-      .map((taskId) => state.graph.nodes[taskId])
-      .filter((task): task is FactoryTaskRecord => Boolean(task) && task.taskKind === "reconciliation" && task.status !== "superseded")
-      .some((task) => [...task.dependsOn].sort().join(",") === signature);
-    if (existing) return undefined;
-    return {
-      taskIds,
-      reason: conclusions.length > 1
-        ? `Reconcile conflicting investigation conclusions across ${taskIds.join(", ")}.`
-        : `Reconcile unresolved investigation disagreements across ${taskIds.join(", ")}.`,
-    };
-  }
-
-  private async spawnInvestigationReconciliationTask(
-    state: FactoryState,
-    sourceTaskIds: ReadonlyArray<string>,
-    reason: string,
-  ): Promise<void> {
-    const current = await this.getObjectiveState(state.objectiveId);
-    if (current.reconciliationTasksUsed >= current.policy.budgets.maxReconciliationTasks) {
-      const blockedReason = `Policy blocked: objective exhausted maxReconciliationTasks (${current.reconciliationTasksUsed}/${current.policy.budgets.maxReconciliationTasks}).`;
-      await this.emitObjective(current.objectiveId, {
-        type: "objective.blocked",
-        objectiveId: current.objectiveId,
-        reason: blockedReason,
-        summary: blockedReason,
-        blockedAt: Date.now(),
-      });
-      return;
-    }
-    const signature = [...sourceTaskIds].sort().join(",");
-    const alreadyQueued = current.taskOrder
-      .map((taskId) => current.graph.nodes[taskId])
-      .filter((task): task is FactoryTaskRecord => Boolean(task) && task.taskKind === "reconciliation" && task.status !== "superseded")
-      .some((task) => [...task.dependsOn].sort().join(",") === signature);
-    if (alreadyQueued) return;
-
-    const reports = sourceTaskIds
-      .map((taskId) => current.investigation.reports[taskId])
-      .filter((report): report is FactoryInvestigationTaskReport => Boolean(report));
-    const basedOn = await this.currentHeadHash(current.objectiveId);
-    const taskId = this.nextTaskId(current);
-    const createdAt = Date.now();
-    const artifactRefs = reports.flatMap((report) => Object.values(report.artifactRefs));
-    const contextRefs = [
-      ...sourceTaskIds.map((sourceTaskId) => stateRef(`${objectiveStream(current.objectiveId)}:task/${sourceTaskId}`, `investigation ${sourceTaskId}`)),
-      ...artifactRefs,
-    ];
-    const prompt = [
-      reason,
-      `Objective: ${current.prompt}`,
-      `Source tasks: ${sourceTaskIds.join(", ")}`,
-      ...reports.map((report) => [
-        `${report.taskId} summary: ${report.summary}`,
-        `${report.taskId} conclusion: ${report.report.conclusion}`,
-        report.report.disagreements.length > 0
-          ? `${report.taskId} disagreements: ${report.report.disagreements.join(" | ")}`
-          : undefined,
-      ].filter((line): line is string => Boolean(line)).join("\n")),
-      "Review the source task packets, report artifacts, logs, and scripts. Produce one aligned investigation report that resolves the disagreement clearly.",
-    ].join("\n\n");
-    await this.emitObjectiveBatch(current.objectiveId, [{
-      type: "task.added",
-      objectiveId: current.objectiveId,
-      createdAt,
-      task: {
-        nodeId: taskId,
-        taskId,
-        taskKind: "reconciliation",
-        title: `Reconcile ${sourceTaskIds.join(", ")}`,
-        prompt,
-        workerType: this.normalizeProfileWorkerType(current.profile, "codex"),
-        sourceTaskId: sourceTaskIds[0],
-        sourceCandidateId: reports[0]?.candidateId,
-        baseCommit: current.baseHash,
-        dependsOn: [...sourceTaskIds],
-        status: "pending",
-        skillBundlePaths: [],
-        contextRefs,
-        artifactRefs: {},
-        createdAt,
-        basedOn,
-      },
-    }], basedOn);
-  }
-
   private resolveTaskBaseCommit(state: FactoryState, task: FactoryTaskRecord): string {
     if (task.candidateId) {
       const candidate = state.candidates[task.candidateId];
       if (candidate?.headCommit) return candidate.headCommit;
     }
     return state.integration.headCommit ?? task.baseCommit ?? state.baseHash;
+  }
+
+  private async ensureTaskRuntime(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    workspaceId: string,
+    pinnedBaseHash?: string,
+    opts?: { readonly resetIfBaseMismatch?: boolean },
+  ): Promise<{ readonly path: string; readonly branchName: string; readonly baseHash: string }> {
+    if (this.taskExecutionMode(state, task) === "isolated") {
+      return this.ensureIsolatedTaskRuntime(state, task, workspaceId, pinnedBaseHash);
+    }
+    return this.ensureTaskWorkspace(state, task, workspaceId, pinnedBaseHash, opts);
   }
 
   private async ensureTaskWorkspace(
@@ -4869,6 +4513,79 @@ export class FactoryService {
       baseHash,
     });
     return created;
+  }
+
+  private async ensureIsolatedTaskRuntime(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    workspaceId: string,
+    pinnedBaseHash?: string,
+  ): Promise<{ readonly path: string; readonly branchName: string; readonly baseHash: string }> {
+    const runtimePath = this.taskRuntimeDir(workspaceId);
+    const baseHash = pinnedBaseHash ?? this.resolveTaskBaseCommit(state, task);
+    await fs.mkdir(runtimePath, { recursive: true });
+    await this.materializeIsolatedTaskSupportFiles(runtimePath, this.workerTaskProfile(this.objectiveProfileForState(state)));
+    return {
+      path: runtimePath,
+      branchName: `factory/isolated/${workspaceId}`,
+      baseHash,
+    };
+  }
+
+  private async materializeIsolatedTaskSupportFiles(
+    runtimePath: string,
+    profile: FactoryObjectiveProfileSnapshot,
+  ): Promise<void> {
+    const copyRoot = async (relativePath: string): Promise<void> => {
+      const sourcePath = path.join(this.profileRoot, relativePath);
+      const targetPath = path.join(runtimePath, relativePath);
+      const stat = await fs.stat(sourcePath).catch(() => undefined);
+      if (!stat) return;
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      if (stat.isDirectory()) {
+        await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+        await fs.cp(sourcePath, targetPath, { recursive: true, force: true });
+        return;
+      }
+      await fs.copyFile(sourcePath, targetPath);
+    };
+
+    const copiedSkillRoots = new Set<string>(["skills/factory-receipt-worker"]);
+    for (const skillPath of profile.selectedSkills) {
+      const trimmed = skillPath.trim();
+      if (!trimmed || path.isAbsolute(trimmed)) continue;
+      const normalized = trimmed.replace(/\\/g, "/");
+      if (!normalized.startsWith("skills/")) continue;
+      const segments = normalized.split("/").slice(0, 2);
+      if (segments.length === 2) copiedSkillRoots.add(segments.join("/"));
+    }
+
+    await copyRoot("AGENTS.md");
+    for (const skillRoot of copiedSkillRoots) {
+      await copyRoot(skillRoot);
+    }
+  }
+
+  private async taskWorkspaceStatus(
+    workspacePath: string,
+    executionMode: FactoryTaskExecutionMode,
+  ): Promise<{ readonly exists: boolean; readonly dirty: boolean; readonly head?: string; readonly branch?: string }> {
+    if (executionMode === "isolated") {
+      const exists = await fs.access(workspacePath).then(() => true).catch(() => false);
+      return {
+        exists,
+        dirty: false,
+      };
+    }
+    return this.git.worktreeStatus(workspacePath);
+  }
+
+  private async removeTaskRuntimeWorkspace(workspacePath: string): Promise<void> {
+    if (workspacePath.startsWith(this.git.worktreesDir)) {
+      await this.git.removeWorkspace(workspacePath).catch(() => undefined);
+      return;
+    }
+    await fs.rm(workspacePath, { recursive: true, force: true }).catch(() => undefined);
   }
 
   private memoryScopesForTask(
@@ -4939,6 +4656,58 @@ export class FactoryService {
     };
   }
 
+  private async taskArtifactActivity(
+    workspacePath: string,
+    taskId: string,
+  ): Promise<ReadonlyArray<FactoryArtifactActivity>> {
+    const files = this.taskFilePaths(workspacePath, taskId);
+    const root = path.dirname(files.manifestPath);
+    const knownFiles = new Set([
+      path.basename(files.manifestPath),
+      path.basename(files.contextPackPath),
+      path.basename(files.promptPath),
+      path.basename(files.resultPath),
+      path.basename(files.stdoutPath),
+      path.basename(files.stderrPath),
+      path.basename(files.lastMessagePath),
+      path.basename(files.skillBundlePath),
+      path.basename(files.memoryScriptPath),
+      path.basename(files.memoryConfigPath),
+      path.basename(this.taskResultSchemaPath(files.resultPath)),
+    ]);
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const artifacts = await Promise.all(entries
+      .filter((entry) => entry.isFile())
+      .filter((entry) => entry.name.startsWith(`${taskId}.`))
+      .filter((entry) => !knownFiles.has(entry.name))
+      .map(async (entry) => {
+        const targetPath = path.join(root, entry.name);
+        const stat = await fs.stat(targetPath).catch(() => undefined);
+        if (!stat?.isFile()) return undefined;
+        return {
+          path: targetPath,
+          label: entry.name,
+          updatedAt: stat.mtimeMs,
+          bytes: stat.size,
+        } satisfies FactoryArtifactActivity;
+      }));
+    return artifacts
+      .filter((artifact): artifact is FactoryArtifactActivity => Boolean(artifact))
+      .sort((left, right) => right.updatedAt - left.updatedAt || right.bytes - left.bytes || left.label.localeCompare(right.label));
+  }
+
+  private summarizeTaskArtifactActivity(
+    activity: ReadonlyArray<FactoryArtifactActivity>,
+  ): string | undefined {
+    if (activity.length === 0) return undefined;
+    if (activity.length === 1) {
+      return `Recent task artifact: ${activity[0]?.label}.`;
+    }
+    const listed = activity.slice(0, 2).map((artifact) => artifact.label).join(", ");
+    const extra = activity.length > 2 ? ` +${activity.length - 2} more` : "";
+    return `Recent task artifacts: ${listed}${extra}.`;
+  }
+
   private integrationFilePaths(workspacePath: string, candidateId: string) {
     const root = path.join(workspacePath, FACTORY_DATA_DIR);
     return {
@@ -5005,6 +4774,7 @@ export class FactoryService {
         title: task.title,
         prompt: taskPrompt,
         workerType: task.workerType,
+        executionMode: task.executionMode ?? profile.objectivePolicy.defaultTaskExecutionMode,
         baseCommit: pinnedBaseCommit ?? this.resolveTaskBaseCommit(state, task),
         dependsOn: task.dependsOn,
       },
@@ -5101,9 +4871,8 @@ export class FactoryService {
       objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy,
     }));
     const includeFactoryObjectiveSkills = Boolean(input.objectiveId);
-    const [sharedProfile, cloudExecutionContext, allRepoSkillPaths] = await Promise.all([
-      this.loadSharedRepoProfileArtifact(),
-      this.loadObjectiveCloudExecutionContext(profile.rootProfileId),
+    const [cloudExecutionContext, allRepoSkillPaths] = await Promise.all([
+      this.loadObjectiveCloudExecutionContext(profile),
       this.collectRepoSkillPaths(),
     ]);
     const repoSkillPaths = allRepoSkillPaths.filter((skillPath) =>
@@ -5168,6 +4937,16 @@ export class FactoryService {
       objectiveScope ? this.summarizeScope(objectiveScope, input.prompt, 360) : Promise.resolve(undefined),
       input.objectiveId ? this.summarizeScope(`factory/objectives/${input.objectiveId}/integration`, input.prompt, 360) : Promise.resolve(undefined),
     ]);
+    const infrastructureKnowledge = await this.loadInfrastructureKnowledgeContext({
+      profileId: profile.rootProfileId,
+      profileCloudProvider: profile.cloudProvider,
+      objectiveTitle: objectiveDetail?.title,
+      objectivePrompt: input.prompt,
+      taskTitle: objectiveDetail?.title ? `Direct probe for ${objectiveDetail.title}` : "Direct Codex Probe",
+      taskPrompt: input.prompt,
+      cloudExecutionContext,
+    });
+    const infrastructureKnowledgeRefs = this.infrastructureKnowledgeSharedArtifactRefs(infrastructureKnowledge);
 
     const frontierTasks = (objectiveDetail?.tasks ?? [])
       .filter((task) => ["ready", "running", "reviewing", "blocked"].includes(task.status))
@@ -5179,7 +4958,6 @@ export class FactoryService {
         status: task.status,
         workerType: task.workerType,
         sourceTaskId: task.sourceTaskId,
-        sourceCandidateId: task.sourceCandidateId,
         relations: ["focus"] as const,
         latestSummary: task.latestSummary,
         blockedReason: task.blockedReason,
@@ -5196,7 +4974,6 @@ export class FactoryService {
         status: task.status,
         workerType: task.workerType,
         sourceTaskId: task.sourceTaskId,
-        sourceCandidateId: task.sourceCandidateId,
         relations: ["focus"] as const,
         latestSummary: task.latestSummary,
         blockedReason: task.blockedReason,
@@ -5222,7 +4999,6 @@ export class FactoryService {
         status: task.status,
         workerType: task.workerType,
         sourceTaskId: task.sourceTaskId,
-        sourceCandidateId: task.sourceCandidateId,
         relations: ["focus"] as const,
         latestSummary: task.latestSummary,
         blockedReason: task.blockedReason,
@@ -5238,7 +5014,6 @@ export class FactoryService {
       mode: input.objectiveId
         ? (readOnly ? "read_only_direct_codex_probe" : "direct_codex")
         : (readOnly ? "read_only_repo_probe" : "direct_repo_probe"),
-      repoExecutionLandscape: sharedProfile?.permissionsLandscape,
       cloudExecutionContext,
       profile,
       task: {
@@ -5289,8 +5064,9 @@ export class FactoryService {
         integrationMemoryScope: input.objectiveId ? `factory/objectives/${input.objectiveId}/integration` : workerScope,
         profileSkillRefs: profile.selectedSkills,
         repoSkillPaths,
-        sharedArtifactRefs: [],
+        sharedArtifactRefs: infrastructureKnowledgeRefs,
       },
+      infrastructureKnowledge,
       latestDecision: objectiveDetail?.latestDecision,
       blockedExplanation: objectiveDetail?.blockedExplanation,
       evidenceCards: objectiveDetail?.evidenceCards.slice(-8) ?? [],
@@ -5345,6 +5121,7 @@ export class FactoryService {
         packPath: artifactPaths.contextPackPath,
       },
       repoSkillPaths,
+      sharedArtifactRefs: infrastructureKnowledgeRefs,
       traceRefs: [
         ...(input.objectiveId ? [stateRef(objectiveStream(input.objectiveId), "factory objective stream")] : []),
         ...(input.parentStream ? [stateRef(input.parentStream, "parent Factory run stream")] : []),
@@ -5379,6 +5156,7 @@ export class FactoryService {
         blockedExplanation: objectiveDetail.blockedExplanation,
       } : undefined,
       cloudExecutionContext,
+      infrastructureKnowledge,
       repoSkillPaths,
       recentReceipts: objectiveReceipts.slice(-10),
     });
@@ -5400,20 +5178,29 @@ export class FactoryService {
     task: FactoryTaskRecord,
     payload: FactoryTaskJobPayload,
   ): Promise<string> {
-    const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(payload.profile.rootProfileId);
+    const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(payload.profile);
     const taskPrompt = this.effectiveTaskPrompt(state, task);
-    const infrastructureTaskGuidance = renderInfrastructureTaskExecutionGuidance({
+    const infrastructureKnowledge = await this.loadInfrastructureKnowledgeContext({
       profileId: payload.profile.rootProfileId,
+      profileCloudProvider: payload.profile.cloudProvider,
+      objectiveTitle: state.title,
+      objectivePrompt: state.prompt,
+      taskTitle: task.title,
+      taskPrompt,
+      cloudExecutionContext,
+    });
+    const infrastructureTaskGuidance = renderInfrastructureTaskExecutionGuidance({
+      profileCloudProvider: payload.profile.cloudProvider,
       objectiveMode: state.objectiveMode,
       cloudExecutionContext,
     });
     const dependencySummaries = task.dependsOn
-      .map((depId) => state.graph.nodes[depId])
+      .map((depId) => state.workflow.tasksById[depId])
       .filter((dep): dep is FactoryTaskRecord => Boolean(dep))
       .map((dep) => `- ${dep.taskId}: ${dep.latestSummary ?? dep.title}`)
       .join("\n") || "- none";
-    const downstreamSummaries = state.taskOrder
-      .map((taskId) => state.graph.nodes[taskId])
+    const downstreamSummaries = state.workflow.taskIds
+      .map((taskId) => state.workflow.tasksById[taskId])
       .filter((candidate): candidate is FactoryTaskRecord => Boolean(candidate) && candidate.dependsOn.includes(task.taskId))
       .map((candidate) => `- ${candidate.taskId}: ${candidate.title}`)
       .join("\n") || "- none";
@@ -5428,7 +5215,9 @@ export class FactoryService {
       `Severity: ${state.severity}`,
       `Task ID: ${task.taskId}`,
       `Worker Type: ${task.workerType}`,
+      `Task Runtime: ${payload.executionMode}`,
       `Profile: ${payload.profile.rootProfileLabel} (${payload.profile.rootProfileId})`,
+      `Profile Cloud Provider: ${payload.profile.cloudProvider ?? "unspecified"}`,
       `Base Commit: ${payload.baseCommit}`,
       `Candidate ID: ${payload.candidateId}`,
       ``,
@@ -5449,7 +5238,7 @@ export class FactoryService {
       ``,
       `## Investigation Contract`,
       state.objectiveMode === "investigation"
-        ? `This objective is investigation-first. Plan before you run commands. It is valid to write helper code or scripts in the worktree if that makes the investigation clearer or more reproducible.`
+        ? `This objective is investigation-first. Plan before you run commands. It is valid to write helper code or scripts in the task runtime if that makes the investigation clearer or more reproducible.`
         : `This objective is delivery-oriented. Prefer tracked repo changes and keep investigation folded into the implementation task.`,
       state.objectiveMode === "investigation"
         ? `A tracked diff is optional. If you leave helper code or scripts behind, Factory will preserve them as evidence instead of integrating them.`
@@ -5457,14 +5246,13 @@ export class FactoryService {
       state.objectiveMode === "investigation"
         ? `Interpret command and script outputs in plain language. Do not just paste logs.`
         : `Capture implementation and validation results precisely in the handoff.`,
-      payload.profile.rootProfileId === "infrastructure"
-        ? `For infrastructure work in this repo, use AWS only. If AWS CLI access fails, fail fast and report the exact AWS error instead of exploring other providers or asking the user to restate scope.`
-        : cloudExecutionContext.preferredProvider
-          ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
-          : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
-      `Do not emit commentary-style progress updates in this child session. Use shell commands only for real commands, and keep all explanation for the final JSON response.`,
+      cloudExecutionContext.preferredProvider
+        ? `Local execution context already indicates ${cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
+        : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
+      `Do not emit commentary-style progress updates in this child session. Prefer writing a small deterministic script when repeated CLI steps or evidence collection would otherwise be lossy.`,
       ``,
       ...(infrastructureTaskGuidance.length > 0 ? [...infrastructureTaskGuidance, ``] : []),
+      ...this.renderInfrastructureKnowledgePromptSection(infrastructureKnowledge),
       `## Live Cloud Context`,
       cloudExecutionContext.summary,
       ...cloudExecutionContext.guidance.map((item) => `- ${item}`),
@@ -5483,8 +5271,12 @@ export class FactoryService {
       payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
       `Use only the checked-in repo skills named in this packet. Do not load unrelated global skills from ~/.codex or other home-directory skill folders unless this packet explicitly names them.`,
       `Read any mounted infrastructure or cloud profile skill before provider-sensitive commands.`,
-      `Do not call \`${FACTORY_CLI_PREFIX} factory inspect\` from inside this task worktree. The packet already mounts recent objective receipts and state, and worktree-side inspect can fail on receipt lock files outside the workspace.`,
-      `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the task worktree.`,
+      payload.executionMode === "worktree"
+        ? `Do not call \`${FACTORY_CLI_PREFIX} factory inspect\` from inside this task worktree. The packet already mounts recent objective receipts and state, and worktree-side inspect can fail on receipt lock files outside the workspace.`
+        : `This task runs in an isolated runtime directory, not a git worktree. Treat repo edits as out of scope unless the controller explicitly reroutes the task into a repo-writing profile.`,
+      payload.executionMode === "worktree"
+        ? `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the task worktree.`
+        : `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the isolated runtime.`,
       ``,
       `## Memory Access`,
       `Use the layered memory script at ${payload.memoryScriptPath} instead of raw memory dumps.`,
@@ -5498,13 +5290,14 @@ export class FactoryService {
       `## Result Contract`,
       `Write JSON to ${payload.resultPath} with:`,
       state.objectiveMode === "investigation"
-        ? `{ "outcome": "approved" | "changes_requested" | "blocked", "summary": string, "handoff": string, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } }`
-        : `{ "outcome": "approved" | "changes_requested" | "blocked", "summary": string, "handoff": string }`,
+        ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
+        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "nextAction": string | null }`,
       `Do not write this file yourself. Return exactly that JSON object as your final response and the runtime will persist it to the result path.`,
-      `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker.`,
+      `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
+      `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
       state.objectiveMode === "investigation"
-        ? `For investigation tasks, include every report key. Use [] for empty lists and null for detail, summary, or status when they do not apply. If you gathered any durable evidence, return a report even when access gaps or partial blockers prevent full completion; reserve "blocked" for zero-evidence hard failures that prevent a meaningful report.`
-        : `For delivery tasks, return only outcome, summary, and handoff unless a future contract explicitly asks for more.`,
+        ? `For investigation tasks, always include the report key. Use a report object whenever you gathered meaningful evidence; otherwise use null. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
+        : `For delivery tasks, keep the envelope small: summary, artifacts, and nextAction should be enough for the controller to classify the attempt.`,
       ``,
       `## Starting Hint`,
       memorySummary || "No durable task memory yet.",
@@ -5516,7 +5309,7 @@ export class FactoryService {
     task: Pick<FactoryTaskRecord, "prompt">,
   ): string {
     return rewriteInfrastructureTaskPromptForExecution({
-      profileId: this.objectiveProfileForState(state).rootProfileId,
+      profileCloudProvider: this.objectiveProfileForState(state).cloudProvider,
       objectiveMode: state.objectiveMode,
       taskPrompt: task.prompt,
     });
@@ -5558,10 +5351,10 @@ export class FactoryService {
 
   private shouldDeferBroadValidation(state: FactoryState, task: FactoryTaskRecord): boolean {
     if (this.taskOwnsBroadValidation(task)) return false;
-    const taskIndex = state.taskOrder.indexOf(task.taskId);
-    const laterTaskIds = taskIndex >= 0 ? state.taskOrder.slice(taskIndex + 1) : [];
+    const taskIndex = state.workflow.taskIds.indexOf(task.taskId);
+    const laterTaskIds = taskIndex >= 0 ? state.workflow.taskIds.slice(taskIndex + 1) : [];
     return laterTaskIds
-      .map((taskId) => state.graph.nodes[taskId])
+      .map((taskId) => state.workflow.tasksById[taskId])
       .some((candidate) => Boolean(candidate) && this.taskOwnsBroadValidation(candidate));
   }
 
@@ -5588,6 +5381,7 @@ export class FactoryService {
       readonly blockedExplanation?: FactoryObjectiveCard["blockedExplanation"];
     };
     readonly cloudExecutionContext: FactoryCloudExecutionContext;
+    readonly infrastructureKnowledge?: FactoryInfrastructureKnowledgeContext;
     readonly repoSkillPaths: ReadonlyArray<string>;
     readonly recentReceipts: ReadonlyArray<FactoryObjectiveReceiptSummary>;
   }): string {
@@ -5613,6 +5407,7 @@ export class FactoryService {
       input.cloudExecutionContext.summary,
       ...input.cloudExecutionContext.guidance.map((item) => `- ${item}`),
       ``,
+      ...this.renderInfrastructureKnowledgePromptSection(input.infrastructureKnowledge),
       `## Bootstrap Context`,
       input.objective
         ? `Treat the prompt as bootstrap only. Read AGENTS.md and skills/factory-receipt-worker/SKILL.md before making claims about what context is available.`
@@ -5688,6 +5483,7 @@ export class FactoryService {
       severity: normalizeObjectiveSeverityInput(payload.severity, 1),
       candidateId: requireNonEmpty(payload.candidateId, "candidateId required"),
       baseCommit: requireNonEmpty(payload.baseCommit, "baseCommit required"),
+      executionMode: payload.executionMode === "isolated" ? "isolated" : "worktree",
       workspaceId: requireNonEmpty(payload.workspaceId, "workspaceId required"),
       workspacePath: requireNonEmpty(payload.workspacePath, "workspacePath required"),
       promptPath: requireNonEmpty(payload.promptPath, "promptPath required"),
@@ -5736,6 +5532,25 @@ export class FactoryService {
     return resultPath.replace(/\.json$/i, ".schema.json");
   }
 
+  private async taskPacketPresent(
+    payload: Pick<
+      FactoryTaskJobPayload,
+      "manifestPath" | "contextPackPath" | "memoryScriptPath" | "memoryConfigPath" | "skillBundlePaths"
+    >,
+  ): Promise<boolean> {
+    const requiredPaths = [
+      payload.manifestPath,
+      payload.contextPackPath,
+      payload.memoryScriptPath,
+      payload.memoryConfigPath,
+      ...payload.skillBundlePaths,
+    ];
+    for (const targetPath of requiredPaths) {
+      if (!(await pathExists(targetPath))) return false;
+    }
+    return true;
+  }
+
   private parseJsonObjectCandidate(raw: string): Record<string, unknown> | undefined {
     const trimmed = raw.trim();
     if (!trimmed) return undefined;
@@ -5754,20 +5569,19 @@ export class FactoryService {
   }
 
   private async resolveTaskWorkerResult(
-    resultPath: string,
+    payload: Pick<FactoryTaskJobPayload, "resultPath" | "lastMessagePath">,
     execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
   ): Promise<Record<string, unknown>> {
     let result: Record<string, unknown> | undefined;
-    const rawResult = await fs.readFile(resultPath, "utf-8").catch(() => "");
+    const rawResult = await fs.readFile(payload.resultPath, "utf-8").catch(() => "");
     if (rawResult.trim()) {
       result = this.parseTaskResult(rawResult);
     } else {
-      const fromLastMessage = execution.lastMessage ? this.parseJsonObjectCandidate(execution.lastMessage) : undefined;
+      const rawLastMessage = execution.lastMessage?.trim()
+        ? execution.lastMessage
+        : await fs.readFile(payload.lastMessagePath, "utf-8").catch(() => "");
+      const fromLastMessage = rawLastMessage ? this.parseJsonObjectCandidate(rawLastMessage) : undefined;
       result = fromLastMessage;
-      if (!result) {
-        const fromStdout = this.parseJsonObjectCandidate(execution.stdout);
-        result = fromStdout;
-      }
     }
     if (!result) {
       throw new FactoryServiceError(500, "missing structured factory task result from codex");
@@ -5918,14 +5732,8 @@ export class FactoryService {
   }
 
   private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
-    const [checkedIn, sharedProfile] = await Promise.all([
-      this.collectCheckedInRepoSkillPaths(),
-      this.loadSharedRepoProfileArtifact(),
-    ]);
-    return [...new Set([
-      ...checkedIn,
-      ...(sharedProfile?.generatedSkillPaths ?? []),
-    ])].sort((a, b) => a.localeCompare(b));
+    const checkedIn = await this.collectCheckedInRepoSkillPaths();
+    return [...new Set(checkedIn)].sort((a, b) => a.localeCompare(b));
   }
 
   private async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {

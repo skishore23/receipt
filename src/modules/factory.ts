@@ -1,20 +1,8 @@
 import type { Decide, Reducer } from "@receipt/core/types";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
-import {
-  activatableNodes,
-  createGraphState,
-  graphNodeList,
-  graphProjection,
-  runnableNodes,
-  type GraphBuckets,
-  type GraphRef,
-  type GraphRunStatus,
-  type GraphState,
-  type GraphNodeBase,
-} from "@receipt/core/graph";
+import { type GraphRef } from "@receipt/core/graph";
 
 export type FactoryObjectiveStatus =
-  | "decomposing"
   | "planning"
   | "executing"
   | "integrating"
@@ -72,6 +60,8 @@ export type FactoryObjectiveSeverity =
   | 4
   | 5;
 
+export type FactoryProfileCloudProvider = "aws" | "gcp" | "azure";
+
 export type FactoryInvestigationEvidence = {
   readonly title: string;
   readonly summary: string;
@@ -110,12 +100,12 @@ export type FactoryInvestigationSynthesisRecord = {
   readonly synthesizedAt: number;
 };
 
-export type FactoryObjectiveProfileWorktreeMode = "required" | "forbidden";
+export type FactoryTaskExecutionMode = "worktree" | "isolated";
 
 export type FactoryObjectiveProfilePolicy = {
   readonly allowedWorkerTypes: ReadonlyArray<FactoryWorkerType>;
   readonly defaultWorkerType: FactoryWorkerType;
-  readonly worktreeModeByWorker: Readonly<Record<string, FactoryObjectiveProfileWorktreeMode>>;
+  readonly defaultTaskExecutionMode: FactoryTaskExecutionMode;
   readonly defaultValidationMode: "repo_profile" | "none";
   readonly defaultObjectiveMode: FactoryObjectiveMode;
   readonly defaultSeverity: FactoryObjectiveSeverity;
@@ -130,18 +120,12 @@ export type FactoryObjectiveProfileSnapshot = {
   readonly promptHash: string;
   readonly promptPath: string;
   readonly selectedSkills: ReadonlyArray<string>;
+  readonly cloudProvider?: FactoryProfileCloudProvider;
   readonly objectivePolicy: FactoryObjectiveProfilePolicy;
 };
 
-export type FactoryMutationAggressiveness =
-  | "off"
-  | "conservative"
-  | "balanced"
-  | "aggressive";
-
 export type FactoryObjectivePhase =
-  | "preparing_repo"
-  | "planning_graph"
+  | "planning"
   | "waiting_for_slot"
   | "executing"
   | "integrating"
@@ -158,15 +142,10 @@ export type FactoryObjectivePolicy = {
   readonly budgets?: {
     readonly maxTaskRuns?: number;
     readonly maxCandidatePassesPerTask?: number;
-    readonly maxReconciliationTasks?: number;
     readonly maxObjectiveMinutes?: number;
   };
   readonly throttles?: {
     readonly maxDispatchesPerReact?: number;
-    readonly mutationCooldownMs?: number;
-  };
-  readonly mutation?: {
-    readonly aggressiveness?: FactoryMutationAggressiveness;
   };
   readonly promotion?: {
     readonly autoPromote?: boolean;
@@ -180,15 +159,10 @@ export type FactoryNormalizedObjectivePolicy = {
   readonly budgets: {
     readonly maxTaskRuns: number;
     readonly maxCandidatePassesPerTask: number;
-    readonly maxReconciliationTasks: number;
     readonly maxObjectiveMinutes: number;
   };
   readonly throttles: {
     readonly maxDispatchesPerReact: number;
-    readonly mutationCooldownMs: number;
-  };
-  readonly mutation: {
-    readonly aggressiveness: FactoryMutationAggressiveness;
   };
   readonly promotion: {
     readonly autoPromote: boolean;
@@ -199,9 +173,7 @@ export type FactoryBudgetState = {
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;
   readonly consecutiveFailuresByTask: Readonly<Record<string, number>>;
-  readonly reconciliationTasksUsed: number;
   readonly elapsedMinutes: number;
-  readonly lastMutationAt?: number;
   readonly lastDispatchAt?: number;
   readonly policyBlockedReason?: string;
 };
@@ -214,22 +186,6 @@ export type FactorySchedulerRecord = {
   readonly releaseReason?: string;
 };
 
-export type FactoryRepoProfileRecord = {
-  readonly status: "missing" | "generating" | "ready" | "stale" | "failed";
-  readonly generatedAt?: number;
-  readonly inferredChecks: ReadonlyArray<string>;
-  readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
-  readonly summary: string;
-};
-
-export type FactoryPlanRecord = {
-  readonly proposedAt?: number;
-  readonly adoptedAt?: number;
-  readonly summary?: string;
-  readonly fallback?: boolean;
-  readonly taskIds: ReadonlyArray<string>;
-};
-
 export type FactoryCheckResult = {
   readonly command: string;
   readonly ok: boolean;
@@ -238,15 +194,6 @@ export type FactoryCheckResult = {
   readonly stderr: string;
   readonly startedAt: number;
   readonly finishedAt: number;
-};
-
-export type FactoryScoreVector = Readonly<Record<string, number>>;
-
-export type FactoryActionEvidence = {
-  readonly basedOn?: string;
-  readonly summary: string;
-  readonly actionIds: ReadonlyArray<string>;
-  readonly computedAt: number;
 };
 
 export type FactoryRebracketRecord = {
@@ -259,14 +206,17 @@ export type FactoryRebracketRecord = {
   readonly basedOn?: string;
 };
 
-export type FactoryTaskRecord = GraphNodeBase<FactoryTaskStatus> & {
+export type FactoryTaskRecord = {
+  readonly nodeId: string;
+  readonly dependsOn: ReadonlyArray<string>;
+  readonly status: FactoryTaskStatus;
   readonly taskId: string;
-  readonly taskKind: "planned" | "split" | "reconciliation";
+  readonly taskKind: "planned";
   readonly title: string;
   readonly prompt: string;
   readonly workerType: FactoryWorkerType;
+  readonly executionMode?: FactoryTaskExecutionMode;
   readonly sourceTaskId?: string;
-  readonly sourceCandidateId?: string;
   readonly baseCommit: string;
   readonly latestSummary?: string;
   readonly latestTraceSummary?: string;
@@ -297,9 +247,6 @@ export type FactoryCandidateRecord = {
   readonly handoff?: string;
   readonly checkResults: ReadonlyArray<FactoryCheckResult>;
   readonly artifactRefs: Readonly<Record<string, GraphRef>>;
-  readonly lastScore?: number;
-  readonly lastScoreVector?: FactoryScoreVector;
-  readonly lastScoreReason?: string;
   readonly latestReason?: string;
   readonly tokensUsed?: number;
   readonly createdAt: number;
@@ -308,6 +255,13 @@ export type FactoryCandidateRecord = {
   readonly integratedAt?: number;
   readonly conflictReason?: string;
 };
+
+export type FactoryWorkflowStatus =
+  | "active"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "canceled";
 
 export type FactoryIntegrationRecord = {
   readonly status: FactoryIntegrationStatus;
@@ -323,7 +277,14 @@ export type FactoryIntegrationRecord = {
   readonly updatedAt: number;
 };
 
-export type FactoryGraphState = GraphState<FactoryTaskRecord, GraphRunStatus>;
+export type FactoryWorkflowState = {
+  readonly objectiveId: string;
+  readonly status: FactoryWorkflowStatus;
+  readonly activeTaskIds: ReadonlyArray<string>;
+  readonly taskIds: ReadonlyArray<string>;
+  readonly tasksById: Readonly<Record<string, FactoryTaskRecord>>;
+  readonly updatedAt: number;
+};
 
 export type FactoryState = {
   readonly objectiveId: string;
@@ -346,23 +307,17 @@ export type FactoryState = {
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;
   readonly consecutiveFailuresByTask: Readonly<Record<string, number>>;
-  readonly reconciliationTasksUsed: number;
-  readonly lastMutationAt?: number;
   readonly lastDispatchAt?: number;
-  readonly taskOrder: ReadonlyArray<string>;
   readonly candidates: Readonly<Record<string, FactoryCandidateRecord>>;
   readonly candidateOrder: ReadonlyArray<string>;
-  readonly graph: FactoryGraphState;
+  readonly workflow: FactoryWorkflowState;
   readonly integration: FactoryIntegrationRecord;
   readonly scheduler: FactorySchedulerRecord;
-  readonly repoProfile: FactoryRepoProfileRecord;
-  readonly plan: FactoryPlanRecord;
   readonly investigation: {
     readonly reports: Readonly<Record<string, FactoryInvestigationTaskReport>>;
     readonly reportOrder: ReadonlyArray<string>;
     readonly synthesized?: FactoryInvestigationSynthesisRecord;
   };
-  readonly latestEvidence?: FactoryActionEvidence;
   readonly latestRebracket?: FactoryRebracketRecord;
 };
 
@@ -384,14 +339,14 @@ export type FactoryProjection = {
   readonly integration: FactoryIntegrationRecord;
 };
 
-export const FACTORY_TASK_GRAPH_BUCKETS = {
+export const FACTORY_TASK_WORKFLOW_BUCKETS = {
   planned: ["pending"],
   ready: ["ready"],
   active: ["running", "reviewing"],
   completed: ["approved", "integrated", "superseded"],
   blocked: ["blocked"],
   terminal: ["approved", "integrated", "blocked", "superseded"],
-} as const satisfies GraphBuckets<FactoryTaskStatus>;
+} as const;
 
 export const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryNormalizedObjectivePolicy = {
   concurrency: {
@@ -400,15 +355,10 @@ export const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryNormalizedObjectivePolicy 
   budgets: {
     maxTaskRuns: 50,
     maxCandidatePassesPerTask: 4,
-    maxReconciliationTasks: 8,
     maxObjectiveMinutes: 1_440,
   },
   throttles: {
     maxDispatchesPerReact: 4,
-    mutationCooldownMs: 15_000,
-  },
-  mutation: {
-    aggressiveness: "balanced",
   },
   promotion: {
     autoPromote: true,
@@ -423,21 +373,13 @@ export const DEFAULT_FACTORY_OBJECTIVE_PROFILE: FactoryObjectiveProfileSnapshot 
   promptPath: "profiles/generalist/PROFILE.md",
   selectedSkills: [],
   objectivePolicy: {
-    allowedWorkerTypes: ["codex", "infra", "theorem", "axiom", "writer", "inspector", "agent"],
+    allowedWorkerTypes: ["codex", "infra", "agent"],
     defaultWorkerType: "codex",
-    worktreeModeByWorker: {
-      codex: "required",
-      infra: "required",
-      theorem: "required",
-      axiom: "required",
-      writer: "forbidden",
-      inspector: "forbidden",
-      agent: "forbidden",
-    },
+    defaultTaskExecutionMode: "worktree",
     defaultValidationMode: "repo_profile",
     defaultObjectiveMode: "delivery",
     defaultSeverity: 1,
-    maxParallelChildren: 4,
+    maxParallelChildren: 1,
     allowObjectiveCreation: true,
   },
 };
@@ -447,6 +389,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const normalizeObjectiveMode = (value: unknown): FactoryObjectiveMode =>
   value === "investigation" ? "investigation" : "delivery";
+
+const normalizeTaskExecutionMode = (value: unknown): FactoryTaskExecutionMode =>
+  value === "isolated" ? "isolated" : "worktree";
+
+const normalizeProfileCloudProvider = (value: unknown): FactoryProfileCloudProvider | undefined =>
+  value === "aws" || value === "gcp" || value === "azure"
+    ? value
+    : undefined;
 
 const normalizeObjectiveSeverity = (value: unknown): FactoryObjectiveSeverity => {
   const numeric = typeof value === "number"
@@ -462,13 +412,6 @@ const normalizeObjectiveSeverity = (value: unknown): FactoryObjectiveSeverity =>
 export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): FactoryObjectiveProfileSnapshot => {
   if (!isRecord(value)) return DEFAULT_FACTORY_OBJECTIVE_PROFILE;
   const policyInput = isRecord(value.objectivePolicy) ? value.objectivePolicy : {};
-  const worktreeModes = isRecord(policyInput.worktreeModeByWorker)
-    ? policyInput.worktreeModeByWorker
-    : {};
-  const normalizedWorktreeModes = Object.fromEntries(
-    Object.entries(worktreeModes)
-      .filter(([, mode]) => mode === "required" || mode === "forbidden"),
-  ) as Readonly<Record<string, FactoryObjectiveProfileWorktreeMode>>;
   return {
     rootProfileId: typeof value.rootProfileId === "string" && value.rootProfileId.trim()
       ? value.rootProfileId
@@ -488,6 +431,7 @@ export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): Factor
     selectedSkills: Array.isArray(value.selectedSkills)
       ? value.selectedSkills.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
       : DEFAULT_FACTORY_OBJECTIVE_PROFILE.selectedSkills,
+    cloudProvider: normalizeProfileCloudProvider(value.cloudProvider),
     objectivePolicy: {
       allowedWorkerTypes: Array.isArray(policyInput.allowedWorkerTypes)
         ? policyInput.allowedWorkerTypes.filter((item): item is FactoryWorkerType => typeof item === "string" && item.trim().length > 0)
@@ -495,10 +439,7 @@ export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): Factor
       defaultWorkerType: typeof policyInput.defaultWorkerType === "string" && policyInput.defaultWorkerType.trim()
         ? policyInput.defaultWorkerType
         : DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy.defaultWorkerType,
-      worktreeModeByWorker: {
-        ...DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy.worktreeModeByWorker,
-        ...normalizedWorktreeModes,
-      },
+      defaultTaskExecutionMode: normalizeTaskExecutionMode(policyInput.defaultTaskExecutionMode),
       defaultValidationMode: policyInput.defaultValidationMode === "none"
         ? "none"
         : DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy.defaultValidationMode,
@@ -550,12 +491,6 @@ export const normalizeFactoryObjectivePolicy = (
         12,
         DEFAULT_FACTORY_OBJECTIVE_POLICY.budgets.maxCandidatePassesPerTask,
       ),
-      maxReconciliationTasks: clampInt(
-        policy?.budgets?.maxReconciliationTasks,
-        0,
-        50,
-        DEFAULT_FACTORY_OBJECTIVE_POLICY.budgets.maxReconciliationTasks,
-      ),
       maxObjectiveMinutes: clampInt(
         policy?.budgets?.maxObjectiveMinutes,
         1,
@@ -570,21 +505,6 @@ export const normalizeFactoryObjectivePolicy = (
         8,
         maxActiveTasks,
       ),
-      mutationCooldownMs: clampInt(
-        policy?.throttles?.mutationCooldownMs,
-        0,
-        300_000,
-        DEFAULT_FACTORY_OBJECTIVE_POLICY.throttles.mutationCooldownMs,
-      ),
-    },
-    mutation: {
-      aggressiveness:
-        policy?.mutation?.aggressiveness === "off"
-        || policy?.mutation?.aggressiveness === "conservative"
-        || policy?.mutation?.aggressiveness === "balanced"
-        || policy?.mutation?.aggressiveness === "aggressive"
-          ? policy.mutation.aggressiveness
-          : DEFAULT_FACTORY_OBJECTIVE_POLICY.mutation.aggressiveness,
     },
     promotion: {
       autoPromote: typeof policy?.promotion?.autoPromote === "boolean"
@@ -601,19 +521,222 @@ const emptyIntegration = (ts: number): FactoryIntegrationRecord => ({
   updatedAt: ts,
 });
 
+const createFactoryWorkflowState = (
+  objectiveId: string,
+  updatedAt: number,
+  status: FactoryWorkflowStatus = "active",
+): FactoryWorkflowState => ({
+  objectiveId,
+  status,
+  activeTaskIds: [],
+  taskIds: [],
+  tasksById: {},
+  updatedAt,
+});
+
+const taskStatusSet = (statuses: ReadonlyArray<FactoryTaskStatus>): ReadonlySet<FactoryTaskStatus> =>
+  new Set(statuses);
+
+const taskHasStatus = (task: FactoryTaskRecord, statuses: ReadonlySet<FactoryTaskStatus>): boolean =>
+  statuses.has(task.status);
+
+const stringList = (value: unknown): ReadonlyArray<string> =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+
+const workflowTaskIds = (state: FactoryState): ReadonlyArray<string> =>
+  stringList(state.workflow.taskIds);
+
+const workflowActiveTaskIds = (state: FactoryState): ReadonlyArray<string> =>
+  stringList(state.workflow.activeTaskIds);
+
+const candidateOrderList = (state: FactoryState): ReadonlyArray<string> =>
+  uniqueStrings([
+    ...stringList(state.candidateOrder),
+    ...Object.keys(state.candidates),
+  ]);
+
+const workflowTaskList = (state: FactoryState): ReadonlyArray<FactoryTaskRecord> =>
+  (workflowTaskIds(state).length > 0 ? workflowTaskIds(state) : Object.keys(state.workflow.tasksById))
+    .map((taskId) => state.workflow.tasksById[taskId])
+    .filter((task): task is FactoryTaskRecord => Boolean(task));
+
+const taskDepsSatisfied = (
+  state: FactoryState,
+  task: FactoryTaskRecord,
+  completedStatuses: ReadonlySet<FactoryTaskStatus>,
+): boolean =>
+  task.dependsOn.every((depId) => {
+    const dependency = state.workflow.tasksById[depId];
+    return Boolean(dependency) && completedStatuses.has(dependency.status);
+  });
+
+const FACTORY_TASK_STATUS_SETS = {
+  planned: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.planned),
+  ready: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.ready),
+  active: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.active),
+  completed: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.completed),
+  blocked: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.blocked),
+  terminal: taskStatusSet(FACTORY_TASK_WORKFLOW_BUCKETS.terminal),
+} as const;
+
+const normalizeWorkflowStatus = (value: unknown): FactoryWorkflowStatus => {
+  if (value === "completed" || value === "blocked" || value === "failed" || value === "canceled") return value;
+  return "active";
+};
+
+const uniqueExistingTaskIds = (
+  taskIds: ReadonlyArray<string>,
+  tasksById: Readonly<Record<string, FactoryTaskRecord>>,
+): ReadonlyArray<string> =>
+  [...new Set(taskIds.filter((taskId) => typeof taskId === "string" && Boolean(tasksById[taskId])))];
+
+const uniqueStrings = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+
+const normalizeCandidateOrder = (
+  candidateOrder: unknown,
+  candidates: Readonly<Record<string, FactoryCandidateRecord>>,
+): ReadonlyArray<string> => {
+  const ordered = Array.isArray(candidateOrder)
+    ? candidateOrder.filter((candidateId): candidateId is string => typeof candidateId === "string" && Boolean(candidates[candidateId]))
+    : [];
+  const allIds = Object.keys(candidates);
+  return uniqueStrings([...ordered, ...allIds]);
+};
+
+const normalizeIntegration = (value: unknown, updatedAt: number): FactoryIntegrationRecord => {
+  if (!isRecord(value)) return emptyIntegration(updatedAt);
+  return {
+    ...emptyIntegration(updatedAt),
+    ...value,
+    queuedCandidateIds: Array.isArray(value.queuedCandidateIds)
+      ? uniqueStrings(value.queuedCandidateIds.filter((candidateId): candidateId is string => typeof candidateId === "string"))
+      : [],
+    validationResults: Array.isArray(value.validationResults)
+      ? value.validationResults as ReadonlyArray<FactoryCheckResult>
+      : [],
+    updatedAt: typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt) ? value.updatedAt : updatedAt,
+  };
+};
+
+const normalizeScheduler = (value: unknown): FactorySchedulerRecord =>
+  isRecord(value) ? value as FactorySchedulerRecord : {};
+
+const normalizeInvestigation = (value: unknown): FactoryState["investigation"] => {
+  if (!isRecord(value)) {
+    return {
+      reports: {},
+      reportOrder: [],
+    };
+  }
+  const reports = isRecord(value.reports)
+    ? Object.fromEntries(
+        Object.entries(value.reports)
+          .filter(([, report]) => isRecord(report) && typeof report.taskId === "string"),
+      ) as Readonly<Record<string, FactoryInvestigationTaskReport>>
+    : {};
+  const reportOrder = Array.isArray(value.reportOrder)
+    ? uniqueStrings(value.reportOrder.filter((taskId): taskId is string => typeof taskId === "string" && Boolean(reports[taskId])))
+    : Object.keys(reports);
+  const synthesized = isRecord(value.synthesized) ? value.synthesized as FactoryInvestigationSynthesisRecord : undefined;
+  return {
+    reports,
+    reportOrder,
+    synthesized,
+  };
+};
+
+export const normalizeFactoryState = (state: FactoryState): FactoryState => {
+  const profile = normalizeFactoryObjectiveProfileSnapshot(state.profile);
+  const candidates = isRecord(state.candidates)
+    ? Object.fromEntries(
+        Object.entries(state.candidates)
+          .filter(([, candidate]) => isRecord(candidate) && typeof candidate.candidateId === "string"),
+      ) as Readonly<Record<string, FactoryCandidateRecord>>
+    : {};
+  const candidateOrder = normalizeCandidateOrder(state.candidateOrder, candidates);
+
+  const legacy = state as FactoryState & {
+    readonly taskOrder?: unknown;
+    readonly graph?: {
+      readonly status?: unknown;
+      readonly activeNodeIds?: unknown;
+      readonly order?: unknown;
+      readonly nodes?: unknown;
+      readonly updatedAt?: unknown;
+    };
+  };
+  const currentWorkflow = isRecord(state.workflow) ? state.workflow : undefined;
+  const taskNodes = isRecord(currentWorkflow?.tasksById)
+    ? currentWorkflow.tasksById
+    : isRecord(legacy.graph?.nodes)
+      ? legacy.graph.nodes
+      : {};
+  const tasksById = Object.fromEntries(
+    Object.entries(taskNodes)
+      .filter(([, task]) => isRecord(task) && typeof task.taskId === "string")
+      .map(([taskId, task]) => [taskId, normalizeTaskRecord(task as FactoryTaskRecord, profile.objectivePolicy.defaultTaskExecutionMode)]),
+  ) as Readonly<Record<string, FactoryTaskRecord>>;
+  const orderedTaskIds = Array.isArray(currentWorkflow?.taskIds)
+    ? currentWorkflow.taskIds.filter((taskId): taskId is string => typeof taskId === "string")
+    : Array.isArray(legacy.taskOrder)
+      ? legacy.taskOrder.filter((taskId): taskId is string => typeof taskId === "string")
+      : Array.isArray(legacy.graph?.order)
+        ? legacy.graph.order.filter((taskId): taskId is string => typeof taskId === "string")
+        : Object.keys(tasksById);
+  const taskIds = uniqueExistingTaskIds(orderedTaskIds, tasksById);
+  const activeTaskIds = uniqueExistingTaskIds(
+    Array.isArray(currentWorkflow?.activeTaskIds)
+      ? currentWorkflow.activeTaskIds.filter((taskId): taskId is string => typeof taskId === "string")
+      : Array.isArray(legacy.graph?.activeNodeIds)
+        ? legacy.graph.activeNodeIds.filter((taskId): taskId is string => typeof taskId === "string")
+        : [],
+    tasksById,
+  );
+  const workflowUpdatedAt = typeof currentWorkflow?.updatedAt === "number" && Number.isFinite(currentWorkflow.updatedAt)
+    ? currentWorkflow.updatedAt
+    : typeof legacy.graph?.updatedAt === "number" && Number.isFinite(legacy.graph.updatedAt)
+      ? legacy.graph.updatedAt
+      : state.updatedAt;
+  const workflowStatus = normalizeWorkflowStatus(currentWorkflow?.status ?? legacy.graph?.status);
+  return {
+    ...initialFactoryState,
+    ...state,
+    profile,
+    candidates,
+    candidateOrder,
+    workflow: {
+      objectiveId: state.objectiveId,
+      status: workflowStatus,
+      activeTaskIds,
+      taskIds,
+      tasksById,
+      updatedAt: workflowUpdatedAt,
+    },
+    integration: normalizeIntegration(state.integration, state.updatedAt),
+    scheduler: normalizeScheduler(state.scheduler),
+    investigation: normalizeInvestigation(state.investigation),
+    candidatePassesByTask: isRecord(state.candidatePassesByTask) ? state.candidatePassesByTask : {},
+    consecutiveFailuresByTask: isRecord(state.consecutiveFailuresByTask) ? state.consecutiveFailuresByTask : {},
+    checks: Array.isArray(state.checks) ? state.checks.filter((check): check is string => typeof check === "string") : [],
+  };
+};
+
 const updateTask = (
   state: FactoryState,
   taskId: string,
   patch: Partial<FactoryTaskRecord>,
 ): FactoryState => {
-  const current = state.graph.nodes[taskId];
+  const current = state.workflow.tasksById[taskId];
   if (!current) return state;
   return {
     ...state,
-    graph: {
-      ...state.graph,
-      nodes: {
-        ...state.graph.nodes,
+    workflow: {
+      ...state.workflow,
+      tasksById: {
+        ...state.workflow.tasksById,
         [taskId]: {
           ...current,
           ...patch,
@@ -623,22 +746,27 @@ const updateTask = (
   };
 };
 
+const normalizeTaskRecord = (
+  task: FactoryTaskRecord,
+  defaultExecutionMode: FactoryTaskExecutionMode,
+): FactoryTaskRecord => ({
+  ...task,
+  executionMode: normalizeTaskExecutionMode(task.executionMode ?? defaultExecutionMode),
+});
+
 const upsertTask = (
   state: FactoryState,
   task: FactoryTaskRecord,
 ): FactoryState => ({
   ...state,
-  taskOrder: state.taskOrder.includes(task.taskId)
-    ? state.taskOrder
-    : [...state.taskOrder, task.taskId],
-  graph: {
-    ...state.graph,
-    order: state.graph.order.includes(task.taskId)
-      ? state.graph.order
-      : [...state.graph.order, task.taskId],
-    nodes: {
-      ...state.graph.nodes,
-      [task.taskId]: task,
+  workflow: {
+    ...state.workflow,
+    taskIds: workflowTaskIds(state).includes(task.taskId)
+      ? workflowTaskIds(state)
+      : [...workflowTaskIds(state), task.taskId],
+    tasksById: {
+      ...state.workflow.tasksById,
+      [task.taskId]: normalizeTaskRecord(task, state.profile.objectivePolicy.defaultTaskExecutionMode),
     },
   },
 });
@@ -666,8 +794,9 @@ const latestTaskCandidate = (
   state: FactoryState,
   taskId: string,
 ): FactoryCandidateRecord | undefined => {
-  for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
-    const candidateId = state.candidateOrder[index];
+  const orderedCandidates = candidateOrderList(state);
+  for (let index = orderedCandidates.length - 1; index >= 0; index -= 1) {
+    const candidateId = orderedCandidates[index];
     const candidate = state.candidates[candidateId];
     if (candidate?.taskId === taskId) return candidate;
   }
@@ -683,55 +812,59 @@ const upsertCandidate = (
     ...state.candidates,
     [candidate.candidateId]: candidate,
   },
-  candidateOrder: state.candidateOrder.includes(candidate.candidateId)
-    ? state.candidateOrder
-    : [...state.candidateOrder, candidate.candidateId],
+  candidateOrder: candidateOrderList(state).includes(candidate.candidateId)
+    ? candidateOrderList(state)
+    : [...candidateOrderList(state), candidate.candidateId],
 });
 
-const setGraphStatus = (
+const setWorkflowStatus = (
   state: FactoryState,
   ts: number,
-  status: GraphRunStatus = state.graph.status,
+  status: FactoryWorkflowStatus = state.workflow.status,
 ): FactoryState => ({
   ...state,
   updatedAt: ts,
-  graph: {
-    ...state.graph,
+  workflow: {
+    ...state.workflow,
     status,
     updatedAt: ts,
   },
 });
 
-const setActiveTaskIds = (state: FactoryState, activeNodeIds: ReadonlyArray<string>, ts: number): FactoryState => ({
+const setActiveTaskIds = (state: FactoryState, activeTaskIds: ReadonlyArray<string>, ts: number): FactoryState => ({
   ...state,
   updatedAt: ts,
-  graph: {
-    ...state.graph,
-    activeNodeIds: [...new Set(activeNodeIds.filter((taskId) => Boolean(state.graph.nodes[taskId])))],
+  workflow: {
+    ...state.workflow,
+    activeTaskIds: [...new Set(stringList(activeTaskIds).filter((taskId) => Boolean(state.workflow.tasksById[taskId])))],
     updatedAt: ts,
   },
 });
 
 export const factoryTaskList = (state: FactoryState): ReadonlyArray<FactoryTaskRecord> =>
-  graphNodeList(state.graph);
-
-export const factoryTaskGraphProjection = (state: FactoryState) =>
-  graphProjection(state.graph, FACTORY_TASK_GRAPH_BUCKETS);
+  workflowTaskList(state);
 
 export const factoryReadyTasks = (state: FactoryState): ReadonlyArray<FactoryTaskRecord> =>
-  runnableNodes(state.graph, {
-    ready: FACTORY_TASK_GRAPH_BUCKETS.ready,
-    completed: FACTORY_TASK_GRAPH_BUCKETS.completed,
-  });
+  workflowTaskList(state).filter((task) =>
+    !workflowActiveTaskIds(state).includes(task.taskId)
+    && taskHasStatus(task, FACTORY_TASK_STATUS_SETS.ready)
+    && taskDepsSatisfied(state, task, FACTORY_TASK_STATUS_SETS.completed)
+  );
 
 export const factoryActivatableTasks = (state: FactoryState): ReadonlyArray<FactoryTaskRecord> =>
-  activatableNodes(state.graph, {
-    planned: FACTORY_TASK_GRAPH_BUCKETS.planned,
-    completed: FACTORY_TASK_GRAPH_BUCKETS.completed,
-  });
+  workflowTaskList(state).filter((task) =>
+    !workflowActiveTaskIds(state).includes(task.taskId)
+    && taskHasStatus(task, FACTORY_TASK_STATUS_SETS.planned)
+    && taskDepsSatisfied(state, task, FACTORY_TASK_STATUS_SETS.completed)
+  );
 
 export const buildFactoryProjection = (state: FactoryState): FactoryProjection => {
-  const tasks = factoryTaskGraphProjection(state);
+  const tasks = workflowTaskList(state);
+  const objectiveStopsLiveTaskCounts =
+    state.status === "blocked"
+    || state.status === "failed"
+    || state.status === "canceled"
+    || state.status === "completed";
   return {
     objectiveId: state.objectiveId,
     title: state.title,
@@ -740,13 +873,19 @@ export const buildFactoryProjection = (state: FactoryState): FactoryProjection =
     updatedAt: state.updatedAt,
     latestSummary: state.latestSummary,
     blockedReason: state.blockedReason,
-    activeTasks: tasks.active,
-    readyTasks: tasks.ready,
-    pendingTasks: tasks.planned,
-    completedTasks: tasks.completed,
-    blockedTasks: tasks.blocked,
-    tasks: factoryTaskList(state),
-    candidates: state.candidateOrder
+    activeTasks: objectiveStopsLiveTaskCounts
+      ? []
+      : tasks.filter((task) =>
+          workflowActiveTaskIds(state).includes(task.taskId) || taskHasStatus(task, FACTORY_TASK_STATUS_SETS.active)
+        ),
+    readyTasks: objectiveStopsLiveTaskCounts
+      ? []
+      : tasks.filter((task) => taskHasStatus(task, FACTORY_TASK_STATUS_SETS.ready)),
+    pendingTasks: tasks.filter((task) => taskHasStatus(task, FACTORY_TASK_STATUS_SETS.planned)),
+    completedTasks: tasks.filter((task) => taskHasStatus(task, FACTORY_TASK_STATUS_SETS.completed)),
+    blockedTasks: tasks.filter((task) => taskHasStatus(task, FACTORY_TASK_STATUS_SETS.blocked)),
+    tasks,
+    candidates: candidateOrderList(state)
       .map((candidateId) => state.candidates[candidateId])
       .filter((candidate): candidate is FactoryCandidateRecord => Boolean(candidate)),
     integration: state.integration,
@@ -768,37 +907,6 @@ export type FactoryEvent =
       readonly profile: FactoryObjectiveProfileSnapshot;
       readonly policy: FactoryNormalizedObjectivePolicy;
       readonly createdAt: number;
-    }
-  | {
-      readonly type: "repo.profile.requested";
-      readonly objectiveId: string;
-      readonly requestedAt: number;
-    }
-  | {
-      readonly type: "repo.profile.generated";
-      readonly objectiveId: string;
-      readonly generatedAt: number;
-      readonly status: FactoryRepoProfileRecord["status"];
-      readonly inferredChecks: ReadonlyArray<string>;
-      readonly generatedSkillRefs: ReadonlyArray<GraphRef>;
-      readonly summary: string;
-      readonly source?: "generated" | "reused" | "fallback";
-    }
-  | {
-      readonly type: "objective.plan.proposed";
-      readonly objectiveId: string;
-      readonly taskCount: number;
-      readonly summary: string;
-      readonly fallback?: boolean;
-      readonly proposedAt: number;
-    }
-  | {
-      readonly type: "objective.plan.adopted";
-      readonly objectiveId: string;
-      readonly taskIds: ReadonlyArray<string>;
-      readonly summary: string;
-      readonly fallback?: boolean;
-      readonly adoptedAt: number;
     }
   | {
       readonly type: "objective.operator.noted";
@@ -827,33 +935,6 @@ export type FactoryEvent =
       readonly objectiveId: string;
       readonly task: FactoryTaskRecord;
       readonly createdAt: number;
-    }
-  | {
-      readonly type: "task.split";
-      readonly objectiveId: string;
-      readonly sourceTaskId: string;
-      readonly tasks: ReadonlyArray<FactoryTaskRecord>;
-      readonly reason: string;
-      readonly basedOn?: string;
-      readonly createdAt: number;
-    }
-  | {
-      readonly type: "task.dependency.updated";
-      readonly objectiveId: string;
-      readonly taskId: string;
-      readonly dependsOn: ReadonlyArray<string>;
-      readonly reason: string;
-      readonly basedOn?: string;
-      readonly updatedAt: number;
-    }
-  | {
-      readonly type: "task.worker.reassigned";
-      readonly objectiveId: string;
-      readonly taskId: string;
-      readonly workerType: FactoryWorkerType;
-      readonly reason: string;
-      readonly basedOn?: string;
-      readonly updatedAt: number;
     }
   | {
       readonly type: "task.ready";
@@ -968,27 +1049,6 @@ export type FactoryEvent =
       readonly candidateId: string;
       readonly reason: string;
       readonly conflictedAt: number;
-    }
-  | {
-      readonly type: "merge.evidence.computed";
-      readonly objectiveId: string;
-      readonly frontierTaskIds: ReadonlyArray<string>;
-      readonly actionIds: ReadonlyArray<string>;
-      readonly summary: string;
-      readonly basedOn?: string;
-      readonly computedAt: number;
-    }
-  | {
-      readonly type: "merge.candidate.scored";
-      readonly objectiveId: string;
-      readonly decisionId: string;
-      readonly candidateId?: string;
-      readonly taskId?: string;
-      readonly actionType?: string;
-      readonly score: number;
-      readonly scoreVector: FactoryScoreVector;
-      readonly reason: string;
-      readonly scoredAt: number;
     }
   | {
       readonly type: "rebracket.applied";
@@ -1119,31 +1179,19 @@ export const initialFactoryState: FactoryState = {
   checksSource: "default",
   profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
   policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
-  status: "decomposing",
+  status: "planning",
   archivedAt: undefined,
   createdAt: 0,
   updatedAt: 0,
   taskRunsUsed: 0,
   candidatePassesByTask: {},
   consecutiveFailuresByTask: {},
-  reconciliationTasksUsed: 0,
-  lastMutationAt: undefined,
   lastDispatchAt: undefined,
-  taskOrder: [],
   candidates: {},
   candidateOrder: [],
-  graph: createGraphState<FactoryTaskRecord>("", 0, "active"),
+  workflow: createFactoryWorkflowState("", 0),
   integration: emptyIntegration(0),
   scheduler: {},
-  repoProfile: {
-    status: "missing",
-    inferredChecks: [],
-    generatedSkillRefs: [],
-    summary: "",
-  },
-  plan: {
-    taskIds: [],
-  },
   investigation: {
     reports: {},
     reportOrder: [],
@@ -1156,6 +1204,7 @@ export const decideFactory: Decide<FactoryCmd, FactoryEvent> = (cmd) => {
 };
 
 export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event) => {
+  state = normalizeFactoryState(state);
   if (CONTROL_RECEIPT_TYPES.has(event.type as never)) return state;
   switch (event.type) {
     case "objective.created":
@@ -1171,86 +1220,22 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         checksSource: event.checksSource,
         profile: normalizeFactoryObjectiveProfileSnapshot(event.profile),
         policy: event.policy,
-        status: "decomposing",
+        status: "planning",
         archivedAt: undefined,
         createdAt: event.createdAt,
         updatedAt: event.createdAt,
         taskRunsUsed: 0,
         candidatePassesByTask: {},
         consecutiveFailuresByTask: {},
-        reconciliationTasksUsed: 0,
-        lastMutationAt: undefined,
         lastDispatchAt: undefined,
-        taskOrder: [],
         candidates: {},
         candidateOrder: [],
-        graph: createGraphState<FactoryTaskRecord>(event.objectiveId, event.createdAt, "active"),
+        workflow: createFactoryWorkflowState(event.objectiveId, event.createdAt),
         integration: emptyIntegration(event.createdAt),
         scheduler: {},
-        repoProfile: {
-          status: "missing",
-          inferredChecks: [],
-          generatedSkillRefs: [],
-          summary: "",
-        },
-        plan: {
-          taskIds: [],
-        },
         investigation: {
           reports: {},
           reportOrder: [],
-        },
-      };
-    case "repo.profile.requested":
-      return {
-        ...state,
-        updatedAt: event.requestedAt,
-        status: state.status === "blocked" ? state.status : "decomposing",
-        repoProfile: {
-          ...state.repoProfile,
-          status: "generating",
-        },
-      };
-    case "repo.profile.generated":
-      return {
-        ...state,
-        updatedAt: event.generatedAt,
-        checks: state.checksSource === "default" && event.inferredChecks.length > 0
-          ? event.inferredChecks
-          : state.checks,
-        repoProfile: {
-          status: event.status,
-          generatedAt: event.generatedAt,
-          inferredChecks: event.inferredChecks,
-          generatedSkillRefs: event.generatedSkillRefs,
-          summary: event.summary,
-        },
-      };
-    case "objective.plan.proposed":
-      return {
-        ...state,
-        status: state.status === "blocked" ? state.status : "planning",
-        updatedAt: event.proposedAt,
-        latestSummary: event.summary,
-        plan: {
-          ...state.plan,
-          proposedAt: event.proposedAt,
-          summary: event.summary,
-          fallback: event.fallback,
-        },
-      };
-    case "objective.plan.adopted":
-      return {
-        ...state,
-        status: state.status === "blocked" ? state.status : "planning",
-        updatedAt: event.adoptedAt,
-        latestSummary: event.summary,
-        plan: {
-          ...state.plan,
-          adoptedAt: event.adoptedAt,
-          taskIds: [...event.taskIds],
-          summary: event.summary,
-          fallback: event.fallback,
         },
       };
     case "objective.operator.noted":
@@ -1297,58 +1282,32 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       };
     case "task.added": {
       const nextStatus: FactoryObjectiveStatus =
-        state.taskOrder.length === 0 ? "planning" : state.status === "decomposing" ? "planning" : state.status;
-      return {
-        ...upsertTask(state, event.task),
-        status: nextStatus,
-        updatedAt: event.createdAt,
-        reconciliationTasksUsed: state.reconciliationTasksUsed + (event.task.taskKind === "reconciliation" ? 1 : 0),
-        lastMutationAt: event.task.taskKind === "planned" ? state.lastMutationAt : event.createdAt,
-        graph: {
-          ...upsertTask(state, event.task).graph,
-          updatedAt: event.createdAt,
-        },
-      };
-    }
-    case "task.split": {
-      let next = state;
-      for (const task of event.tasks) {
-        next = upsertTask(next, task);
-      }
+        state.workflow.taskIds.length === 0 || state.status === "blocked"
+          ? "planning"
+          : state.status;
+      const next = upsertTask(state, event.task);
       return {
         ...next,
+        blockedReason: nextStatus === "planning" ? undefined : state.blockedReason,
+        status: nextStatus,
         updatedAt: event.createdAt,
-        latestSummary: event.reason,
-        lastMutationAt: event.createdAt,
-        graph: {
-          ...next.graph,
+        workflow: {
+          ...next.workflow,
           updatedAt: event.createdAt,
         },
       };
     }
-    case "task.dependency.updated":
-      return {
-        ...setGraphStatus(updateTask(state, event.taskId, {
-          dependsOn: event.dependsOn,
-          basedOn: event.basedOn,
-        }), event.updatedAt),
-        lastMutationAt: event.updatedAt,
-      };
-    case "task.worker.reassigned":
-      return {
-        ...setGraphStatus(updateTask(state, event.taskId, {
-          workerType: event.workerType,
-          basedOn: event.basedOn,
-        }), event.updatedAt),
-        lastMutationAt: event.updatedAt,
-      };
     case "task.ready":
-      return setGraphStatus(updateTask(state, event.taskId, {
-        status: "ready",
-        readyAt: event.readyAt,
-      }), event.readyAt);
+      return {
+        ...setWorkflowStatus(updateTask(state, event.taskId, {
+          status: "ready",
+          readyAt: event.readyAt,
+        }), event.readyAt),
+        status: state.status === "blocked" ? "planning" : state.status,
+        blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
+      };
     case "task.dispatched": {
-      const currentActive = new Set(state.graph.activeNodeIds);
+      const currentActive = new Set(state.workflow.activeTaskIds);
       currentActive.add(event.taskId);
       let next = updateTask(state, event.taskId, {
         status: "running",
@@ -1367,6 +1326,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...setActiveTaskIds(next, [...currentActive], event.startedAt),
         status: "executing",
+        blockedReason: undefined,
         taskRunsUsed: state.taskRunsUsed + 1,
         lastDispatchAt: event.startedAt,
       };
@@ -1375,9 +1335,9 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return setActiveTaskIds(updateTask(state, event.taskId, {
         status: "reviewing",
         reviewingAt: event.reviewRequestedAt,
-      }), state.graph.activeNodeIds, event.reviewRequestedAt);
+      }), state.workflow.activeTaskIds, event.reviewRequestedAt);
     case "task.approved": {
-      const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
       const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
@@ -1390,7 +1350,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       };
     }
     case "task.integrated": {
-      const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
       const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
@@ -1403,8 +1363,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       };
     }
     case "task.blocked": {
-      const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
-      const prev = state.graph.nodes[event.taskId];
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
+      const prev = state.workflow.tasksById[event.taskId];
       const wasDispatch = prev?.status === "running" || prev?.status === "reviewing";
       const prevFailures = state.consecutiveFailuresByTask[event.taskId] ?? 0;
       let next = updateTask(state, event.taskId, {
@@ -1430,22 +1390,22 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     }
     case "task.unblocked":
       return {
-        ...setGraphStatus(updateTask(state, event.taskId, {
+        ...setWorkflowStatus(updateTask(state, event.taskId, {
           status: "ready",
           readyAt: event.readyAt,
           blockedReason: undefined,
         }), event.readyAt),
-        lastMutationAt: event.readyAt,
+        status: state.status === "blocked" ? "planning" : state.status,
+        blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
       };
     case "task.superseded": {
-      const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
       return {
         ...setActiveTaskIds(updateTask(state, event.taskId, {
           status: "superseded",
           latestSummary: event.reason,
           completedAt: event.supersededAt,
         }), active, event.supersededAt),
-        lastMutationAt: event.supersededAt,
       };
     }
     case "candidate.created":
@@ -1497,12 +1457,12 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         completedAt: event.status === "approved" ? event.reviewedAt : undefined,
       });
       return {
-        ...setActiveTaskIds(next, state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId), event.reviewedAt),
+        ...setActiveTaskIds(next, state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId), event.reviewedAt),
         latestSummary: event.summary,
       };
     }
     case "investigation.reported": {
-      const active = state.graph.activeNodeIds.filter((taskId) => taskId !== event.taskId);
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
       let next = updateCandidate(state, event.candidateId, {
         status: "approved",
         summary: event.summary,
@@ -1568,33 +1528,6 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           updatedAt: event.conflictedAt,
         }),
         updatedAt: event.conflictedAt,
-      };
-    case "merge.evidence.computed":
-      return {
-        ...state,
-        latestEvidence: {
-          summary: event.summary,
-          actionIds: event.actionIds,
-          basedOn: event.basedOn,
-          computedAt: event.computedAt,
-        },
-        updatedAt: event.computedAt,
-      };
-    case "merge.candidate.scored":
-      if (!event.candidateId) {
-        return {
-          ...state,
-          updatedAt: event.scoredAt,
-        };
-      }
-      return {
-        ...updateCandidate(state, event.candidateId, {
-          lastScore: event.score,
-          lastScoreVector: event.scoreVector,
-          lastScoreReason: event.reason,
-          updatedAt: event.scoredAt,
-        }),
-        updatedAt: event.scoredAt,
       };
     case "rebracket.applied":
       return {
@@ -1737,8 +1670,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         status: "completed",
         latestSummary: event.summary,
         updatedAt: event.completedAt,
-        graph: {
-          ...state.graph,
+        workflow: {
+          ...state.workflow,
           status: "completed",
           updatedAt: event.completedAt,
         },
@@ -1750,8 +1683,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         blockedReason: event.reason,
         latestSummary: event.summary,
         updatedAt: event.blockedAt,
-        graph: {
-          ...state.graph,
+        workflow: {
+          ...state.workflow,
           status: "blocked",
           updatedAt: event.blockedAt,
         },
@@ -1763,8 +1696,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         blockedReason: event.reason,
         latestSummary: event.reason,
         updatedAt: event.failedAt,
-        graph: {
-          ...state.graph,
+        workflow: {
+          ...state.workflow,
           status: "failed",
           updatedAt: event.failedAt,
         },
@@ -1776,8 +1709,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         blockedReason: event.reason,
         latestSummary: event.reason ?? "canceled",
         updatedAt: event.canceledAt,
-        graph: {
-          ...state.graph,
+        workflow: {
+          ...state.workflow,
           status: "canceled",
           updatedAt: event.canceledAt,
         },

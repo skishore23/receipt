@@ -5,11 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
-
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
-import { CodexControlSignalError, type CodexExecutorInput, type CodexRunControl } from "../../src/adapters/codex-executor";
+import type { CodexExecutorInput, CodexRunControl } from "../../src/adapters/codex-executor";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -63,10 +61,6 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 };
 
 const createFactoryService = async (opts: {
-  readonly llmStructured: <Schema extends ZodTypeAny>(input: {
-    readonly schemaName: string;
-    readonly schema: Schema;
-  }) => Promise<{ readonly parsed: ZodInfer<Schema>; readonly raw: string }>;
   readonly codexRun: (
     input: CodexExecutorInput,
     control?: CodexRunControl,
@@ -76,6 +70,7 @@ const createFactoryService = async (opts: {
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
+  readonly repoRoot: string;
 }> => {
   const dataDir = await createTempDir("receipt-factory-investigation");
   const repoRoot = await createSourceRepo({ seed: opts.seedRepo });
@@ -101,12 +96,11 @@ const createFactoryService = async (opts: {
         };
       },
     },
-    llmStructured: opts.llmStructured,
     repoRoot,
     profileRoot: process.cwd(),
     cloudExecutionContextProvider: opts.cloudExecutionContextProvider,
   });
-  return { service, queue };
+  return { service, queue, repoRoot };
 };
 
 const objectiveTaskJobs = async (
@@ -121,18 +115,11 @@ const objectiveTaskJobs = async (
 
 test("factory investigation: no-diff reports complete without integration and synthesize a final report", async () => {
   const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Inspect permissions", prompt: "Inspect AWS permissions and summarize the current access posture.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
     codexRun: async (input) => {
       const schema = JSON.parse(await fs.readFile(input.outputSchemaPath!, "utf-8")) as Record<string, unknown>;
-      expect(schema.required).toEqual(["outcome", "summary", "handoff", "report"]);
+      expect(schema.required).toEqual(["outcome", "summary", "artifacts", "nextAction", "report"]);
       const report = (schema.properties as Record<string, Record<string, unknown>>).report;
+      expect(report.type).toEqual(["object", "null"]);
       expect(report.required).toEqual(["conclusion", "evidence", "scriptsRun", "disagreements", "nextSteps"]);
       const evidenceItem = ((report.properties as Record<string, Record<string, unknown>>).evidence.items as Record<string, unknown>);
       expect(evidenceItem.required).toEqual(["title", "summary", "detail"]);
@@ -141,7 +128,8 @@ test("factory investigation: no-diff reports complete without integration and sy
       const structured = {
         outcome: "approved",
         summary: "Collected the current AWS access posture.",
-        handoff: "Investigation is ready for synthesis.",
+        artifacts: [{ label: "AWS CLI inspection", path: "/tmp/aws-access-posture.json", summary: "Read-only identity details were collected successfully." }],
+        nextAction: "Investigation is ready for synthesis.",
         report: {
           conclusion: "The configured AWS identity has read access but no mutation path was exercised.",
           evidence: [{ title: "AWS CLI inspection", summary: "Read-only identity details were collected successfully.", detail: null }],
@@ -183,14 +171,6 @@ test("factory investigation: no-diff reports complete without integration and sy
 
 test("factory investigation: blocked results with a structured report are treated as partial reports and still synthesize", async () => {
   const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Inventory spend drivers", prompt: "Inspect AWS inventory and note access gaps.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
     codexRun: async () => {
       const structured = {
         outcome: "blocked",
@@ -231,46 +211,120 @@ test("factory investigation: blocked results with a structured report are treate
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
 }, 120_000);
 
-test("factory investigation: supervisor restart guidance reruns the task with appended instructions", async () => {
-  let runCount = 0;
-  const prompts: string[] = [];
+test("factory investigation: missing final JSON fails instead of falling back to stdout", async () => {
   const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Validate inventory", prompt: "Validate inventory and summarize blockers clearly.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
-    codexRun: async (input) => {
-      prompts.push(input.prompt);
-      runCount += 1;
-      if (runCount === 1) {
-        throw new CodexControlSignalError({
-          kind: "restart",
-          note: "Focus only on the inventory task and return the structured result now.",
-        }, {
-          exitCode: null,
-          signal: "SIGTERM",
-          stdout: "",
-          stderr: "",
-          lastMessage: undefined,
-        });
-      }
-      const raw = JSON.stringify({
+    codexRun: async () => ({
+      stdout: JSON.stringify({
         outcome: "approved",
-        summary: "Collected the current inventory.",
-        handoff: "Ready for synthesis.",
-        report: {
-          conclusion: "Inventory completed after supervisor guidance tightened the scope.",
-          evidence: [{ title: "Inventory", summary: "The scoped inventory completed successfully.", detail: null }],
-          scriptsRun: [{ command: "bash .receipt/factory/task_01_inventory.sh", summary: "Collected scoped inventory evidence.", status: "ok" }],
-          disagreements: [],
-          nextSteps: [],
-        },
-      });
-      return { stdout: raw, stderr: "", lastMessage: raw };
+        summary: "stdout looked structured but no final message was produced",
+        artifacts: [],
+        nextAction: null,
+        report: null,
+      }),
+      stderr: "",
+    }),
+  });
+
+  const created = await service.createObjective({
+    title: "Reject unstructured investigation completion",
+    prompt: "Require the worker to finish with the structured final JSON contract.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await expect(service.runTask(taskJob!.payload as FactoryTaskJobPayload))
+    .rejects
+    .toThrow("missing structured factory task result from codex");
+}, 120_000);
+
+test("factory investigation: live output surfaces extra task artifacts before final handoff", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => {
+      throw new Error("task execution should not be needed for artifact visibility");
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Inspect billing context",
+    prompt: "Inspect billing context and collect any side artifacts.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const sideArtifactPath = path.join(payload.workspacePath, ".receipt", "factory", `${payload.taskId}.billing_context.json`);
+  await fs.mkdir(path.dirname(sideArtifactPath), { recursive: true });
+  await fs.writeFile(sideArtifactPath, JSON.stringify({ buckets: 3 }, null, 2), "utf-8");
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.tasks[0]?.artifactActivity?.some((artifact) => artifact.label === `${payload.taskId}.billing_context.json`)).toBe(true);
+
+  const live = await service.getObjectiveLiveOutput(created.objectiveId, "task", payload.taskId);
+  expect(live.summary).toContain("Recent task artifact");
+  expect(live.artifactActivity?.some((artifact) => artifact.label === `${payload.taskId}.billing_context.json`)).toBe(true);
+});
+
+test("factory investigation: infrastructure objectives keep explicit empty checks and use fixed repo profile defaults", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => {
+      throw new Error("task execution should not be needed for the checks regression");
+    },
+    seedRepo: async (repoRoot) => {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({
+          name: "factory-infra-checks-test",
+          packageManager: "bun@1.2.0",
+          scripts: {
+            build: "tsc -p tsconfig.json",
+            test: "bun test",
+            lint: "eslint .",
+          },
+        }, null, 2),
+        "utf-8",
+      );
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate infrastructure inventory",
+    prompt: "Investigate the current infrastructure inventory without changing code.",
+    profileId: "infrastructure",
+    objectiveMode: "investigation",
+    severity: 2,
+  });
+  expect(created.checks).toEqual([]);
+
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const compose = await service.buildComposeModel();
+  expect(detail.checks).toEqual([]);
+  expect(compose.profileSummary).toContain("checked-in Factory profiles and skills only");
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const manifestPath = String((taskJob!.payload as FactoryTaskJobPayload).manifestPath);
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
+    readonly objective?: {
+      readonly checks?: ReadonlyArray<string>;
+    };
+  };
+  expect(manifest.objective?.checks).toEqual([]);
+}, 120_000);
+
+test("factory investigation: react with a note supersedes the pending attempt and appends operator guidance", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => {
+      throw new Error("task execution should not be needed for react note coverage");
     },
   });
 
@@ -281,64 +335,25 @@ test("factory investigation: supervisor restart guidance reruns the task with ap
     severity: 2,
     checks: ["true"],
   });
-  await runObjectiveStartup(service, created.objectiveId);
-
-  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
-  expect(taskJob).toBeTruthy();
-  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+  await service.reactObjectiveWithNote(
+    created.objectiveId,
+    "Focus only on the inventory task and return the structured result now.",
+  );
 
   const detail = await service.getObjective(created.objectiveId);
-  expect(detail.status).toBe("completed");
-  expect(runCount).toBe(2);
-  expect(prompts[1] ?? "").toContain("## Supervisor Guidance");
-  expect(prompts[1] ?? "").toContain("Focus only on the inventory task and return the structured result now.");
+  expect(detail.tasks).toHaveLength(2);
+  expect(detail.tasks[0]?.status).toBe("superseded");
+  expect(detail.tasks[1]?.prompt).toContain("Operator follow-up for this attempt:");
+  expect(detail.tasks[1]?.prompt).toContain("Focus only on the inventory task and return the structured result now.");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
+  const taskJobs = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJobs).toHaveLength(1);
 }, 120_000);
 
-test("factory investigation: conflicting reports spawn reconciliation and complete from the reconciled result", async () => {
-  const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Signal A", prompt: "Collect signal A from service health evidence.", workerType: "codex", dependsOn: [] },
-          { title: "Signal B", prompt: "Collect signal B from deployment evidence.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
-    codexRun: async (input) => {
-      const structured = input.prompt.includes("Collect signal A")
-        ? {
-            outcome: "approved",
-            summary: "Signal A implicates service health.",
-            handoff: "First report complete.",
-            report: {
-              conclusion: "Service health evidence points to an application-side fault.",
-              evidence: [{ title: "Health checks", summary: "Service health degraded before the deployment change." }],
-            },
-          }
-        : input.prompt.includes("Collect signal B")
-          ? {
-              outcome: "approved",
-              summary: "Signal B implicates deployment drift.",
-              handoff: "Second report complete.",
-              report: {
-                conclusion: "Deployment evidence points to an infrastructure-side drift.",
-                evidence: [{ title: "Deployment diff", summary: "The latest rollout changed core infrastructure settings." }],
-              },
-            }
-          : {
-              outcome: "approved",
-              summary: "Reconciled the conflicting signals.",
-              handoff: "Reconciliation complete.",
-              report: {
-                conclusion: "The rollout exposed an application defect; infrastructure drift was not causal.",
-                evidence: [{ title: "Reconciled evidence", summary: "The deployment change coincided with, but did not cause, the outage." }],
-                disagreements: ["Initial signal attribution differed across task_01 and task_02."],
-                nextSteps: ["Validate the application fix path before any infra rollback."],
-              },
-            };
-      const raw = JSON.stringify(structured);
-      return { stdout: raw, stderr: "", lastMessage: raw };
+test("factory investigation: multiple reported tasks synthesize directly without reconciliation fan-out", async () => {
+  const { service } = await createFactoryService({
+    codexRun: async () => {
+      throw new Error("task execution should not be needed for synthesis coverage");
     },
   });
 
@@ -349,45 +364,106 @@ test("factory investigation: conflicting reports spawn reconciliation and comple
     severity: 3,
     checks: ["true"],
   });
-  await runObjectiveStartup(service, created.objectiveId);
-
-  const [firstJob] = await objectiveTaskJobs(queue, created.objectiveId);
-  expect(firstJob).toBeTruthy();
-  const firstTaskId = (firstJob!.payload as FactoryTaskJobPayload).taskId;
-  await service.runTask(firstJob!.payload as FactoryTaskJobPayload);
-
-  const secondJob = (await objectiveTaskJobs(queue, created.objectiveId))
-    .find((job) => (job.payload as FactoryTaskJobPayload).taskId !== firstTaskId);
-  expect(secondJob).toBeTruthy();
-  await service.runTask(secondJob!.payload as FactoryTaskJobPayload);
-
-  const afterConflict = await service.getObjective(created.objectiveId);
-  expect(afterConflict.reconciliationStatus).not.toBe("none");
-  const reconciliationTask = afterConflict.tasks.find((task) => task.taskKind === "reconciliation");
-  expect(reconciliationTask).toBeTruthy();
-
-  const reconciliationJob = (await objectiveTaskJobs(queue, created.objectiveId))
-    .find((job) => (job.payload as FactoryTaskJobPayload).taskId === reconciliationTask?.taskId);
-  expect(reconciliationJob).toBeTruthy();
-  await service.runTask(reconciliationJob!.payload as FactoryTaskJobPayload);
-
   const detail = await service.getObjective(created.objectiveId);
-  expect(detail.status).toBe("completed");
-  expect(detail.reconciliationStatus).toBe("completed");
-  expect(detail.investigation.synthesized?.report.conclusion).toContain("application defect");
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
+  const firstTask = detail.tasks[0]!;
+  const secondTask = {
+    ...firstTask,
+    nodeId: "task_02",
+    taskId: "task_02",
+    title: "Signal B",
+    prompt: "Collect signal B from deployment evidence.",
+    status: "pending" as const,
+    candidateId: undefined,
+    sourceTaskId: firstTask.taskId,
+    createdAt: firstTask.createdAt + 1,
+  };
+  const now = Date.now();
+  await (service as unknown as {
+    emitObjectiveBatch(objectiveId: string, events: ReadonlyArray<Record<string, unknown>>): Promise<void>;
+  }).emitObjectiveBatch(created.objectiveId, [
+    {
+      type: "task.added",
+      objectiveId: created.objectiveId,
+      task: secondTask,
+      createdAt: secondTask.createdAt,
+    },
+    {
+      type: "candidate.created",
+      objectiveId: created.objectiveId,
+      createdAt: now,
+      candidate: {
+        candidateId: "task_01_candidate_01",
+        taskId: firstTask.taskId,
+        status: "running",
+        baseCommit: created.baseHash,
+        checkResults: [],
+        artifactRefs: {},
+        createdAt: now,
+        updatedAt: now,
+      },
+    },
+    {
+      type: "candidate.created",
+      objectiveId: created.objectiveId,
+      createdAt: now + 1,
+      candidate: {
+        candidateId: "task_02_candidate_01",
+        taskId: secondTask.taskId,
+        status: "running",
+        baseCommit: created.baseHash,
+        checkResults: [],
+        artifactRefs: {},
+        createdAt: now + 1,
+        updatedAt: now + 1,
+      },
+    },
+    {
+      type: "investigation.reported",
+      objectiveId: created.objectiveId,
+      taskId: firstTask.taskId,
+      candidateId: "task_01_candidate_01",
+      summary: "Signal A implicates service health.",
+      handoff: "First report complete.",
+      report: {
+        conclusion: "Service health evidence points to an application-side fault.",
+        evidence: [{ title: "Health checks", summary: "Service health degraded before the deployment change.", detail: null }],
+        scriptsRun: [],
+        disagreements: ["Initial attribution differed across observed signals."],
+        nextSteps: [],
+      },
+      artifactRefs: {},
+      reportedAt: now + 2,
+    },
+    {
+      type: "investigation.reported",
+      objectiveId: created.objectiveId,
+      taskId: secondTask.taskId,
+      candidateId: "task_02_candidate_01",
+      summary: "Signal B implicates deployment drift.",
+      handoff: "Second report complete.",
+      report: {
+        conclusion: "Deployment evidence points to an infrastructure-side drift.",
+        evidence: [{ title: "Deployment diff", summary: "The latest rollout changed core infrastructure settings.", detail: null }],
+        scriptsRun: [],
+        disagreements: [],
+        nextSteps: ["Validate the application fix path before any infra rollback."],
+      },
+      artifactRefs: {},
+      reportedAt: now + 3,
+    },
+  ]);
+  await service.reactObjective(created.objectiveId);
+
+  const after = await service.getObjective(created.objectiveId);
+  expect(after.status).toBe("completed");
+  expect(after.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
+  expect(after.investigation.synthesized?.taskIds).toEqual([firstTask.taskId, secondTask.taskId]);
+  expect(after.investigation.synthesized?.report.conclusion).toContain("task_01");
+  expect(after.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
 }, 120_000);
 
-test("factory repo profile: init emits an execution landscape skill and mounts it into codex packets", async () => {
+test("factory profile summary: init stays fixed and does not mount generated repo-profile artifacts", async () => {
   const { service } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Inspect repo profile", prompt: "Inspect the generated repo profile.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
     codexRun: async () => {
       const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop" });
       return { stdout: raw, stderr: "", lastMessage: raw };
@@ -400,13 +476,8 @@ test("factory repo profile: init emits an execution landscape skill and mounts i
     },
   });
 
-  const profile = await service.prepareRepoProfile();
-  const landscapeSkillRef = profile.generatedSkillRefs.find((ref) => ref.label === "Repo Execution And Permission Landscape");
-  expect(landscapeSkillRef).toBeTruthy();
-  const landscapeSkill = await fs.readFile(String(landscapeSkillRef!.ref), "utf-8");
-  expect(landscapeSkill).toContain("aws-cli");
-  expect(landscapeSkill).toContain("terraform");
-  expect(landscapeSkill).toContain(".aws");
+  const compose = await service.buildComposeModel();
+  expect(compose.profileSummary).toContain("checked-in Factory profiles and skills only");
 
   const packet = await service.prepareDirectCodexProbePacket({
     jobId: "job_landscape_probe",
@@ -419,9 +490,7 @@ test("factory repo profile: init emits an execution landscape skill and mounts i
     supervisorSessionId: "session_landscape_probe",
   });
   const contextPack = await fs.readFile(packet.artifactPaths.contextPackPath, "utf-8");
-  expect(contextPack).toContain("\"repoExecutionLandscape\"");
-  expect(contextPack).toContain("\"tooling\": [");
-  expect(packet.renderedPrompt).toContain("execution landscape, permissions, or infrastructure guardrails");
+  expect(contextPack).not.toContain("\"repoExecutionLandscape\"");
 }, 120_000);
 
 test("factory cloud context: infrastructure packets mount AWS-first context and skills even when multiple providers are active locally", async () => {
@@ -461,14 +530,6 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
     },
   };
   const { service } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "Inspect bucket posture", prompt: "Use the local cloud context and report the active bucket scope.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
     codexRun: async () => {
       const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
@@ -563,14 +624,6 @@ test("factory investigation: infrastructure task prompts require deterministic s
   let capturedCompletionSignalPath: CodexExecutorInput["completionSignalPath"];
   let capturedReasoningEffort: CodexExecutorInput["reasoningEffort"];
   const { service, queue } = await createFactoryService({
-    llmStructured: async <Schema extends ZodTypeAny>(input: { readonly schema: Schema }) => ({
-      parsed: input.schema.parse({
-        tasks: [
-          { title: "List buckets", prompt: "Use AWS CLI to list S3 buckets.", workerType: "codex", dependsOn: [] },
-        ],
-      }),
-      raw: "",
-    }),
     codexRun: async (input) => {
       capturedSandboxMode = input.sandboxMode;
       capturedCompletionSignalPath = input.completionSignalPath;
@@ -603,20 +656,24 @@ test("factory investigation: infrastructure task prompts require deterministic s
   };
   expect(capturedSandboxMode).toBe("danger-full-access");
   expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
-  expect(capturedReasoningEffort).toBe("medium");
+  expect(capturedReasoningEffort).toBe("high");
   expect(prompt).toContain("## Script-First Execution");
+  expect(prompt).toContain("Profile Cloud Provider: aws");
   expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
   expect(prompt).toContain("stop bootstrap and immediately write and run the script");
   expect(prompt).toContain("If the script succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
   expect(prompt).toContain("Treat successful AWS CLI JSON output as sufficient machine-readable evidence");
   expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
   expect(prompt).toContain("capture `aws sts get-caller-identity` in the script first");
-  expect(prompt).toContain("use AWS only");
+  expect(prompt).toContain("Local execution context already indicates aws. Use that provider");
+  expect(prompt).toContain("Infrastructure profile is AWS-only for now");
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
   expect(prompt).toContain("do not blindly loop raw `aws ec2 describe-regions --all-regions` output");
   expect(prompt).toContain("bash skills/factory-infrastructure-aws/scripts/aws-account-scope.sh");
   expect(prompt).toContain("Treat `not-opted-in` regions as skipped scope, not as a global credential failure");
-  expect(prompt).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
+  expect(payload.executionMode).toBe("isolated");
+  expect(payload.workspacePath).toContain("/factory/runtimes/");
+  expect(prompt).toContain("This task runs in an isolated runtime directory, not a git worktree.");
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
   expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");
   expect(prompt).toContain("Helper evidence files written under .receipt/ do not count as repo changes");
@@ -624,4 +681,184 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).not.toContain("skills/factory-run-orchestrator/SKILL.md");
+  await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-receipt-worker", "SKILL.md"))).resolves.toBeNull();
+  await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-infrastructure-aws", "SKILL.md"))).resolves.toBeNull();
 }, 120_000);
+
+test("factory investigation: infrastructure runs promote reusable knowledge and remount it on matching follow-ups", async () => {
+  const awsContext: FactoryCloudExecutionContext = {
+    summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/csagent-api-service in account 445567089271 with region us-west-2.",
+    availableProviders: ["aws"],
+    activeProviders: ["aws"],
+    preferredProvider: "aws",
+    guidance: ["One provider is clearly usable from the local CLI context (aws). Use it by default instead of asking the user to restate provider or scope."],
+    aws: {
+      cliPath: "/opt/homebrew/bin/aws",
+      version: "aws-cli/2.34.14",
+      profiles: ["default"],
+      selectedProfile: "default",
+      defaultRegion: "us-west-2",
+      callerIdentity: {
+        accountId: "445567089271",
+        arn: "arn:aws:iam::445567089271:user/csagent-api-service",
+        userId: "AIDATEST",
+      },
+    },
+  };
+  const prompts: string[] = [];
+  let runCount = 0;
+  const { service, queue } = await createFactoryService({
+    codexRun: async (input) => {
+      prompts.push(input.prompt);
+      runCount += 1;
+      if (runCount === 1) {
+        const scriptRelPath = ".receipt/factory/reusable_bucket_inventory.sh";
+        const outputRelPath = ".receipt/factory/reusable_bucket_inventory.json";
+        await fs.mkdir(path.join(input.workspacePath, ".receipt", "factory"), { recursive: true });
+        await fs.writeFile(
+          path.join(input.workspacePath, scriptRelPath),
+          "#!/usr/bin/env bash\nset -euo pipefail\naws s3api list-buckets --output json\n",
+          "utf-8",
+        );
+        await fs.writeFile(
+          path.join(input.workspacePath, outputRelPath),
+          JSON.stringify({ buckets: ["alpha-bucket", "beta-bucket"] }, null, 2),
+          "utf-8",
+        );
+        const raw = JSON.stringify({
+          outcome: "approved",
+          summary: "Collected the current S3 bucket inventory.",
+          artifacts: [
+            { label: "Bucket inventory script", path: scriptRelPath, summary: "Reusable S3 inventory probe." },
+            { label: "Bucket inventory JSON", path: outputRelPath, summary: "Structured bucket list for the active AWS account." },
+          ],
+          nextAction: null,
+          report: {
+            conclusion: "S3 bucket inventory completed for the active AWS account.",
+            evidence: [{ title: "Bucket inventory JSON", summary: "Structured bucket list for the active AWS account.", detail: outputRelPath }],
+            scriptsRun: [{ command: `bash ${scriptRelPath}`, summary: "Listed S3 buckets.", status: "ok" }],
+            disagreements: [],
+            nextSteps: [],
+          },
+        });
+        return { stdout: raw, stderr: "", lastMessage: raw };
+      }
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Reused prior bucket inventory knowledge.",
+        artifacts: [],
+        nextAction: null,
+        report: {
+          conclusion: "The prior reusable bucket inventory knowledge was available in the task packet.",
+          evidence: [],
+          scriptsRun: [],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+    cloudExecutionContextProvider: async () => awsContext,
+  });
+
+  const first = await service.createObjective({
+    title: "List buckets",
+    prompt: "show me the aws list of buckets",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+    profileId: "infrastructure",
+  });
+  await runObjectiveStartup(service, first.objectiveId);
+  const [firstJob] = await objectiveTaskJobs(queue, first.objectiveId);
+  expect(firstJob).toBeTruthy();
+  await service.runTask(firstJob!.payload as FactoryTaskJobPayload);
+
+  const knowledgeRepos = await fs.readdir(path.join(service.dataDir, "factory", "knowledge"));
+  expect(knowledgeRepos.length).toBe(1);
+  const infraRoot = path.join(service.dataDir, "factory", "knowledge", knowledgeRepos[0]!, "infrastructure");
+  const index = JSON.parse(await fs.readFile(path.join(infraRoot, "index.json"), "utf-8")) as ReadonlyArray<{
+    readonly knowledgePath: string;
+    readonly keywords?: ReadonlyArray<string>;
+    readonly scriptPaths?: ReadonlyArray<string>;
+  }>;
+  expect(index).toHaveLength(1);
+  const knowledgePath = index[0]!.knowledgePath;
+  const storedScriptPath = index[0]!.scriptPaths?.[0];
+  expect(index[0]!.keywords).not.toContain("aws");
+  expect(knowledgePath).toContain("/entries/");
+  await expect(fs.access(knowledgePath)).resolves.toBeNull();
+  expect(storedScriptPath).toContain("/scripts/");
+  await expect(fs.access(storedScriptPath!)).resolves.toBeNull();
+
+  const second = await service.createObjective({
+    title: "List buckets again",
+    prompt: "show me the list of buckets",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+    profileId: "infrastructure",
+  });
+  await runObjectiveStartup(service, second.objectiveId);
+  const [secondJob] = await objectiveTaskJobs(queue, second.objectiveId);
+  expect(secondJob).toBeTruthy();
+  const secondPayload = secondJob!.payload as FactoryTaskJobPayload;
+  const contextPack = JSON.parse(await fs.readFile(secondPayload.contextPackPath, "utf-8")) as {
+    readonly infrastructureKnowledge?: {
+      readonly roleLabel?: string;
+      readonly selectedEntries?: ReadonlyArray<{
+        readonly knowledgePath?: string;
+        readonly scriptPaths?: ReadonlyArray<string>;
+      }>;
+    };
+    readonly contextSources?: {
+      readonly sharedArtifactRefs?: ReadonlyArray<{
+        readonly ref?: string;
+      }>;
+    };
+  };
+  expect(contextPack.infrastructureKnowledge?.roleLabel).toBe("Infrastructure engineer");
+  expect(contextPack.infrastructureKnowledge?.selectedEntries?.[0]?.knowledgePath).toBe(knowledgePath);
+  expect(contextPack.infrastructureKnowledge?.selectedEntries?.[0]?.scriptPaths?.[0]).toBe(storedScriptPath);
+  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.ref === knowledgePath)).toBe(true);
+  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.ref === storedScriptPath)).toBe(true);
+
+  await service.runTask(secondPayload);
+  expect(prompts[1]).toContain("Act as the infrastructure engineer for this task.");
+  expect(prompts[1]).toContain(knowledgePath);
+  expect(prompts[1]).toContain(storedScriptPath!);
+}, 120_000);
+
+test("factory investigation: infrastructure objectives can start from a dirty source repo without an explicit baseHash", async () => {
+  const { service, queue, repoRoot } = await createFactoryService({
+    codexRun: async () => {
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Collected bucket count.",
+        artifacts: [],
+        nextAction: null,
+        report: {
+          conclusion: "Bucket inventory completed.",
+          evidence: [],
+          scriptsRun: [],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+  });
+
+  await fs.writeFile(path.join(repoRoot, "DIRTY_NOTE.txt"), "local change\n", "utf-8");
+
+  const created = await service.createObjective({
+    title: "Dirty repo infra objective",
+    prompt: "Count buckets in the mounted AWS account.",
+    profileId: "infrastructure",
+  });
+
+  expect(created.baseHash).toBeTruthy();
+  await runObjectiveStartup(service, created.objectiveId);
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect((taskJob?.payload as FactoryTaskJobPayload | undefined)?.executionMode).toBe("isolated");
+});

@@ -1,8 +1,123 @@
 import { esc, sectionLabelClass, softPanelClass, badge, statPill, formatTs, shortHash, ghostButtonClass, dangerButtonClass } from "./ui";
-import type { FactoryInspectorModel } from "./factory-models";
+import type {
+  FactoryInspectorModel,
+  FactoryInspectorRouteModel,
+  FactoryInspectorTabsModel,
+} from "./factory-models";
+
+const formatBytes = (bytes: number | undefined): string => {
+  if (!Number.isFinite(bytes) || !bytes || bytes < 1024) return `${Math.max(0, Math.floor(bytes ?? 0))} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+type FactoryInspectorIslandOptions = {
+  readonly tabsPath?: string;
+  readonly panelPath?: string;
+  readonly selectPath?: string;
+  readonly tabsTrigger?: string;
+  readonly panelTrigger?: string;
+  readonly panelOob?: boolean;
+};
+
+const inspectorQuery = (model: FactoryInspectorRouteModel, extra?: {
+  readonly panel?: FactoryInspectorRouteModel["panel"];
+  readonly focusKind?: "task" | "job";
+  readonly focusId?: string;
+  readonly jobId?: string;
+}): string => {
+  const params = new URLSearchParams();
+  params.set("profile", model.activeProfileId);
+  if (model.chatId) params.set("chat", model.chatId);
+  if (model.objectiveId) params.set("thread", model.objectiveId);
+  if (model.runId) params.set("run", model.runId);
+  if (extra?.jobId ?? model.jobId) params.set("job", extra?.jobId ?? model.jobId!);
+  if (extra?.panel ?? model.panel) params.set("panel", extra?.panel ?? model.panel);
+  if (extra?.focusKind ?? model.focusKind) params.set("focusKind", extra?.focusKind ?? model.focusKind!);
+  if (extra?.focusId ?? model.focusId) params.set("focusId", extra?.focusId ?? model.focusId!);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+};
+
+const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
+  const task = model.workbench?.focusedTask;
+  if (!task) return "";
+  const artifacts = [
+    ["Manifest", task.manifestPath],
+    ["Context", task.contextPackPath],
+    ["Prompt", task.promptPath],
+    ["Memory", task.memoryScriptPath],
+    ["Stdout", task.stdoutPath],
+    ["Stderr", task.stderrPath],
+    ["Last Message", task.lastMessagePath],
+  ].flatMap(([label, value]) => value ? [[label, value] as const] : []);
+  const packetFiles = artifacts.length > 0
+    ? `<details class="rounded-lg border border-border bg-muted px-2.5 py-2">
+    <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Packet Files</summary>
+    <div class="mt-2 space-y-2">
+      ${artifacts.map(([label, value]) => `<div class="rounded-md border border-border bg-background px-2 py-1.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(label)}</div>
+        <code class="mt-1 block text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(value)}</code>
+      </div>`).join("")}
+    </div>
+  </details>`
+    : "";
+  const extraArtifacts = task.artifactActivity?.length
+    ? `<details class="rounded-lg border border-border bg-muted px-2.5 py-2">
+    <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Task Artifacts</summary>
+    <div class="mt-2 space-y-2">
+      ${task.artifactActivity.map((artifact) => `<div class="rounded-md border border-border bg-background px-2 py-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(artifact.label)}</div>
+          <div class="text-[10px] text-muted-foreground">${esc(formatBytes(artifact.bytes))}</div>
+        </div>
+        <div class="mt-1 text-[10px] text-muted-foreground">${esc(formatTs(artifact.updatedAt))}</div>
+        <code class="mt-1 block text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(artifact.path)}</code>
+      </div>`).join("")}
+    </div>
+  </details>`
+    : "";
+  if (!packetFiles && !extraArtifacts) return "";
+  return [packetFiles, extraArtifacts].filter(Boolean).join("");
+};
+
+const renderMissingObjectivePanel = (model: FactoryInspectorModel): string => {
+  const objectiveId = model.objectiveId?.trim();
+  return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm">
+    <div class="rounded-lg border border-warning/20 bg-warning/5 px-3 py-3 text-warning">Objective not found.</div>
+    <div class="text-muted-foreground">The current thread URL points to Factory data that no longer exists${objectiveId ? `: ${esc(objectiveId)}` : "."}</div>
+  </div>`;
+};
+
+const renderFocusedOutput = (model: FactoryInspectorModel, heading: string): string => {
+  const focus = model.workbench?.focus;
+  if (!focus) return "";
+  return `<div class="space-y-2">
+    <div class="${sectionLabelClass} mb-2">${esc(heading)}</div>
+    <div class="${softPanelClass} p-3 flex flex-col gap-2">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="font-semibold text-sm text-foreground">${esc(focus.title)}</div>
+          <div class="mt-1 text-[11px] text-muted-foreground">${esc(focus.focusKind === "job" ? `Job ${focus.focusId}` : `Task ${focus.focusId}`)}</div>
+        </div>
+        ${badge(focus.status)}
+      </div>
+      ${focus.summary ? `<div class="text-xs text-foreground">${esc(focus.summary)}</div>` : ''}
+      ${focus.artifactSummary ? `<div class="text-[11px] text-muted-foreground">${esc(focus.artifactSummary)}</div>` : ''}
+      ${focus.lastMessage ? `<pre class="mt-1 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(focus.lastMessage)}</pre>` : ''}
+      ${focus.stdoutTail ? `<pre class="mt-1 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(focus.stdoutTail)}</pre>` : ''}
+      ${focus.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto">${esc(focus.stderrTail)}</pre>` : ''}
+    </div>
+    ${renderFocusedArtifacts(model)}
+  </div>`;
+};
 
 const renderOverviewPanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   const obj = model.selectedObjective;
+  const workbench = model.workbench;
+  const focusedTask = workbench?.focusedTask;
+  const focus = workbench?.focus;
   if (!obj) {
     return `<div class="space-y-3 px-3 py-3 md:px-4 text-muted-foreground text-sm">No objective selected.</div>`;
   }
@@ -50,10 +165,34 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
       <div class="text-sm text-muted-foreground">${esc(obj.latestDecisionSummary)}</div>
     </div>` : ''}
 
+    ${workbench?.hasActiveExecution && focus ? `
+    <div class="flex flex-col gap-2 pt-3 mt-1 border-t border-border">
+      <div class="${sectionLabelClass}">Focused Execution</div>
+      <div class="${softPanelClass} p-3 flex flex-col gap-2">
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-foreground">${esc(focus.title)}</div>
+            <div class="mt-1 text-[11px] text-muted-foreground">${esc(focus.focusKind === "job" ? `Job ${focus.focusId}` : `Task ${focus.focusId}`)}</div>
+          </div>
+          ${badge(focus.status)}
+        </div>
+        ${focus.summary ? `<div class="text-xs text-foreground">${esc(focus.summary)}</div>` : ''}
+        ${focus.artifactSummary ? `<div class="text-[11px] text-muted-foreground">${esc(focus.artifactSummary)}</div>` : ''}
+        ${focusedTask ? `<div class="rounded-lg border border-border bg-background px-2.5 py-2">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Task Prompt</div>
+          <pre class="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(focusedTask.prompt)}</pre>
+        </div>` : ''}
+        ${focusedTask ? `<div class="grid grid-cols-2 gap-2">
+          ${statPill("Workspace", focusedTask.workspaceExists ? (focusedTask.workspaceDirty ? "Dirty" : "Clean") : "Missing")}
+          ${statPill("Candidate", focusedTask.candidateId ?? "None")}
+        </div>` : ''}
+        ${renderFocusedArtifacts(model)}
+      </div>
+    </div>` : ''}
+
     <div class="flex flex-col gap-2 pt-3 mt-1 border-t border-border">
       <div class="${sectionLabelClass}">Quick Actions</div>
       <div class="flex flex-wrap gap-2">
-        <button onclick="document.getElementById('factory-prompt').value = '/steer '; document.getElementById('factory-prompt').focus();" class="${ghostButtonClass} !py-1 !px-2.5 !text-[10px]">Steer</button>
         <button onclick="document.getElementById('factory-prompt').value = '/react '; document.getElementById('factory-prompt').focus();" class="${ghostButtonClass} !py-1 !px-2.5 !text-[10px]">React</button>
         ${['failed', 'canceled'].includes(obj.status) ? `<button onclick="document.getElementById('factory-prompt').value = '/resume '; document.getElementById('factory-prompt').focus();" class="${ghostButtonClass} !py-1 !px-2.5 !text-[10px]">Resume</button>` : ''}
         ${!['completed', 'failed', 'canceled'].includes(obj.status) ? `<button onclick="document.getElementById('factory-prompt').value = '/cancel '; document.getElementById('factory-prompt').focus();" class="${dangerButtonClass} !py-1 !px-2.5 !text-[10px]">Cancel</button>` : ''}
@@ -65,7 +204,7 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
     <div class="flex flex-col gap-2 pt-3 mt-1 border-t border-border">
       <div class="${sectionLabelClass} flex justify-between items-center">
         <span>Active Codex</span>
-        <button hx-get="/factory/island/inspector?panel=live&thread=${encodeURIComponent(obj.objectiveId)}" hx-target="#factory-inspector" hx-swap="innerHTML" class="text-[10px] text-primary hover:underline lowercase tracking-normal font-medium">View all live output &rarr;</button>
+        <button hx-get="/factory/island/inspector${inspectorQuery(model, { panel: 'live' })}" hx-target="#factory-inspector" hx-swap="innerHTML" class="text-[10px] text-primary hover:underline lowercase tracking-normal font-medium">View all live output &rarr;</button>
       </div>
       <div class="${softPanelClass} p-3 flex flex-col gap-2">
         <div class="text-xs text-foreground">${esc(model.activeCodex.summary)}</div>
@@ -78,16 +217,23 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
 };
 
 const renderExecutionPanel = (model: FactoryInspectorModel): string => {
-  if (!model.tasks || model.tasks.length === 0) {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
+  const tasks = model.workbench?.tasks ?? model.tasks;
+  if (!tasks || tasks.length === 0) {
     return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No tasks defined yet.</div>`;
   }
   
   return `<div class="space-y-3 px-3 py-3 md:px-4">
+    ${renderFocusedOutput(model, "Focused Output")}
     <div class="${sectionLabelClass} mb-2">Execution Graph</div>
     <div class="space-y-2">
-      ${model.tasks.map((task, idx) => `
-        <div class="${softPanelClass} p-3 flex flex-col gap-1.5 relative">
-          <div class="absolute -left-2.5 top-5 bottom-0 border-l border-border/50 ${idx === model.tasks!.length - 1 ? 'hidden' : ''}"></div>
+      ${tasks.map((task, idx) => {
+        const candidateTokensUsed = "candidateTokensUsed" in task
+          ? task.candidateTokensUsed
+          : ("candidate" in task ? task.candidate?.tokensUsed : undefined);
+        return `
+        <a href="/factory${inspectorQuery(model, { focusKind: 'task', focusId: task.taskId })}" class="block ${softPanelClass} p-3 flex flex-col gap-1.5 relative transition hover:bg-accent">
+          <div class="absolute -left-2.5 top-5 bottom-0 border-l border-border/50 ${idx === tasks.length - 1 ? 'hidden' : ''}"></div>
           
           <div class="flex items-center justify-between gap-2 relative">
             <div class="flex items-center gap-1.5 min-w-0">
@@ -101,26 +247,45 @@ const renderExecutionPanel = (model: FactoryInspectorModel): string => {
             <div class="flex items-center gap-2">
               <span class="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">${esc(task.workerType)}</span>
               ${task.taskKind !== 'planned' ? `<span class="text-[10px] bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded">${esc(task.taskKind)}</span>` : ''}
-              ${task.candidate?.tokensUsed ? `<span class="text-[10px] text-muted-foreground font-mono bg-background px-1 border border-border rounded">${task.candidate.tokensUsed.toLocaleString()} tokens</span>` : ''}
+              ${candidateTokensUsed ? `<span class="text-[10px] text-muted-foreground font-mono bg-background px-1 border border-border rounded">${candidateTokensUsed.toLocaleString()} tokens</span>` : ''}
             </div>
             
             ${task.prompt ? `<div class="text-xs text-muted-foreground line-clamp-2 mt-0.5">${esc(task.prompt)}</div>` : ''}
+            ${"dependencySummary" in task && task.dependencySummary ? `<div class="text-xs text-muted-foreground mt-0.5">${esc(task.dependencySummary)}</div>` : ''}
             
             ${task.latestSummary ? `<div class="text-xs text-info/90 mt-1">${esc(task.latestSummary)}</div>` : ''}
             
             ${task.blockedReason ? `<div class="text-xs text-warning mt-1">${esc(task.blockedReason)}</div>` : ''}
           </div>
-        </div>
-      `).join('')}
+        </a>
+      `;}).join('')}
     </div>
   </div>`;
 };
 
 const renderLivePanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
+  if (model.workbench?.focus) {
+    return `<div class="space-y-3 px-3 py-3 md:px-4">
+      ${renderFocusedOutput(model, "Focused Live Output")}
+      ${model.workbench.jobs.length ? `<div class="space-y-2">
+        <div class="${sectionLabelClass}">Recent Jobs</div>
+        ${model.workbench.jobs.map((job) => `<a href="/factory${inspectorQuery(model, { focusKind: 'job', focusId: job.jobId, jobId: job.jobId })}" class="block ${softPanelClass} p-3 transition hover:bg-accent">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-semibold text-foreground">${esc(job.agentId)}</div>
+              <div class="mt-1 text-xs text-muted-foreground">${esc(job.summary)}</div>
+            </div>
+            ${badge(job.status)}
+          </div>
+        </a>`).join("")}
+      </div>` : ""}
+    </div>`;
+  }
   if (!model.activeCodex && (!model.liveChildren || model.liveChildren.length === 0)) {
     return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No live execution currently running.</div>`;
   }
-  
+
   const cards: string[] = [];
   if (model.activeCodex) {
     cards.push(`
@@ -161,6 +326,7 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
 };
 
 const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   if (!model.receipts || model.receipts.length === 0) {
     return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No receipts found.</div>`;
   }
@@ -183,6 +349,7 @@ const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
 };
 
 const renderDebugPanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   if (!model.debugInfo) {
     return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No debug info available.</div>`;
   }
@@ -191,33 +358,35 @@ const renderDebugPanel = (model: FactoryInspectorModel): string => {
   </div>`;
 };
 
-const renderInspectorTabs = (model: FactoryInspectorModel): string => {
-  const tabs = [
+const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: FactoryInspectorIslandOptions): string => {
+  const tabs: ReadonlyArray<{ readonly id: FactoryInspectorRouteModel["panel"]; readonly label: string }> = [
     { id: "overview", label: "Overview" },
     { id: "execution", label: "Tasks" },
     { id: "live", label: "Live Output" },
     { id: "receipts", label: "Receipts" },
     { id: "debug", label: "Debug" }
   ];
-  
-  const objId = model.selectedObjective?.objectiveId;
-  const threadParam = objId ? `&thread=${encodeURIComponent(objId)}` : "";
-  
-  return `<div class="flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10">
+  const tabsPath = options?.tabsPath ?? "/factory/island/inspector/tabs";
+  const selectPath = options?.selectPath ?? "/factory/island/inspector/select";
+  const triggerAttrs = options?.tabsTrigger
+    ? ` hx-get="${tabsPath}${inspectorQuery(model)}" hx-trigger="${esc(options.tabsTrigger)}" hx-swap="outerHTML"`
+    : "";
+
+  return `<div id="factory-inspector-tabs" class="flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10"${triggerAttrs}>
     ${tabs.map(t => {
       const active = model.panel === t.id;
       return `<button 
-        hx-get="/factory/island/inspector?panel=${t.id}${threadParam}" 
-        hx-target="#factory-inspector" 
-        hx-swap="innerHTML"
+        type="button"
+        hx-get="${selectPath}${inspectorQuery(model, { panel: t.id })}" 
+        hx-target="#factory-inspector-tabs" 
+        hx-swap="outerHTML"
         class="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap ${active ? 'bg-primary/10 text-primary border border-primary/20' : 'text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground'}"
       >${esc(t.label)}</button>`;
     }).join('')}
   </div>`;
 };
 
-export const factoryInspectorIsland = (model: FactoryInspectorModel): string => {
-  const tabs = renderInspectorTabs(model);
+const renderInspectorPanel = (model: FactoryInspectorModel): string => {
   let content = "";
   switch (model.panel) {
     case "overview": content = renderOverviewPanel(model); break;
@@ -230,5 +399,36 @@ export const factoryInspectorIsland = (model: FactoryInspectorModel): string => 
       throw new Error(`Unhandled panel type: ${exhaustiveCheck}`);
     }
   }
-  return tabs + content;
+  return content;
 };
+
+export const factoryInspectorTabsIsland = (
+  model: FactoryInspectorTabsModel,
+  options?: FactoryInspectorIslandOptions,
+): string => renderInspectorTabs(model, options);
+
+export const factoryInspectorPanelIsland = (
+  model: FactoryInspectorModel,
+  options?: FactoryInspectorIslandOptions,
+): string => {
+  const panelPath = options?.panelPath ?? "/factory/island/inspector/panel";
+  const triggerAttrs = options?.panelTrigger
+    ? ` hx-get="${panelPath}${inspectorQuery(model)}" hx-trigger="${esc(options.panelTrigger)}" hx-swap="outerHTML"`
+    : "";
+  const oobAttr = options?.panelOob ? ` hx-swap-oob="outerHTML"` : "";
+  return `<div id="factory-inspector-panel" class="min-h-0"${triggerAttrs}${oobAttr}>${renderInspectorPanel(model)}</div>`;
+};
+
+export const factoryInspectorSelectionIsland = (
+  model: FactoryInspectorModel,
+  options?: FactoryInspectorIslandOptions,
+): string =>
+  factoryInspectorTabsIsland(model, options)
+  + factoryInspectorPanelIsland(model, { ...options, panelOob: true });
+
+export const factoryInspectorIsland = (
+  model: FactoryInspectorModel,
+  options?: FactoryInspectorIslandOptions,
+): string =>
+  factoryInspectorTabsIsland(model, options)
+  + factoryInspectorPanelIsland(model, options);

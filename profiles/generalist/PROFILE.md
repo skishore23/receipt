@@ -3,33 +3,10 @@
   "id": "generalist",
   "label": "Generalist",
   "default": true,
-  "capabilities": [
-    "memory.read",
-    "memory.write",
-    "skill.read",
-    "status.read",
-    "async.dispatch",
-    "async.control",
-    "objective.control",
-    "profile.handoff"
-  ],
-  "handoffTargets": [
-    "software",
-    "infrastructure"
-  ],
-  "routeHints": [
-    "factory",
-    "objective",
-    "implement",
-    "delivery",
-    "debug",
-    "ship"
-  ],
-  "mode": "interactive",
-  "childDedupe": "by_run_and_prompt",
-  "objective": {
-    "maxParallelChildren": 3
-  }
+  "skills": [],
+  "defaultObjectiveMode": "delivery",
+  "defaultValidationMode": "repo_profile",
+  "allowObjectiveCreation": true
 }
 ---
 

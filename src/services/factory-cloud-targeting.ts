@@ -36,10 +36,10 @@ const buildAwsInfraGuidance = (aws: FactoryAwsExecutionContext | undefined): Rea
 };
 
 export const resolveFactoryCloudExecutionContext = (
-  profileId: string | undefined,
+  profileCloudProvider: string | undefined,
   context: FactoryCloudExecutionContext,
 ): FactoryCloudExecutionContext => {
-  if (profileId !== "infrastructure") return context;
+  if (profileCloudProvider !== "aws") return context;
   const aws = context.aws;
   return {
     summary: buildAwsInfraSummary(aws),

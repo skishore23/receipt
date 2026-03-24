@@ -49,7 +49,7 @@ const uniqueChecks = (values: ReadonlyArray<string> | undefined): ReadonlyArray<
 export const isInteractiveTerminal = (): boolean =>
   Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
-export const defaultFactoryConfigPath = (repoRoot: string): string =>
+const defaultFactoryConfigPath = (repoRoot: string): string =>
   path.join(repoRoot, CONFIG_DIR, CONFIG_NAME);
 
 export const detectGitRoot = async (cwd: string): Promise<string | undefined> => {
@@ -65,7 +65,7 @@ export const detectGitRoot = async (cwd: string): Promise<string | undefined> =>
   }
 };
 
-export const findFactoryConfig = async (startDir: string): Promise<string | undefined> => {
+const findFactoryConfig = async (startDir: string): Promise<string | undefined> => {
   let current = path.resolve(startDir);
   while (true) {
     const candidate = defaultFactoryConfigPath(current);

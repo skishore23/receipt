@@ -11,7 +11,7 @@ import {
 } from "../adapters/memory-tools";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { jsonlQueue } from "../adapters/jsonl-queue";
-import { embed, llmStructured } from "../adapters/openai";
+import { embed } from "../adapters/openai";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobHandler } from "../engine/runtime/job-worker";
 import type { SseHub } from "../framework/sse-hub";
@@ -66,7 +66,6 @@ export const createFactoryServiceRuntime = (opts: FactoryServiceRuntimeOptions):
     sse: opts.sse,
     codexExecutor: new LocalCodexExecutor({ bin: opts.codexBin }),
     memoryTools,
-    llmStructured: process.env.OPENAI_API_KEY ? llmStructured : undefined,
     repoRoot: opts.repoRoot,
   });
 
@@ -102,32 +101,14 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
         ? await service.runTask(job.payload, {
           shouldAbort: async () => {
             const aborts = await ctx.pullCommands(["abort"]);
-              const latest = await service.queue.getJob(job.id);
-              return aborts.length > 0 || latest?.abortRequested === true;
-            },
-            pollSignal: async () => {
-              const [latest, commands] = await Promise.all([
-                service.queue.getJob(job.id),
-                ctx.pullCommands(["steer", "follow_up"]),
-              ]);
-              const next = commands[0];
-              if (next?.command === "steer") {
-                const problem = typeof next.payload.problem === "string" ? next.payload.problem.trim() : "";
-                return {
-                  kind: "restart",
-                  note: problem || "Supervisor requested a restart with tighter scope and finish criteria.",
-                };
-              }
-              if (next?.command === "follow_up") {
-                const note = typeof next.payload.note === "string" ? next.payload.note.trim() : "";
-                return {
-                  kind: "restart",
-                  note: note || "Supervisor requested a restart with follow-up guidance.",
-                };
-              }
-              if (latest?.abortRequested === true) return { kind: "abort" };
-              return undefined;
-            },
+            const latest = await service.queue.getJob(job.id);
+            return aborts.length > 0 || latest?.abortRequested === true;
+          },
+          pollSignal: async () => {
+            const latest = await service.queue.getJob(job.id);
+            if (latest?.abortRequested === true) return { kind: "abort" };
+            return undefined;
+          },
           })
         : job.payload.kind === "factory.codex.run" || job.payload.kind === "codex.run"
           ? await (async () => {

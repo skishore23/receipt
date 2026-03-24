@@ -32,7 +32,6 @@ export const buildInvestigationReportPanelValue = (detail: FactoryObjectiveDetai
   objectiveId: detail.objectiveId,
   objectiveMode: detail.objectiveMode,
   severity: detail.severity,
-  reconciliationStatus: detail.reconciliationStatus,
   report: detail.investigation.finalReport,
   synthesized: detail.investigation.synthesized,
   reports: detail.investigation.reports,
@@ -64,7 +63,7 @@ export const buildInvestigationReportSections = (
       title: "Report",
       lines: [
         lead,
-        `mode=${detail.objectiveMode} severity=${detail.severity} reconciliation=${detail.reconciliationStatus}`,
+        `mode=${detail.objectiveMode} severity=${detail.severity}`,
       ],
     },
     {

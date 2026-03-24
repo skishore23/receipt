@@ -547,13 +547,40 @@ const createFactoryOutputTool = (input: {
 }): AgentToolExecutor =>
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId);
-    const focusKind = asString(toolInput.focusKind);
-    const focusId = asString(toolInput.focusId);
     if (!objectiveId) throw new Error("factory.output requires objectiveId");
-    if (focusKind !== "task" && focusKind !== "job") {
+    const taskId = asString(toolInput.taskId);
+    const jobId = asString(toolInput.jobId);
+    const requestedFocusKind = asString(toolInput.focusKind);
+    const requestedFocusId = asString(toolInput.focusId);
+    let focusKind: "task" | "job";
+    let focusId: string;
+    if (taskId) {
+      focusKind = "task";
+      focusId = taskId;
+    } else if (jobId) {
+      focusKind = "job";
+      focusId = jobId;
+    } else if (requestedFocusKind === "task" || requestedFocusKind === "job") {
+      if (!requestedFocusId) throw new Error("factory.output requires focusId");
+      focusKind = requestedFocusKind;
+      focusId = requestedFocusId;
+    } else if (requestedFocusKind) {
       throw new Error("factory.output requires focusKind of 'task' or 'job'");
+    } else if (requestedFocusId) {
+      throw new Error("factory.output requires focusKind when focusId is provided");
+    } else {
+      const detail = await input.factoryService.getObjective(objectiveId);
+      const taskIds = Array.isArray(detail.tasks)
+        ? detail.tasks
+          .map((task) => asString((task as Record<string, unknown>).taskId))
+          .filter((value): value is string => Boolean(value))
+        : [];
+      if (taskIds.length !== 1) {
+        throw new Error("factory.output requires focusKind/focusId, taskId/jobId, or an objective with exactly one task");
+      }
+      focusKind = "task";
+      focusId = taskIds[0]!;
     }
-    if (!focusId) throw new Error("factory.output requires focusId");
     const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildOutput = async (): Promise<Record<string, unknown>> => ({
       worker: "factory",
@@ -641,7 +668,7 @@ export const runCodexSupervisor = async (input: CodexSupervisorRunInput): Promis
       ...(input.factoryService ? {
         "factory.dispatch": "{\"action\"?: \"create\"|\"react\"|\"promote\"|\"cancel\"|\"cleanup\"|\"archive\", \"objectiveId\"?: string, \"prompt\"?: string, \"title\"?: string, \"baseHash\"?: string, \"checks\"?: string[], \"channel\"?: string, \"profileId\"?: string, \"reason\"?: string} — Create or operate on a tracked Factory objective. Use this when the work should run in objective-managed worktrees.",
         "factory.status": "{\"objectiveId\": string, \"waitForChangeMs\"?: number} — Inspect objective status, active jobs, recent receipts, and task/integration worktrees. With waitForChangeMs, block briefly until the objective changes.",
-        "factory.output": "{\"objectiveId\": string, \"focusKind\": \"task\"|\"job\", \"focusId\": string, \"waitForChangeMs\"?: number} — Inspect live output and log tails for an objective task or job. With waitForChangeMs, block briefly until the output changes.",
+        "factory.output": "{\"objectiveId\": string, \"focusKind\"?: \"task\"|\"job\", \"focusId\"?: string, \"taskId\"?: string, \"jobId\"?: string, \"waitForChangeMs\"?: number} — Inspect live output and log tails for an objective task or job. `taskId`/`jobId` are shorthands, and if the objective has exactly one task the focus can be inferred automatically.",
       } : {}),
       ...(input.extraToolSpecs ?? {}),
     },

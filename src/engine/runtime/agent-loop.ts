@@ -166,23 +166,6 @@ export const runAgentLoop = async <
       });
     } else {
       await emit({
-        type: "merge.evidence.computed",
-        runId: input.runId,
-        mergePolicyId: spec.mergePolicy.id,
-        mergePolicyVersion: spec.mergePolicy.version,
-      });
-
-      for (const candidate of mergeResult.scored) {
-        await emit({
-          type: "merge.candidate.scored",
-          runId: input.runId,
-          mergePolicyId: spec.mergePolicy.id,
-          candidateId: candidate.candidate.id,
-          score: candidate.score,
-        });
-      }
-
-      await emit({
         type: "merge.applied",
         runId: input.runId,
         mergePolicyId: spec.mergePolicy.id,

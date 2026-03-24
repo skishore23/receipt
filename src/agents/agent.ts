@@ -1273,7 +1273,7 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         type: "response.finalized",
         runId: input.runId,
         agentId: "orchestrator",
-        content: "Stopped after hitting max iterations. Use steer/follow-up to continue.",
+        content: "Stopped after hitting max iterations.",
       }, true);
     }
   } catch (err) {

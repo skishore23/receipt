@@ -61,19 +61,6 @@ export type ControlReceipt =
       readonly note?: string;
     }
   | {
-      readonly type: "merge.evidence.computed";
-      readonly runId: string;
-      readonly mergePolicyId: string;
-      readonly mergePolicyVersion: string;
-    }
-  | {
-      readonly type: "merge.candidate.scored";
-      readonly runId: string;
-      readonly mergePolicyId: string;
-      readonly candidateId: string;
-      readonly score: Readonly<Record<string, number>>;
-    }
-  | {
       readonly type: "merge.applied";
       readonly runId: string;
       readonly mergePolicyId: string;
@@ -95,8 +82,5 @@ export const CONTROL_RECEIPT_TYPES = new Set<ControlReceipt["type"]>([
   "human.requested",
   "human.responded",
   "goal.completed",
-  "merge.evidence.computed",
-  "merge.candidate.scored",
   "merge.applied",
 ]);
-

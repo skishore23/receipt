@@ -14,13 +14,15 @@ import type {
   FactoryObjectiveSeverity,
   FactoryObjectiveSlotState,
   FactoryObjectiveStatus,
-  FactoryRepoProfileRecord,
   FactoryState,
+  FactoryTaskExecutionMode,
   FactoryTaskRecord,
   FactoryWorkerType,
 } from "../modules/factory";
 import type { JobRecord, JobStatus } from "../modules/job";
 import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
+
+export const FACTORY_PROFILE_SUMMARY = "Using checked-in Factory profiles and skills only.";
 
 export class FactoryServiceError extends Error {
   readonly status: number;
@@ -45,12 +47,6 @@ export type FactoryServiceOptions = {
   readonly repoRoot?: string;
   readonly profileRoot?: string;
   readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
-  readonly llmStructured?: <Schema extends import("zod").ZodTypeAny>(opts: {
-    readonly system?: string;
-    readonly user: string;
-    readonly schema: Schema;
-    readonly schemaName: string;
-  }) => Promise<{ readonly parsed: import("zod").infer<Schema>; readonly raw: string }>;
 };
 
 export type FactoryObjectiveInput = {
@@ -104,12 +100,25 @@ export type FactoryTaskView = FactoryTaskRecord & {
   readonly workspaceDirty: boolean;
   readonly workspaceHead?: string;
   readonly elapsedMs?: number;
+  readonly manifestPath?: string;
+  readonly contextPackPath?: string;
+  readonly promptPath?: string;
+  readonly memoryScriptPath?: string;
   readonly stdoutPath?: string;
   readonly stderrPath?: string;
   readonly lastMessagePath?: string;
   readonly stdoutTail?: string;
   readonly stderrTail?: string;
   readonly lastMessage?: string;
+  readonly artifactSummary?: string;
+  readonly artifactActivity?: ReadonlyArray<FactoryArtifactActivity>;
+};
+
+export type FactoryArtifactActivity = {
+  readonly path: string;
+  readonly label: string;
+  readonly updatedAt: number;
+  readonly bytes: number;
 };
 
 export type FactoryObjectiveCard = {
@@ -119,12 +128,10 @@ export type FactoryObjectiveCard = {
   readonly phase: FactoryObjectivePhase;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
-  readonly reconciliationStatus: "none" | "pending" | "running" | "completed";
   readonly scheduler: {
     readonly slotState: FactoryObjectiveSlotState;
     readonly queuePosition?: number;
   };
-  readonly repoProfile: FactoryRepoProfileRecord;
   readonly archivedAt?: number;
   readonly updatedAt: number;
   readonly latestSummary?: string;
@@ -140,7 +147,7 @@ export type FactoryObjectiveCard = {
   readonly latestDecision?: {
     readonly summary: string;
     readonly at: number;
-    readonly source: "plan" | "orchestrator" | "fallback" | "runtime" | "system";
+    readonly source: "orchestrator" | "fallback" | "runtime" | "system";
     readonly selectedActionId?: string;
   };
   readonly nextAction?: string;
@@ -179,7 +186,7 @@ export type FactoryObjectiveDetail = FactoryObjectiveCard & {
     readonly candidateId?: string;
   }>;
   readonly evidenceCards: ReadonlyArray<{
-    readonly kind: "decision" | "plan" | "blocked" | "merge" | "promotion" | "report";
+    readonly kind: "decision" | "blocked" | "merge" | "promotion" | "report";
     readonly title: string;
     readonly summary: string;
     readonly at: number;
@@ -205,7 +212,7 @@ export type FactoryComposeModel = {
   readonly sourceBranch?: string;
   readonly objectiveCount: number;
   readonly defaultPolicy: FactoryNormalizedObjectivePolicy;
-  readonly repoProfile: FactoryRepoProfileRecord;
+  readonly profileSummary: string;
   readonly defaultValidationCommands: ReadonlyArray<string>;
 };
 
@@ -246,6 +253,8 @@ export type FactoryLiveOutputSnapshot = {
   readonly lastMessage?: string;
   readonly stdoutTail?: string;
   readonly stderrTail?: string;
+  readonly artifactSummary?: string;
+  readonly artifactActivity?: ReadonlyArray<FactoryArtifactActivity>;
 };
 
 export type FactoryDebugProjection = {
@@ -257,7 +266,6 @@ export type FactoryDebugProjection = {
     readonly slotState: FactoryObjectiveSlotState;
     readonly queuePosition?: number;
   };
-  readonly repoProfile: FactoryRepoProfileRecord;
   readonly latestDecision?: FactoryObjectiveCard["latestDecision"];
   readonly nextAction?: string;
   readonly profile: FactoryObjectiveProfileSnapshot;
@@ -304,6 +312,7 @@ export type FactoryTaskJobPayload = {
   readonly severity: FactoryObjectiveSeverity;
   readonly candidateId: string;
   readonly baseCommit: string;
+  readonly executionMode: FactoryTaskExecutionMode;
   readonly workspaceId: string;
   readonly workspacePath: string;
   readonly promptPath: string;
@@ -356,7 +365,7 @@ export type FactoryIntegrationPublishJobPayload = {
 export type FactoryObjectiveControlJobPayload = {
   readonly kind: "factory.objective.control";
   readonly objectiveId: string;
-  readonly reason: "startup" | "admitted" | "reconcile";
+  readonly reason: "startup" | "admitted";
 };
 
 export type FactoryObjectiveReceiptSummary = {
@@ -373,17 +382,4 @@ export type FactoryObjectiveReceiptQuery = {
   readonly taskId?: string;
   readonly candidateId?: string;
   readonly types?: ReadonlyArray<string>;
-};
-
-export type FactoryRepoProfileProgress = {
-  readonly step:
-    | "bootstrap"
-    | "cache"
-    | "scan"
-    | "infer_checks"
-    | "llm"
-    | "write_skills"
-    | "persist"
-    | "complete";
-  readonly message: string;
 };

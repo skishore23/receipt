@@ -1,24 +1,14 @@
 import type { FactoryObjectiveMode } from "../modules/factory";
 import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
 
-const INFRASTRUCTURE_PROFILE_ID = "infrastructure";
 const AWS_ACCOUNT_SCOPE_HELPER = "skills/factory-infrastructure-aws/scripts/aws-account-scope.sh";
-const BUCKET_PROMPT_RE = /\b(bucket|buckets|s3)\b/i;
 const INVENTORY_PROMPT_RE = /\b(how many|count|list|show|inventory|enumerate|what are|which)\b/i;
 const COST_PROMPT_RE = /\b(cost|costs|pricing|price|spend)\b/i;
 const AWS_MULTI_SERVICE_RE = /\b(ec2|ebs|snapshot|snapshots|s3|rds|nat|load balancer|load balancers|elb|cloudwatch|eks|elastic ip|elastic ips)\b/gi;
 const FAIL_FAST_DENIED_RE = /fail fast if any aws cli call is denied and report exact error\.?/i;
 
-export type InfrastructureDecomposedTask = {
-  readonly taskId: string;
-  readonly title: string;
-  readonly prompt: string;
-  readonly workerType: string;
-  readonly dependsOn: ReadonlyArray<string>;
-};
-
-export const infrastructureDefaultsToAws = (profileId: string | undefined): boolean =>
-  profileId === INFRASTRUCTURE_PROFILE_ID;
+export const cloudProviderDefaultsToAws = (cloudProvider: string | undefined): boolean =>
+  cloudProvider === "aws";
 
 const countAwsServiceMentions = (prompt: string): number => {
   const services = new Set(
@@ -35,11 +25,11 @@ const isBroadAwsMultiServiceInventoryPrompt = (prompt: string): boolean => {
 };
 
 export const rewriteInfrastructureTaskPromptForExecution = (input: {
-  readonly profileId: string | undefined;
+  readonly profileCloudProvider?: string;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly taskPrompt: string;
 }): string => {
-  if (!infrastructureDefaultsToAws(input.profileId) || input.objectiveMode !== "investigation") return input.taskPrompt;
+  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return input.taskPrompt;
   if (!FAIL_FAST_DENIED_RE.test(input.taskPrompt)) return input.taskPrompt;
   if (!isBroadAwsMultiServiceInventoryPrompt(input.taskPrompt)) return input.taskPrompt;
   return input.taskPrompt.replace(
@@ -48,41 +38,12 @@ export const rewriteInfrastructureTaskPromptForExecution = (input: {
   );
 };
 
-const isSimpleAwsBucketInvestigation = (
-  objectivePrompt: string,
-): boolean => {
-  return BUCKET_PROMPT_RE.test(objectivePrompt) && INVENTORY_PROMPT_RE.test(objectivePrompt);
-};
-
-export const buildInfrastructureDecompositionGuidance = (input: {
-  readonly profileId: string | undefined;
-  readonly objectiveMode: FactoryObjectiveMode;
-  readonly objectivePrompt: string;
-}): ReadonlyArray<string> => {
-  if (!infrastructureDefaultsToAws(input.profileId) || input.objectiveMode !== "investigation") return [];
-  const lines = [
-    "This infrastructure profile is AWS-only for now. Do not create provider-resolution, GCP, or Azure tasks unless the objective explicitly asks for another provider.",
-    "For routine AWS inventory or counting requests against one resource family, prefer a single Codex task that writes a deterministic script, runs it, and interprets the result.",
-    "Do not split simple AWS S3 inventory into separate provider-resolution, methodology, and synthesis tasks.",
-    "If AWS CLI access fails, fail fast with the exact AWS CLI error instead of exploring other providers or asking the user to restate scope.",
-    "Differentiate account-level AWS access failures from one denied service API. For broad multi-service inventory, prefer tasks that report per-service AccessDenied gaps and continue on the remaining allowed services when the denied API is not the primary scope.",
-    "For cross-region AWS inventory, treat the mounted cloud context as authoritative for the current account/profile and any discovered region scope instead of blindly querying every AWS region.",
-    "Only create multiple tasks when the objective clearly requires multi-service correlation, reconciliation, fleet-wide fanout, or materially different evidence streams.",
-  ];
-  return isSimpleAwsBucketInvestigation(input.objectivePrompt)
-    ? [
-        ...lines,
-        "For S3 bucket questions, keep the plan to one AWS task unless the prompt explicitly asks for cross-account, multi-region, or fleet-wide analysis.",
-      ]
-    : lines;
-};
-
 export const renderInfrastructureTaskExecutionGuidance = (input: {
-  readonly profileId: string | undefined;
+  readonly profileCloudProvider?: string;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly cloudExecutionContext: FactoryCloudExecutionContext;
 }): ReadonlyArray<string> => {
-  if (!infrastructureDefaultsToAws(input.profileId) || input.objectiveMode !== "investigation") return [];
+  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return [];
   const provider = input.cloudExecutionContext.preferredProvider ?? "aws";
   return [
     `## Script-First Execution`,
@@ -105,27 +66,4 @@ export const renderInfrastructureTaskExecutionGuidance = (input: {
         ]
       : []),
   ];
-};
-
-export const normalizeInfrastructureInvestigationTasks = (input: {
-  readonly profileId: string | undefined;
-  readonly objectiveMode: FactoryObjectiveMode;
-  readonly objectivePrompt: string;
-  readonly tasks: ReadonlyArray<InfrastructureDecomposedTask>;
-}): ReadonlyArray<InfrastructureDecomposedTask> => {
-  if (!infrastructureDefaultsToAws(input.profileId) || input.objectiveMode !== "investigation") return input.tasks;
-  if (!isSimpleAwsBucketInvestigation(input.objectivePrompt)) return input.tasks;
-  const wantsCosts = COST_PROMPT_RE.test(input.objectivePrompt);
-  const primary = input.tasks[0];
-  return [{
-    taskId: primary?.taskId ?? "task_01",
-    title: wantsCosts
-      ? "Inventory S3 buckets and summarize available bucket cost signals"
-      : "Inventory S3 buckets and report the authoritative bucket count",
-    prompt: wantsCosts
-      ? "Write a small deterministic shell script under `.receipt/factory/` that uses AWS CLI only. Set fail-fast AWS settings, capture `aws sts get-caller-identity` first, then list S3 buckets for the mounted AWS account, and emit machine-readable output with bucket names and total count. Extend the same script to query any directly available per-bucket cost signals, and clearly distinguish verified live cost data from unavailable or estimated values. Run the script, interpret the results in plain language, and if any AWS CLI call fails, stop immediately and report the exact error."
-      : "Write a small deterministic shell script under `.receipt/factory/` that uses AWS CLI only. Set fail-fast AWS settings, capture `aws sts get-caller-identity` first, then list S3 buckets for the mounted AWS account, and emit machine-readable output with bucket names and total count. Run the script, interpret the results in plain language, and if any AWS CLI call fails, stop immediately and report the exact error. Do not explore other providers or ask the user to restate scope.",
-    workerType: primary?.workerType ?? "codex",
-    dependsOn: [],
-  }];
 };

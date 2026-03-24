@@ -114,20 +114,18 @@ const parseAwsEc2RegionScope = (value: string): FactoryAwsEc2RegionScope | undef
     readonly Endpoint?: string;
   }>>(value);
   if (!Array.isArray(parsed)) return undefined;
-  const regions = parsed
-    .map((entry) => {
+  const regions = parsed.flatMap((entry) => {
       const regionName = trim(entry.RegionName);
-      if (!regionName) return undefined;
+      if (!regionName) return [];
       const optInStatus = trim(entry.OptInStatus);
       const endpoint = trim(entry.Endpoint);
-      return {
+      return [{
         regionName,
         optInStatus,
         endpoint,
         queryable: optInStatus ? AWS_EC2_QUERYABLE_OPT_IN_STATUSES.has(optInStatus) : false,
-      } satisfies FactoryAwsEc2Region;
-    })
-    .filter((entry): entry is FactoryAwsEc2Region => Boolean(entry));
+      } satisfies FactoryAwsEc2Region];
+    });
   return {
     regions,
     queryableRegions: regions.filter((entry) => entry.queryable).map((entry) => entry.regionName),
@@ -326,7 +324,7 @@ export const scanFactoryCloudExecutionContext = async (
       ? "Mounted AWS caller identity and region scope do not guarantee every service API is authorized. Treat service-specific AccessDenied results separately from account-wide auth failures."
       : "",
     buildAwsEc2RegionScopeGuidance(aws?.ec2RegionScope),
-  ].filter(Boolean);
+  ].filter((item): item is string => Boolean(item));
   const summaryParts = [
     aws
       ? aws.callerIdentity
@@ -345,7 +343,7 @@ export const scanFactoryCloudExecutionContext = async (
         : "Azure CLI is available, but no active subscription was confirmed."
       : "",
     guidance[0] ?? "",
-  ].filter(Boolean);
+  ].filter((item): item is string => Boolean(item));
   return {
     summary: summaryParts.join(" "),
     availableProviders,
