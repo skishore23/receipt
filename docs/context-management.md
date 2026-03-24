@@ -28,7 +28,7 @@ Factory is the strongest example of this design. It does not dump the whole obje
 
 ## Core Rule: Receipts Are The Durable Context Plane
 
-The generic runtime in `src/core/runtime.ts` is the foundation:
+The generic runtime in `packages/core/src/runtime.ts` is the foundation:
 
 1. A command is executed against a stream.
 2. `decide(...)` turns that command into events.
@@ -37,7 +37,7 @@ The generic runtime in `src/core/runtime.ts` is the foundation:
 
 That means the repo treats context primarily as replayable evidence, not mutable service-owned state.
 
-`src/core/chain.ts` and `src/core/types.ts` make this explicit:
+`packages/core/src/chain.ts` and `packages/core/src/types.ts` make this explicit:
 
 - a receipt is immutable
 - a chain is append-only
@@ -351,7 +351,9 @@ The script exposes bounded commands over scoped memory plus the context pack:
 - `read`
 - `commit`
 
-Internally, the script shells out to the `receipt memory ...` CLI and optionally reads the context pack file.
+Internally, the script shells out to the `receipt memory ...` CLI for scoped memory operations and reads the context pack file directly for `context` and `objective`.
+
+When `OPENAI_API_KEY` is present, that CLI path uses embeddings by default for `search` and query-driven `summarize`; otherwise it falls back to keyword matching.
 
 So the worker gets a tool interface for recall, not just a pile of text.
 
@@ -560,7 +562,7 @@ Factory's debug projection in `buildObjectiveDebug(...)` exposes:
 - latest context pack paths
 - memory script paths
 
-The context tab view in `src/views/factory/context.ts` is not inventing context. It is surfacing the files and projections built by the service.
+The inspector and workbench views in `src/views/factory-inspector.ts` and `src/views/factory-workbench.ts` are not inventing context. They are surfacing the files and projections built by the service.
 
 That means the easiest way to inspect live Factory context is usually:
 

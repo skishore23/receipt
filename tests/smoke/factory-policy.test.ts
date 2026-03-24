@@ -236,6 +236,59 @@ test("factory policy: validation-owned task packets include the full repo checks
   expect(prompt).toContain("Run the relevant repo validation for this task");
 });
 
+test("factory policy: delivery task schema and prompt require scriptsRun", async () => {
+  const { service, queue } = await createFactoryService();
+
+  const created = await service.createObjective({
+    title: "Strict delivery schema",
+    prompt: "Change a small repo file and summarize the result.",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+
+  const prompt = await fs.readFile(String(taskJob.payload.promptPath), "utf-8");
+  const resultPath = String(taskJob.payload.resultPath);
+  const schemaPath = resultPath.replace(/\.json$/i, ".schema.json");
+  const schema = JSON.parse(await fs.readFile(schemaPath, "utf-8")) as {
+    readonly required?: ReadonlyArray<string>;
+  };
+
+  expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
+  expect(prompt).toContain("Always include scriptsRun. Use [] when no command or small script materially informed the result");
+  expect(schema.required).toContain("scriptsRun");
+});
+
+test("factory policy: investigation task schema keeps scriptsRun inside report only", async () => {
+  const { service, queue } = await createFactoryService();
+
+  const created = await service.createObjective({
+    title: "Strict investigation schema",
+    prompt: "Inventory the mounted AWS account.",
+    objectiveMode: "investigation",
+    profileId: "infrastructure",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+
+  const prompt = await fs.readFile(String(taskJob.payload.promptPath), "utf-8");
+  const resultPath = String(taskJob.payload.resultPath);
+  const schemaPath = resultPath.replace(/\.json$/i, ".schema.json");
+  const schema = JSON.parse(await fs.readFile(schemaPath, "utf-8")) as {
+    readonly properties?: Record<string, unknown>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  const report = (schema.properties?.report ?? null) as { readonly properties?: Record<string, unknown> } | null;
+
+  expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
+  expect(schema.properties?.scriptsRun).toBeUndefined();
+  expect(schema.required).not.toContain("scriptsRun");
+  expect(report?.properties?.scriptsRun).toBeTruthy();
+});
+
 test("factory policy: objectives stay single-task by default and still normalize dispatch policy", async () => {
   const { service } = await createFactoryService();
 

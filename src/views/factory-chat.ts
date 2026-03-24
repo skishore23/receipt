@@ -9,14 +9,23 @@ import {
   formatTs,
   ghostButtonClass,
   iconChat,
+  iconClock,
+  iconCodex,
   iconForEntity,
+  iconNext,
   iconProject,
+  iconQueue,
   iconReceipt,
+  iconRun,
+  iconStatus,
+  iconTask,
+  iconTokens,
   iconBadgeToneClass,
-  railCardClass,
+  renderEmptyState,
   renderJobActionCards,
   sectionLabelClass,
   softPanelClass,
+  statusDot,
   toneForValue,
   CSS_VERSION,
 } from "./ui";
@@ -254,8 +263,8 @@ const renderJobControls = (jobId: string, running?: boolean, abortRequested?: bo
 const renderWorkControls = (card: FactoryWorkCard): string =>
   card.jobId ? renderJobControls(card.jobId, card.running, false) : "";
 
-const shellPill = (label: string, tone: Tone = "neutral"): string =>
-  `<span class="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${badgeToneClass(tone)}">${esc(label)}</span>`;
+const shellPill = (label: string, tone: Tone = "neutral", icon?: string): string =>
+  `<span class="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] whitespace-nowrap ${badgeToneClass(tone)}">${icon ?? ""}${esc(label)}</span>`;
 
 const shellHeaderTitle = (model: FactoryChatShellModel): string =>
   model.inspector.selectedObjective?.title
@@ -266,13 +275,14 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   const objective = model.inspector.selectedObjective;
   if (objective) {
     const phaseLabel = displayLabel(objective.phase) || displayLabel(objective.status) || "active";
-    pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.phase || objective.status)));
-    if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning"));
+    pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.phase || objective.status), iconProject("h-3 w-3")));
+    if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning", iconQueue("h-3 w-3")));
+    if (objective.tokensUsed) pills.push(shellPill(`${objective.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")));
   }
   if (model.inspector.activeCodex) {
-    pills.push(shellPill(`Codex ${displayLabel(model.inspector.activeCodex.status) || "active"}`, toneForValue(model.inspector.activeCodex.status)));
+    pills.push(shellPill(`Codex ${displayLabel(model.inspector.activeCodex.status) || "active"}`, toneForValue(model.inspector.activeCodex.status), iconCodex("h-3 w-3")));
   } else if (model.inspector.activeRun?.status) {
-    pills.push(shellPill(`Run ${displayLabel(model.inspector.activeRun.status) || "active"}`, toneForValue(model.inspector.activeRun.status)));
+    pills.push(shellPill(`Run ${displayLabel(model.inspector.activeRun.status) || "active"}`, toneForValue(model.inspector.activeRun.status), iconRun("h-3 w-3")));
   }
   return pills.join("");
 };
@@ -525,17 +535,28 @@ const describeTaskDependencies = (
 };
 
 const renderThreadSummaryCard = (
-  label: string,
-  title: string,
-  detail: string,
-  tone: Tone = "neutral",
+  input: {
+    readonly label: string;
+    readonly title: string;
+    readonly detail: string;
+    readonly tone?: Tone;
+    readonly icon: string;
+    readonly stateLabel?: string;
+  },
 ): string => `<section class="${softPanelClass} px-4 py-3">
-  <div class="flex items-center justify-between gap-2">
-    <div class="${sectionLabelClass}">${esc(label)}</div>
-    ${badge(label.toLowerCase(), tone)}
+  <div class="flex items-start justify-between gap-3">
+    <div class="min-w-0 flex flex-1 items-start gap-3">
+      <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border ${iconBadgeToneClass(input.tone ?? "neutral")} shadow-sm">
+        ${input.icon}
+      </span>
+      <div class="min-w-0">
+        <div class="${sectionLabelClass}">${esc(input.label)}</div>
+        <div class="mt-1 text-sm font-semibold text-foreground">${esc(input.title)}</div>
+      </div>
+    </div>
+    ${input.stateLabel ? shellPill(input.stateLabel, input.tone ?? "neutral") : ""}
   </div>
-  <div class="mt-1 text-sm font-semibold text-foreground">${esc(title)}</div>
-  <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(detail)}</div>
+  <div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(input.detail)}</div>
 </section>`;
 
 const renderThreadOverview = (model: FactoryChatIslandModel, thread?: FactorySelectedObjectiveCard): string => {
@@ -582,9 +603,30 @@ const renderThreadOverview = (model: FactoryChatIslandModel, thread?: FactorySel
   ) || "This thread is updating in place from the current workflow state.";
 
   return `<section class="grid gap-2 md:grid-cols-3">
-    ${renderThreadSummaryCard("Current", currentTitle, currentDetail, activeTask || model.activeCodex ? "info" : "neutral")}
-    ${renderThreadSummaryCard("Next", nextTitle, nextDetail, readyTask?.isReady ? "success" : "neutral")}
-    ${renderThreadSummaryCard(statusLabel, statusTitle, statusDetail, statusTone)}
+    ${renderThreadSummaryCard({
+      label: "Current",
+      title: currentTitle,
+      detail: currentDetail,
+      tone: activeTask || model.activeCodex ? "info" : "neutral",
+      icon: iconRun("h-4 w-4"),
+      stateLabel: activeTask || model.activeCodex ? "Live" : (displayLabel(thread?.phase || thread?.status) || "Idle"),
+    })}
+    ${renderThreadSummaryCard({
+      label: "Next",
+      title: nextTitle,
+      detail: nextDetail,
+      tone: readyTask?.isReady ? "success" : "neutral",
+      icon: iconNext("h-4 w-4"),
+      stateLabel: readyTask?.isReady ? "Ready" : (readyTask ? "Queued" : "Clear"),
+    })}
+    ${renderThreadSummaryCard({
+      label: statusLabel,
+      title: statusTitle,
+      detail: statusDetail,
+      tone: statusTone,
+      icon: iconStatus("h-4 w-4"),
+      stateLabel: blockedTask || thread?.blockedReason ? "Blocked" : (displayLabel(thread?.phase || thread?.status) || "Snapshot"),
+    })}
   </section>`;
 };
 
@@ -690,6 +732,21 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
   </section>`;
 };
 
+const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
+  renderEmptyState({
+    icon: iconChat("h-6 w-6"),
+    tone: "info",
+    eyebrow: "Ready",
+    title: model.objectiveId ? "This thread is quiet." : "Start a new thread",
+    message: model.objectiveId
+      ? "No transcript items have landed yet. Ask for status, react to a task, or wait for the next supervisor update."
+      : `Describe what ${model.activeProfileLabel} should investigate, fix, or review.`,
+    detail: model.objectiveId
+      ? "Use /react, /cleanup, /promote, or /abort-job from the composer below."
+      : "Slash commands still work here when you want a direct Factory action instead of a new prompt.",
+    minHeightClass: "min-h-[320px]",
+  });
+
 export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   const workbench = renderCenterWorkbench(model);
   const grouped = groupChatItems(model.items);
@@ -699,15 +756,7 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
         ? renderChatItem(group.item, model.activeProfileLabel)
         : renderWorkGroup(group.items, model.activeProfileLabel)
     ).join("")
-    : `<section class="${softPanelClass} px-4 py-3">
-      <div class="flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2">
-          <span class="${sectionLabelClass}">Ready</span>
-          <span class="text-xs text-foreground">${esc(model.activeProfileLabel)}</span>
-        </div>
-        ${badge("idle", "neutral")}
-      </div>
-    </section>`;
+    : renderTranscriptEmptyState(model);
   return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 pt-4 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}">
     ${workbench}
     <section class="space-y-2">
@@ -731,32 +780,68 @@ const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjec
     ? "border-primary/30 bg-primary/10"
     : "border-border bg-muted hover:bg-accent";
   const displayStatus = objective.phase || objective.status;
-  return `<a class="block min-w-0 rounded-lg border px-3 py-2 transition ${selectedClass}" href="${href}">
-    <div class="flex min-w-0 items-center justify-between gap-2">
-      <div class="min-w-0 truncate text-xs font-medium text-foreground">${esc(objective.title)}</div>
-      <span class="shrink-0 text-[10px] font-medium uppercase ${badgeToneClass(toneForValue(displayStatus)).replace(/border-\S+/g, "").replace(/bg-\S+/g, "").trim()}">${esc(displayLabel(displayStatus))}</span>
+  const meta = [
+    objective.updatedAt ? formatTs(objective.updatedAt) : undefined,
+    objective.tokensUsed ? `${objective.tokensUsed.toLocaleString()} tok` : undefined,
+  ].filter(Boolean);
+  const summary = compactStatusText(objective.summary ?? "", 92);
+  const tone = toneForValue(displayStatus);
+  return `<a class="block min-w-0 rounded-xl border px-3 py-2.5 transition ${selectedClass}" href="${href}">
+    <div class="flex min-w-0 items-start gap-2.5">
+      <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-border/80 bg-background/70 text-muted-foreground">
+        ${iconProject("h-4 w-4")}
+      </span>
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-semibold leading-5 text-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(objective.title)}</div>
+        ${summary ? `<div class="mt-1 text-[11px] leading-4 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(summary)}</div>` : ""}
+      </div>
     </div>
-    ${objective.updatedAt ? `<div class="mt-0.5 text-[10px] text-muted-foreground">${esc(formatTs(objective.updatedAt))}</div>` : ""}
+    <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        <span class="inline-flex items-center gap-1.5 uppercase tracking-[0.18em]" title="${esc(displayLabel(displayStatus) || displayStatus)}">
+          ${statusDot(tone)}
+          <span class="sr-only">${esc(displayLabel(displayStatus) || displayStatus)}</span>
+        </span>
+        ${objective.updatedAt ? `<span class="inline-flex items-center gap-1 whitespace-nowrap">${iconClock("h-3 w-3")} ${esc(formatTs(objective.updatedAt))}</span>` : ""}
+        ${objective.tokensUsed ? `<span class="inline-flex items-center gap-1 whitespace-nowrap">${iconTokens("h-3 w-3")} ${esc(`${objective.tokensUsed.toLocaleString()} tok`)}</span>` : ""}
+      </div>
+    </div>
   </a>`;
 };
 
+const renderSidebarEmptyState = (blankChat: boolean): string =>
+  renderEmptyState({
+    icon: iconProject("h-5 w-5"),
+    tone: "neutral",
+    eyebrow: blankChat ? "New Chat" : "Threads",
+    title: blankChat ? "No threads yet" : "No tracked threads",
+    message: blankChat
+      ? "Send the first message below to create a thread in this profile."
+      : "This profile does not have any recent objectives to show right now.",
+    minHeightClass: "min-h-[168px]",
+  });
+
+const renderSidebarMetricTile = (label: string, value: string, icon: string): string => `<div class="rounded-xl border border-border/80 bg-muted/65 px-2.5 py-2">
+  <div class="flex items-center justify-between gap-2">
+    <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
+    <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background/60 text-muted-foreground">${icon}</span>
+  </div>
+  <div class="mt-1.5 text-sm font-semibold text-card-foreground">${esc(value)}</div>
+</div>`;
+
 const renderSidebarMetrics = (obj?: FactorySelectedObjectiveCard): string => {
-  
   if (!obj) return "";
-  return `<section class="${railCardClass}">
-    <div class="grid grid-cols-3 gap-1.5">
-      <div class="rounded-xl border border-border bg-muted px-2 py-1.5 text-center">
-        <div class="text-[10px] uppercase tracking-widest text-muted-foreground">Active</div>
-        <div class="mt-0.5 text-xs text-card-foreground">${obj.activeTaskCount ?? 0}</div>
-      </div>
-      <div class="rounded-xl border border-border bg-muted px-2 py-1.5 text-center">
-        <div class="text-[10px] uppercase tracking-widest text-muted-foreground">Ready</div>
-        <div class="mt-0.5 text-xs text-card-foreground">${obj.readyTaskCount ?? 0}</div>
-      </div>
-      <div class="rounded-xl border border-border bg-muted px-2 py-1.5 text-center">
-        <div class="text-[10px] uppercase tracking-widest text-muted-foreground">Total</div>
-        <div class="mt-0.5 text-xs text-card-foreground">${obj.taskCount ?? 0}</div>
-      </div>
+  const metricColumns = obj.tokensUsed ? "grid-cols-2" : "grid-cols-3";
+  return `<section class="space-y-2">
+    <div class="flex items-center justify-between gap-2">
+      <div class="${sectionLabelClass}">Snapshot</div>
+      <div class="text-[10px] text-muted-foreground">${esc(obj.slotState ?? "idle")}</div>
+    </div>
+    <div class="grid ${metricColumns} gap-1.5">
+      ${renderSidebarMetricTile("Active", String(obj.activeTaskCount ?? 0), iconRun("h-3.5 w-3.5"))}
+      ${renderSidebarMetricTile("Ready", String(obj.readyTaskCount ?? 0), iconNext("h-3.5 w-3.5"))}
+      ${renderSidebarMetricTile("Total", String(obj.taskCount ?? 0), iconTask("h-3.5 w-3.5"))}
+      ${obj.tokensUsed ? renderSidebarMetricTile("Tokens", obj.tokensUsed.toLocaleString(), iconTokens("h-3.5 w-3.5")) : ""}
     </div>
   </section>`;
 };
@@ -773,21 +858,20 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
   const viewAllQuery = `${selectedObjectiveQuery}${selectedObjectiveQuery.includes("?") ? "&" : "?"}all=1`;
   const objectiveCards = visibleObjectives.length > 0
     ? visibleObjectives.map((objective) => renderObjectiveLink(model, objective)).join("")
-    : `<div class="text-[11px] text-muted-foreground">${blankChat ? "No threads yet." : "No tracked threads."}</div>`;
-  const objectives = objectiveCards;
+    : renderSidebarEmptyState(blankChat);
   const profileLinks = model.profiles.length > 0
     ? model.profiles.map((profile) => {
         const selectedClass = profile.selected
           ? "border-primary/30 bg-primary/10 text-primary"
-          : "border-border bg-secondary text-muted-foreground hover:bg-accent hover:text-foreground";
-        return `<a class="rounded-lg border px-2 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
+          : "border-border bg-secondary/65 text-muted-foreground hover:bg-accent hover:text-foreground";
+        return `<a class="rounded-full border px-3 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
           profileId: profile.id,
           chatId: model.chatId,
           objectiveId: selectedObjective?.objectiveId,
         })}">${esc(profile.label)}</a>`;
       }).join("")
     : "";
-  return `<div class="space-y-3 px-3 py-3 md:px-4">
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     <div class="space-y-2">
       <a class="flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition" href="/receipt">
         ${iconReceipt("text-primary")} Receipt
@@ -796,15 +880,15 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
         ${profileLinks}
       </div>
     </div>
-    <section class="${softPanelClass} px-3 py-2.5">
+    <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} ${blankChat ? "Recent" : "Threads"}</div>
         <div class="text-[10px] text-muted-foreground">${esc(`${model.objectives.length}`)}</div>
       </div>
-      <div class="mt-2 grid gap-2">
-        ${objectives}
+      <div class="space-y-2">
+        ${objectiveCards}
       </div>
-      ${hasMoreObjectives ? `<div class="mt-2">
+      ${hasMoreObjectives ? `<div>
         <button hx-get="/factory/island/sidebar${viewAllQuery}" hx-target="#factory-sidebar" hx-swap="innerHTML" class="text-[10px] font-medium text-primary hover:underline text-left cursor-pointer">View all</button>
       </div>` : ""}
     </section>
@@ -862,7 +946,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
 <body data-factory-chat data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden md:h-screen md:overflow-hidden" hx-ext="sse" sse-connect="/factory/events${shellQuery}">
   <div class="relative min-h-screen bg-background text-foreground md:h-screen">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,hsl(13_73%_55%/0.06),transparent_40%),radial-gradient(circle_at_top_right,hsl(210_38%_65%/0.08),transparent_40%)]"></div>
-    <div class="relative flex min-h-screen flex-col md:grid md:h-screen md:min-h-0 md:grid-cols-[220px_minmax(0,1fr)_280px] md:overflow-hidden">
+    <div class="relative flex min-h-screen flex-col md:grid md:h-screen md:min-h-0 md:grid-cols-[248px_minmax(0,1fr)_320px] lg:grid-cols-[256px_minmax(0,1fr)_336px] md:overflow-hidden">
       <aside class="order-2 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:order-0 md:min-h-0 md:border-r md:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
           <div id="factory-sidebar" hx-get="/factory/island/sidebar${shellQuery}" hx-trigger="${sidebarTrigger}" hx-swap="innerHTML">
@@ -873,8 +957,8 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       <main class="order-1 min-w-0 overflow-hidden bg-background md:order-0 md:min-h-0">
         <div class="flex min-h-screen flex-col md:h-full md:min-h-0">
           <header class="shrink-0 border-b border-border bg-card/80 backdrop-blur-xl">
-            <div class="flex items-center justify-between gap-2 px-4 py-2">
-              <div class="min-w-0 flex flex-1 items-center gap-2">
+            <div class="flex items-center justify-between gap-3 px-4 py-2.5">
+              <div class="min-w-0 flex flex-1 items-center gap-2 overflow-x-auto factory-scrollbar">
                 <span class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} Thread</span>
                 <h1 class="min-w-0 truncate text-sm font-semibold text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
                 ${renderShellStatusPills(model)}

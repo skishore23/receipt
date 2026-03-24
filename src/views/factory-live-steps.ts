@@ -1,40 +1,42 @@
-import { badgeToneClass, esc, formatTs, sectionLabelClass } from "./ui";
-import type { FactoryLiveRunCard, FactoryRunStepTone } from "./factory-models";
+import {
+  badgeToneClass,
+  esc,
+  formatTs,
+  iconClock,
+  iconForRunStepKind,
+  iconRun,
+  sectionLabelClass,
+} from "./ui";
+import type { FactoryLiveRunCard } from "./factory-models";
 
-const dotToneClass = (tone: FactoryRunStepTone): string => {
-  switch (tone) {
-    case "success":
-      return "bg-success ring-4 ring-success/10";
-    case "warning":
-      return "bg-warning ring-4 ring-warning/10";
-    case "danger":
-      return "bg-destructive ring-4 ring-destructive/10";
-    case "info":
-      return "bg-info ring-4 ring-info/10";
-    default:
-      return "bg-muted-foreground/60 ring-4 ring-border";
-  }
+type DisplayStep = NonNullable<FactoryLiveRunCard["steps"]>[number] & {
+  readonly displayMeta?: string;
 };
 
 const renderStep = (
-  step: NonNullable<FactoryLiveRunCard["steps"]>[number],
-  latest: boolean,
+  step: DisplayStep,
+  options: {
+    readonly latest: boolean;
+    readonly showConnector: boolean;
+  },
 ): string => {
   const labelClass = badgeToneClass(step.tone);
-  const dotClass = dotToneClass(step.tone);
-  const activeClass = step.active || latest ? "animate-pulse" : "";
-  return `<div class="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3 px-4 py-3 ${latest ? "bg-primary/5" : ""}">
-    <div class="flex flex-col items-center">
-      <span class="mt-1 flex h-2.5 w-2.5 shrink-0 rounded-full ${dotClass} ${activeClass}"></span>
+  const activeClass = step.active || options.latest ? "animate-pulse" : "";
+  return `<div class="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-3 px-4 py-4 ${options.latest ? "bg-primary/5" : ""}">
+    <div class="relative flex justify-center">
+      ${options.showConnector ? `<span class="absolute left-1/2 top-10 bottom-[-1rem] w-px -translate-x-1/2 bg-border/70"></span>` : ""}
+      <span class="relative z-10 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border ${labelClass} shadow-sm ${activeClass}">
+        ${iconForRunStepKind(step.kind, "h-4 w-4")}
+      </span>
     </div>
-    <div class="min-w-0">
+    <div class="min-w-0 pt-0.5">
       <div class="flex flex-wrap items-center gap-2">
         <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] ${labelClass}">${esc(step.label)}</span>
-        ${step.meta ? `<span class="text-[10px] text-muted-foreground">${esc(step.meta)}</span>` : ""}
-        ${step.at ? `<span class="text-[10px] text-muted-foreground">${esc(formatTs(step.at))}</span>` : ""}
+        ${step.displayMeta ? `<span class="inline-flex items-center gap-1 text-[10px] text-muted-foreground">${iconRun("h-3 w-3")} ${esc(step.displayMeta)}</span>` : ""}
+        ${step.at ? `<span class="inline-flex items-center gap-1 text-[10px] text-muted-foreground">${iconClock("h-3 w-3")} ${esc(formatTs(step.at))}</span>` : ""}
       </div>
-      <div class="mt-1 text-sm leading-5 text-foreground">${esc(step.summary)}</div>
-      ${step.detail ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(step.detail)}</div>` : ""}
+      <div class="mt-1.5 text-sm leading-6 text-foreground">${esc(step.summary)}</div>
+      ${step.detail ? `<div class="mt-2 rounded-xl border border-border/70 bg-background/50 px-3 py-2 text-xs leading-5 text-muted-foreground">${esc(step.detail)}</div>` : ""}
     </div>
   </div>`;
 };
@@ -48,18 +50,32 @@ export const renderFactoryRunSteps = (
 ): string => {
   const steps = run?.steps ?? [];
   if (steps.length === 0) return "";
+  const displaySteps: DisplayStep[] = steps.map((step, index) => ({
+    ...step,
+    displayMeta: step.meta && step.meta !== steps[index - 1]?.meta ? step.meta : undefined,
+  }));
   const title = options?.title ?? "What's Happening";
   const subtitle = options?.subtitle ?? `${run?.profileLabel ?? "Factory"} is streaming recent reasoning steps for this thread.`;
   return `<section class="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
     <div class="flex items-start justify-between gap-3 border-b border-border/80 px-4 py-3">
-      <div class="min-w-0">
-        <div class="${sectionLabelClass}">${esc(title)}</div>
-        <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(subtitle)}</div>
+      <div class="flex min-w-0 items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/80 bg-muted/80 text-primary shadow-sm">
+          ${iconRun("h-4 w-4")}
+        </span>
+        <div class="min-w-0">
+          <div class="${sectionLabelClass}">${esc(title)}</div>
+          <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(subtitle)}</div>
+        </div>
       </div>
-      <div class="shrink-0 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(`${steps.length} step${steps.length === 1 ? "" : "s"}`)}</div>
+      <div class="shrink-0 rounded-full border border-border bg-muted px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        ${esc(`${steps.length} step${steps.length === 1 ? "" : "s"}`)}
+      </div>
     </div>
     <div class="divide-y divide-border/70">
-      ${steps.map((step, index) => renderStep(step, index === steps.length - 1)).join("")}
+      ${displaySteps.map((step, index) => renderStep(step, {
+        latest: index === displaySteps.length - 1,
+        showConnector: index < displaySteps.length - 1,
+      })).join("")}
     </div>
   </section>`;
 };

@@ -46,7 +46,7 @@ The current repo is a strong prototype. It already demonstrates:
 
 But the current implementation is not production-grade for an infrastructure runtime because:
 
-- `src/core/runtime.ts` uses in-memory stream locks, so coordination is per-process only
+- `packages/core/src/runtime.ts` uses in-memory stream locks, so coordination is per-process only
 - `src/adapters/jsonl.ts` persists receipts to local JSONL files rather than a replicated database
 - `src/agents/agent.ts` executes tools against the host filesystem and local shell
 - failure recovery is tied to one server process and local disk
@@ -85,11 +85,11 @@ This section grounds the production architecture in the code that exists today.
 
 Receipt already has several of the right primitives:
 
-- receipt-native streams and replay in `src/core/runtime.ts`
+- receipt-native streams and replay in `packages/core/src/runtime.ts`
 - JSONL receipt storage and branch metadata in `src/adapters/jsonl.ts`
 - receipt-native queue lifecycle in `src/adapters/jsonl-queue.ts`
 - job worker leases and heartbeats in `src/engine/runtime/job-worker.ts`
-- receipt-based approval precedent in `src/modules/self-improvement.ts`
+- receipt-based approval and promotion precedent in `src/modules/factory.ts`
 - operator SSE fanout in `src/framework/sse-hub.ts`
 - receipt-inspection UI surfaces in `src/views/receipt.ts`
 
@@ -100,12 +100,12 @@ Those are not throwaway ideas. The production system should preserve them.
 | Area | Current repo behavior | Why it is not production-grade |
 | --- | --- | --- |
 | Receipt durability | Local JSONL files keyed by stream in `src/adapters/jsonl.ts` | Local disk is not the right primary ledger for HA or multi-node coordination |
-| Concurrency control | In-memory `streamLocks` in `src/core/runtime.ts` | Only safe inside one process; no cross-node append ordering |
+| Concurrency control | In-memory `streamLocks` in `packages/core/src/runtime.ts` | Only safe inside one process; no cross-node append ordering |
 | Queue durability | Receipt-native queue in JSONL | Useful design, but tied to the same local-disk and single-process assumptions |
 | Execution environment | Built-in tools run on host filesystem and host shell in `src/agents/agent.ts` | Unsafe for production multi-tenant or cloud-executing agents |
 | Sandboxing | No first-class sandbox provider abstraction | Infrastructure tasks need isolated execution cells |
 | Credentials | No dedicated short-lived cloud credential broker | Production cloud access must be run-scoped and auditable |
-| Artifacts | Some artifact concepts exist in self-improvement flows, but no general artifact store | Infra runs need reports, plans, logs, bundles, and reusable outputs |
+| Artifacts | Factory already carries packet, report, evidence, and candidate artifact refs, but there is no general artifact store | Infra runs need reports, plans, logs, bundles, and reusable outputs |
 | Persistent reuse | Workspace reuse is local and process-oriented | Reuse must outlive any one host or sandbox |
 
 ### Summary of current-state decision
@@ -1407,7 +1407,7 @@ Repo impact:
 
 - new `src/adapters/postgres/`
 - new receipt migration files
-- `src/core/runtime.ts` split or wrapped behind ledger abstraction
+- `packages/core/src/runtime.ts` split or wrapped behind ledger abstraction
 
 Acceptance criteria:
 
@@ -1515,13 +1515,13 @@ This avoids a dangerous rewrite of unrelated agent paths.
 
 ### Internal repo references
 
-- `src/core/runtime.ts`
+- `packages/core/src/runtime.ts`
 - `src/adapters/jsonl.ts`
 - `src/adapters/jsonl-queue.ts`
 - `src/engine/runtime/job-worker.ts`
 - `src/agents/agent.ts`
 - `src/framework/sse-hub.ts`
-- `src/modules/self-improvement.ts`
+- `src/modules/factory.ts`
 - `docs/api/streams.md`
 - `architecture.md`
 

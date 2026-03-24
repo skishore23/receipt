@@ -5,6 +5,7 @@ import type {
   FactoryObjectiveDetail,
   FactoryTaskView,
 } from "../services/factory-types";
+import { summarizeFactoryQueueJob } from "./factory/job-presenters";
 
 type WorkbenchEmphasis = "accent" | "warning" | "danger" | "success" | "muted";
 
@@ -33,21 +34,6 @@ const emphasisForReceipt = (type: string): WorkbenchEmphasis => {
   if (type.includes("promoted") || type.includes("ready_to_promote") || type.includes("completed")) return "success";
   if (type.includes("rebracket")) return "accent";
   return "muted";
-};
-
-const summarizeQueueJob = (job: QueueJob): string => {
-  const result = asRecord(job.result);
-  const failure = asRecord(result?.failure);
-  return asString(result?.summary)
-    ?? asString(result?.finalResponse)
-    ?? asString(result?.message)
-    ?? asString(result?.note)
-    ?? asString(failure?.message)
-    ?? job.lastError
-    ?? asString((job.payload as Record<string, unknown>).problem)
-    ?? asString((job.payload as Record<string, unknown>).task)
-    ?? asString((job.payload as Record<string, unknown>).kind)
-    ?? `${job.agentId} job`;
 };
 
 const dependencySummary = (
@@ -237,7 +223,7 @@ export const buildFactoryWorkbench = (input: {
       jobId: job.id,
       agentId: job.agentId,
       status: job.status,
-      summary: summarizeQueueJob(job),
+      summary: summarizeFactoryQueueJob(job),
       updatedAt: job.updatedAt,
       taskId: asString(payload.taskId),
       candidateId: asString(payload.candidateId),

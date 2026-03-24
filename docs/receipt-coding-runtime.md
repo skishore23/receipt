@@ -43,7 +43,7 @@ But the current execution model is still host-local:
 
 - `src/agents/agent.ts` reads and writes directly against a local `workspaceRoot`
 - shell commands execute on the host via `spawn(...)`
-- runtime append ordering depends on in-process stream locks in `src/core/runtime.ts`
+- runtime append ordering depends on in-process stream locks in `packages/core/src/runtime.ts`
 
 That is good enough for a prototype, but not enough for a production coding runtime where:
 
@@ -153,7 +153,7 @@ Those outputs must be accessible through Receipt so they can be shown in UI or c
 
 The current repo already provides useful building blocks:
 
-- append-only receipt chains in `src/core/runtime.ts`
+- append-only receipt chains in `packages/core/src/runtime.ts`
 - JSONL-backed receipt persistence in `src/adapters/jsonl.ts`
 - receipt-native job lifecycle and worker leasing in `src/engine/runtime/job-worker.ts`
 - HTTP and SSE surfaces in `src/server.ts`

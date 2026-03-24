@@ -668,6 +668,11 @@ test("factory reducer: replay reconstructs task, candidate, and integration stat
         startedAt: 6,
         finishedAt: 7,
       }],
+      scriptsRun: [{
+        command: "bun test tests/smoke/factory.test.ts",
+        summary: "Ran the focused reducer smoke test.",
+        status: "ok",
+      }],
       artifactRefs: {},
       producedAt: 7,
     },
@@ -723,6 +728,7 @@ test("factory reducer: replay reconstructs task, candidate, and integration stat
   expect(projection.tasks[0]?.status).toBe("approved");
   expect(projection.integration.status).toBe("promoted");
   expect(replayA.candidates.task_01_candidate_01?.status).toBe("approved");
+  expect(replayA.candidates.task_01_candidate_01?.scriptsRun?.[0]?.command).toBe("bun test tests/smoke/factory.test.ts");
   expect(replayA.integration.promotedCommit).toBe("fedcba9");
 });
 
@@ -1313,6 +1319,48 @@ test("factory sidebar island: blank chat treats old objectives as recent threads
   expect(markup).toMatch(/Profile-driven Factory UI/);
 });
 
+test("factory sidebar island: objective cards and selected metrics show token totals when available", () => {
+  const selectedObjective = {
+    objectiveId: "objective_tokens",
+    title: "Token-visible objective",
+    status: "executing",
+    phase: "executing",
+    summary: "Surface the Codex token total.",
+    debugLink: "/debug",
+    receiptsLink: "/receipts",
+    activeTaskCount: 1,
+    readyTaskCount: 0,
+    taskCount: 3,
+    tokensUsed: 12345,
+  };
+  const markup = factorySidebarIsland({
+    activeProfileId: "generalist",
+    activeProfileLabel: "Generalist",
+    activeProfileTools: [],
+    profiles: [{ id: "generalist", label: "Generalist", selected: true }],
+    objectives: [{
+      objectiveId: "objective_tokens",
+      title: "Token-visible objective",
+      status: "executing",
+      phase: "executing",
+      summary: "Surface the Codex token total.",
+      updatedAt: 100,
+      selected: true,
+      slotState: "active",
+      activeTaskCount: 1,
+      readyTaskCount: 0,
+      taskCount: 3,
+      integrationStatus: "idle",
+      tokensUsed: 12345,
+    }],
+    jobs: [],
+  }, selectedObjective);
+
+  expect(markup).toContain("12,345 tok");
+  expect(markup).toContain("Tokens");
+  expect(markup).toContain("12,345");
+});
+
 test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () => {
   const plan = [
     {
@@ -1406,6 +1454,7 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
         summary: "Demo summary",
         debugLink: "/debug",
         receiptsLink: "/receipts",
+        tokensUsed: 321,
       },
       activeRun: {
         runId: "run_demo",
@@ -1446,6 +1495,7 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
   expect(markup).toMatch(/id="factory-composer-completions"[^>]+role="listbox"/);
   expect(markup).toMatch(/id="factory-composer-submit"[^>]+min-h-\[88px\]/);
   expect(markup).toContain("Objective blocked");
+  expect(markup).toContain("321 tokens");
   expect(markup).toContain("Run completed");
   expect(markup).toContain("Tasks");
   expect(markup).toContain("Validate cost-driver inventory");
@@ -2386,6 +2436,61 @@ test("factory route: composer accepts UI chat submissions and redirects into que
     chatId: "chat_demo",
     objectiveId: "objective_created",
     problem: "Check the repo and tell me what happens next.",
+  });
+});
+
+test("factory route: follow-up composer submissions stop pinning the URL to a completed thread", async () => {
+  let queuedInput: Record<string, unknown> | undefined;
+  const completed = {
+    ...makeStubObjectiveDetail("objective_done", "job_done"),
+    status: "completed",
+    phase: "completed",
+    latestSummary: "Completed objective summary",
+    nextAction: "Start a follow-up objective for more work.",
+  };
+  const app = createRouteTestApp({
+    onEnqueue: async (input) => {
+      queuedInput = input;
+      return {
+        id: "job_chat_followup",
+        agentId: "factory",
+        payload: (input.payload as Record<string, unknown> | undefined) ?? {},
+        lane: "chat",
+        status: "queued",
+        attempt: 1,
+        maxAttempts: 1,
+        createdAt: 10,
+        updatedAt: 11,
+        commands: [],
+      } as QueueJob;
+    },
+    service: {
+      listObjectives: async () => [
+        completed as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => completed,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist&chat=chat_demo&thread=objective_done", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      prompt: "Continue with the next piece of work.",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(303);
+  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_demo&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_followup$/);
+  expect(response.headers.get("location")).not.toContain("thread=objective_done");
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
+    kind: "factory.run",
+    profileId: "generalist",
+    chatId: "chat_demo",
+    objectiveId: "objective_done",
+    problem: "Continue with the next piece of work.",
   });
 });
 

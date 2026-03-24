@@ -1,4 +1,25 @@
-import { esc, sectionLabelClass, softPanelClass, badge, statPill, formatTs, shortHash, ghostButtonClass, dangerButtonClass } from "./ui";
+import {
+  badge,
+  dangerButtonClass,
+  esc,
+  formatTs,
+  ghostButtonClass,
+  iconCheckCircle,
+  iconCommit,
+  iconProject,
+  iconPullRequest,
+  iconReceipt,
+  iconRun,
+  iconStatus,
+  iconTask,
+  iconTokens,
+  iconWorker,
+  renderEmptyState,
+  sectionLabelClass,
+  shortHash,
+  softPanelClass,
+  statPill,
+} from "./ui";
 import { renderFactoryRunSteps } from "./factory-live-steps";
 import type {
   FactoryInspectorModel,
@@ -82,12 +103,68 @@ const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
   return [packetFiles, extraArtifacts].filter(Boolean).join("");
 };
 
+const renderInspectorEmptyState = (
+  panel: FactoryInspectorRouteModel["panel"],
+  options?: {
+    readonly title?: string;
+    readonly message?: string;
+    readonly tone?: "neutral" | "info" | "success" | "warning" | "danger";
+  },
+): string => {
+  const config = (() => {
+    switch (panel) {
+      case "execution":
+        return {
+          icon: iconTask("h-5 w-5"),
+          eyebrow: "Tasks",
+          message: "Pick a thread from the rail or start a new one to inspect its task graph.",
+        };
+      case "live":
+        return {
+          icon: iconRun("h-5 w-5"),
+          eyebrow: "Live Output",
+          message: "Choose a thread to watch active runs, job output, and recent supervisor steps here.",
+        };
+      case "receipts":
+        return {
+          icon: iconReceipt("h-5 w-5"),
+          eyebrow: "Receipts",
+          message: "Receipts appear here once a thread is selected and Factory has recorded activity.",
+        };
+      case "debug":
+        return {
+          icon: iconWorker("h-5 w-5"),
+          eyebrow: "Debug",
+          message: "Select a thread to inspect raw debug data, runtime state, and supporting metadata.",
+        };
+      case "overview":
+      default:
+        return {
+          icon: iconProject("h-5 w-5"),
+          eyebrow: "Overview",
+          message: "Pick a thread from the left rail or send a message below to open its overview here.",
+        };
+    }
+  })();
+  return `<div class="px-3 py-3 md:px-3.5">
+    ${renderEmptyState({
+      icon: config.icon,
+      tone: options?.tone ?? "neutral",
+      eyebrow: config.eyebrow,
+      title: options?.title ?? "No objective selected.",
+      message: options?.message ?? config.message,
+      minHeightClass: "min-h-[260px]",
+    })}
+  </div>`;
+};
+
 const renderMissingObjectivePanel = (model: FactoryInspectorModel): string => {
   const objectiveId = model.objectiveId?.trim();
-  return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm">
-    <div class="rounded-lg border border-warning/20 bg-warning/5 px-3 py-3 text-warning">Objective not found.</div>
-    <div class="text-muted-foreground">The current thread URL points to Factory data that no longer exists${objectiveId ? `: ${esc(objectiveId)}` : "."}</div>
-  </div>`;
+  return renderInspectorEmptyState(model.panel, {
+    title: "Objective not found.",
+    message: `The current thread URL points to Factory data that no longer exists${objectiveId ? `: ${objectiveId}` : "."}`,
+    tone: "warning",
+  });
 };
 
 const renderFocusedOutput = (model: FactoryInspectorModel, heading: string): string => {
@@ -120,17 +197,22 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
   const focusedTask = workbench?.focusedTask;
   const focus = workbench?.focus;
   if (!obj) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4 text-muted-foreground text-sm">No objective selected.</div>`;
+    return renderInspectorEmptyState("overview");
   }
   
-  return `<div class="space-y-4 px-3 py-4 md:px-4">
-    <div class="flex flex-col gap-2">
-      <div class="text-lg font-semibold text-foreground">${esc(obj.title)}</div>
-      <div class="text-sm text-muted-foreground">${esc(obj.objectiveId)}</div>
-      <div class="flex flex-wrap gap-2 mt-1">
-        ${badge(obj.status)}
-        ${obj.phase !== obj.status ? badge(obj.phase) : ''}
-        ${obj.integrationStatus ? badge(obj.integrationStatus) : ''}
+  return `<div class="space-y-4 px-3 py-3 md:px-3.5">
+    <div class="flex items-start gap-3">
+      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/80 bg-muted/90 text-primary shadow-sm">
+        ${iconProject("h-4 w-4")}
+      </span>
+      <div class="min-w-0 flex-1">
+        <div class="text-lg font-semibold text-foreground">${esc(obj.title)}</div>
+        <div class="mt-1 text-sm text-muted-foreground">${esc(obj.objectiveId)}</div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          ${badge(obj.status)}
+          ${obj.phase !== obj.status ? badge(obj.phase) : ''}
+          ${obj.integrationStatus ? badge(obj.integrationStatus) : ''}
+        </div>
       </div>
     </div>
     
@@ -140,12 +222,12 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
     </div>` : ''}
 
     <div class="grid grid-cols-2 gap-3">
-      ${statPill("Slot State", obj.slotState + (obj.queuePosition ? ` (q${obj.queuePosition})` : ''))}
-      ${statPill("Tasks", `${obj.activeTaskCount ?? 0} active / ${obj.readyTaskCount ?? 0} ready / ${obj.taskCount ?? 0} total`)}
-      ${statPill("Head Commit", shortHash(obj.latestCommitHash) || "None")}
-      ${statPill("Pull Request", obj.prNumber ? `#${obj.prNumber}` : obj.prUrl ? "Opened" : "None")}
-      ${statPill("Checks", obj.checks?.length ? `${obj.checks.length} checks` : "None")}
-      ${obj.tokensUsed ? statPill("Codex Tokens", obj.tokensUsed.toLocaleString()) : ''}
+      ${statPill("Slot State", obj.slotState + (obj.queuePosition ? ` (q${obj.queuePosition})` : ''), { icon: iconStatus("h-3.5 w-3.5") })}
+      ${statPill("Tasks", `${obj.activeTaskCount ?? 0} active / ${obj.readyTaskCount ?? 0} ready / ${obj.taskCount ?? 0} total`, { icon: iconTask("h-3.5 w-3.5") })}
+      ${statPill("Head Commit", shortHash(obj.latestCommitHash) || "None", { icon: iconCommit("h-3.5 w-3.5") })}
+      ${statPill("Pull Request", obj.prNumber ? `#${obj.prNumber}` : obj.prUrl ? "Opened" : "None", { icon: iconPullRequest("h-3.5 w-3.5") })}
+      ${statPill("Checks", obj.checks?.length ? `${obj.checks.length} checks` : "None", { icon: iconCheckCircle("h-3.5 w-3.5") })}
+      ${obj.tokensUsed ? statPill("Codex Tokens", obj.tokensUsed.toLocaleString(), { icon: iconTokens("h-3.5 w-3.5") }) : ''}
     </div>
 
     ${obj.prUrl ? `
@@ -190,8 +272,8 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
           <pre class="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(focusedTask.prompt)}</pre>
         </div>` : ''}
         ${focusedTask ? `<div class="grid grid-cols-2 gap-2">
-          ${statPill("Workspace", focusedTask.workspaceExists ? (focusedTask.workspaceDirty ? "Dirty" : "Clean") : "Missing")}
-          ${statPill("Candidate", focusedTask.candidateId ?? "None")}
+          ${statPill("Workspace", focusedTask.workspaceExists ? (focusedTask.workspaceDirty ? "Dirty" : "Clean") : "Missing", { icon: iconWorker("h-3.5 w-3.5") })}
+          ${statPill("Candidate", focusedTask.candidateId ?? "None", { icon: iconTask("h-3.5 w-3.5") })}
         </div>` : ''}
         ${renderFocusedArtifacts(model)}
       </div>
@@ -227,10 +309,13 @@ const renderExecutionPanel = (model: FactoryInspectorModel): string => {
   if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   const tasks = model.workbench?.tasks ?? model.tasks;
   if (!tasks || tasks.length === 0) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No tasks defined yet.</div>`;
+    return renderInspectorEmptyState("execution", {
+      title: "No tasks defined yet.",
+      message: "This thread has not planned or recorded any tasks yet.",
+    });
   }
   
-  return `<div class="space-y-3 px-3 py-3 md:px-4">
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     ${renderFocusedOutput(model, "Focused Output")}
     <div class="${sectionLabelClass} mb-2">Execution Graph</div>
     <div class="space-y-2">
@@ -277,7 +362,7 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
     subtitle: "Recent supervisor steps for the currently selected thread.",
   });
   if (model.workbench?.focus) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4">
+    return `<div class="space-y-3 px-3 py-3 md:px-3.5">
       ${renderFocusedOutput(model, "Focused Live Output")}
       ${liveSteps}
       ${model.workbench.jobs.length ? `<div class="space-y-2">
@@ -295,7 +380,10 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
     </div>`;
   }
   if (!liveSteps && !model.activeCodex && (!model.liveChildren || model.liveChildren.length === 0)) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No live execution currently running.</div>`;
+    return renderInspectorEmptyState("live", {
+      title: "No live execution currently running.",
+      message: "Select a thread with active work to watch run output here.",
+    });
   }
 
   const cards: string[] = [];
@@ -331,7 +419,7 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
     }
   }
 
-  return `<div class="space-y-3 px-3 py-3 md:px-4">
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     ${liveSteps}
     <div class="${sectionLabelClass} mb-2">Live Output</div>
     ${cards.join('\n')}
@@ -341,9 +429,12 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
 const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
   if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   if (!model.receipts || model.receipts.length === 0) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No receipts found.</div>`;
+    return renderInspectorEmptyState("receipts", {
+      title: "No receipts found.",
+      message: "Factory has not recorded any receipts for this thread yet.",
+    });
   }
-  return `<div class="space-y-2 px-3 py-3 md:px-4">
+  return `<div class="space-y-2 px-3 py-3 md:px-3.5">
     ${model.receipts.map(r => `
       <div class="${softPanelClass} p-3 flex flex-col gap-1.5">
         <div class="flex items-center justify-between gap-2">
@@ -364,9 +455,12 @@ const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
 const renderDebugPanel = (model: FactoryInspectorModel): string => {
   if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   if (!model.debugInfo) {
-    return `<div class="space-y-3 px-3 py-3 md:px-4 text-sm text-muted-foreground">No debug info available.</div>`;
+    return renderInspectorEmptyState("debug", {
+      title: "No debug info available.",
+      message: "There is no captured debug payload for the current selection.",
+    });
   }
-  return `<div class="space-y-3 px-3 py-3 md:px-4">
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     <pre class="text-[11px] leading-5 p-3 rounded-lg border border-border bg-background text-foreground overflow-auto max-h-[70vh] font-mono shadow-inner">${esc(JSON.stringify(model.debugInfo, null, 2))}</pre>
   </div>`;
 };

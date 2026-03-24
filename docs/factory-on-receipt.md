@@ -137,8 +137,8 @@ flowchart LR
 
 ### Core Receipt/runtime primitives
 
-- `src/core/runtime.ts`
-- `src/core/graph.ts`
+- `packages/core/src/runtime.ts`
+- `packages/core/src/graph.ts`
 - `src/adapters/jsonl.ts`
 - `src/adapters/jsonl-queue.ts`
 - `src/adapters/memory-tools.ts`
@@ -431,18 +431,24 @@ stateDiagram-v2
   blocked --> superseded
 ```
 
-## Graph Model
+## Workflow Dependency Model
 
-The task DAG is backed by the generic graph primitive in `src/core/graph.ts`.
+Factory still has a task DAG conceptually, but it is no longer backed by a generic graph primitive.
 
-Important changes from the older Hub graph behavior:
+Today the dependency model lives directly in `src/modules/factory.ts` as workflow state:
 
-- node status is domain-defined
-- there is no single `currentNodeId` gate in the graph core
-- `activeNodeIds` is a set-like list, so multiple tasks can run concurrently
-- activation and runnable selection stay deterministic because dependency checks are pure
+- `workflow.taskIds`
+- `workflow.tasksById`
+- `workflow.activeTaskIds`
+- per-task `dependsOn`
 
-Factory task graph buckets are defined in `FACTORY_TASK_GRAPH_BUCKETS`.
+`packages/core/src/graph.ts` is only used for `GraphRef` metadata such as state, artifact, file, workspace, commit, job, and prompt references.
+
+Important behavior in the current custom workflow model:
+
+- task status is domain-defined in the factory reducer
+- multiple tasks can be active concurrently through `workflow.activeTaskIds`
+- dependency activation and runnable selection stay deterministic because `dependsOn` checks are pure reducer/service logic
 
 Notable behavior:
 
@@ -698,7 +704,7 @@ The worker prompt is rendered by `renderTaskPrompt()`.
 Result contract:
 
 ```json
-{ "outcome": "approved" | "changes_requested" | "blocked", "summary": "...", "handoff": "..." }
+{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": "...", "artifacts": [{ "label": "...", "path": "...", "summary": "..." }], "nextAction": "..." }
 ```
 
 Current handling:
@@ -706,6 +712,7 @@ Current handling:
 - `approved` produces `candidate.reviewed` with approved status
 - `changes_requested` moves the task back to `ready`
 - `blocked` emits `task.blocked`
+- `partial` is preserved for investigation reports and treated as blocked for delivery tasks
 
 ## Layered Memory Access
 
@@ -723,17 +730,20 @@ Configured scopes:
 - `factory/objectives/<objectiveId>/candidates/<candidateId>`
 - `factory/objectives/<objectiveId>/integration`
 
-The script shells out to the repo CLI:
+For `overview`, `scope`, `search`, `read`, and `commit`, the script shells out to the repo CLI:
 
 - `receipt memory summarize`
 - `receipt memory search`
 - `receipt memory read`
 - `receipt memory commit`
 
+For `context` and `objective`, it reads the generated `context-pack.json` directly.
+
 Supported script commands:
 
 - `overview`
 - `context`
+- `objective`
 - `scope`
 - `search`
 - `read`
@@ -747,6 +757,7 @@ Specifically:
 
 - scope summaries still come from receipt-backed `memory.summarize`
 - `overview` compacts those scopes under a bounded budget
+- when `OPENAI_API_KEY` is present, worker-side memory retrieval uses embeddings by default; otherwise it falls back to keyword matching
 - `context` renders a recursive pack built from:
   - the focused task
   - its dependency closure
@@ -884,7 +895,7 @@ The generated memory script shells out to `receipt`, which is shimmed into the w
 
 - `.receipt/bin/receipt`
 
-That shim uses the repo-local CLI through Node and the `tsx` loader.
+That shim uses the repo-local CLI through Bun with the repo's `src/cli.ts` entrypoint.
 
 This is convenient and keeps one memory path, but it is slower than a direct in-process call.
 

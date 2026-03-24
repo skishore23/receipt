@@ -27,6 +27,7 @@ import {
   type FactoryInvestigationReport,
   type FactoryInvestigationSynthesisRecord,
   type FactoryInvestigationTaskReport,
+  type FactoryExecutionScriptRun,
   type FactoryObjectivePhase,
   type FactoryObjectiveMode,
   type FactoryCheckResult,
@@ -59,6 +60,16 @@ import {
   rewriteInfrastructureTaskPromptForExecution,
   renderInfrastructureTaskExecutionGuidance,
 } from "./factory-infrastructure-guidance";
+import {
+  buildFactoryFailureSignature,
+  buildInheritedFactoryFailureNote,
+  priorFactoryFailureSignatureMap,
+} from "./factory/failure-policy";
+import {
+  resolveFactoryPublishWorkerResult,
+  resolveFactoryTaskWorkerResult,
+  type FactoryPublishResult,
+} from "./factory/worker-results";
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
 import { type GraphRef } from "@receipt/core/graph";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
@@ -91,6 +102,16 @@ const FACTORY_TASK_ARTIFACT_SCHEMA = {
   required: ["label", "path", "summary"],
   additionalProperties: false,
 } as const;
+const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
+  type: "object",
+  properties: {
+    command: { type: "string" },
+    summary: { type: ["string", "null"] },
+    status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
+  },
+  required: ["command", "summary", "status"],
+  additionalProperties: false,
+} as const;
 const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -100,9 +121,13 @@ const FACTORY_TASK_RESULT_SCHEMA = {
       type: "array",
       items: FACTORY_TASK_ARTIFACT_SCHEMA,
     },
+    scriptsRun: {
+      type: "array",
+      items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
+    },
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "artifacts", "nextAction"],
+  required: ["outcome", "summary", "artifacts", "scriptsRun", "nextAction"],
   additionalProperties: false,
 } as const;
 const FACTORY_PUBLISH_RESULT_SCHEMA = {
@@ -137,16 +162,7 @@ const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
     },
     scriptsRun: {
       type: "array",
-      items: {
-        type: "object",
-        properties: {
-          command: { type: "string" },
-          summary: { type: ["string", "null"] },
-          status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
-        },
-        required: ["command", "summary", "status"],
-        additionalProperties: false,
-      },
+      items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
     disagreements: {
       type: "array",
@@ -163,7 +179,10 @@ const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
 const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
-    ...FACTORY_TASK_RESULT_SCHEMA.properties,
+    outcome: FACTORY_TASK_RESULT_SCHEMA.properties.outcome,
+    summary: FACTORY_TASK_RESULT_SCHEMA.properties.summary,
+    artifacts: FACTORY_TASK_RESULT_SCHEMA.properties.artifacts,
+    nextAction: FACTORY_TASK_RESULT_SCHEMA.properties.nextAction,
     report: {
       ...FACTORY_INVESTIGATION_REPORT_SCHEMA,
       type: ["object", "null"],
@@ -200,14 +219,6 @@ const clipText = (value: string | undefined, max = 280): string | undefined => {
 };
 const pathExists = async (targetPath: string): Promise<boolean> =>
   fs.access(targetPath).then(() => true).catch(() => false);
-const isValidUrl = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-};
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 const tailText = (value: string, maxChars: number): string =>
@@ -234,8 +245,6 @@ const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "queued" || status === "leased" || status === "running";
-const ansiRe = /\x1b\[[0-9;]*m/g;
-const salientFailureLineRe = /(fail|error|enoent|eperm|expected|received|exited with code|unable to|no such file|missing)/i;
 const INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS = new Set([
   "a",
   "an",
@@ -411,6 +420,21 @@ const asReadonlyStringArray = (value: unknown): ReadonlyArray<string> =>
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
     : [];
 
+const normalizeExecutionScriptsRun = (
+  value: unknown,
+): ReadonlyArray<FactoryExecutionScriptRun> =>
+  Array.isArray(value)
+    ? value
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => ({
+        command: clipText(typeof item.command === "string" ? item.command : undefined, 220) ?? "command",
+        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
+        status: item.status === "ok" || item.status === "warning" || item.status === "error"
+          ? item.status
+          : undefined,
+      } satisfies FactoryExecutionScriptRun))
+    : [];
+
 const normalizeInvestigationReport = (
   value: unknown,
   summary: string,
@@ -425,17 +449,7 @@ const normalizeInvestigationReport = (
         detail: clipText(typeof item.detail === "string" ? item.detail : undefined, 600),
       }))
     : [];
-  const scriptsRun = Array.isArray(record.scriptsRun)
-    ? record.scriptsRun
-      .filter((item): item is Record<string, unknown> => isRecord(item))
-      .map((item) => ({
-        command: clipText(typeof item.command === "string" ? item.command : undefined, 220) ?? "command",
-        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
-        status: item.status === "ok" || item.status === "warning" || item.status === "error"
-          ? item.status
-          : undefined,
-      } satisfies FactoryInvestigationReport["scriptsRun"][number]))
-    : [];
+  const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);
   return {
     conclusion: clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400) ?? summary,
     evidence,
@@ -521,14 +535,6 @@ type FactoryMemoryScopeSpec = {
   readonly defaultQuery: string;
 };
 
-type FactoryPublishResult = {
-  readonly summary: string;
-  readonly prUrl: string;
-  readonly prNumber: number | null;
-  readonly headRefName: string | null;
-  readonly baseRefName: string | null;
-};
-
 type FactoryContextTaskNode = {
   readonly taskId: string;
   readonly taskKind: FactoryTaskRecord["taskKind"];
@@ -609,6 +615,7 @@ type FactoryContextPack = {
     readonly summary?: string;
     readonly headCommit?: string;
     readonly latestReason?: string;
+    readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
   }>;
   readonly recentReceipts: ReadonlyArray<FactoryContextReceipt>;
   readonly objectiveSlice: FactoryContextObjectiveSlice;
@@ -2420,6 +2427,10 @@ export class FactoryService {
     }
 
     if (state.workflow.taskIds.length === 0) {
+      if (state.status === "blocked") {
+        await this.rebalanceObjectiveSlots();
+        return;
+      }
       const createdAt = Date.now();
       const initialTask = this.createObjectiveTaskRecord({
         objectiveId,
@@ -2458,6 +2469,10 @@ export class FactoryService {
           readyAt: Date.now() + index,
         })));
         state = await refreshState();
+      }
+      if (state.status === "blocked") {
+        await this.rebalanceObjectiveSlots();
+        return;
       }
     }
 
@@ -2835,12 +2850,20 @@ export class FactoryService {
       ).join("\n")}`
       : undefined;
     const handoff = [nextAction ?? summary, workerArtifactSummary].filter(Boolean).join("\n\n") || summary;
+    const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
     const outcome = optionalTrimmedString(rawResult.outcome) ?? "approved";
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
 
     if ((outcome === "blocked" || (outcome === "partial" && !isInvestigation)) && !hasStructuredInvestigationReport) {
+      await this.commitTaskMemory(
+        state,
+        task,
+        payload.candidateId,
+        this.renderDeliveryResultText({ summary, handoff, scriptsRun }),
+        outcome,
+      );
       await this.emitObjective(payload.objectiveId, {
         type: "task.blocked",
         objectiveId: payload.objectiveId,
@@ -2859,7 +2882,13 @@ export class FactoryService {
 
     if (payload.executionMode === "isolated" && !isInvestigation) {
       const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${summary}`;
-      await this.commitTaskMemory(state, task, payload.candidateId, `${summary}\n\n${handoff}`, "blocked_no_diff");
+      await this.commitTaskMemory(
+        state,
+        task,
+        payload.candidateId,
+        this.renderDeliveryResultText({ summary, handoff, scriptsRun }),
+        "blocked_no_diff",
+      );
       await this.emitObjective(payload.objectiveId, {
         type: "task.blocked",
         objectiveId: payload.objectiveId,
@@ -2872,7 +2901,13 @@ export class FactoryService {
 
     if (!status.dirty && !isInvestigation) {
       const noDiffReason = `factory task produced no tracked diff: ${summary}`;
-      await this.commitTaskMemory(state, task, payload.candidateId, `${summary}\n\n${handoff}`, "blocked_no_diff");
+      await this.commitTaskMemory(
+        state,
+        task,
+        payload.candidateId,
+        this.renderDeliveryResultText({ summary, handoff, scriptsRun }),
+        "blocked_no_diff",
+      );
       await this.emitObjective(payload.objectiveId, {
         type: "task.blocked",
         objectiveId: payload.objectiveId,
@@ -2991,6 +3026,7 @@ export class FactoryService {
       summary,
       handoff,
       checkResults,
+      scriptsRun,
       artifactRefs: resultRefs,
       tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
       producedAt: completedAt,
@@ -3011,7 +3047,7 @@ export class FactoryService {
         ? `${summary} (checks only reproduced an inherited failure in ${failedCheck.command})`
         : `Verification failed: ${failedCheck.command}`;
       const reviewHandoff = inheritedOnly
-        ? `${handoff}\n\n${this.inheritedFailureNote(failedCheck, classification)}`
+        ? `${handoff}\n\n${buildInheritedFactoryFailureNote(failedCheck, classification)}`
         : handoff;
       await this.emitObjective(payload.objectiveId, {
         type: "candidate.reviewed",
@@ -3023,7 +3059,17 @@ export class FactoryService {
         handoff: reviewHandoff,
         reviewedAt: completedAt,
       });
-      await this.commitTaskMemory(state, task, payload.candidateId, reviewSummary, reviewStatus);
+      await this.commitTaskMemory(
+        state,
+        task,
+        payload.candidateId,
+        this.renderDeliveryResultText({
+          summary: reviewSummary,
+          handoff: reviewHandoff,
+          scriptsRun,
+        }),
+        reviewStatus,
+      );
       return;
     }
 
@@ -3039,7 +3085,13 @@ export class FactoryService {
       handoff,
       reviewedAt: completedAt,
     });
-    await this.commitTaskMemory(state, task, payload.candidateId, summary, reviewStatus);
+    await this.commitTaskMemory(
+      state,
+      task,
+      payload.candidateId,
+      this.renderDeliveryResultText({ summary, handoff, scriptsRun }),
+      reviewStatus,
+    );
   }
 
   async runIntegrationValidation(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -3076,7 +3128,7 @@ export class FactoryService {
         await this.commitIntegrationMemory(
           state,
           parsed.candidateId,
-          `${summary}\n\n${this.inheritedFailureNote(failed, classification)}`,
+          `${summary}\n\n${buildInheritedFactoryFailureNote(failed, classification)}`,
           ["integration", "validated", "inherited_failures"],
         );
         await this.reactObjective(parsed.objectiveId);
@@ -4331,6 +4383,7 @@ export class FactoryService {
         summary: candidate.summary,
         headCommit: candidate.headCommit,
         latestReason: candidate.latestReason,
+        scriptsRun: candidate.scriptsRun,
       }));
     const relatedTaskIds = new Set<string>([...relatedTaskRelations.keys(), ...dependencyIds]);
     const relatedCandidateIds = new Set<string>([
@@ -4537,6 +4590,37 @@ export class FactoryService {
       }
     }
     return lines;
+  }
+
+  private renderDeliveryResultText(input: {
+    readonly summary: string;
+    readonly handoff: string;
+    readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  }): string {
+    const sections = [
+      {
+        title: "Summary",
+        lines: [input.summary || "No summary recorded."],
+        bulletize: false,
+      },
+      {
+        title: "Handoff",
+        lines: [input.handoff || input.summary || "No handoff recorded."],
+        bulletize: false,
+      },
+      {
+        title: "Scripts Run",
+        lines: input.scriptsRun.length
+          ? input.scriptsRun.map((item) =>
+            `${item.status ?? "ok"}: ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
+          : ["none recorded"],
+        bulletize: true,
+      },
+    ] as const;
+    return sections.map((section) => [
+      section.title,
+      ...section.lines.map((line) => section.bulletize ? `- ${line}` : line),
+    ].join("\n")).join("\n\n");
   }
 
   private renderInvestigationReportText(
@@ -5483,13 +5567,13 @@ export class FactoryService {
       `Write JSON to ${payload.resultPath} with:`,
       state.objectiveMode === "investigation"
         ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
-        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "nextAction": string | null }`,
+        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "nextAction": string | null }`,
       `Do not write this file yourself. Return exactly that JSON object as your final response and the runtime will persist it to the result path.`,
       `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
       `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
       state.objectiveMode === "investigation"
         ? `For investigation tasks, always include the report key. Use a report object whenever you gathered meaningful evidence; otherwise use null. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
-        : `For delivery tasks, keep the envelope small: summary, artifacts, and nextAction should be enough for the controller to classify the attempt.`,
+        : `For delivery tasks, keep the envelope small. Always include scriptsRun. Use [] when no command or small script materially informed the result so the controller can keep the JSON schema strict.`,
       ``,
       `## Starting Hint`,
       memorySummary || "No durable task memory yet.",
@@ -5743,113 +5827,18 @@ export class FactoryService {
     return true;
   }
 
-  private parseJsonObjectCandidate(raw: string): Record<string, unknown> | undefined {
-    const trimmed = raw.trim();
-    if (!trimmed) return undefined;
-    const candidates = trimmed.includes("\n")
-      ? trimmed.split("\n").map((line) => line.trim()).filter(Boolean).reverse()
-      : [trimmed];
-    for (const candidate of candidates) {
-      try {
-        const parsed = JSON.parse(candidate);
-        if (isRecord(parsed)) return parsed;
-      } catch {
-        continue;
-      }
-    }
-    return undefined;
-  }
-
   private async resolveTaskWorkerResult(
     payload: Pick<FactoryTaskJobPayload, "resultPath" | "lastMessagePath">,
     execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
   ): Promise<Record<string, unknown>> {
-    let result: Record<string, unknown> | undefined;
-    const rawResult = await fs.readFile(payload.resultPath, "utf-8").catch(() => "");
-    if (rawResult.trim()) {
-      result = this.parseTaskResult(rawResult);
-    } else {
-      const rawLastMessage = execution.lastMessage?.trim()
-        ? execution.lastMessage
-        : await fs.readFile(payload.lastMessagePath, "utf-8").catch(() => "");
-      const fromLastMessage = rawLastMessage ? this.parseJsonObjectCandidate(rawLastMessage) : undefined;
-      result = fromLastMessage;
-    }
-    if (!result) {
-      throw new FactoryServiceError(500, "missing structured factory task result from codex");
-    }
-    if (execution.tokensUsed !== undefined) {
-      return { ...result, tokensUsed: execution.tokensUsed };
-    }
-    return result;
+    return resolveFactoryTaskWorkerResult(payload, execution);
   }
 
   private async resolvePublishWorkerResult(
     payload: Pick<FactoryIntegrationPublishJobPayload, "resultPath" | "lastMessagePath">,
     execution: { readonly lastMessage?: string },
   ): Promise<FactoryPublishResult> {
-    const rawResult = await fs.readFile(payload.resultPath, "utf-8").catch(() => "");
-    if (rawResult.trim()) return this.parsePublishResult(rawResult);
-    const rawLastMessage = execution.lastMessage?.trim()
-      ? execution.lastMessage
-      : await fs.readFile(payload.lastMessagePath, "utf-8").catch(() => "");
-    const parsed = rawLastMessage ? this.parseJsonObjectCandidate(rawLastMessage) : undefined;
-    if (!parsed) {
-      throw new FactoryServiceError(500, "missing structured factory publish result from codex");
-    }
-    return this.normalizePublishResult(parsed);
-  }
-
-  private parseTaskResult(raw: string): Record<string, unknown> {
-    if (!raw.trim()) throw new FactoryServiceError(500, "missing factory task result.json");
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new FactoryServiceError(500, `malformed factory task result.json: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (!isRecord(parsed)) throw new FactoryServiceError(500, "factory task result must be an object");
-    return parsed;
-  }
-
-  private parsePublishResult(raw: string): FactoryPublishResult {
-    if (!raw.trim()) throw new FactoryServiceError(500, "missing factory publish result.json");
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new FactoryServiceError(500, `malformed factory publish result.json: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (!isRecord(parsed)) throw new FactoryServiceError(500, "factory publish result must be an object");
-    return this.normalizePublishResult(parsed);
-  }
-
-  private normalizePublishResult(raw: Record<string, unknown>): FactoryPublishResult {
-    const summary = optionalTrimmedString(raw.summary);
-    if (!summary) throw new FactoryServiceError(500, "factory publish result missing summary");
-    const prUrl = optionalTrimmedString(raw.prUrl);
-    if (!prUrl || !isValidUrl(prUrl)) throw new FactoryServiceError(500, "factory publish result missing valid prUrl");
-    const prNumber = raw.prNumber === null
-      ? null
-      : typeof raw.prNumber === "number" && Number.isFinite(raw.prNumber)
-        ? Math.max(0, Math.floor(raw.prNumber))
-        : undefined;
-    if (prNumber === undefined) throw new FactoryServiceError(500, "factory publish result missing prNumber");
-    const headRefName = raw.headRefName === null
-      ? null
-      : optionalTrimmedString(raw.headRefName) ?? undefined;
-    if (headRefName === undefined) throw new FactoryServiceError(500, "factory publish result missing headRefName");
-    const baseRefName = raw.baseRefName === null
-      ? null
-      : optionalTrimmedString(raw.baseRefName) ?? undefined;
-    if (baseRefName === undefined) throw new FactoryServiceError(500, "factory publish result missing baseRefName");
-    return {
-      summary,
-      prUrl,
-      prNumber,
-      headRefName,
-      baseRefName,
-    };
+    return resolveFactoryPublishWorkerResult(payload, execution);
   }
 
   private async ensureWorkspaceReceiptCli(workspacePath: string): Promise<string> {
@@ -6056,84 +6045,6 @@ export class FactoryService {
     return results;
   }
 
-  private escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  private normalizeFailureText(raw: string): string {
-    const worktreePrefix = `${this.git.worktreesDir.replace(/\\/g, "/")}/`;
-    const repoRoot = this.git.repoRoot.replace(/\\/g, "/");
-    const worktreePathRe = new RegExp(`${this.escapeRegex(worktreePrefix)}[^/\\s'":)]+`, "g");
-    return raw
-      .replace(/\r\n/g, "\n")
-      .replace(ansiRe, "")
-      .replace(worktreePathRe, "<worktree>")
-      .replaceAll(repoRoot, "<repo>")
-      .replace(/task_\d+_candidate_\d+/g, "<candidate>")
-      .replace(/objective_[a-z0-9_]+/gi, "<objective>")
-      .replace(/\bworker_\d+\b/g, "worker")
-      .replace(/\b\d+(?:\.\d+)?ms\b/g, "<ms>")
-      .split("\n")
-      .map((line) => line.replace(/[ \t]+/g, " ").trimEnd())
-      .join("\n")
-      .trim();
-  }
-
-  private checkFailureExcerpt(check: FactoryCheckResult): string {
-    const combined = this.normalizeFailureText(`${check.stderr}\n${check.stdout}`);
-    const lines = combined
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .filter((line) => !line.startsWith("$ "))
-      .filter((line) => !/^bun test v/i.test(line))
-      .filter((line) => !/^\(pass\)/i.test(line));
-    const salient = lines.filter((line) => salientFailureLineRe.test(line));
-    const source = salient.length > 0 ? salient : lines;
-    return source.slice(0, 12).join("\n").slice(0, 2_000);
-  }
-
-  private checkFailureSignature(check: FactoryCheckResult): {
-    readonly digest: string;
-    readonly excerpt: string;
-  } {
-    const excerpt = this.checkFailureExcerpt(check);
-    const digest = createHash("sha256")
-      .update(`${check.command}\n${check.exitCode ?? "null"}\n${excerpt}`)
-      .digest("hex")
-      .slice(0, 12);
-    return { digest, excerpt };
-  }
-
-  private priorFailureSignatureMap(state: FactoryState): ReadonlyMap<string, { readonly source: string; readonly excerpt: string }> {
-    const signatures = new Map<string, { readonly source: string; readonly excerpt: string }>();
-    for (const candidateId of state.candidateOrder) {
-      const candidate = state.candidates[candidateId];
-      if (!candidate) continue;
-      for (const check of candidate.checkResults) {
-        if (check.ok) continue;
-        const { digest, excerpt } = this.checkFailureSignature(check);
-        if (!signatures.has(digest)) {
-          signatures.set(digest, {
-            source: `${candidate.taskId}/${candidate.candidateId}`,
-            excerpt,
-          });
-        }
-      }
-    }
-    for (const check of state.integration.validationResults) {
-      if (check.ok) continue;
-      const { digest, excerpt } = this.checkFailureSignature(check);
-      if (!signatures.has(digest)) {
-        signatures.set(digest, {
-          source: `integration/${state.integration.activeCandidateId ?? "unknown"}`,
-          excerpt,
-        });
-      }
-    }
-    return signatures;
-  }
-
   private async baselineFailureSignature(
     state: FactoryState,
     command: string,
@@ -6159,7 +6070,10 @@ export class FactoryService {
         });
         const [result] = await this.runChecks([command], workspace.path);
         if (!result || result.ok) return undefined;
-        return this.checkFailureSignature(result);
+        return buildFactoryFailureSignature(result, {
+          worktreesDir: this.git.worktreesDir,
+          repoRoot: this.git.repoRoot,
+        });
       } catch {
         return undefined;
       } finally {
@@ -6181,8 +6095,14 @@ export class FactoryService {
     readonly excerpt: string;
     readonly source?: string;
   }> {
-    const { digest, excerpt } = this.checkFailureSignature(check);
-    const prior = this.priorFailureSignatureMap(state).get(digest);
+    const { digest, excerpt } = buildFactoryFailureSignature(check, {
+      worktreesDir: this.git.worktreesDir,
+      repoRoot: this.git.repoRoot,
+    });
+    const prior = priorFactoryFailureSignatureMap(state, {
+      worktreesDir: this.git.worktreesDir,
+      repoRoot: this.git.repoRoot,
+    }).get(digest);
     if (prior) {
       return {
         inherited: true,
@@ -6200,18 +6120,6 @@ export class FactoryService {
         ? `baseline/${baseHash.slice(0, 8)}`
         : undefined,
     };
-  }
-
-  private inheritedFailureNote(check: FactoryCheckResult, classification: {
-    readonly digest: string;
-    readonly source?: string;
-  }): string {
-    return [
-      `Deterministic review note: ${check.command} matched a prior failure signature.`,
-      `signature=${classification.digest}`,
-      classification.source ? `source=${classification.source}` : undefined,
-      `This failure is treated as inherited, not as a new regression from the current candidate.`,
-    ].filter(Boolean).join(" ");
   }
 
   private async readTextTail(filePath: string | undefined, maxChars: number): Promise<string | undefined> {

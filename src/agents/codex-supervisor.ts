@@ -4,6 +4,8 @@ import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
 import { readRepoStatus } from "../lib/repo-status";
 import type { FactoryObjectiveInput, FactoryService } from "../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../services/factory-codex-artifacts";
+import { summarizeFactoryObjective } from "../views/factory/objective-presenters";
+import { buildFactoryQueueJobSnapshot } from "../views/factory/job-presenters";
 import {
   runAgent,
   type AgentFinalizer,
@@ -141,43 +143,10 @@ const readCodexArtifacts = async (dataDir: string, jobId: string): Promise<{
 };
 
 const normalizeJobSnapshot = (job: QueueJob): Record<string, unknown> => {
-  const result = asRecord(job.result);
-  const failure = asRecord(result?.failure);
-  const task = asString(job.payload.task)
-    ?? asString(job.payload.prompt)
-    ?? asString(job.payload.problem)
-    ?? asString(job.payload.kind)
-    ?? `${job.agentId} job`;
-  const terminalSummary = job.status === "failed"
-    ? job.lastError ?? asString(failure?.message)
-    : job.status === "canceled"
-      ? job.canceledReason ?? asString(result?.note)
-      : undefined;
-  const summary = terminalSummary
-    ?? asString(result?.summary)
-    ?? asString(result?.finalResponse)
-    ?? asString(result?.note)
-    ?? asString(result?.message)
-    ?? asString(failure?.message)
-    ?? job.lastError
-    ?? clip(task);
+  const base = buildFactoryQueueJobSnapshot(job);
   return {
-    jobId: job.id,
-    status: job.status,
-    worker: asString(result?.worker) ?? job.agentId,
-    agentId: job.agentId,
-    summary,
-    task: clip(task),
-    runId: asString(result?.runId) ?? asString(job.payload.runId),
-    stream: asString(result?.stream) ?? asString(job.payload.stream),
-    parentRunId: asString(job.payload.parentRunId),
-    parentStream: asString(job.payload.parentStream),
+    ...base,
     supervisorSessionId: asString(job.payload.supervisorSessionId),
-    lastMessage: asString(result?.lastMessage),
-    stdoutTail: asString(result?.stdoutTail),
-    stderrTail: asString(result?.stderrTail),
-    changedFiles: asStringList(result?.changedFiles),
-    note: asString(result?.note),
   };
 };
 
@@ -221,19 +190,6 @@ const listSupervisorJobs = async (
   const jobs = await queue.listJobs({ limit: 200 });
   return jobs.filter((job) => jobMatchesSupervisor(job, input));
 };
-
-const summarizeObjective = (detail: Awaited<ReturnType<FactoryService["getObjective"]>>) => ({
-  objectiveId: detail.objectiveId,
-  title: detail.title,
-  status: detail.status,
-  phase: detail.phase,
-  summary: detail.latestSummary ?? detail.nextAction ?? detail.title,
-  integrationStatus: detail.integration.status,
-  latestCommitHash: detail.latestCommitHash,
-  prUrl: detail.prUrl,
-  prNumber: detail.prNumber,
-  link: `/factory?objective=${encodeURIComponent(detail.objectiveId)}`,
-});
 
 const createCodexRunTool = (input: {
   readonly queue: JsonlQueue;
@@ -481,7 +437,7 @@ const createFactoryDispatchTool = (input: {
     } else {
       throw new Error(`unsupported factory.dispatch action '${action}'`);
     }
-    const summary = summarizeObjective(detail);
+    const summary = summarizeFactoryObjective(detail);
     if (detail.archivedAt || detail.status === "completed") {
       latestObjectiveByRun.delete(input.runId);
     } else {
@@ -510,7 +466,7 @@ const createFactoryStatusTool = (input: {
         input.factoryService.getObjective(objectiveId),
         input.factoryService.getObjectiveDebug(objectiveId),
       ]);
-      const summary = summarizeObjective(detail);
+      const summary = summarizeFactoryObjective(detail);
       return {
         worker: "factory",
         action: "status",

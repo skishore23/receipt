@@ -16,7 +16,7 @@ export const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.
 
 // ── Badge class constants ───────────────────────────────────────────────────
 
-export const badgeBaseClass = "inline-flex max-w-full items-center justify-center gap-2 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-normal leading-4 break-words [overflow-wrap:anywhere]";
+export const badgeBaseClass = "inline-flex max-w-full shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-nowrap leading-4";
 
 // ── Button class constants ──────────────────────────────────────────────────
 
@@ -37,10 +37,10 @@ export const toneForValue = (value?: string): Tone => {
   ].includes(normalized)) return "success";
   if ([
     "failed", "canceled", "cancelled", "aborted", "error",
-    "changes_requested", "blocked", "unhealthy", "conflicted",
+    "changes_requested", "unhealthy", "conflicted",
   ].includes(normalized)) return "danger";
   if ([
-    "queued", "pending", "waiting_for_slot", "waiting", "idle",
+    "blocked", "queued", "pending", "waiting_for_slot", "waiting", "idle",
     "needs_attention", "degraded", "planning",
   ].includes(normalized)) return "warning";
   if ([
@@ -82,6 +82,24 @@ export const iconBadgeToneClass = (tone: Tone): string => {
       return "border-border bg-secondary text-muted-foreground";
   }
 };
+
+export const statusDotToneClass = (tone: Tone): string => {
+  switch (tone) {
+    case "success":
+      return "bg-success";
+    case "warning":
+      return "bg-warning";
+    case "danger":
+      return "bg-destructive";
+    case "info":
+      return "bg-info";
+    default:
+      return "bg-muted-foreground";
+  }
+};
+
+export const statusDot = (tone: Tone): string =>
+  `<span class="inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${statusDotToneClass(tone)}"></span>`;
 
 // ── Formatter functions ─────────────────────────────────────────────────────
 
@@ -132,9 +150,38 @@ export const iconFactory = (cls = ""): string =>
 export const iconChat = (cls = ""): string =>
   svg16(`<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`, cls);
 
+export const iconMemory = (cls = ""): string =>
+  svg16(`<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>`, cls);
+
+export const iconSpark = (cls = ""): string =>
+  svg16(`<path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7L12 3z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14z"/><path d="M5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14z"/>`, cls);
+
+export const iconCheckCircle = (cls = ""): string =>
+  svg16(`<circle cx="12" cy="12" r="9"/><polyline points="8 12 11 15 16 9"/>`, cls);
+
+export const iconClock = (cls = ""): string =>
+  svg16(`<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>`, cls);
+
+export const iconCommit = (cls = ""): string =>
+  svg16(`<circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/>`, cls);
+
+export const iconPullRequest = (cls = ""): string =>
+  svg16(`<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><path d="M9 6h4a5 5 0 0 1 5 5v4"/>`, cls);
+
+export const iconTokens = (cls = ""): string =>
+  svg16(`<circle cx="12" cy="12" r="9"/><path d="M9 9h6"/><path d="M9 12h6"/><path d="M9 15h4"/>`, cls);
+
+export const iconStatus = (cls = ""): string =>
+  svg16(`<path d="M3 12h4l2-4 4 8 2-4h6"/>`, cls);
+
+export const iconNext = (cls = ""): string =>
+  svg16(`<circle cx="12" cy="12" r="9"/><path d="M10 8l4 4-4 4"/><path d="M8 12h6"/>`, cls);
 
 export const iconWorker = (cls = ""): string =>
   svg16(`<rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="14"/><line x1="10" y1="10" x2="10" y2="14"/><line x1="14" y1="10" x2="14" y2="14"/><line x1="18" y1="10" x2="18" y2="14"/>`, cls);
+
+export const iconLayout = (cls = ""): string =>
+  svg16(`<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path d="M9 10h12"/>`, cls);
 
 export const iconForEntity = (entity: string, cls = ""): string => {
   const key = entity.trim().toLowerCase();
@@ -152,12 +199,55 @@ export const iconForEntity = (entity: string, cls = ""): string => {
   return "";
 };
 
+export const iconForRunStepKind = (kind: string, cls = ""): string => {
+  const key = kind.trim().toLowerCase();
+  if (key === "thought") return iconSpark(cls);
+  if (key === "action") return iconQueue(cls);
+  if (key === "tool") return iconJob(cls);
+  if (key === "memory") return iconMemory(cls);
+  if (key === "validation") return iconCheckCircle(cls);
+  return iconRun(cls);
+};
+
 // ── Reusable rendering components ───────────────────────────────────────────
 
-export const statPill = (label: string, value: string): string => `<div class="min-w-0 overflow-hidden rounded-2xl border border-border bg-muted px-3 py-2">
-  <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
-  <div class="mt-1 break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">${esc(value)}</div>
+export const statPill = (
+  label: string,
+  value: string,
+  opts?: {
+    readonly icon?: string;
+    readonly supporting?: string;
+  },
+): string => `<div class="min-w-0 overflow-hidden rounded-2xl border border-border bg-muted/90 px-3 py-2.5 shadow-sm">
+  <div class="flex items-center gap-2">
+    ${opts?.icon ? `<span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-border/80 bg-background/70 text-muted-foreground">${opts.icon}</span>` : ""}
+    <div class="min-w-0">
+      <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
+      ${opts?.supporting ? `<div class="mt-0.5 text-[10px] leading-4 text-muted-foreground/80">${esc(opts.supporting)}</div>` : ""}
+    </div>
+  </div>
+  <div class="mt-2 break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">${esc(value)}</div>
 </div>`;
+
+export const renderEmptyState = (input: {
+  readonly icon: string;
+  readonly title: string;
+  readonly message: string;
+  readonly tone?: Tone;
+  readonly eyebrow?: string;
+  readonly detail?: string;
+  readonly minHeightClass?: string;
+}): string => `<section class="flex ${input.minHeightClass ?? "min-h-[240px]"} items-center justify-center rounded-[28px] border border-border/80 bg-[linear-gradient(180deg,hsl(223_21%_24%/0.92),hsl(223_21%_20%/0.96))] px-6 py-8 text-center shadow-sm">
+  <div class="mx-auto flex max-w-sm flex-col items-center">
+    <span class="flex h-14 w-14 items-center justify-center rounded-[20px] border ${iconBadgeToneClass(input.tone ?? "neutral")} shadow-sm">
+      ${input.icon}
+    </span>
+    ${input.eyebrow ? `<div class="mt-4 ${sectionLabelClass}">${esc(input.eyebrow)}</div>` : ""}
+    <div class="mt-3 text-lg font-semibold text-foreground">${esc(input.title)}</div>
+    <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(input.message)}</div>
+    ${input.detail ? `<div class="mt-4 text-[11px] leading-5 text-muted-foreground/90">${esc(input.detail)}</div>` : ""}
+  </div>
+</section>`;
 
 
 export const renderCliActionCard = (input: {

@@ -2481,6 +2481,127 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
   expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_update");
 });
 
+test("factory chat runner: terminal bound objectives create a follow-up objective instead of reacting in place", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-terminal-followup");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let createdInput: Record<string, unknown> | undefined;
+  let reacted: { readonly objectiveId: string; readonly message?: string } | undefined;
+  const factoryService = createFactoryServiceStub({
+    getObjective: async (objectiveId: string) => ({
+      objectiveId,
+      title: "Completed objective",
+      status: "completed",
+      phase: "completed",
+      objectiveMode: "delivery",
+      severity: 3,
+      latestSummary: "The original objective is already done.",
+      nextAction: "Start a new follow-up objective for more work.",
+      integration: { status: "promoted", queuedCandidateIds: [] },
+      latestDecision: undefined,
+      blockedExplanation: undefined,
+      evidenceCards: [],
+      tasks: [],
+    }),
+    createObjective: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return {
+        objectiveId: "objective_followup",
+        title: String(input.prompt ?? "follow-up"),
+        status: "queued",
+        phase: "queued",
+        latestSummary: "Created the follow-up objective.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+    reactObjectiveWithNote: async (objectiveId: string, message?: string) => {
+      reacted = { objectiveId, message };
+      return {
+        objectiveId,
+        title: "Completed objective",
+        status: "completed",
+        phase: "completed",
+        latestSummary: message ?? "Reacted in place.",
+        integration: { status: "promoted", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "continue with a new follow-up objective",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ prompt: "Continue with the follow-up work." }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Started a follow-up objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/terminal-followup",
+    runId: "run_dispatch_terminal_followup",
+    problem: "Continue after the completed objective.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_done",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(createdInput).toMatchObject({
+    title: "Continue with the follow-up work",
+    prompt: "Continue with the follow-up work.",
+    objectiveMode: "delivery",
+    severity: 3,
+    profileId: "generalist",
+    startImmediately: true,
+  });
+  expect(reacted).toBeUndefined();
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/terminal-followup", "run_dispatch_terminal_followup"));
+  const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
+  expect(observed && "output" in observed ? observed.output : "").toContain('"action": "create"');
+  const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
+  const latestBound = boundEvents.at(-1);
+  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_followup");
+  expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
+});
+
 test("factory chat runner: exhausted slices queue an automatic continuation on the same thread with a higher budget", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-slice-continue");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");

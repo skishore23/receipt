@@ -22,6 +22,7 @@ export type FactoryChatObjectiveNav = {
   readonly readyTaskCount?: number;
   readonly taskCount?: number;
   readonly integrationStatus?: string;
+  readonly tokensUsed?: number;
 };
 
 export type FactoryChatJobNav = {

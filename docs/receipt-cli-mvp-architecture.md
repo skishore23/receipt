@@ -124,7 +124,7 @@ flowchart LR
 
 The MVP should reuse these existing pieces as-is where possible:
 
-- `src/core/runtime.ts`
+- `packages/core/src/runtime.ts`
 - `src/adapters/jsonl.ts`
 - `src/adapters/jsonl-queue.ts`
 - `src/modules/job.ts`
@@ -669,4 +669,3 @@ The important technical boundary is this:
 - the sandbox adapter stays separate
 - the Codex executor stays separate
 - only the worker implementation changes
-

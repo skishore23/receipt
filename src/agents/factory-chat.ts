@@ -36,6 +36,8 @@ import {
   readTextTail,
 } from "../services/factory-codex-artifacts";
 import { readRepoStatus } from "../lib/repo-status";
+import { summarizeFactoryObjective } from "../views/factory/objective-presenters";
+import { buildFactoryQueueJobSnapshot } from "../views/factory/job-presenters";
 
 const execFileAsync = promisify(execFile);
 
@@ -218,19 +220,6 @@ const nextIterationBudget = (current: number): number | undefined =>
 const stableCodexSessionKey = (runId: string, prompt: string): string =>
   `codex:${runId}:${createHash("sha1").update(prompt).digest("hex").slice(0, 12)}`;
 
-const summarizeObjective = (detail: Awaited<ReturnType<FactoryService["getObjective"]>>) => ({
-  objectiveId: detail.objectiveId,
-  title: detail.title,
-  status: detail.status,
-  phase: detail.phase,
-  summary: detail.latestSummary ?? detail.nextAction ?? detail.title,
-  integrationStatus: detail.integration.status,
-  latestCommitHash: detail.latestCommitHash,
-  prUrl: detail.prUrl,
-  prNumber: detail.prNumber,
-  link: `/factory?objective=${encodeURIComponent(detail.objectiveId)}`,
-});
-
 const deriveObjectiveTitle = (prompt: string): string => {
   const compact = prompt.replace(/\s+/g, " ").trim();
   if (!compact) return "Factory objective";
@@ -297,47 +286,15 @@ const summarizeChildProgress = (input: {
 );
 
 const normalizeJobSnapshot = (job: QueueJob): Record<string, unknown> => {
+  const base = buildFactoryQueueJobSnapshot(job);
   const result = asRecord(job.result);
-  const failure = asRecord(result?.failure);
-  const task = asString(job.payload.task)
-    ?? asString(job.payload.prompt)
-    ?? asString(job.payload.problem)
-    ?? asString(job.payload.kind)
-    ?? `${job.agentId} job`;
-  const terminalSummary = job.status === "failed"
-    ? job.lastError ?? asString(failure?.message)
-    : job.status === "canceled"
-      ? job.canceledReason ?? asString(result?.note)
-      : undefined;
-  const summary = terminalSummary
-    ?? asString(result?.summary)
-    ?? asString(result?.finalResponse)
-    ?? asString(result?.note)
-    ?? asString(result?.message)
-    ?? asString(failure?.message)
-    ?? job.lastError
-    ?? clip(task);
   return {
-    jobId: job.id,
-    status: job.status,
-    worker: asString(result?.worker) ?? job.agentId,
-    agentId: job.agentId,
-    summary,
-    task: clip(task, 220),
-    runId: asString(result?.runId) ?? asString(job.payload.runId),
-    stream: asString(result?.stream) ?? asString(job.payload.stream),
-    parentRunId: asString(job.payload.parentRunId),
-    parentStream: asString(job.payload.parentStream),
+    ...base,
     profileId: asString(job.payload.profileId),
     delegatedTo: asString(result?.delegatedTo) ?? asString(job.payload.delegatedTo),
     objectiveId: asString(result?.objectiveId) ?? asString(job.payload.objectiveId),
     mode: asString(result?.mode) ?? asString(job.payload.mode),
     readOnly: result?.readOnly === true || job.payload.readOnly === true,
-    lastMessage: asString(result?.lastMessage),
-    stdoutTail: asString(result?.stdoutTail),
-    stderrTail: asString(result?.stderrTail),
-    changedFiles: asStringList(result?.changedFiles),
-    note: asString(result?.note),
   };
 };
 
@@ -844,7 +801,18 @@ const createFactoryDispatchTool = (input: {
   async (toolInput) => {
     const requestedObjectiveId = asString(toolInput.objectiveId);
     const objectiveId = requestedObjectiveId ?? input.getCurrentObjectiveId();
-    const action = asString(toolInput.action) ?? (objectiveId ? "react" : "create");
+    const currentObjective = objectiveId
+      ? await input.factoryService.getObjective(objectiveId).catch(() => undefined)
+      : undefined;
+    let action = asString(toolInput.action)
+      ?? (
+        objectiveId
+        && currentObjective
+        && !currentObjective.archivedAt
+        && !isTerminalObjectiveStatus(currentObjective.status)
+          ? "react"
+          : "create"
+      );
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
     let reused = false;
     let bindingReason: "dispatch_create" | "dispatch_reuse" | "dispatch_update" = "dispatch_update";
@@ -867,11 +835,11 @@ const createFactoryDispatchTool = (input: {
           baseHash: asString(toolInput.baseHash),
           objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
             ? toolInput.objectiveMode
-            : undefined,
+            : currentObjective?.objectiveMode,
           severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
             && toolInput.severity >= 1 && toolInput.severity <= 5
             ? toolInput.severity as FactoryObjectiveInput["severity"]
-            : undefined,
+            : currentObjective?.severity,
           checks: asStringList(toolInput.checks),
           channel: asString(toolInput.channel),
           profileId: input.profileId,
@@ -882,10 +850,35 @@ const createFactoryDispatchTool = (input: {
       }
     } else if (action === "react") {
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
-      detail = await input.factoryService.reactObjectiveWithNote(
-        objectiveId,
-        asString(toolInput.note) ?? asString(toolInput.prompt),
-      );
+      const followUpPrompt = asString(toolInput.note) ?? asString(toolInput.prompt);
+      if (currentObjective && (currentObjective.archivedAt || isTerminalObjectiveStatus(currentObjective.status))) {
+        if (!followUpPrompt) {
+          throw new Error("factory.dispatch react on a completed objective requires note or prompt to create a follow-up objective");
+        }
+        detail = await input.factoryService.createObjective({
+          title: asString(toolInput.title) ?? deriveObjectiveTitle(followUpPrompt),
+          prompt: followUpPrompt,
+          baseHash: asString(toolInput.baseHash),
+          objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
+            ? toolInput.objectiveMode
+            : currentObjective.objectiveMode,
+          severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
+            && toolInput.severity >= 1 && toolInput.severity <= 5
+            ? toolInput.severity as FactoryObjectiveInput["severity"]
+            : currentObjective.severity,
+          checks: asStringList(toolInput.checks),
+          channel: asString(toolInput.channel),
+          profileId: input.profileId,
+          startImmediately: true,
+        });
+        action = "create";
+        bindingReason = "dispatch_create";
+      } else {
+        detail = await input.factoryService.reactObjectiveWithNote(
+          objectiveId,
+          followUpPrompt,
+        );
+      }
     } else if (action === "promote") {
       if (!objectiveId) throw new Error("factory.dispatch promote requires objectiveId");
       detail = await input.factoryService.promoteObjective(objectiveId);
@@ -901,7 +894,7 @@ const createFactoryDispatchTool = (input: {
     } else {
       throw new Error(`unsupported factory.dispatch action '${action}'`);
     }
-    const summary = summarizeObjective(detail);
+    const summary = summarizeFactoryObjective(detail);
     if (detail.archivedAt || isTerminalObjectiveStatus(detail.status)) {
       latestObjectiveByStream.delete(input.stream);
     } else {
@@ -944,7 +937,7 @@ const createFactoryStatusTool = (input: {
         input.factoryService.getObjectiveDebug(objectiveId),
         input.factoryService.listObjectiveReceipts(objectiveId, { limit: 20 }),
       ]);
-      const summary = summarizeObjective(detail);
+      const summary = summarizeFactoryObjective(detail);
       const reusableRefs = reusableInfrastructureRefs(detail.contextSources?.sharedArtifactRefs);
       return {
         worker: "factory",

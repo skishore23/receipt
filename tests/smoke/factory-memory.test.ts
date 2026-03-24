@@ -215,7 +215,17 @@ test("factory worker packets expose a layered memory script for bounded recall a
       await fs.writeFile(resultPath, JSON.stringify({
         outcome: "approved",
         summary: "Used the generated memory script to recall and store bounded context.",
-        handoff: "Candidate is ready for integration.",
+        artifacts: [],
+        scriptsRun: [{
+          command: `bun ${memoryScriptPath} context 1800`,
+          summary: "Read the bounded packet context before editing.",
+          status: "ok",
+        }, {
+          command: `bun ${memoryScriptPath} overview memory 1400`,
+          summary: "Reviewed scoped memory summaries before writing the durable note.",
+          status: "ok",
+        }],
+        nextAction: "Candidate is ready for integration.",
       }, null, 2), "utf-8");
       await fs.writeFile(input.lastMessagePath, "Used the generated memory script.", "utf-8");
       return {
@@ -340,6 +350,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} scope task`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} search repo`));
+  expect(promptBody).toMatch(/Include scriptsRun only when a command or small script materially informed the result/);
 
   expect(captured.context).toMatch(/Objective: Scripted memory objective/);
   expect(captured.context).toMatch(/Dependencies:|Candidate lineage:|Recent receipts:/);
@@ -382,11 +393,19 @@ test("factory worker packets expose a layered memory script for bounded recall a
     limit: 10,
   });
   expect(taskMemory.some((entry) => entry.text.includes("worker durable note from script"))).toBeTruthy();
+  expect(taskMemory.some((entry) =>
+    entry.text.includes("Scripts Run\n- ok: bun ")
+    && entry.text.includes(`${path.basename(payload.memoryScriptPath)} context 1800`)
+  )).toBeTruthy();
 
   const after = await service.getObjective(created.objectiveId);
   const afterTask = after.tasks.find((item) => item.taskId === task!.taskId);
   expect(afterTask?.candidate?.artifactRefs.memoryScript).toBeTruthy();
   expect(afterTask?.candidate?.artifactRefs.memoryConfig).toBeTruthy();
+  expect(afterTask?.candidate?.scriptsRun?.map((item) => item.command)).toEqual([
+    `bun ${payload.memoryScriptPath} context 1800`,
+    `bun ${payload.memoryScriptPath} overview memory 1400`,
+  ]);
 }, 120_000);
 
 test("factory investigation synthesis commits a sectioned operator report to objective memory", async () => {
