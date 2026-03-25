@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -128,6 +129,9 @@ const RETRYABLE_BLOCK_REASON_RE = /\b(factory task failed|lease expired|timed ou
 const NON_RETRYABLE_BLOCK_REASON_RE = /\b(no tracked diff|isolated runtime|cannot run in isolated mode|policy blocked|circuit[- ]broken|integration validation failed)\b/i;
 const HUMAN_INPUT_BLOCK_REASON_RE = /\b(missing (?:dependency |implementation |product |design )?details?|need .*detail|need .*guidance|need .*clarification|choose|which (?:approach|option|api|path)|operator|human|approval|permission denied|access denied|unauthorized|credentials|auth(?:entication|orization)?|forbidden)\b/i;
 const AUTONOMOUS_RETRY_MAX_CANDIDATE_PASSES = 1;
+const PUBLISH_TRANSIENT_FAILURE_RE =
+  /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
+const PUBLISH_MAX_ATTEMPTS = 3;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -3404,7 +3408,7 @@ export class FactoryService {
     const memoryConfigPath = path.join(path.dirname(parsed.resultPath), "memory.json");
     await fs.writeFile(memoryConfigPath, JSON.stringify({ scopes: [parsed.memoryScope] }, null, 2), "utf-8");
     try {
-      const execution = await this.codexExecutor.run({
+      const codexInput: CodexRunInput = {
         prompt: [
           "# Factory Integration Publish",
           "",
@@ -3420,6 +3424,8 @@ export class FactoryService {
           "## Publish Contract",
           `Use \`receipt memory summarize factory/objectives/${parsed.objectiveId}\` and \`receipt inspect factory/objectives/${parsed.objectiveId}\` before writing the PR body.`,
           "Inspect `git remote -v`, push the current branch to a GitHub remote (prefer `origin` when present), open the PR with gh, then fetch the final PR metadata from the current branch.",
+          "Before creating a new PR, check whether the current branch already has one with `gh pr view --json url,number,headRefName,baseRefName`.",
+          "If `git push`, `gh pr create`, or `gh pr view` fail with a transient GitHub or network error, retry the command up to two more times with short backoff. After a failed `gh pr create`, check `gh pr view` once before concluding the PR was not created.",
           "Do not run builds or tests.",
           "Return exactly one JSON object matching this schema:",
           `{"summary":"short publish summary","prUrl":"https://github.com/...","prNumber":123,"headRefName":"branch-name","baseRefName":"main"}`,
@@ -3448,8 +3454,26 @@ export class FactoryService {
           RECEIPT_DATA_DIR: this.dataDir,
           PATH: workspaceCommandEnv.path,
         },
-      }, control);
-      const publishResult = await this.resolvePublishWorkerResult(parsed, execution);
+      };
+      let publishResult: FactoryPublishResult | undefined;
+      let lastPublishError: unknown;
+      for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const execution = await this.codexExecutor.run(codexInput, control);
+          publishResult = await this.resolvePublishWorkerResult(parsed, execution);
+          break;
+        } catch (err) {
+          lastPublishError = err;
+          const message = err instanceof Error ? err.message : String(err);
+          if (attempt >= PUBLISH_MAX_ATTEMPTS || !this.isRetryablePublishFailureMessage(message)) {
+            throw err;
+          }
+          await sleep(attempt * 2_000);
+        }
+      }
+      if (!publishResult) {
+        throw lastPublishError instanceof Error ? lastPublishError : new Error(String(lastPublishError ?? "factory publish failed"));
+      }
       await fs.writeFile(parsed.resultPath, JSON.stringify(publishResult, null, 2), "utf-8");
       const summary = publishResult.summary;
       await this.commitPublishMemory(state, parsed.candidateId, `${summary}\nPR: ${publishResult.prUrl}`, ["publish", "succeeded"]);
@@ -5732,6 +5756,13 @@ export class FactoryService {
     execution: { readonly lastMessage?: string },
   ): Promise<FactoryPublishResult> {
     return resolveFactoryPublishWorkerResult(payload, execution);
+  }
+
+  private isRetryablePublishFailureMessage(message: string): boolean {
+    const normalized = message.trim();
+    if (!normalized) return false;
+    if (HUMAN_INPUT_BLOCK_REASON_RE.test(normalized)) return false;
+    return PUBLISH_TRANSIENT_FAILURE_RE.test(normalized);
   }
 
   private async ensureWorkspaceReceiptCli(workspacePath: string): Promise<string> {

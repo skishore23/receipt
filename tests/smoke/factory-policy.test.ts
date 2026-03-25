@@ -83,12 +83,13 @@ const latestFactoryJob = async (
 
 const createFactoryService = async (opts?: {
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
-  readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error";
+  readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error" | "transient_then_success";
   readonly completionRemaining?: ReadonlyArray<string>;
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
   readonly repoRoot: string;
+  readonly publishRuns: { count: number };
 }> => {
   const dataDir = await createTempDir("receipt-factory-policy");
   const repoRoot = await createSourceRepo();
@@ -96,6 +97,7 @@ const createFactoryService = async (opts?: {
   const codexOutcome = opts?.codexOutcome ?? "approved";
   const publishMode = opts?.publishMode ?? "success";
   const completionRemaining = opts?.completionRemaining ?? [];
+  const publishRuns = { count: 0 };
   const service = new FactoryService({
     dataDir,
     queue,
@@ -107,6 +109,7 @@ const createFactoryService = async (opts?: {
         await fs.writeFile(input.stdoutPath, "", "utf-8");
         await fs.writeFile(input.stderrPath, "", "utf-8");
         if (input.taskId === "publish") {
+          publishRuns.count += 1;
           if (publishMode === "error") {
             throw new Error("gh pr create failed: GraphQL permission denied");
           }
@@ -117,6 +120,14 @@ const createFactoryService = async (opts?: {
                 headRefName: "codex/objective-demo",
                 baseRefName: "main",
               }
+            : publishMode === "transient_then_success" && publishRuns.count === 1
+              ? {
+                  summary: "Publish blocked by network access to GitHub: the branch could not be pushed and `gh pr create` failed with `error connecting to api.github.com`.",
+                  prUrl: "",
+                  prNumber: null,
+                  headRefName: "codex/objective-demo",
+                  baseRefName: "main",
+                }
             : publishMode === "blocked"
               ? {
                   summary: "Publish blocked: could not push the branch or open a GitHub PR from this environment.",
@@ -170,7 +181,7 @@ const createFactoryService = async (opts?: {
     },
     repoRoot,
   });
-  return { service, queue, repoRoot };
+  return { service, queue, repoRoot, publishRuns };
 };
 
 const buildState = (events: ReadonlyArray<FactoryEvent>): FactoryState =>
@@ -539,6 +550,36 @@ test("factory policy: software delivery objectives auto-publish and expose PR me
   expect(debug.prUrl).toBe("https://github.com/example/receipt/pull/17");
   expect(debug.prNumber).toBe(17);
 });
+
+test("factory policy: publish retries transient GitHub connectivity failures before blocking", async () => {
+  const { service, queue, publishRuns } = await createFactoryService({
+    codexOutcome: "approved",
+    publishMode: "transient_then_success",
+  });
+
+  const created = await service.createObjective({
+    title: "Software publish retry objective",
+    prompt: "Retry one transient GitHub publish failure before blocking the objective.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+  expect(publishResult.status).toBe("completed");
+  expect(publishRuns.count).toBe(2);
+
+  const published = await service.getObjective(created.objectiveId);
+  expect(published.status).toBe("completed");
+  expect(published.integration.status).toBe("promoted");
+  expect(published.prUrl).toBe("https://github.com/example/receipt/pull/17");
+}, 20_000);
 
 test("factory policy: publish failures block the objective when PR metadata is missing", async () => {
   const { service, queue } = await createFactoryService({
