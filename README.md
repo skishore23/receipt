@@ -125,3 +125,26 @@ The canonical source entrypoints in this repo are `bun src/cli.ts` and `bun --wa
 The server auto-loads route modules from `src/agents/*.agent.ts`.
 
 The web UI uses `chat`, `thread`, and `Work Details` terminology while the durable code, HTTP APIs, receipts, and CLI still use `objective`.
+
+## Docker
+
+The repo ships with a Docker image for EC2 or any other container host:
+
+```bash
+docker build -t receipt .
+docker run --rm -p 8787:8787 \
+  -e OPENAI_API_KEY=... \
+  -v receipt-data:/app/.receipt/data \
+  receipt
+```
+
+Environment variables that are commonly useful at runtime:
+
+- `PORT` defaults to `8787`
+- `DATA_DIR` defaults to `/app/.receipt/data`
+- `OPENAI_API_KEY` enables live LLM and embedding calls
+- `RECEIPT_CODEX_BIN` or `HUB_CODEX_BIN` can point at a Codex CLI binary if you want the container to use a non-default path
+
+The app expects a `codex` executable to be present on `PATH` or supplied through `RECEIPT_CODEX_BIN`. If you want it baked into the image, install that binary in the `runner` stage before starting the server.
+
+For EC2, run the container with a persistent EBS-backed volume mounted at `/app/.receipt/data` so receipts, queue state, and workspace metadata survive restarts.
