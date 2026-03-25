@@ -79,7 +79,7 @@ const writeExecutable = async (targetPath: string, body: string): Promise<void> 
 };
 
 const seedSourceRepoRuntimeSurface = async (repoRoot: string): Promise<void> => {
-  await fs.writeFile(path.join(repoRoot, ".gitignore"), "node_modules/\n", "utf-8");
+  await fs.writeFile(path.join(repoRoot, ".gitignore"), "node_modules\nnode_modules/\n", "utf-8");
   await fs.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({
     name: "factory-worktree-runtime",
     private: true,
@@ -637,6 +637,43 @@ test("factory service: git worktree checks bootstrap repo node_modules and recei
   expect(results.map((result) => result.ok)).toEqual([true]);
   expect(results[0]?.stdout).toContain("workspace-tool-ok");
   expect(results[0]?.stdout).toContain("build-ok");
+  await expect(fs.readlink(path.join(workspace.path, "node_modules"))).resolves.toBe(path.join(repoRoot, "node_modules"));
+});
+
+test("factory service: bootstrapped worktree node_modules link stays excluded from git status and commits", async () => {
+  const dataDir = await createTempDir("receipt-factory-worktree-node-modules-exclude");
+  const repoRoot = await createSourceRepo();
+  await seedSourceRepoRuntimeSurface(repoRoot);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const workspace = await service.git.createWorkspace({
+    workspaceId: "runtime-exclude-checks",
+    agentId: "codex",
+  });
+
+  const runChecks = (service as unknown as {
+    runChecks: (commands: ReadonlyArray<string>, workspacePath: string) => Promise<ReadonlyArray<{ readonly ok: boolean }>>;
+  }).runChecks.bind(service);
+  await runChecks([`${shellQuote(process.env.BUN_BIN?.trim() || "bun")} run build`], workspace.path);
+
+  const afterBootstrap = await service.git.worktreeStatus(workspace.path);
+  expect(afterBootstrap.dirty).toBe(false);
+
+  await fs.writeFile(path.join(workspace.path, "README.md"), "# factory test\nupdated\n", "utf-8");
+  const committed = await service.git.commitWorkspace(workspace.path, "update readme");
+  expect(committed.hash.length).toBeGreaterThan(0);
+
+  const committedFiles = await git(workspace.path, ["show", "--name-only", "--format=", committed.hash]);
+  expect(committedFiles.split(/\r?\n/).filter(Boolean)).toEqual(["README.md"]);
   await expect(fs.readlink(path.join(workspace.path, "node_modules"))).resolves.toBe(path.join(repoRoot, "node_modules"));
 });
 

@@ -815,7 +815,7 @@ export class HubGit {
       ? path.resolve(workspacePath, gitDirMatch[1].trim())
       : path.join(workspacePath, ".git");
     const excludePath = path.join(gitDir, "info", "exclude");
-    const marker = ".receipt/";
+    const markers = [".receipt/", "node_modules"];
     let current = "";
     try {
       current = await fs.promises.readFile(excludePath, "utf-8");
@@ -823,9 +823,11 @@ export class HubGit {
       current = "";
     }
     const lines = current.split(/\r?\n/).map((line) => line.trim());
-    if (lines.includes(marker)) return;
+    const missing = markers.filter((marker) => !lines.includes(marker));
+    if (missing.length === 0) return;
     const next = current.trimEnd();
-    const body = next ? `${next}\n${marker}\n` : `${marker}\n`;
+    const suffix = `${missing.join("\n")}\n`;
+    const body = next ? `${next}\n${suffix}` : suffix;
     await fs.promises.mkdir(path.dirname(excludePath), { recursive: true });
     await fs.promises.writeFile(excludePath, body, "utf-8");
   }
