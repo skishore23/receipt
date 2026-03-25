@@ -28,7 +28,7 @@ import {
 import type { AgentEvent } from "../../src/modules/agent";
 import createFactoryRoute, { buildActiveCodexCard, buildChatItemsForRun } from "../../src/agents/factory.agent";
 import { agentRunStream } from "../../src/agents/agent.streams";
-import { FactoryService } from "../../src/services/factory-service";
+import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { factoryChatSessionStream, factoryChatStream } from "../../src/services/factory-chat-profiles";
 import { factoryChatIsland, factoryChatShell, factorySidebarIsland } from "../../src/views/factory-chat";
 import { factoryInspectorIsland } from "../../src/views/factory-inspector";
@@ -70,6 +70,32 @@ const createSourceRepo = async (): Promise<string> => {
   await git(repoDir, ["commit", "-m", "initial commit"]);
   await git(repoDir, ["branch", "-M", "main"]);
   return repoDir;
+};
+
+const writeExecutable = async (targetPath: string, body: string): Promise<void> => {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, body, "utf-8");
+  await fs.chmod(targetPath, 0o755);
+};
+
+const seedSourceRepoRuntimeSurface = async (repoRoot: string): Promise<void> => {
+  await fs.writeFile(path.join(repoRoot, ".gitignore"), "node_modules/\n", "utf-8");
+  await fs.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({
+    name: "factory-worktree-runtime",
+    private: true,
+    scripts: {
+      build: "workspace-tool && receipt --help >/dev/null && test -f node_modules/htmx.org/dist/htmx.min.js && echo build-ok",
+    },
+  }, null, 2), "utf-8");
+  await git(repoRoot, ["add", ".gitignore", "package.json"]);
+  await git(repoRoot, ["commit", "-m", "add runtime surface"]);
+
+  await writeExecutable(
+    path.join(repoRoot, "node_modules", ".bin", "workspace-tool"),
+    "#!/bin/sh\necho workspace-tool-ok\n",
+  );
+  await fs.mkdir(path.join(repoRoot, "node_modules", "htmx.org", "dist"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, "node_modules", "htmx.org", "dist", "htmx.min.js"), "/* htmx */\n", "utf-8");
 };
 
 const runObjectiveStartup = async (service: FactoryService, objectiveId: string): Promise<void> => {
@@ -581,6 +607,99 @@ test("factory service: check runner resolves source-backed workspace packages wi
   expect(results.map((result) => result.ok)).toEqual([true]);
   expect(results[0]?.stdout).toContain("source-backed workspace import ok");
   await expect(fs.access(path.join(workspaceDir, "packages", "core", "dist"))).rejects.toThrow();
+});
+
+test("factory service: git worktree checks bootstrap repo node_modules and receipt cli", async () => {
+  const dataDir = await createTempDir("receipt-factory-worktree-checks");
+  const repoRoot = await createSourceRepo();
+  await seedSourceRepoRuntimeSurface(repoRoot);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+  const workspace = await service.git.createWorkspace({
+    workspaceId: "runtime-checks",
+    agentId: "codex",
+  });
+  const bunBin = shellQuote(process.env.BUN_BIN?.trim() || "bun");
+
+  const runChecks = (service as unknown as {
+    runChecks: (commands: ReadonlyArray<string>, workspacePath: string) => Promise<ReadonlyArray<{ readonly ok: boolean; readonly stdout: string }>>;
+  }).runChecks.bind(service);
+  const results = await runChecks([`${bunBin} run build`], workspace.path);
+
+  expect(results.map((result) => result.ok)).toEqual([true]);
+  expect(results[0]?.stdout).toContain("workspace-tool-ok");
+  expect(results[0]?.stdout).toContain("build-ok");
+  await expect(fs.readlink(path.join(workspace.path, "node_modules"))).resolves.toBe(path.join(repoRoot, "node_modules"));
+});
+
+test("factory service: software task runs inherit worktree cli and local tool access", async () => {
+  const dataDir = await createTempDir("receipt-factory-worktree-task-env");
+  const repoRoot = await createSourceRepo();
+  await seedSourceRepoRuntimeSurface(repoRoot);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  let capturedStdout = "";
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async (input) => {
+        const { stdout } = await execFileAsync("/bin/sh", ["-lc", "workspace-tool && receipt --help >/dev/null && echo env-ok"], {
+          cwd: input.workspacePath,
+          env: {
+            ...process.env,
+            ...input.env,
+          },
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        capturedStdout = stdout;
+        await fs.writeFile(path.join(input.workspacePath, "CHANGE.txt"), "workspace env ready\n", "utf-8");
+        const result = JSON.stringify({
+          outcome: "approved",
+          summary: "Validated worktree command access for the software task runtime.",
+          artifacts: [],
+          scriptsRun: [{
+            command: "workspace-tool && receipt --help",
+            summary: "Verified local tool and receipt CLI access from the task worktree.",
+            status: "ok",
+          }],
+          nextAction: null,
+        });
+        await fs.writeFile(input.lastMessagePath, result, "utf-8");
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", lastMessage: result };
+      },
+    },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Software worktree env",
+    prompt: "Confirm the software task runtime can use repo-local commands from its worktree.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const jobs = await queue.listJobs({ limit: 20 });
+  const taskJob = jobs.find((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+  expect(taskJob).toBeTruthy();
+
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+
+  expect(capturedStdout).toContain("workspace-tool-ok");
+  expect(capturedStdout).toContain("env-ok");
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.tasks[0]?.status).not.toBe("blocked");
+  expect(detail.status).not.toBe("blocked");
 });
 
 test("factory reducer: replay reconstructs task, candidate, and integration state deterministically", () => {

@@ -230,6 +230,15 @@ const FACTORY_CLI_PREFIX = (() => {
 })();
 const prependPath = (dir: string, currentPath: string | undefined): string =>
   currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
+const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: string | undefined): string =>
+  entries
+    .map((entry) => entry?.trim())
+    .filter((entry): entry is string => Boolean(entry))
+    .reduceRight((acc, entry) => prependPath(entry, acc), currentPath);
+const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+};
 const uniqueChecks = (checks?: ReadonlyArray<string>): ReadonlyArray<string> => {
   const source = (checks ?? DEFAULT_CHECKS)
     .map((item) => item.trim())
@@ -2780,7 +2789,7 @@ export class FactoryService {
     if (rebuiltPacket || !packetPresent) {
       await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
     }
-    const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
+    const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(parsed.workspacePath);
     const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
     await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
     await fs.writeFile(
@@ -2814,7 +2823,8 @@ export class FactoryService {
       repoSkillPaths: parsed.repoSkillPaths,
       env: {
         DATA_DIR: this.dataDir,
-        PATH: prependPath(receiptBinDir, process.env.PATH),
+        RECEIPT_DATA_DIR: this.dataDir,
+        PATH: workspaceCommandEnv.path,
       },
     }, control);
     const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
@@ -3431,7 +3441,7 @@ export class FactoryService {
     const parsed = this.parseIntegrationPublishPayload(payload);
     const state = await this.getObjectiveState(parsed.objectiveId);
 
-    const receiptBinDir = await this.ensureWorkspaceReceiptCli(parsed.workspacePath);
+    const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(parsed.workspacePath);
     const resultSchemaPath = path.join(path.dirname(parsed.resultPath), "schema.json");
     await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
     await fs.writeFile(resultSchemaPath, JSON.stringify(FACTORY_PUBLISH_RESULT_SCHEMA, null, 2), "utf-8");
@@ -3479,7 +3489,8 @@ export class FactoryService {
         repoSkillPaths: [],
         env: {
           DATA_DIR: this.dataDir,
-          PATH: prependPath(receiptBinDir, process.env.PATH),
+          RECEIPT_DATA_DIR: this.dataDir,
+          PATH: workspaceCommandEnv.path,
         },
       }, control);
       const publishResult = await this.resolvePublishWorkerResult(parsed, execution);
@@ -5417,7 +5428,7 @@ export class FactoryService {
     await fs.writeFile(artifactPaths.memoryScriptPath, buildFactoryMemoryScriptSource(artifactPaths.memoryConfigPath), "utf-8");
     if (process.platform !== "win32") await fs.chmod(artifactPaths.memoryScriptPath, 0o755);
 
-    const receiptBinDir = await this.ensureWorkspaceReceiptCli(this.git.repoRoot);
+    const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(this.git.repoRoot);
     const renderedPrompt = this.renderDirectCodexProbePrompt({
       prompt: input.prompt,
       readOnly,
@@ -5444,7 +5455,7 @@ export class FactoryService {
       env: {
         DATA_DIR: this.dataDir,
         RECEIPT_DATA_DIR: this.dataDir,
-        PATH: prependPath(receiptBinDir, process.env.PATH),
+        PATH: workspaceCommandEnv.path,
       },
     };
   }
@@ -5866,6 +5877,36 @@ export class FactoryService {
     return binDir;
   }
 
+  private async ensureWorkspaceCommandEnv(workspacePath: string): Promise<{
+    readonly receiptBinDir: string;
+    readonly path: string;
+  }> {
+    if (isPathWithinRoot(workspacePath, this.git.worktreesDir)) {
+      await this.ensureWorkspaceDependencyLinks(workspacePath);
+    }
+    const receiptBinDir = await this.ensureWorkspaceReceiptCli(workspacePath);
+    const workspaceNodeModulesBin = await pathExists(path.join(workspacePath, "node_modules", ".bin"))
+      ? path.join(workspacePath, "node_modules", ".bin")
+      : undefined;
+    return {
+      receiptBinDir,
+      path: prependPaths([receiptBinDir, workspaceNodeModulesBin], process.env.PATH),
+    };
+  }
+
+  private async ensureWorkspaceDependencyLinks(workspacePath: string): Promise<void> {
+    const sourceNodeModulesPath = path.join(this.git.repoRoot, "node_modules");
+    if (!(await pathExists(sourceNodeModulesPath))) return;
+    const workspaceNodeModulesPath = path.join(workspacePath, "node_modules");
+    const existing = await fs.lstat(workspaceNodeModulesPath).catch(() => undefined);
+    if (existing) return;
+    await fs.symlink(
+      sourceNodeModulesPath,
+      workspaceNodeModulesPath,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  }
+
   private async loadMemorySummary(scope: string, query: string): Promise<string> {
     if (!this.memoryTools) return "";
     try {
@@ -6004,6 +6045,7 @@ export class FactoryService {
   }
 
   private async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
+    const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(workspacePath);
     const results: FactoryCheckResult[] = [];
     for (const command of commands) {
       const startedAt = Date.now();
@@ -6013,7 +6055,12 @@ export class FactoryService {
         const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
           cwd: workspacePath,
           encoding: "utf-8",
-          env: process.env,
+          env: {
+            ...process.env,
+            DATA_DIR: this.dataDir,
+            RECEIPT_DATA_DIR: this.dataDir,
+            PATH: workspaceCommandEnv.path,
+          },
           maxBuffer: 16 * 1024 * 1024,
           signal: ac.signal,
         });
