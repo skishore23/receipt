@@ -1783,6 +1783,41 @@ test("factory sidebar state: active Codex ignores stale terminal failures", () =
   expect(buildActiveCodexCard([failedCodexJob])).toBeUndefined();
 });
 
+test("factory sidebar state: stalled Codex jobs are labeled from progress timestamps, not heartbeats", () => {
+  const originalNow = Date.now;
+  Date.now = () => 200_000;
+  try {
+    const stalledCodexJob: QueueJob = {
+      id: "job_codex_stalled",
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.codex.run",
+        task: "Inspect the active worktree.",
+        prompt: "Inspect the active worktree.",
+        parentRunId: "run_live",
+      },
+      status: "running",
+      attempt: 1,
+      maxAttempts: 1,
+      createdAt: 1_000,
+      updatedAt: 199_000,
+      result: {
+        summary: "Running command: rg --files",
+        progressAt: 50_000,
+      },
+      commands: [],
+    };
+
+    const card = buildActiveCodexCard([stalledCodexJob]);
+    expect(card?.status).toBe("stalled");
+    expect(card?.running).toBe(false);
+    expect(card?.updatedAt).toBe(50_000);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("factory chat items: generic JSON finals are reformatted into readable markdown", () => {
   const runStream = "agents/factory/demo/runs/run_json_final";
   let prev: string | undefined;

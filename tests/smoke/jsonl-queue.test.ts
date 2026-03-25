@@ -13,6 +13,18 @@ import { decide as decideJob, initial as initialJob, reduce as reduceJob, type J
 const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 
+const waitFor = async (
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+  pollMs = 20,
+): Promise<void> => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+};
+
 test("jsonl queue: lease/retry/wait lifecycle", async () => {
   const dir = await mkTmp("receipt-queue");
   try {
@@ -580,6 +592,49 @@ test("jsonl queue: waitForWork performs at most one refresh per idle timeout win
   }
 });
 
+test("jsonl queue: refresh reaps expired leases even when no new lease is requested", async () => {
+  const dir = await mkTmp("receipt-queue-refresh-expired-lease");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    const retryable = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_retryable_expiry" },
+      maxAttempts: 2,
+    });
+    await queue.leaseNext({ workerId: "w_retry", leaseMs: 1_000 });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await queue.refresh();
+    const requeued = await queue.getJob(retryable.id);
+
+    expect(requeued?.status).toBe("queued");
+    expect(requeued?.lastError).toBe("lease expired");
+    await queue.cancel(retryable.id, "test cleanup");
+
+    const terminal = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_terminal_expiry" },
+      maxAttempts: 1,
+    });
+    await queue.leaseNext({ workerId: "w_terminal", leaseMs: 1_000 });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await queue.refresh();
+    const failed = await queue.getJob(terminal.id);
+
+    expect(failed?.status).toBe("failed");
+    expect(failed?.lastError).toBe("lease expired");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test.skip("jsonl queue: cross-queue enqueue wakes a worker watching the shared data dir (removed: single-process)", () => {});
 
 test("jsonl queue: worker wakes for a child queued by an active parent before the parent finishes", async () => {
@@ -767,6 +822,7 @@ test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat
     worker.start();
     const secondSettled = await baseQueue.waitForJob(second.id, 2_000);
     worker.stop();
+    await waitFor(() => workerErrors.includes("simulated heartbeat failure"));
 
     expect(workerErrors).toContain("simulated heartbeat failure");
     expect(handled).toContain(second.id);

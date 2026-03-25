@@ -1444,6 +1444,7 @@ export const runFactoryCodexJob = async (input: {
       mode: readOnly ? "read_only_probe" : "workspace_write",
       readOnly,
       status: "running",
+      progressAt: Date.now(),
       lastMessage,
       stdoutTail,
       stderrTail,

@@ -1770,6 +1770,7 @@ export class FactoryService {
   }
 
   async resumeObjectives(): Promise<void> {
+    await this.queue.refresh();
     await this.rebalanceObjectiveSlots();
     const objectives = await this.listObjectives();
     for (const objective of objectives.filter((item) =>
@@ -2737,6 +2738,7 @@ export class FactoryService {
       stdoutPath: parsed.stdoutPath,
       stderrPath: parsed.stderrPath,
       model: FACTORY_TASK_CODEX_MODEL,
+      jsonOutput: true,
       outputSchemaPath: resultSchemaPath,
       completionSignalPath: parsed.lastMessagePath,
       completionQuietMs: 1_500,
@@ -3429,6 +3431,7 @@ export class FactoryService {
         stdoutPath: parsed.stdoutPath,
         stderrPath: parsed.stderrPath,
         model: FACTORY_TASK_CODEX_MODEL,
+        jsonOutput: true,
         outputSchemaPath: resultSchemaPath,
         completionSignalPath: parsed.lastMessagePath,
         completionQuietMs: 1_500,

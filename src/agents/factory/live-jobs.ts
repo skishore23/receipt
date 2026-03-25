@@ -36,6 +36,26 @@ export const summarizeJob = (job: QueueJob): string => {
   });
 };
 
+const LIVE_JOB_STALE_AFTER_MS = 90_000;
+
+const jobProgressAt = (job: QueueJob): number | undefined => {
+  const result = asObject(job.result);
+  return typeof result?.progressAt === "number" && Number.isFinite(result.progressAt)
+    ? result.progressAt
+    : undefined;
+};
+
+const liveJobStatus = (job: QueueJob): string => {
+  if (isTerminalJobStatus(job.status)) return job.status;
+  const progressAt = jobProgressAt(job);
+  if (job.status === "running" && typeof progressAt === "number" && Date.now() - progressAt >= LIVE_JOB_STALE_AFTER_MS) {
+    return "stalled";
+  }
+  return job.status;
+};
+
+const liveJobUpdatedAt = (job: QueueJob): number => jobProgressAt(job) ?? job.updatedAt;
+
 const codexJobPriority = (job: QueueJob): number => {
   if (!isTerminalJobStatus(job.status)) return 0;
   if (job.status === "failed") return 1;
@@ -153,10 +173,13 @@ export const buildActiveCodexCard = (jobs: ReadonlyArray<QueueJob>): FactoryLive
     )[0];
   if (!codexJob) return undefined;
   const result = asObject(codexJob.result);
+  const status = liveJobStatus(codexJob);
   return {
     jobId: codexJob.id,
-    status: codexJob.status,
-    summary: summarizeJob(codexJob),
+    status,
+    summary: status === "stalled"
+      ? asString(result?.summary) ?? "No recent Codex progress was observed."
+      : summarizeJob(codexJob),
     latestNote: asString(result?.lastMessage) ?? asString(result?.message),
     tokensUsed: typeof result?.tokensUsed === "number" ? result.tokensUsed : undefined,
     stderrTail: asString(result?.stderrTail),
@@ -166,10 +189,10 @@ export const buildActiveCodexCard = (jobs: ReadonlyArray<QueueJob>): FactoryLive
       ?? asString(codexJob.payload.prompt)
       ?? asString(codexJob.payload.problem)
       ?? asString(codexJob.payload.taskId),
-    updatedAt: codexJob.updatedAt,
+    updatedAt: liveJobUpdatedAt(codexJob),
     abortRequested: codexJob.abortRequested === true,
     rawLink: `/jobs/${encodeURIComponent(codexJob.id)}`,
-    running: !isTerminalJobStatus(codexJob.status),
+    running: !isTerminalJobStatus(codexJob.status) && status !== "stalled",
   };
 };
 
@@ -203,12 +226,15 @@ export const buildLiveChildCards = (
       const payloadStream = asString(job.payload.stream);
       const parentStream = asString(job.payload.parentStream);
       const worker = asString(result?.worker) ?? normalizedWorkerId(job.agentId);
+      const status = liveJobStatus(job);
       return {
         jobId: job.id,
         agentId: job.agentId,
         worker,
-        status: job.status,
-        summary: summarizeJob(job),
+        status,
+        summary: status === "stalled"
+          ? asString(result?.summary) ?? "No recent worker progress was observed."
+          : summarizeJob(job),
         latestNote: asString(result?.lastMessage) ?? asString(result?.message),
         tokensUsed: typeof result?.tokensUsed === "number" ? result.tokensUsed : undefined,
         stderrTail: asString(result?.stderrTail),
@@ -221,10 +247,10 @@ export const buildLiveChildCards = (
           ?? asString(job.payload.prompt)
           ?? asString(job.payload.problem)
           ?? asString(job.payload.taskId),
-        updatedAt: job.updatedAt,
+        updatedAt: liveJobUpdatedAt(job),
         abortRequested: job.abortRequested === true,
         rawLink: `/jobs/${encodeURIComponent(job.id)}`,
-        running: !isTerminalJobStatus(job.status),
+        running: !isTerminalJobStatus(job.status) && status !== "stalled",
       } satisfies FactoryLiveChildCard;
     });
 

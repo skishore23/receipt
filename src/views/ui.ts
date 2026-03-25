@@ -41,7 +41,7 @@ export const toneForValue = (value?: string): Tone => {
   ].includes(normalized)) return "danger";
   if ([
     "blocked", "queued", "pending", "waiting_for_slot", "waiting", "idle",
-    "needs_attention", "degraded", "planning",
+    "needs_attention", "degraded", "planning", "stalled",
   ].includes(normalized)) return "warning";
   if ([
     "executing", "running", "active", "in_progress",

@@ -88,6 +88,9 @@ export const buildFactoryQueueJobSnapshot = (job: QueueJob): Record<string, unkn
     lastMessage: asString(result?.lastMessage),
     stdoutTail: asString(result?.stdoutTail),
     stderrTail: asString(result?.stderrTail),
+    progressAt: typeof result?.progressAt === "number" ? result.progressAt : undefined,
+    latestEventType: asString(result?.latestEventType),
+    latestEventText: asString(result?.latestEventText),
     changedFiles: asStringList(result?.changedFiles),
     note: asString(result?.note),
   };

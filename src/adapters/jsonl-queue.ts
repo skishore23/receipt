@@ -491,7 +491,12 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       const ids = await discoverJobIds();
       const jobs = (await Promise.all(ids.map((jobId) => loadQueueJob(jobId))))
         .filter((job): job is QueueJob => Boolean(job));
-      return resetIndex(jobs);
+      const changedJobs = new Map<string, QueueJob>();
+      for (const job of resetIndex(jobs)) {
+        changedJobs.set(job.id, cloneJob(job));
+      }
+      await handleExpiredLeases(nowTs(), changedJobs);
+      return [...changedJobs.values()].sort(compareRecentJobs);
     });
     if (changed.length > 0) notifyWaiters();
     await publishChangedJobList(changed);

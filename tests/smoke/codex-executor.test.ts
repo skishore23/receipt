@@ -148,6 +148,60 @@ const createRepeatableLoggingCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
+const createBootstrapThenHangCodexStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-stall");
+  const scriptPath = path.join(dir, "codex-bootstrap-hang-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "(async () => {",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  await readAll();",
+    "  process.stderr.write('bootstrap complete\\n');",
+    "  setInterval(() => {}, 1000);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
+const createJsonProgressCodexStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-json-progress");
+  const scriptPath = path.join(dir, "codex-json-progress-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "const emit = (payload) => process.stdout.write(`${JSON.stringify(payload)}\\n`);",
+    "(async () => {",
+    "  if (!args.includes('--json')) throw new Error('missing --json');",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  await readAll();",
+    "  emit({ type: 'turn.started' });",
+    "  emit({ type: 'item.started', item: { type: 'command_execution', command: 'rg --files', status: 'in_progress' } });",
+    "  emit({ type: 'item.completed', item: { type: 'agent_message', text: 'Inventory captured.' } });",
+    "  emit({ type: 'turn.completed', usage: { input_tokens: 120, output_tokens: 34 } });",
+    "  fs.writeFileSync(lastMessagePath, 'Final answer', 'utf8');",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
 test("local codex executor completes once a task result file exists and output goes quiet", async () => {
   const root = await mkTmp("receipt-codex-executor-workspace");
   const stub = await createHungCodexStub();
@@ -337,6 +391,77 @@ test("local codex executor completes once a structured last message stabilizes e
   expect(result.signal).toBeNull();
   expect(result.lastMessage).toContain("\"summary\":\"structured completion\"");
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("still streaming");
+}, 15_000);
+
+test("local codex executor aborts a wedged codex child after the stall timeout", async () => {
+  const root = await mkTmp("receipt-codex-executor-stall-workspace");
+  const stub = await createBootstrapThenHangCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+    stallTimeoutMs: 1_000,
+  });
+
+  const startedAt = Date.now();
+  await expect(executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  })).rejects.toThrow(/stalled/);
+  const elapsed = Date.now() - startedAt;
+
+  expect(elapsed).toBeLessThan(10_000);
+  await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("bootstrap complete");
+}, 15_000);
+
+test("local codex executor parses JSON progress events and token usage", async () => {
+  const root = await mkTmp("receipt-codex-executor-json-progress-workspace");
+  const stub = await createJsonProgressCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+  const progress: string[] = [];
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final answer.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    jsonOutput: true,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  }, {
+    onProgress: async (update) => {
+      progress.push(update.summary ?? update.lastMessage ?? "progress");
+    },
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.lastMessage).toBe("Final answer");
+  expect(result.tokensUsed).toBe(154);
+  expect(result.latestEventType).toBe("turn.completed");
+  expect(result.latestEventText).toBe("Inventory captured.");
+  expect(progress).toContain("Codex started working.");
+  expect(progress).toContain("Running command: rg --files");
+  expect(progress).toContain("Inventory captured.");
 }, 15_000);
 
 test("local codex executor preserves stdout and stderr breadcrumbs across consecutive runs", async () => {

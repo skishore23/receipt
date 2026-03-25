@@ -109,6 +109,12 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
             if (latest?.abortRequested === true) return { kind: "abort" };
             return undefined;
           },
+          onProgress: async (update) => {
+            await service.queue.progress(job.id, ctx.workerId, {
+              worker: "codex",
+              ...update,
+            });
+          },
           })
         : job.payload.kind === "factory.codex.run" || job.payload.kind === "codex.run"
           ? await (async () => {
