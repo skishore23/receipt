@@ -685,7 +685,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command");
   expect(prompt).toContain("stop bootstrap and run the best matching checked-in helper");
   expect(prompt).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json <helper-id> -- ...");
-  expect(prompt).toContain("Never invent helper arguments or placeholder identifiers.");
+  expect(prompt).toContain("Helper manifests list required args, required context, and example invocations");
   expect(prompt).toContain("Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.");
   expect(prompt).toContain("If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
   expect(prompt).toContain("Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue.");

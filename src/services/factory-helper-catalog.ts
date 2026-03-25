@@ -272,7 +272,7 @@ export const loadFactoryHelperContext = async (input: {
       "Use checked-in helpers first for AWS investigations instead of generating a task-local script.",
       "If no helper matches the ask closely enough, stop and return a structured no-matching-helper outcome plus the helper you would author next.",
       "For live cloud/account/runtime questions, rerun the matching helper and treat stored helper metadata as a starting point, not as fresh evidence.",
-      "Never invent helper arguments or placeholder identifiers. If a helper requires a concrete resource id and the packet, prompt, receipts, or prior helper output does not provide one, discover candidates first with a generic helper or stop and report the missing identifier.",
+      "Helper manifests list required args, required context, and example invocations so the current packet can expose what each helper needs before you decide whether to use it.",
     ],
     selectedHelpers,
   };

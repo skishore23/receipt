@@ -8,7 +8,7 @@
   "requiredArgs": ["--service", "--check", "--resource-id"],
   "requiredContext": [
     "Requires a real bucket name, IAM role name, or security group id from the operator request, receipts, or prior helper output.",
-    "Do not invent placeholder identifiers such as __placeholder__. If the resource id is unknown, discover candidates first with inventory or filter helpers."
+    "Do not invent placeholder identifiers such as __placeholder__."
   ],
   "examples": [
     "--service s3 --check public-access --resource-id my-bucket",
