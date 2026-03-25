@@ -234,7 +234,7 @@ const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: s
   entries
     .map((entry) => entry?.trim())
     .filter((entry): entry is string => Boolean(entry))
-    .reduceRight((acc, entry) => prependPath(entry, acc), currentPath);
+    .reduceRight<string>((acc, entry) => prependPath(entry, acc), currentPath ?? "");
 const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
   const relative = path.relative(rootPath, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -3464,7 +3464,7 @@ export class FactoryService {
           "",
           "## Publish Contract",
           `Use \`receipt memory summarize factory/objectives/${parsed.objectiveId}\` and \`receipt inspect factory/objectives/${parsed.objectiveId}\` before writing the PR body.`,
-          "Push the current branch, open the PR with gh, then fetch the final PR metadata from the current branch.",
+          "Inspect `git remote -v`, push the current branch to a GitHub remote (prefer `origin` when present), open the PR with gh, then fetch the final PR metadata from the current branch.",
           "Do not run builds or tests.",
           "Return exactly one JSON object matching this schema:",
           `{"summary":"short publish summary","prUrl":"https://github.com/...","prNumber":123,"headRefName":"branch-name","baseRefName":"main"}`,

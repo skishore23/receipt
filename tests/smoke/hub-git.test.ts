@@ -55,6 +55,31 @@ test("hub git canonicalizes local source paths and serializes concurrent remote 
   await fs.rm(aliasRoot, { force: true });
 });
 
+test("hub git mirrors source publish remotes into factory worktrees", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-publish-remote-source");
+  const dataDir = await mkTmp("receipt-hub-git-publish-remote-data");
+  const canonicalRepoRoot = await fs.realpath(repoRoot);
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git publish remote test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+  await git(repoRoot, ["remote", "add", "origin", "https://github.com/example/receipt.git"]);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  const workspace = await hub.ensureIntegrationWorkspace("objective-publish-remote", await git(repoRoot, ["rev-parse", "HEAD"]));
+  const bareDir = path.join(dataDir, "hub", "repo.git");
+
+  await expect(git(bareDir, ["remote", "get-url", "origin"])).resolves.toBe("https://github.com/example/receipt.git");
+  await expect(git(workspace.path, ["remote", "get-url", "origin"])).resolves.toBe("https://github.com/example/receipt.git");
+  await expect(git(workspace.path, ["remote", "get-url", "source"])).resolves.toBe(canonicalRepoRoot);
+});
+
 test("hub git promotes disjoint worktree commits into a dirty source repo", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-dirty-source");
   const dataDir = await mkTmp("receipt-hub-git-dirty-data");

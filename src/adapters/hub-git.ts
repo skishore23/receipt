@@ -120,6 +120,12 @@ const parseTouchedFiles = (raw: string): ReadonlyArray<string> =>
     .map((line) => line.trim())
     .filter(Boolean);
 
+const parseLines = (raw: string): ReadonlyArray<string> =>
+  raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
 const parseStatusFiles = (raw: string): ReadonlyArray<string> =>
   raw
     .split(/\r?\n/)
@@ -663,11 +669,47 @@ export class HubGit {
           if (refreshed) return;
           throw err;
         });
-        return;
+      } else if (current !== desired && currentCanonical !== desired) {
+        await this.execGit(["remote", "set-url", this.remoteName, desired], { gitDir: this.bareDir });
       }
-      if (current === desired || currentCanonical === desired) return;
-      await this.execGit(["remote", "set-url", this.remoteName, desired], { gitDir: this.bareDir });
+
+      const sourceRemotes = await this.sourceRepoRemotes();
+      const desiredByName = new Map(sourceRemotes.map((remote) => [remote.name, remote.url]));
+      const bareRemoteNames = parseLines(await this.execGit(["remote"], { gitDir: this.bareDir }).catch(() => ""));
+
+      for (const remoteName of bareRemoteNames) {
+        if (remoteName === this.remoteName || desiredByName.has(remoteName)) continue;
+        await this.execGit(["remote", "remove", remoteName], { gitDir: this.bareDir }).catch(() => undefined);
+      }
+
+      for (const sourceRemote of sourceRemotes) {
+        const remoteUrl = clean(await this.execGit(["remote", "get-url", sourceRemote.name], { gitDir: this.bareDir }).catch(() => ""));
+        const canonicalRemoteUrl = remoteUrl ? await canonicalizeRepoPath(remoteUrl) : "";
+        if (!remoteUrl) {
+          await this.execGit(["remote", "add", sourceRemote.name, sourceRemote.url], { gitDir: this.bareDir });
+          continue;
+        }
+        if (remoteUrl === sourceRemote.url || canonicalRemoteUrl === sourceRemote.url) continue;
+        await this.execGit(["remote", "set-url", sourceRemote.name, sourceRemote.url], { gitDir: this.bareDir });
+      }
     });
+  }
+
+  private async sourceRepoRemotes(): Promise<ReadonlyArray<{ readonly name: string; readonly url: string }>> {
+    const remoteNames = parseLines(await this.execGit(["remote"], { cwd: this.repoRoot }).catch(() => ""));
+    const remotes = await Promise.all(
+      remoteNames
+        .filter((name) => name !== this.remoteName)
+        .map(async (name) => {
+          const url = clean(await this.execGit(["remote", "get-url", name], { cwd: this.repoRoot }).catch(() => ""));
+          if (!url) return undefined;
+          return {
+            name,
+            url: await canonicalizeRepoPath(url),
+          };
+        }),
+    );
+    return remotes.filter((remote): remote is { readonly name: string; readonly url: string } => Boolean(remote));
   }
 
   private async withRemoteConfigLock<T>(op: () => Promise<T>): Promise<T> {

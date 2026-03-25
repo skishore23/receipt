@@ -11,8 +11,11 @@ You have been dispatched to publish the final results of a Factory objective. Th
 1. Read the objective history using the `receipt` CLI to understand what was built:
    - `receipt memory summarize factory/objectives/<objectiveId>`
    - `receipt inspect factory/objectives/<objectiveId>`
-2. Check the current git status and push the current branch to the origin remote:
+2. Check the current git status and inspect the available remotes:
+   - `git remote -v`
+   - Push the current branch to a GitHub-backed remote, preferring `origin` when present:
    - `git push -u origin HEAD`
+   - If `origin` is not the GitHub remote, push to the remote that points at the GitHub repository instead.
 3. Use the `gh` CLI to create a Pull Request:
    - Write a detailed PR description summarizing the objective, the tasks completed, and the test/validation results.
    - Run `gh pr create --title "<Objective Title>" --body "<Detailed Markdown Body>"`

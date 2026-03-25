@@ -20,6 +20,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const optionalTrimmedString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 
+const blockerSummary = (summary: string): string | undefined =>
+  /\b(blocked|failed|error|unable|could not)\b/i.test(summary) ? summary : undefined;
+
 const isValidUrl = (value: string): boolean => {
   try {
     const parsed = new URL(value);
@@ -62,7 +65,9 @@ export const normalizeFactoryPublishResult = (raw: Record<string, unknown>): Fac
   const summary = optionalTrimmedString(raw.summary);
   if (!summary) throw new FactoryServiceError(500, "factory publish result missing summary");
   const prUrl = optionalTrimmedString(raw.prUrl);
-  if (!prUrl || !isValidUrl(prUrl)) throw new FactoryServiceError(500, "factory publish result missing valid prUrl");
+  if (!prUrl || !isValidUrl(prUrl)) {
+    throw new FactoryServiceError(500, blockerSummary(summary) ?? "factory publish result missing valid prUrl");
+  }
   const prNumber = raw.prNumber === null
     ? null
     : typeof raw.prNumber === "number" && Number.isFinite(raw.prNumber)

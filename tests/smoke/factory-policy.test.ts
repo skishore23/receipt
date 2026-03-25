@@ -83,7 +83,7 @@ const latestFactoryJob = async (
 
 const createFactoryService = async (opts?: {
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
-  readonly publishMode?: "success" | "missing_metadata" | "error";
+  readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error";
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
@@ -115,6 +115,14 @@ const createFactoryService = async (opts?: {
                 headRefName: "codex/objective-demo",
                 baseRefName: "main",
               }
+            : publishMode === "blocked"
+              ? {
+                  summary: "Publish blocked: could not push the branch or open a GitHub PR from this environment.",
+                  prUrl: "",
+                  prNumber: null,
+                  headRefName: null,
+                  baseRefName: null,
+                }
             : {
                 summary: "Published PR #17.",
                 prUrl: "https://github.com/example/receipt/pull/17",
@@ -492,6 +500,35 @@ test("factory policy: publish failures block the objective when PR metadata is m
   expect(detail.blockedReason ?? "").toContain("factory publish result missing valid prUrl");
 });
 
+test("factory policy: publish failures preserve an explicit worker blocker summary", async () => {
+  const { service, queue } = await createFactoryService({
+    codexOutcome: "approved",
+    publishMode: "blocked",
+  });
+
+  const created = await service.createObjective({
+    title: "Software publish blocker objective",
+    prompt: "Surface the real publish blocker.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+  expect(publishResult.status).toBe("failed");
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("blocked");
+  expect(detail.integration.status).toBe("conflicted");
+  expect(detail.prUrl).toBeUndefined();
+  expect(detail.blockedReason ?? "").toContain("Publish blocked: could not push the branch or open a GitHub PR from this environment.");
+});
+
 test("factory policy: integration validation can pass through inherited failures without reconciliation churn", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
 
@@ -617,4 +654,63 @@ test("factory reducer: blocked task clears the latest running candidate status",
   expect(state.workflow.tasksById.task_03?.status).toBe("blocked");
   expect(state.candidates.task_03_candidate_01?.status).toBe("changes_requested");
   expect(state.candidates.task_03_candidate_01?.latestReason).toContain("DescribeLoadBalancers");
+});
+
+test("factory reducer: successful promotion clears stale blocker state", () => {
+  const baseCreatedAt = Date.now();
+  const state = buildState([
+    {
+      type: "objective.created",
+      objectiveId: "objective_publish_recovery",
+      title: "Promotion recovery",
+      prompt: "Recover from a publish blocker.",
+      channel: "results",
+      baseHash: "abc1234",
+      checks: ["bun run build"],
+      checksSource: "explicit",
+      profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+      policy: normalizeFactoryObjectivePolicy(),
+      createdAt: baseCreatedAt,
+    },
+    {
+      type: "integration.conflicted",
+      objectiveId: "objective_publish_recovery",
+      candidateId: "task_01_candidate_01",
+      reason: "Publishing failed: factory publish result missing valid prUrl",
+      headCommit: "abc1234",
+      conflictedAt: baseCreatedAt + 1,
+    },
+    {
+      type: "objective.blocked",
+      objectiveId: "objective_publish_recovery",
+      reason: "Publishing failed: factory publish result missing valid prUrl",
+      summary: "Publishing failed: factory publish result missing valid prUrl",
+      blockedAt: baseCreatedAt + 2,
+    },
+    {
+      type: "integration.promoted",
+      objectiveId: "objective_publish_recovery",
+      candidateId: "task_01_candidate_01",
+      promotedCommit: "def5678",
+      summary: "Published PR #2.",
+      prUrl: "https://github.com/example/receipt/pull/2",
+      prNumber: 2,
+      headRefName: "hub/integration/objective_publish_recovery",
+      baseRefName: "main",
+      promotedAt: baseCreatedAt + 3,
+    },
+    {
+      type: "objective.completed",
+      objectiveId: "objective_publish_recovery",
+      summary: "Published PR #2.",
+      completedAt: baseCreatedAt + 4,
+    },
+  ]);
+
+  expect(state.status).toBe("completed");
+  expect(state.blockedReason).toBeUndefined();
+  expect(state.integration.status).toBe("promoted");
+  expect(state.integration.conflictReason).toBeUndefined();
+  expect(state.integration.prUrl).toBe("https://github.com/example/receipt/pull/2");
+  expect(state.integration.prNumber).toBe(2);
 });

@@ -573,6 +573,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         status: "completed",
         updatedAt: event.promotedAt,
         latestSummary: event.summary,
+        blockedReason: undefined,
         integration: {
           ...state.integration,
           status: "promoted",
@@ -582,6 +583,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           prNumber: event.prNumber ?? state.integration.prNumber,
           headRefName: event.headRefName ?? state.integration.headRefName,
           baseRefName: event.baseRefName ?? state.integration.baseRefName,
+          conflictReason: undefined,
           updatedAt: event.promotedAt,
         },
       };
@@ -605,6 +607,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         ...state,
         status: "completed",
         latestSummary: event.summary,
+        blockedReason: undefined,
         updatedAt: event.completedAt,
         workflow: {
           ...state.workflow,
