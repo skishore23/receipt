@@ -12,6 +12,16 @@ sys.path.insert(0, str(RUNTIME_ROOT / "lib"))
 from helper_runtime import AwsCliError, aws_cli_json, build_result, emit_result, summarize_errors, write_json_artifact
 
 
+def looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or "placeholder" in normalized
+        or normalized in {"resource-id", "bucket-name", "role-name", "security-group-id"}
+        or (normalized.startswith("<") and normalized.endswith(">"))
+    )
+
+
 def check_s3_bucket(resource_id: str, profile: str | None) -> dict[str, Any]:
     policy_status = aws_cli_json(["s3api", "get-bucket-policy-status", "--bucket", resource_id], profile=profile)
     public_access_block = aws_cli_json(["s3api", "get-public-access-block", "--bucket", resource_id], profile=profile)
@@ -47,6 +57,17 @@ def main() -> int:
     parser.add_argument("--region")
     parser.add_argument("--output-dir")
     args = parser.parse_args()
+
+    if looks_like_placeholder(args.resource_id):
+        emit_result(build_result(
+            "error",
+            "aws_policy_or_exposure_check requires a real AWS resource identifier.",
+            {},
+            errors=[
+                "Pass a real bucket name, IAM role name, or security group id from the operator request or prior helper output. Do not use placeholders such as __placeholder__.",
+            ],
+        ))
+        return 1
 
     try:
         if args.service == "s3" and args.check == "public-access":

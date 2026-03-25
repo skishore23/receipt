@@ -4,5 +4,14 @@
   "provider": "aws",
   "tags": ["inventory", "count", "list", "resource", "ec2", "instances", "ebs", "volumes", "s3", "buckets", "rds", "databases", "lambda", "functions"],
   "description": "List or count common AWS resources by service and resource type.",
-  "entrypoint": "run.py"
+  "entrypoint": "run.py",
+  "requiredArgs": ["--service", "--resource"],
+  "requiredContext": [
+    "Requires an explicit service/resource pair such as s3/buckets or ec2/instances.",
+    "For region-scoped resources, provide --region, --regions, or --all-regions from the mounted scope."
+  ],
+  "examples": [
+    "--service s3 --resource buckets",
+    "--service ec2 --resource instances --all-regions"
+  ]
 }

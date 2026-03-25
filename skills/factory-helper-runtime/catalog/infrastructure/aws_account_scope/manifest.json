@@ -4,5 +4,13 @@
   "provider": "aws",
   "tags": ["account", "identity", "sts", "profile", "scope", "whoami"],
   "description": "Capture the active AWS caller identity, profile, and region defaults.",
-  "entrypoint": "run.py"
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile and optional region when one is already available in the packet."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --region us-west-2"
+  ]
 }

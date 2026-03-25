@@ -685,6 +685,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command");
   expect(prompt).toContain("stop bootstrap and run the best matching checked-in helper");
   expect(prompt).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json <helper-id> -- ...");
+  expect(prompt).toContain("Never invent helper arguments or placeholder identifiers.");
   expect(prompt).toContain("Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.");
   expect(prompt).toContain("If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
   expect(prompt).toContain("Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue.");
@@ -785,6 +786,8 @@ test("factory investigation: infrastructure task packets mount selected checked-
         readonly id?: string;
         readonly manifestPath?: string;
         readonly entrypointPath?: string;
+        readonly requiredArgs?: ReadonlyArray<string>;
+        readonly requiredContext?: ReadonlyArray<string>;
       }>;
     };
     readonly contextSources?: {
@@ -796,6 +799,11 @@ test("factory investigation: infrastructure task packets mount selected checked-
   };
   expect(contextPack.helperCatalog?.runnerPath).toContain("/skills/factory-helper-runtime/runner.py");
   expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) => helper.id === "aws_resource_inventory")).toBe(true);
+  expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) =>
+    helper.id === "aws_resource_inventory"
+    && helper.requiredArgs?.includes("--service")
+    && helper.requiredContext?.some((item) => item.includes("service/resource pair"))
+  )).toBe(true);
   expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper manifest")).toBe(true);
   expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper entrypoint")).toBe(true);
 
@@ -804,6 +812,56 @@ test("factory investigation: infrastructure task packets mount selected checked-
   expect(prompt).toContain("Use the checked-in helper runner");
   expect(prompt).toContain("Selected helpers for this scope:");
   expect(prompt).toContain("aws_resource_inventory");
+}, 120_000);
+
+test("factory investigation: resource-specific helper prompts tell Codex to use real identifiers instead of placeholders", async () => {
+  const awsContext: FactoryCloudExecutionContext = {
+    summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/test in account 445567089271 with region us-west-2.",
+    availableProviders: ["aws"],
+    activeProviders: ["aws"],
+    preferredProvider: "aws",
+    guidance: ["Use the mounted AWS context."],
+    aws: {
+      cliPath: "/opt/homebrew/bin/aws",
+      version: "aws-cli/2.34.14",
+      profiles: ["default"],
+      selectedProfile: "default",
+      defaultRegion: "us-west-2",
+      callerIdentity: {
+        accountId: "445567089271",
+        arn: "arn:aws:iam::445567089271:user/test",
+        userId: "AIDATEST",
+      },
+    },
+  };
+  const { service, queue } = await createFactoryService({
+    codexRun: async (input) => {
+      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+    cloudExecutionContextProvider: async () => awsContext,
+  });
+
+  const created = await service.createObjective({
+    title: "Bucket exposure",
+    prompt: "check whether the customer-uploads bucket is public",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+    profileId: "infrastructure",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  await service.runTask(payload);
+  const prompt = await fs.readFile(payload.promptPath, "utf-8");
+
+  expect(prompt).toContain("aws_policy_or_exposure_check");
+  expect(prompt).toContain("required args: --service, --check, --resource-id");
+  expect(prompt).toContain("Do not invent placeholder identifiers such as __placeholder__.");
+  expect(prompt).toContain("--service s3 --check public-access --resource-id my-bucket");
 }, 120_000);
 
 test("factory investigation: infrastructure objectives can start from a dirty source repo without an explicit baseHash", async () => {

@@ -4,5 +4,14 @@
   "provider": "aws",
   "tags": ["log", "logs", "cloudwatch", "events", "sample", "filter", "message"],
   "description": "Sample recent CloudWatch log events from a named log group.",
-  "entrypoint": "run.py"
+  "entrypoint": "run.py",
+  "requiredArgs": ["--log-group-name", "--region"],
+  "requiredContext": [
+    "Requires a real CloudWatch log group name from the operator request or prior helper output.",
+    "Do not invent placeholder log group names."
+  ],
+  "examples": [
+    "--log-group-name /aws/lambda/my-function --region us-west-2",
+    "--log-group-name /ecs/app --region us-west-2 --filter-pattern ERROR"
+  ]
 }

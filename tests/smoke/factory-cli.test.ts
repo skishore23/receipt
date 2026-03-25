@@ -773,6 +773,33 @@ test("factory cli: helper run executes a checked-in helper through the shared ru
   expect(parsed.data?.callerIdentity?.Account).toBe("445567089271");
 }, 120_000);
 
+test("factory cli: helper run rejects placeholder resource ids before it hits AWS", async () => {
+  const result = await runCli([
+    "factory",
+    "helper",
+    "run",
+    "aws_policy_or_exposure_check",
+    "--provider",
+    "aws",
+    "--json",
+    "--helper-arg=--service",
+    "--helper-arg=s3",
+    "--helper-arg=--check",
+    "--helper-arg=public-access",
+    "--helper-arg=--resource-id",
+    "--helper-arg=__placeholder__",
+  ]);
+  expect(result.code).toBe(1);
+  const parsed = JSON.parse(result.stdout) as {
+    readonly status?: string;
+    readonly summary?: string;
+    readonly errors?: ReadonlyArray<string>;
+  };
+  expect(parsed.status).toBe("error");
+  expect(parsed.summary).toContain("requires a real AWS resource identifier");
+  expect(parsed.errors?.[0] ?? "").toContain("Do not use placeholders such as __placeholder__");
+}, 120_000);
+
 test("factory cli: run promotes changes and inspect exposes debug data", async () => {
   const repoDir = await createRepo();
   const codexStub = await createCodexStub();

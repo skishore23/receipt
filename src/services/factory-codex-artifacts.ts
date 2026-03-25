@@ -77,7 +77,7 @@ export const buildFactoryMemoryScriptSource = (configPath: string): string => {
     `    pack.memory?.overview ? \`Overview: \${pack.memory.overview}\` : "",`,
     `    pack.contextSources?.profileSkillRefs?.length ? \`Profile skills: \${pack.contextSources.profileSkillRefs.join(", ")}\` : "",`,
     `    pack.helperCatalog?.selectedHelpers?.length ? "Checked-in helpers:" : "",`,
-    `    ...(pack.helperCatalog?.selectedHelpers || []).flatMap((entry) => [\`- \${entry.id}: \${entry.description}\`, \`  manifest: \${entry.manifestPath}\`, \`  entrypoint: \${entry.entrypointPath}\`]),`,
+    `    ...(pack.helperCatalog?.selectedHelpers || []).flatMap((entry) => [\`- \${entry.id}: \${entry.description}\`, \`  manifest: \${entry.manifestPath}\`, \`  entrypoint: \${entry.entrypointPath}\`, entry.requiredArgs?.length ? \`  required args: \${entry.requiredArgs.join(", ")}\` : "", ...(entry.requiredContext || []).map((item) => \`  requires: \${item}\`)]).filter(Boolean),`,
     `    pack.integration?.status ? \`Integration: \${pack.integration.status}\${pack.integration.lastSummary ? \` · \${pack.integration.lastSummary}\` : ""}\` : "",`,
     `    pack.relatedTasks?.length ? "Related task context:" : "",`,
     `    ...(pack.relatedTasks || []).map((task) => \`- \${task.taskId} [\${task.relations.join(", ")}] · \${task.title} [\${task.status}]\${task.candidateStatus ? \` · candidate \${task.candidateStatus}\` : ""}\${task.memorySummary ? \` · \${task.memorySummary}\` : ""}\`),`,

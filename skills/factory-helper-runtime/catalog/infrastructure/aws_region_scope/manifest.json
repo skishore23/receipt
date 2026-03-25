@@ -4,5 +4,12 @@
   "provider": "aws",
   "tags": ["region", "regions", "scope", "ec2", "inventory", "queryable"],
   "description": "Discover queryable AWS regions for region-scoped investigations.",
-  "entrypoint": "run.py"
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile to discover queryable regions for the current account."
+  ],
+  "examples": [
+    "--profile default"
+  ]
 }

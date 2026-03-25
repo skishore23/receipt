@@ -61,6 +61,9 @@ export type FactoryHelperManifest = {
   readonly tags: ReadonlyArray<string>;
   readonly description: string;
   readonly entrypoint: string;
+  readonly requiredArgs?: ReadonlyArray<string>;
+  readonly requiredContext?: ReadonlyArray<string>;
+  readonly examples?: ReadonlyArray<string>;
 };
 
 export type FactoryHelperCatalogEntry = FactoryHelperManifest & {
@@ -77,6 +80,9 @@ export type FactoryHelperSelection = {
   readonly description: string;
   readonly manifestPath: string;
   readonly entrypointPath: string;
+  readonly requiredArgs: ReadonlyArray<string>;
+  readonly requiredContext: ReadonlyArray<string>;
+  readonly examples: ReadonlyArray<string>;
   readonly score: number;
 };
 
@@ -136,6 +142,15 @@ const parseHelperManifest = async (
     const tags = Array.isArray(raw.tags)
       ? raw.tags.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
       : [];
+    const requiredArgs = Array.isArray(raw.requiredArgs)
+      ? raw.requiredArgs.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+      : [];
+    const requiredContext = Array.isArray(raw.requiredContext)
+      ? raw.requiredContext.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+      : [];
+    const examples = Array.isArray(raw.examples)
+      ? raw.examples.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+      : [];
     if (!id || !version || !validProvider(provider) || !description || !entrypoint) return undefined;
     const entrypointPath = path.resolve(path.dirname(manifestPath), entrypoint);
     if (!(await pathExists(entrypointPath))) return undefined;
@@ -146,6 +161,9 @@ const parseHelperManifest = async (
       tags,
       description,
       entrypoint,
+      requiredArgs,
+      requiredContext,
+      examples,
       domain,
       manifestPath,
       entrypointPath,
@@ -243,6 +261,9 @@ export const loadFactoryHelperContext = async (input: {
       description: entry.description,
       manifestPath: entry.manifestPath,
       entrypointPath: entry.entrypointPath,
+      requiredArgs: entry.requiredArgs ?? [],
+      requiredContext: entry.requiredContext ?? [],
+      examples: entry.examples ?? [],
       score,
     }));
   return {
@@ -251,6 +272,7 @@ export const loadFactoryHelperContext = async (input: {
       "Use checked-in helpers first for AWS investigations instead of generating a task-local script.",
       "If no helper matches the ask closely enough, stop and return a structured no-matching-helper outcome plus the helper you would author next.",
       "For live cloud/account/runtime questions, rerun the matching helper and treat stored helper metadata as a starting point, not as fresh evidence.",
+      "Never invent helper arguments or placeholder identifiers. If a helper requires a concrete resource id and the packet, prompt, receipts, or prior helper output does not provide one, discover candidates first with a generic helper or stop and report the missing identifier.",
     ],
     selectedHelpers,
   };
@@ -273,6 +295,10 @@ export const renderFactoryHelperPromptSection = (
       lines.push(`- helper: ${helper.id} | ${helper.description} | tags ${helper.tags.join(", ")}`);
       lines.push(`- manifest: ${helper.manifestPath}`);
       lines.push(`- entrypoint: ${helper.entrypointPath}`);
+      if (helper.requiredArgs.length > 0) lines.push(`- required args: ${helper.requiredArgs.join(", ")}`);
+      lines.push(...helper.requiredContext.map((item) => `- context requirement: ${item}`));
+      lines.push(...helper.examples.slice(0, 2).map((item) =>
+        `- example: python3 ${context.runnerPath} run --provider ${helper.provider} --json ${helper.id} -- ${item}`));
     }
     lines.push("- Combine only a small number of helpers. Stop once one or two helper runs produce enough evidence to answer.");
     lines.push("- Record helper runner commands in report.scriptsRun so operators can rerun the exact path.");
