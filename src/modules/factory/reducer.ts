@@ -175,6 +175,12 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         latestSummary: event.message,
         updatedAt: event.notedAt,
       };
+    case "planning.receipt":
+      return {
+        ...state,
+        planning: event.plan,
+        updatedAt: event.plannedAt,
+      };
     case "objective.slot.queued":
       return {
         ...state,
@@ -354,6 +360,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         headCommit: event.headCommit,
         summary: event.summary,
         handoff: event.handoff,
+        completion: event.completion,
         checkResults: event.checkResults,
         scriptsRun: event.scriptsRun,
         artifactRefs: event.artifactRefs,
@@ -423,6 +430,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
               candidateId: event.candidateId,
               summary: event.summary,
               handoff: event.handoff,
+              completion: event.completion,
               report: event.report,
               artifactRefs: event.artifactRefs,
               evidenceCommit: event.evidenceCommit,

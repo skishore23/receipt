@@ -85,8 +85,21 @@ const createCodexStub = async (): Promise<string> => {
     "  const match = prompt.match(/Write JSON to (.+?) with:/);",
     "  if (!workspace || !lastMessagePath) throw new Error('codex stub missing required args');",
     "  const resultPath = match ? match[1].trim() : '';",
-    "  const isPublish = prompt.includes('Publish the completed objective:');",
+    "  const isPublish = prompt.includes('# Factory Integration Publish') || prompt.includes('Return exactly one JSON object matching this schema:');",
     "  if (!match && !isPublish) throw new Error('codex stub missing match or publish flag');",
+    "  if (isPublish) {",
+    "    const publishResult = {",
+    "      summary: 'Published PR #17.',",
+    "      prUrl: 'https://github.com/example/factory-cli-test/pull/17',",
+    "      prNumber: 17,",
+    "      headRefName: 'codex/factory-cli-test',",
+    "      baseRefName: 'main',",
+    "    };",
+    "    const raw = JSON.stringify(publishResult);",
+    "    fs.writeFileSync(lastMessagePath, raw, 'utf8');",
+    "    process.stdout.write(`${raw}\\n`);",
+    "    return;",
+    "  }",
     "  if (resultPath.includes('task_02')) {",
     "    const packageJsonPath = path.join(workspace, 'package.json');",
     "    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));",
@@ -170,6 +183,43 @@ const createPathCodexStub = async (): Promise<string> => {
   }
   const scriptPath = path.join(dir, "codex");
   await fs.writeFile(scriptPath, "#!/bin/sh\nexit 0\n", "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return dir;
+};
+
+const createAwsStub = async (): Promise<string> => {
+  const dir = await createTempDir("receipt-factory-cli-aws");
+  const nodeBody = [
+    "const args = process.argv.slice(2);",
+    "const emit = (value) => process.stdout.write(value);",
+    "if (args[0] === 'configure' && args[1] === 'list-profiles') {",
+    "  emit('default\\nsandbox\\n');",
+    "  process.exit(0);",
+    "}",
+    "const filtered = [];",
+    "for (let index = 0; index < args.length; index += 1) {",
+    "  const value = args[index];",
+    "  if (value === '--output' || value === '--profile' || value === '--region') { index += 1; continue; }",
+    "  if (value === 'json') continue;",
+    "  filtered.push(value);",
+    "}",
+    "if (filtered[0] === 'sts' && filtered[1] === 'get-caller-identity') {",
+    "  emit(JSON.stringify({ Account: '445567089271', Arn: 'arn:aws:iam::445567089271:user/test', UserId: 'AIDATEST' }));",
+    "  process.exit(0);",
+    "}",
+    "console.error(`unsupported aws stub command: ${args.join(' ')}`);",
+    "process.exit(1);",
+    "",
+  ].join("\n");
+  if (process.platform === "win32") {
+    const jsPath = path.join(dir, "aws-stub.js");
+    const cmdPath = path.join(dir, "aws.cmd");
+    await fs.writeFile(jsPath, nodeBody, "utf-8");
+    await fs.writeFile(cmdPath, `@echo off\r\n"${BUN.replace(/\//g, "\\")}" "%~dp0\\aws-stub.js" %*\r\n`, "utf-8");
+    return dir;
+  }
+  const scriptPath = path.join(dir, "aws");
+  await fs.writeFile(scriptPath, `#!/usr/bin/env bun\n${nodeBody}`, "utf-8");
   await fs.chmod(scriptPath, 0o755);
   return dir;
 };
@@ -680,6 +730,47 @@ test("factory cli: codex-probe runs direct and queue status probes without init"
   const queueLastMessage = await fs.readFile(payload.queue!.artifacts.lastMessagePath, "utf-8");
   expect(directLastMessage.trim()).toBe("probe-ok");
   expect(queueLastMessage.trim()).toBe("probe-ok");
+}, 120_000);
+
+test("factory cli: helper list surfaces the checked-in helper catalog without init", async () => {
+  const listed = await runCli(["factory", "helper", "list", "--json"]);
+  expect(listed.code).toBe(0);
+  const parsed = JSON.parse(listed.stdout) as ReadonlyArray<{
+    readonly id?: string;
+    readonly provider?: string;
+  }>;
+  expect(parsed.some((item) => item.id === "aws_account_scope" && item.provider === "aws")).toBe(true);
+  expect(parsed.some((item) => item.id === "aws_resource_inventory" && item.provider === "aws")).toBe(true);
+}, 120_000);
+
+test("factory cli: helper run executes a checked-in helper through the shared runner", async () => {
+  const awsDir = await createAwsStub();
+  const result = await runCli([
+    "factory",
+    "helper",
+    "run",
+    "aws_account_scope",
+    "--provider",
+    "aws",
+    "--json",
+  ], {
+    PATH: `${awsDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  });
+  expect(result.code).toBe(0);
+  const parsed = JSON.parse(result.stdout) as {
+    readonly status?: string;
+    readonly summary?: string;
+    readonly data?: {
+      readonly availableProfiles?: ReadonlyArray<string>;
+      readonly callerIdentity?: {
+        readonly Account?: string;
+      };
+    };
+  };
+  expect(parsed.status).toBe("ok");
+  expect(parsed.summary).toContain("AWS caller identity");
+  expect(parsed.data?.availableProfiles).toEqual(["default", "sandbox"]);
+  expect(parsed.data?.callerIdentity?.Account).toBe("445567089271");
 }, 120_000);
 
 test("factory cli: run promotes changes and inspect exposes debug data", async () => {

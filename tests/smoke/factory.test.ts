@@ -778,6 +778,11 @@ test("factory reducer: replay reconstructs task, candidate, and integration stat
       headCommit: "def5678",
       summary: "Produced candidate.",
       handoff: "Ready for review.",
+      completion: {
+        changed: ["Produced the candidate commit."],
+        proof: ["bun run build passed."],
+        remaining: [],
+      },
       checkResults: [{
         command: "bun run build",
         ok: true,
@@ -2080,6 +2085,47 @@ test("factory route: explicit thread view hydrates transcript items from the obj
   expect(body).toContain("Transcript");
   expect(body).toContain("Thread status");
   expect(body).toContain("Objective still executing.");
+});
+
+test("factory route: completed thread without chat receipts still surfaces the terminal summary in transcript", async () => {
+  const completedObjective = {
+    ...makeStubObjectiveDetail("objective_done"),
+    status: "completed",
+    phase: "completed",
+    latestSummary: "No active CloudWatch alarms were present across the 17 queryable regions.",
+    nextAction: "Investigation is complete.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    tasks: [{
+      taskId: "task_01",
+      title: "Inspect CloudWatch alarms",
+      workerType: "codex",
+      status: "approved",
+      dependsOn: [],
+      workspaceExists: true,
+      workspaceDirty: false,
+      jobId: "job_done",
+      jobStatus: "completed",
+      latestSummary: "No active CloudWatch alarms were present across the 17 queryable regions.",
+    }],
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [
+        completedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => completedObjective,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&thread=objective_done");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("No active CloudWatch alarms were present across the 17 queryable regions.");
+  expect(body).not.toContain("This thread is quiet.");
+  expect(body).toContain(">1<");
 });
 
 test("factory route: blocked thread workbench does not present canceled tasks as running", async () => {

@@ -225,6 +225,16 @@ test("factory worker packets expose a layered memory script for bounded recall a
           summary: "Reviewed scoped memory summaries before writing the durable note.",
           status: "ok",
         }],
+        completion: {
+          changed: [
+            "Recalled bounded Factory context and committed a durable task note through the generated memory script.",
+          ],
+          proof: [
+            "bun memory script context 1800 returned the layered task packet context.",
+            "bun memory script overview memory 1400 returned the scoped memory summaries.",
+          ],
+          remaining: [],
+        },
         nextAction: "Candidate is ready for integration.",
       }, null, 2), "utf-8");
       await fs.writeFile(input.lastMessagePath, "Used the generated memory script.", "utf-8");
@@ -350,7 +360,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} scope task`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} search repo`));
-  expect(promptBody).toMatch(/Include scriptsRun only when a command or small script materially informed the result/);
+  expect(promptBody).toMatch(/Always include scriptsRun and completion\./);
 
   expect(captured.context).toMatch(/Objective: Scripted memory objective/);
   expect(captured.context).toMatch(/Dependencies:|Candidate lineage:|Recent receipts:/);
@@ -429,6 +439,16 @@ test("factory investigation synthesis commits a sectioned operator report to obj
           path: path.join(input.workspacePath, ".receipt", "factory", "inventory.json"),
           summary: "Machine-readable inventory evidence.",
         }],
+        completion: {
+          changed: [
+            "Collected the current AWS inventory evidence and wrote the machine-readable snapshot.",
+          ],
+          proof: [
+            "Inventory snapshot artifact was written to the task workspace.",
+            "bash .receipt/factory/task_01_inventory.sh captured the inventory successfully.",
+          ],
+          remaining: [],
+        },
         nextAction: "Investigation is ready for synthesis.",
         report: {
           conclusion: "The AWS inventory completed successfully and the evidence is internally consistent.",
@@ -530,6 +550,20 @@ test("factory publish commits PR metadata to objective, integration, and publish
         outcome: "approved",
         summary: "Implemented the software change and prepared it for integration.",
         artifacts: [],
+        scriptsRun: [{
+          command: "git status --short",
+          summary: "Confirmed the task workspace recorded the publish memory fixture diff.",
+          status: "ok",
+        }],
+        completion: {
+          changed: [
+            "Created MEMORY_PUBLISH_TEST.txt to exercise the publish-memory path.",
+          ],
+          proof: [
+            "git status --short showed the workspace diff for MEMORY_PUBLISH_TEST.txt.",
+          ],
+          remaining: [],
+        },
         nextAction: "Ready for integration.",
       });
       await fs.writeFile(input.lastMessagePath, raw, "utf-8");
@@ -621,6 +655,20 @@ test("factory publish failures still commit durable blocker notes to publish mem
         outcome: "approved",
         summary: "Prepared the delivery candidate for publishing.",
         artifacts: [],
+        scriptsRun: [{
+          command: "git status --short",
+          summary: "Confirmed the task workspace diff before the publish failure path.",
+          status: "ok",
+        }],
+        completion: {
+          changed: [
+            "Created MEMORY_PUBLISH_FAILURE.txt to exercise publish blocker memory handling.",
+          ],
+          proof: [
+            "git status --short showed the workspace diff for MEMORY_PUBLISH_FAILURE.txt.",
+          ],
+          remaining: [],
+        },
         nextAction: "Ready for integration.",
       });
       await fs.writeFile(input.lastMessagePath, raw, "utf-8");

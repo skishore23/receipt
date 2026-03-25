@@ -1,6 +1,6 @@
 import { fold } from "@receipt/core/chain";
 
-import { initial as initialAgent, reduce as reduceAgent } from "../../modules/agent";
+import { initial as initialAgent, reduce as reduceAgent, type AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import { summarizeFactoryQueueJob } from "../../views/factory/job-presenters";
 import type {
@@ -470,7 +470,7 @@ const buildActiveRunSteps = (
 
 const describeRunActivity = (
   profileLabel: string,
-  state: ReturnType<typeof fold<AgentRunChain[number], ReturnType<typeof initialAgent>>>,
+  state: AgentState,
   finalContent?: string,
 ): string => {
   const tool = state.lastTool?.name?.trim().toLowerCase();

@@ -101,12 +101,15 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- Use `codex.run` only for lightweight read-only inspection or evidence-gathering in the current repo.",
   "- Use `factory.dispatch` for any code-changing delivery work, any substantive infrastructure investigation, or when the next step should run in an objective worktree.",
   "- If a completed objective already contains the answer in `factory.status`, `factory.receipts`, or `factory.output`, answer directly only when the answer is historical, meta, or clearly not freshness-sensitive.",
-  "- If the answer depends on current cloud/account/runtime state and reusable scripts are available in the current situation or `factory.status`, rerun the best matching saved script first via `codex.run` or `factory.dispatch` instead of finalizing from saved results alone.",
+  "- If the answer depends on current cloud/account/runtime state and checked-in helpers are available in the current situation or `factory.status`, rerun the best matching helper first via `codex.run` or `factory.dispatch` instead of finalizing from saved results alone.",
   "- If the answer depends on current cloud/account/runtime state and you only have saved evidence, prefer a fresh probe over presenting old results as current.",
   "- Before `react`, `promote`, `cancel`, or duplicate dispatch, ground the decision in the current situation, receipts, or live output.",
+  "- Use delegation only for bounded sidecar work with a clear owner and stop condition. Keep the main chat responsible for the final answer.",
   "- When child work is already active, prefer `codex.status`, `factory.status`, or `factory.output` with `waitForChangeMs` so you wait for real progress instead of tight polling.",
+  "- Once a child has produced a concrete artifact, result JSON, or terminal summary that answers the question, inspect that evidence and finalize instead of issuing more wait loops.",
   "- Do not try to steer an in-flight child. If the current attempt is wrong, inspect it, abort it, and react the objective with a clearer note.",
   "- If investigation reports disagree or reconciliation is pending, do not finalize yet. Inspect status/receipts and wait for the objective to align or block.",
+  "- Match tool input keys exactly to the documented schema. For example, `codex.run` accepts `{\"prompt\": string, \"timeoutMs\"?: number}`.",
   "",
   "For final answers to the user:",
   "- write plain language, not raw JSON",
@@ -250,22 +253,89 @@ const commitWorkerSummary = async (
   });
 };
 
-const gitChangedFiles = async (repoRoot: string): Promise<ReadonlyArray<string>> => {
+type GitChangedFileEntry = {
+  readonly path: string;
+  readonly status: string;
+};
+
+type GitChangedFileSnapshotEntry = {
+  readonly status: string;
+  readonly fingerprint?: string;
+};
+
+const gitStatusEntries = async (repoRoot: string): Promise<ReadonlyArray<GitChangedFileEntry>> => {
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--short"], {
+    const { stdout } = await execFileAsync("git", ["status", "--porcelain=1", "-z", "--untracked-files=all"], {
       cwd: repoRoot,
       encoding: "utf-8",
       maxBuffer: 4 * 1024 * 1024,
     });
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => line.slice(3).trim())
-      .filter(Boolean);
+    const tokens = stdout.split("\u0000");
+    const entries: GitChangedFileEntry[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token) continue;
+      const status = token.slice(0, 2);
+      const filePath = token.slice(3);
+      if (!status || !filePath) continue;
+      entries.push({ path: filePath, status });
+      if (status.includes("R") || status.includes("C")) index += 1;
+    }
+    return entries;
   } catch {
     return [];
   }
+};
+
+const gitWorkingTreeFingerprint = async (repoRoot: string, filePath: string): Promise<string | undefined> => {
+  try {
+    const absolutePath = path.join(repoRoot, filePath);
+    const stat = await fs.lstat(absolutePath);
+    if (stat.isSymbolicLink()) return `symlink:${await fs.readlink(absolutePath)}`;
+    if (stat.isDirectory()) return `dir:${stat.mtimeMs}:${stat.size}`;
+    const content = await fs.readFile(absolutePath);
+    return createHash("sha1").update(content).digest("hex");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return undefined;
+  }
+};
+
+const gitChangedFileSnapshot = async (
+  repoRoot: string,
+): Promise<ReadonlyMap<string, GitChangedFileSnapshotEntry>> => {
+  const entries = await gitStatusEntries(repoRoot);
+  const snapshots = await Promise.all(entries.map(async ({ path: filePath, status }) => (
+    [filePath, { status, fingerprint: await gitWorkingTreeFingerprint(repoRoot, filePath) }] as const
+  )));
+  return new Map(snapshots);
+};
+
+const diffGitChangedFileSnapshots = (
+  before: ReadonlyMap<string, GitChangedFileSnapshotEntry>,
+  after: ReadonlyMap<string, GitChangedFileSnapshotEntry>,
+): ReadonlyArray<string> => {
+  const changed = new Set<string>();
+  for (const filePath of before.keys()) {
+    const previous = before.get(filePath);
+    const current = after.get(filePath);
+    if (!current || previous?.status !== current.status || previous?.fingerprint !== current.fingerprint) {
+      changed.add(filePath);
+    }
+  }
+  for (const filePath of after.keys()) {
+    const previous = before.get(filePath);
+    const current = after.get(filePath);
+    if (!previous || previous.status !== current?.status || previous.fingerprint !== current?.fingerprint) {
+      changed.add(filePath);
+    }
+  }
+  return [...changed].sort((left, right) => left.localeCompare(right));
+};
+
+const gitChangedFiles = async (repoRoot: string): Promise<ReadonlyArray<string>> => {
+  const entries = await gitStatusEntries(repoRoot);
+  return entries.map((entry) => entry.path).sort((left, right) => left.localeCompare(right));
 };
 
 const tail = (value: string | undefined, max = 400): string | undefined => {
@@ -363,9 +433,9 @@ const reusableInfrastructureRefs = (
     return values;
   };
   return {
-    scripts: collect("reusable infrastructure script"),
-    knowledge: collect("reusable infrastructure knowledge"),
-    evidence: collect("reusable infrastructure evidence"),
+    scripts: collect("checked-in helper entrypoint"),
+    knowledge: collect("checked-in helper manifest"),
+    evidence: collect("helper runner"),
   };
 };
 
@@ -416,13 +486,13 @@ const buildFactorySituation = async (input: {
       }
       const reusableRefs = reusableInfrastructureRefs(detail.contextSources?.sharedArtifactRefs);
       if (reusableRefs.knowledge.length > 0) {
-        lines.push("Reusable infrastructure knowledge:");
+        lines.push("Checked-in helper manifests:");
         lines.push(...reusableRefs.knowledge.slice(0, 3).map((ref) => `- ${ref}`));
       }
       if (reusableRefs.scripts.length > 0) {
-        lines.push("Reusable infrastructure scripts:");
+        lines.push("Checked-in helper entrypoints:");
         lines.push(...reusableRefs.scripts.slice(0, 4).map((ref) => `- ${ref}`));
-        lines.push("Freshness rule: for live cloud/account/runtime questions, rerun the best matching saved script before finalizing; do not answer from saved output alone.");
+        lines.push("Freshness rule: for live cloud/account/runtime questions, rerun the best matching checked-in helper before finalizing; do not answer from saved output alone.");
       }
     } catch (err: unknown) {
       const status = typeof err === "object" && err !== null && "status" in err
@@ -951,11 +1021,11 @@ const createFactoryStatusTool = (input: {
         taskWorktrees: debug.taskWorktrees,
         integrationWorktree: debug.integrationWorktree,
         latestContextPacks: debug.latestContextPacks,
-        reusableInfrastructureScripts: reusableRefs.scripts,
-        reusableInfrastructureKnowledge: reusableRefs.knowledge,
-        reusableInfrastructureEvidence: reusableRefs.evidence,
+        availableHelperEntrypoints: reusableRefs.scripts,
+        availableHelperManifests: reusableRefs.knowledge,
+        availableHelperSupport: reusableRefs.evidence,
         freshnessGuidance: reusableRefs.scripts.length > 0
-          ? "For live cloud/account/runtime questions, rerun the best matching saved script before finalizing."
+          ? "For live cloud/account/runtime questions, rerun the best matching checked-in helper before finalizing."
           : undefined,
       };
     };
@@ -1398,6 +1468,10 @@ export const runFactoryCodexJob = async (input: {
     await fs.writeFile(artifacts.resultPath, JSON.stringify(result, null, 2), "utf-8");
   };
 
+  const initialChangedFileSnapshot = readOnly
+    ? await gitChangedFileSnapshot(input.repoRoot)
+    : undefined;
+
   try {
     const result = await input.executor.run({
       prompt: renderedPrompt,
@@ -1415,7 +1489,13 @@ export const runFactoryCodexJob = async (input: {
     await progressLoop;
     await emitProgress();
 
-    const changedFiles = await gitChangedFiles(input.repoRoot);
+    const [repoChangedFiles, finalChangedFileSnapshot] = await Promise.all([
+      gitChangedFiles(input.repoRoot),
+      readOnly ? gitChangedFileSnapshot(input.repoRoot) : Promise.resolve(undefined),
+    ]);
+    const changedFiles = readOnly && initialChangedFileSnapshot && finalChangedFileSnapshot
+      ? diffGitChangedFileSnapshots(initialChangedFileSnapshot, finalChangedFileSnapshot)
+      : repoChangedFiles;
     if (readOnly && changedFiles.length > 0) {
       const failed = {
         status: "failed",
@@ -1427,6 +1507,7 @@ export const runFactoryCodexJob = async (input: {
         stdoutTail: tail(result.stdout),
         stderrTail: tail(result.stderr),
         changedFiles,
+        ...(readOnly ? { repoChangedFiles } : {}),
         artifacts,
       };
       await writeResult(failed);
@@ -1443,6 +1524,7 @@ export const runFactoryCodexJob = async (input: {
       stdoutTail: tail(result.stdout),
       stderrTail: tail(result.stderr),
       changedFiles,
+      ...(readOnly ? { repoChangedFiles } : {}),
       artifacts,
     };
     await writeResult(completed);
@@ -1452,12 +1534,16 @@ export const runFactoryCodexJob = async (input: {
     await progressLoop;
     await emitProgress();
 
-    const [lastMessage, stdoutTail, stderrTail, changedFiles] = await Promise.all([
+    const [lastMessage, stdoutTail, stderrTail, repoChangedFiles, finalChangedFileSnapshot] = await Promise.all([
       readTextTail(artifacts.lastMessagePath, 400),
       readTextTail(artifacts.stdoutPath, 900),
       readTextTail(artifacts.stderrPath, 600),
       gitChangedFiles(input.repoRoot),
+      readOnly ? gitChangedFileSnapshot(input.repoRoot) : Promise.resolve(undefined),
     ]);
+    const changedFiles = readOnly && initialChangedFileSnapshot && finalChangedFileSnapshot
+      ? diffGitChangedFileSnapshots(initialChangedFileSnapshot, finalChangedFileSnapshot)
+      : repoChangedFiles;
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = readOnly && (changedFiles.length > 0 || looksLikeReadOnlyMutationFailure(rawMessage))
       ? DIRECT_CODEX_MUTATION_MESSAGE
@@ -1472,6 +1558,7 @@ export const runFactoryCodexJob = async (input: {
       stdoutTail,
       stderrTail,
       changedFiles,
+      ...(readOnly ? { repoChangedFiles } : {}),
       artifacts,
     });
     throw new Error(message);

@@ -84,6 +84,7 @@ const latestFactoryJob = async (
 const createFactoryService = async (opts?: {
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
   readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error";
+  readonly completionRemaining?: ReadonlyArray<string>;
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
@@ -94,6 +95,7 @@ const createFactoryService = async (opts?: {
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexOutcome = opts?.codexOutcome ?? "approved";
   const publishMode = opts?.publishMode ?? "success";
+  const completionRemaining = opts?.completionRemaining ?? [];
   const service = new FactoryService({
     dataDir,
     queue,
@@ -142,8 +144,21 @@ const createFactoryService = async (opts?: {
             : codexOutcome === "changes_requested"
               ? "Another pass is required."
               : "Task is blocked.",
-          handoff: codexOutcome === "approved"
-            ? "Candidate is ready for integration."
+          artifacts: [],
+          scriptsRun: [],
+          completion: {
+            changed: codexOutcome === "approved" ? ["Updated POLICY_TEST.txt in the task workspace."] : [],
+            proof: ["POLICY_TEST.txt was written by the worker stub."],
+            remaining: completionRemaining.length > 0
+              ? [...completionRemaining]
+              : codexOutcome === "changes_requested"
+                ? ["Run another pass."]
+                : codexOutcome === "blocked"
+                  ? ["Blocked."]
+                  : [],
+          },
+          nextAction: codexOutcome === "approved"
+            ? null
             : codexOutcome === "changes_requested"
               ? "Run another pass."
               : "Blocked.",
@@ -198,6 +213,10 @@ test("factory policy: direct codex probes without an objective stay repo-scoped 
   expect(packet.renderedPrompt).toContain("This direct probe is not a Factory task worktree");
   expect(packet.renderedPrompt).toContain("should not call the objective inspect commands");
   expect(packet.renderedPrompt).toContain("Do not assume skills/factory-receipt-worker/SKILL.md applies unless a real objectiveId is present.");
+  expect(packet.renderedPrompt).toContain("Start with a short internal plan.");
+  expect(packet.renderedPrompt).toContain("If the operator named a file, artifact, receipt, helper, or run, inspect that exact target before broader repo search or memory expansion.");
+  expect(packet.renderedPrompt).toContain("If you use subagents, keep them as bounded sidecars");
+  expect(packet.renderedPrompt).toContain("Do not parallelize broad repo exploration when one named artifact or one primary evidence path can answer the request.");
 });
 
 test("factory policy: task packets tell workers to inspect objective receipts sequentially", async () => {
@@ -218,6 +237,9 @@ test("factory policy: task packets tell workers to inspect objective receipts se
   expect(prompt).not.toContain(`factory inspect '${created.objectiveId}' --json --panel receipts`);
   expect(prompt).not.toContain(`factory inspect '${created.objectiveId}' --json --panel debug`);
   expect(prompt).toContain("Do not absorb downstream work");
+  expect(prompt).toContain("## Planning Receipt");
+  expect(prompt).toContain("Acceptance Criteria:");
+  expect(prompt).toContain("Validation Plan:");
   expect(prompt).toContain("Do not write this file yourself.");
   expect(prompt).toContain("## Checks");
   expect(prompt).toContain("Run the relevant repo validation for this task");
@@ -244,7 +266,7 @@ test("factory policy: validation-owned task packets include the full repo checks
   expect(prompt).toContain("Run the relevant repo validation for this task");
 });
 
-test("factory policy: delivery task schema and prompt require scriptsRun", async () => {
+test("factory policy: delivery task schema and prompt require scriptsRun and completion", async () => {
   const { service, queue } = await createFactoryService();
 
   const created = await service.createObjective({
@@ -264,11 +286,13 @@ test("factory policy: delivery task schema and prompt require scriptsRun", async
   };
 
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
-  expect(prompt).toContain("Always include scriptsRun. Use [] when no command or small script materially informed the result");
+  expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
+  expect(prompt).toContain("Always include scriptsRun and completion.");
   expect(schema.required).toContain("scriptsRun");
+  expect(schema.required).toContain("completion");
 });
 
-test("factory policy: investigation task schema keeps scriptsRun inside report only", async () => {
+test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
   const { service, queue } = await createFactoryService();
 
   const created = await service.createObjective({
@@ -291,11 +315,56 @@ test("factory policy: investigation task schema keeps scriptsRun inside report o
   };
   const report = (schema.properties?.report ?? null) as { readonly properties?: Record<string, unknown> } | null;
 
+  expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
   expect(schema.properties?.scriptsRun).toBeUndefined();
   expect(schema.required).not.toContain("scriptsRun");
+  expect(schema.required).toContain("completion");
   expect(report?.properties?.scriptsRun).toBeTruthy();
 });
+
+test("factory policy: objectives record a planning receipt and expose it on detail", async () => {
+  const { service } = await createFactoryService();
+
+  const created = await service.createObjective({
+    title: "Planning receipt objective",
+    prompt: "Build a small feature plan and execute it.",
+    profileId: "software",
+  });
+
+  const detail = await service.getObjective(created.objectiveId);
+
+  expect(detail.planning?.goal).toBe("Build a small feature plan and execute it.");
+  expect(detail.planning?.taskGraph.map((task) => task.taskId)).toEqual(["task_01"]);
+  expect(detail.planning?.acceptanceCriteria.length).toBeGreaterThan(0);
+  expect(detail.planning?.validationPlan.length).toBeGreaterThan(0);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "planning.receipt")).toBe(true);
+});
+
+test("factory policy: promotion gate blocks when task completion reports remaining work", async () => {
+  const { service, queue } = await createFactoryService({
+    completionRemaining: ["Wire the final publish behavior before shipping."],
+  });
+
+  const created = await service.createObjective({
+    title: "Promotion gate objective",
+    prompt: "Implement a small delivery change and leave one remaining item.",
+    profileId: "software",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validationJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validationJob.payload as FactoryIntegrationJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+
+  expect(detail.status).toBe("blocked");
+  expect(detail.blockedReason).toContain("still reports remaining work");
+  expect(detail.tasks[0]?.completion?.remaining).toEqual(["Wire the final publish behavior before shipping."]);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote")).toBe(false);
+}, 120_000);
 
 test("factory policy: objectives stay single-task by default and still normalize dispatch policy", async () => {
   const { service } = await createFactoryService();

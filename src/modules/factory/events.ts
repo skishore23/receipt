@@ -9,9 +9,11 @@ import type {
   FactoryNormalizedObjectivePolicy,
   FactoryObjectiveMode,
   FactoryObjectiveProfileSnapshot,
+  FactoryPlanningReceiptRecord,
   FactoryObjectiveSeverity,
   FactoryRebracketRecord,
   FactoryTaskRecord,
+  FactoryTaskCompletionRecord,
   FactoryWorkerType,
 } from "./types";
 
@@ -36,6 +38,12 @@ export type FactoryEvent =
       readonly objectiveId: string;
       readonly message: string;
       readonly notedAt: number;
+    }
+  | {
+      readonly type: "planning.receipt";
+      readonly objectiveId: string;
+      readonly plan: FactoryPlanningReceiptRecord;
+      readonly plannedAt: number;
     }
   | {
       readonly type: "objective.slot.queued";
@@ -131,6 +139,7 @@ export type FactoryEvent =
       readonly headCommit: string;
       readonly summary: string;
       readonly handoff: string;
+      readonly completion: FactoryTaskCompletionRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
       readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
@@ -154,6 +163,7 @@ export type FactoryEvent =
       readonly candidateId: string;
       readonly summary: string;
       readonly handoff: string;
+      readonly completion: FactoryTaskCompletionRecord;
       readonly report: FactoryInvestigationReport;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
       readonly evidenceCommit?: string;

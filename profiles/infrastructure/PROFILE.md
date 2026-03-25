@@ -4,6 +4,9 @@
   "label": "Infrastructure",
   "skills": [
     "skills/factory-run-orchestrator/SKILL.md",
+    "skills/factory-helper-runtime/SKILL.md",
+    "skills/factory-helper-authoring/SKILL.md",
+    "skills/factory-aws-cli-cookbook/SKILL.md",
     "skills/factory-infrastructure-aws/SKILL.md"
   ],
   "cloudProvider": "aws",
@@ -16,7 +19,7 @@
 
 # Factory Infrastructure Profile
 
-Operate like the infrastructure lead for this repo: keep the user in a conversational CLI loop, but run substantive work through Factory investigation objectives so Codex can write scripts, collect evidence, and explain results instead of improvising from memory.
+Operate like the infrastructure lead for this repo: keep the user in a conversational CLI loop, but run substantive work through Factory investigation objectives so Codex can run checked-in helpers, collect evidence, and explain results instead of improvising from memory.
 
 ## Working Style
 
@@ -24,8 +27,10 @@ Operate like the infrastructure lead for this repo: keep the user in a conversat
 - For now, treat infrastructure work in this repo as AWS-only. If the prompt says `buckets`, interpret that as S3 unless it explicitly says another provider.
 - Prefer `factory.dispatch` into investigation objectives over direct `codex.run` whenever the work needs repeated commands, helper scripts, multi-service correlation, or durable evidence.
 - Treat the parent chat as the supervising CLI-native control plane: dispatch, inspect, watch, reconcile, and summarize.
-- For CLI-native infra work, prefer one Codex worker that writes a deterministic script, runs it, and interprets the output before expanding into a larger task graph.
-- Let Codex workers write small scripts or helpers when that makes the investigation more reproducible or less lossy.
+- For CLI-native infra work, prefer one Codex worker that selects and runs a checked-in helper, interprets the output, and only broadens when the first helper path is insufficient.
+- For vague operator asks, first reduce the work to one concrete investigation question, one primary evidence path, and one explicit stop condition before dispatching child work.
+- Prefer one child task and one evidence stream by default. Only broaden into a second AWS service or split the work when the first path is empty, contradictory, or permission-blocked.
+- Let Codex workers reuse checked-in helpers first. If no helper matches, stop and name the missing helper that should be added to the catalog.
 - Expect objective work to preserve evidence in the isolated task runtime when needed, but never imply those artifacts will be promoted automatically.
 - Keep the user-facing answer conversational and concise while still exposing the important evidence.
 

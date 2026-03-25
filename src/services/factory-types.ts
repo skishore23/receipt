@@ -9,6 +9,7 @@ import type {
   FactoryObjectiveMode,
   FactoryNormalizedObjectivePolicy,
   FactoryObjectivePhase,
+  FactoryPlanningReceiptRecord,
   FactoryObjectivePolicy,
   FactoryObjectiveProfileSnapshot,
   FactoryObjectiveSeverity,
@@ -16,6 +17,7 @@ import type {
   FactoryObjectiveStatus,
   FactoryState,
   FactoryTaskExecutionMode,
+  FactoryTaskCompletionRecord,
   FactoryTaskRecord,
   FactoryWorkerType,
 } from "../modules/factory";
@@ -94,6 +96,7 @@ export type FactoryContextSources = {
 export type FactoryTaskView = FactoryTaskRecord & {
   readonly candidate?: FactoryCandidateRecord;
   readonly investigationReport?: FactoryInvestigationTaskReport;
+  readonly completion?: FactoryTaskCompletionRecord;
   readonly jobStatus?: JobStatus | "missing";
   readonly job?: JobRecord;
   readonly workspaceExists: boolean;
@@ -173,6 +176,7 @@ export type FactoryObjectiveDetail = FactoryObjectiveCard & {
   readonly contextSources: FactoryContextSources;
   readonly budgetState: FactoryBudgetState;
   readonly createdAt: number;
+  readonly planning?: FactoryPlanningReceiptRecord;
   readonly investigation: {
     readonly reports: ReadonlyArray<FactoryInvestigationTaskReport>;
     readonly synthesized?: FactoryInvestigationSynthesisRecord;

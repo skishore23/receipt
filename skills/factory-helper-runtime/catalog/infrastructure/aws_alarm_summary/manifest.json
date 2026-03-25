@@ -1,0 +1,8 @@
+{
+  "id": "aws_alarm_summary",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["alarm", "alarms", "alert", "alerts", "cloudwatch", "metric", "metrics"],
+  "description": "Summarize CloudWatch alarms by region and state.",
+  "entrypoint": "run.py"
+}

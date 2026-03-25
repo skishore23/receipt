@@ -39,6 +39,8 @@ import { buildInvestigationReportPanelValue, defaultObjectivePanelForDetail } fr
 import { createFactoryCliRuntime } from "./runtime";
 import { terminalTheme } from "./theme";
 import type { FactoryObjectivePanel } from "./view-model";
+import { loadFactoryHelperCatalog, runFactoryHelper } from "../services/factory-helper-catalog";
+import type { FactoryCloudProvider } from "../services/factory-cloud-context";
 
 const parseBooleanFlag = (flags: Flags, key: string): boolean =>
   flags[key] === true || flags[key] === "true";
@@ -195,6 +197,13 @@ const parsePanel = (value: string | undefined): FactoryObjectivePanel => {
 
 const printJson = (value: unknown): void => {
   console.log(JSON.stringify(value, null, 2));
+};
+
+const parseHelperProvider = (value: string | undefined): FactoryCloudProvider => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "aws") return "aws";
+  if (normalized === "gcp" || normalized === "azure") return normalized;
+  throw new Error(`Unsupported helper provider '${value}'. Use aws, gcp, or azure.`);
 };
 
 const objectiveReplayStream = (objectiveIdOrStream: string): {
@@ -714,6 +723,54 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
     else console.log(renderCodexProbeText(report));
     if (!report.ok) process.exitCode = 1;
     return;
+  }
+
+  if (subcommand === "helper") {
+    const helperCommand = args[1] ?? "list";
+    const repoRoot = path.resolve(asString(flags, "repo-root") ?? await detectGitRoot(cwd) ?? cwd);
+    const domain = asString(flags, "domain") ?? "infrastructure";
+    if (helperCommand === "list") {
+      const provider = asString(flags, "provider");
+      const helpers = await loadFactoryHelperCatalog(repoRoot, domain);
+      const filtered = provider
+        ? helpers.filter((helper) => helper.provider === parseHelperProvider(provider))
+        : helpers;
+      if (json) {
+        printJson(filtered);
+      } else {
+        const lines = filtered.flatMap((helper) => [
+          `${helper.id} (${helper.provider})`,
+          `  ${helper.description}`,
+          `  tags: ${helper.tags.join(", ")}`,
+        ]);
+        console.log(lines.join("\n"));
+      }
+      return;
+    }
+    if (helperCommand === "run") {
+      const helperId = args[2] ?? asString(flags, "id");
+      if (!helperId) throw new Error("factory helper run requires a helper id");
+      const provider = parseHelperProvider(asString(flags, "provider"));
+      const helperArgs = [
+        ...args.slice(3),
+        ...asStrings(flags, "helper-arg"),
+      ];
+      const result = await runFactoryHelper({
+        profileRoot: repoRoot,
+        helperId,
+        provider,
+        domain,
+        helperArgs,
+      });
+      if (json) {
+        printJson(result);
+      } else {
+        console.log(result.summary);
+      }
+      if (result.status === "error") process.exitCode = 1;
+      return;
+    }
+    throw new Error(`Unsupported factory helper command '${helperCommand}'. Use 'list' or 'run'.`);
   }
 
   const config = await ensureFactoryConfig(cwd, flags);

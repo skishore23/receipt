@@ -16,9 +16,9 @@ Keep infrastructure investigations AWS-only for now. If the prompt is ambiguous 
 1. Read the task packet and the mounted live cloud context.
 2. Treat the mounted AWS account/profile as the default execution target.
 3. Read the checked-in worker context skill before using receipt or memory commands.
-4. For region-scoped AWS inventory, use the mounted `cloudExecutionContext.aws.ec2RegionScope` when present. If you need fresh evidence, run `scripts/aws-account-scope.sh` first and treat its JSON as the account/region baseline.
-5. For simple CLI investigations, write a small deterministic shell script in `.receipt/factory/` before you start chaining one-off AWS commands.
-6. Run the script from the current worktree and summarize what its output means.
+4. For region-scoped AWS inventory, use the mounted `cloudExecutionContext.aws.ec2RegionScope` when present.
+5. Prefer the checked-in helper catalog and AWS CLI cookbook before inventing a new command chain.
+6. Run the best matching helper and summarize what its output means.
 
 ## AWS Defaults
 
@@ -32,8 +32,8 @@ Keep infrastructure investigations AWS-only for now. If the prompt is ambiguous 
 ## Investigation Rules
 
 - Prefer AWS CLI evidence over speculation.
-- Default to a small deterministic shell script for provider-sensitive or repeated AWS CLI work. The script should fail fast, emit machine-readable output when practical, and make the exact evidence path reproducible.
-- Capture `aws sts get-caller-identity` in the script before resource queries so the account scope is explicit in the evidence.
+- Default to the checked-in helper catalog for provider-sensitive or repeated AWS CLI work. Helpers should fail fast, emit machine-readable output, and make the exact evidence path reproducible.
+- Use the `aws_account_scope` helper when account scope should be explicit in the evidence.
 - For fail-fast behavior, prefer `AWS_PAGER=''`, `AWS_MAX_ATTEMPTS=1`, `AWS_RETRY_MODE=standard`, and `AWS_EC2_METADATA_DISABLED=true`.
 - Distinguish account-level AWS access failures from per-service IAM denials. A working `sts get-caller-identity` only proves the mounted identity is usable; it does not prove every `Describe*` or `List*` API is allowed.
 - For regional AWS services such as EC2, do not blindly iterate raw `aws ec2 describe-regions --all-regions` output.
@@ -41,8 +41,8 @@ Keep infrastructure investigations AWS-only for now. If the prompt is ambiguous 
 - If an EC2 call fails in a `not-opted-in` region, treat that as region scope for the current account, not as proof that the overall AWS credentials are globally invalid.
 - For broad multi-service inventory or cost-validation tasks, capture exact `AccessDenied` errors per service and continue collecting evidence from the remaining allowed services when the denied API is not the core task scope.
 - If access gaps still leave you with usable evidence, return a final investigation report that says the inventory is incomplete due to permissions; reserve a hard blocked outcome for zero-evidence failures that prevent a meaningful report.
-- Use `scripts/aws-account-scope.sh` when you need a reusable JSON snapshot of the current AWS account, profile, and EC2 region scope before writing the task-specific script.
-- If the script succeeds and answers the task, stop and return the final JSON result immediately. Do not spend extra turns reformatting already-valid AWS CLI JSON or running optional follow-up checks.
-- Record the script path and invocation in `report.scriptsRun`, then explain the output in plain language.
+- Use the checked-in helper runtime when you need a reusable JSON snapshot of the current AWS account, profile, EC2 region scope, resource inventory, alarm summary, or log sample.
+- If a helper succeeds and answers the task, stop and return the final JSON result immediately. Do not spend extra turns reformatting already-valid AWS CLI JSON or running optional follow-up checks.
+- Record the helper runner command in `report.scriptsRun`, then explain the output in plain language.
 - Summarize findings in plain language. Do not return raw command output without interpretation.
 - Do not run the broad repo validation suite for a no-code AWS investigation unless the task explicitly owns validation or you changed repo files.

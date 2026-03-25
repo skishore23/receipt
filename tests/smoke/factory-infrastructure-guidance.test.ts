@@ -45,6 +45,15 @@ test("factory infrastructure guidance: execution guidance allows partial progres
   expect(guidance).toContain(
     "For broad multi-service AWS inventory, capture exact per-service `AccessDenied` results and continue with the remaining allowed services when the denied API is not central to the task. Only stop immediately on account-scope/auth failures, region-scope discovery failures, or when the denied service is the core requested evidence.",
   );
+  expect(guidance).toContain(
+    "For vague prompts such as \"show me something interesting\", decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command.",
+  );
+  expect(guidance).toContain(
+    "Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue. Do not keep iterating once you already have a valid finding.",
+  );
+  expect(guidance).toContain(
+    "Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.",
+  );
 });
 
 test("factory infrastructure guidance: broad multi-service prompts do not keep contradictory fail-fast-on-any-denial wording", () => {

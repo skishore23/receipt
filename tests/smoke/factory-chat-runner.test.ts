@@ -571,8 +571,8 @@ test("factory chat runner: status.read tools expose codex logs, objective status
         tasks: [],
         contextSources: {
           sharedArtifactRefs: [
-            { kind: "artifact", ref: "/tmp/infra-knowledge/entry.json", label: "reusable infrastructure knowledge" },
-            { kind: "artifact", ref: "/tmp/infra-knowledge/scripts/inventory.sh", label: "reusable infrastructure script" },
+            { kind: "artifact", ref: "/tmp/helpers/aws_resource_inventory/manifest.json", label: "checked-in helper manifest" },
+            { kind: "artifact", ref: "/tmp/helpers/aws_resource_inventory/run.py", label: "checked-in helper entrypoint" },
           ],
         },
       }),
@@ -586,8 +586,8 @@ test("factory chat runner: status.read tools expose codex logs, objective status
   const observations = chain.filter((receipt) => receipt.body.type === "tool.observed").map((receipt) => receipt.body);
   expect(observations.find((event) => event.tool === "codex.logs" && "output" in event)?.output ?? "").toContain('"artifacts"');
   expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('"latestDecision"');
-  expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('"reusableInfrastructureScripts"');
-  expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('/tmp/infra-knowledge/scripts/inventory.sh');
+  expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('"availableHelperEntrypoints"');
+  expect(observations.find((event) => event.tool === "factory.status" && "output" in event)?.output ?? "").toContain('/tmp/helpers/aws_resource_inventory/run.py');
   expect(observations.find((event) => event.tool === "factory.receipts" && "output" in event)?.output ?? "").toContain('"receipts"');
   expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain('Streaming live output.');
 });
@@ -3015,6 +3015,74 @@ test("factory chat runner: direct codex probes run read-only and materialize a p
   expect(String(captured[0]?.prompt ?? "")).toContain("READ ONLY");
   await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_packet", "manifest.json"), "utf-8")).resolves.toContain("factory.codex.probe");
   await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_packet", "result.json"), "utf-8")).resolves.toContain("\"readOnly\": true");
+});
+
+test("factory chat runner: direct codex probes ignore pre-existing repo dirtiness when the probe stays read-only", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-direct-dirty");
+  const repoRoot = await createGitRepo("receipt-factory-chat-direct-dirty-repo");
+
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# locally dirty\n", "utf-8");
+
+  const result = await runFactoryCodexJob({
+    dataDir,
+    repoRoot,
+    jobId: "job_direct_dirty",
+    prompt: "Inspect the repo without changing it.",
+    payload: {
+      readOnly: true,
+      mode: "read_only_probe",
+      profileId: "software",
+      stream: "agents/factory/demo",
+    },
+    factoryService: {
+      prepareDirectCodexProbePacket: async ({ jobId, prompt, readOnly }) => {
+        const root = path.join(dataDir, "factory-chat", "codex", jobId);
+        const packet = {
+          artifactPaths: {
+            root,
+            promptPath: path.join(root, "prompt.md"),
+            lastMessagePath: path.join(root, "last-message.txt"),
+            stdoutPath: path.join(root, "stdout.log"),
+            stderrPath: path.join(root, "stderr.log"),
+            manifestPath: path.join(root, "manifest.json"),
+            contextPackPath: path.join(root, "context-pack.json"),
+            resultPath: path.join(root, "result.json"),
+            memoryScriptPath: path.join(root, "memory.cjs"),
+            memoryConfigPath: path.join(root, "memory-scopes.json"),
+          },
+          renderedPrompt: `READ ONLY\n${prompt}`,
+          readOnly: readOnly !== false,
+          env: {},
+        };
+        await fs.mkdir(packet.artifactPaths.root, { recursive: true });
+        await fs.writeFile(packet.artifactPaths.manifestPath, JSON.stringify({ kind: "factory.codex.probe" }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.contextPackPath, JSON.stringify({ title: "Direct Codex Probe", task: { taskId: "direct", title: "Direct probe", status: "running" } }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryConfigPath, JSON.stringify({ scopes: [] }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryScriptPath, "#!/usr/bin/env bun\n", "utf-8");
+        return packet;
+      },
+    } as never,
+    executor: {
+      run: async (execInput) => {
+        await fs.writeFile(execInput.lastMessagePath, "Read-only inspection complete.", "utf-8");
+        await fs.writeFile(execInput.stdoutPath, "Scanned files\n", "utf-8");
+        await fs.writeFile(execInput.stderrPath, "", "utf-8");
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "Scanned files\n",
+          stderr: "",
+          lastMessage: "Read-only inspection complete.",
+        };
+      },
+    },
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.readOnly).toBe(true);
+  expect(result.changedFiles).toEqual([]);
+  expect(result.repoChangedFiles).toEqual(["README.md"]);
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_dirty", "result.json"), "utf-8")).resolves.toContain("\"repoChangedFiles\": [");
 });
 
 test("factory chat runner: direct codex probes fail explicitly if they mutate tracked files", async () => {

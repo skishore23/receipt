@@ -1,7 +1,7 @@
 import type { FactoryObjectiveMode } from "../modules/factory";
 import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
 
-const AWS_ACCOUNT_SCOPE_HELPER = "skills/factory-infrastructure-aws/scripts/aws-account-scope.sh";
+const HELPER_RUNNER = "skills/factory-helper-runtime/runner.py";
 const INVENTORY_PROMPT_RE = /\b(how many|count|list|show|inventory|enumerate|what are|which)\b/i;
 const COST_PROMPT_RE = /\b(cost|costs|pricing|price|spend)\b/i;
 const AWS_MULTI_SERVICE_RE = /\b(ec2|ebs|snapshot|snapshots|s3|rds|nat|load balancer|load balancers|elb|cloudwatch|eks|elastic ip|elastic ips)\b/gi;
@@ -46,21 +46,25 @@ export const renderInfrastructureTaskExecutionGuidance = (input: {
   if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return [];
   const provider = input.cloudExecutionContext.preferredProvider ?? "aws";
   return [
-    `## Script-First Execution`,
-    `For infrastructure CLI investigations, prefer a deterministic shell script over ad hoc one-off commands.`,
-    `Write the script under .receipt/factory/ when practical, make it emit machine-readable output, and fail fast on CLI, auth, or network errors.`,
-    `Run the script from the worktree before interpreting the result, and base the report on the script output rather than memory or speculation.`,
-    `After reading AGENTS.md, the task packet, the memory context/objective summaries, and the mounted AWS skill, stop bootstrap and immediately write and run the script. Do not keep exploring unrelated repo files for a simple AWS inventory task.`,
-    `If the script succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result. Do not spend extra turns reformatting already-valid AWS CLI JSON, re-checking git status, or doing optional follow-up probes.`,
-    `Treat successful AWS CLI JSON output as sufficient machine-readable evidence unless the task explicitly asks for a different format.`,
-    `Record the script path and invocation in report.scriptsRun so the operator can rerun the exact evidence path.`,
+    `## Helper-First Execution`,
+    `For infrastructure CLI investigations, prefer a checked-in helper over ad hoc one-off commands or a task-local script.`,
+    `For vague prompts such as "show me something interesting", decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command.`,
+    `After reading AGENTS.md, the task packet, the memory context/objective summaries, and the mounted helper skills, stop bootstrap and run the best matching checked-in helper. Do not keep exploring unrelated repo files for a simple AWS inventory task.`,
+    `Run helpers through \`python3 ${HELPER_RUNNER} run --provider aws --json <helper-id> -- ...\` and base the report on the helper output rather than memory or speculation.`,
+    `Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.`,
+    `If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result. Do not spend extra turns reformatting already-valid AWS CLI JSON, re-checking git status, or doing optional follow-up probes.`,
+    `Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue. Do not keep iterating once you already have a valid finding.`,
+    `Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.`,
+    `Treat successful helper JSON output as sufficient machine-readable evidence unless the task explicitly asks for a different format.`,
+    `Record the helper runner command in report.scriptsRun so the operator can rerun the exact evidence path.`,
+    `If no checked-in helper matches the ask, stop and return a structured no-matching-helper outcome instead of inventing a new .receipt/factory script.`,
     ...(provider === "aws"
       ? [
-          `For AWS tasks, capture \`aws sts get-caller-identity\` in the script first so account scope is explicit in the evidence.`,
+          `For AWS tasks, prefer the checked-in \`aws_account_scope\` and \`aws_region_scope\` helpers when account or region scope is part of the evidence path.`,
           `Prefer fail-fast AWS CLI settings like \`AWS_PAGER=''\`, \`AWS_MAX_ATTEMPTS=1\`, \`AWS_RETRY_MODE=standard\`, and \`AWS_EC2_METADATA_DISABLED=true\`.`,
           `Treat a successful \`sts get-caller-identity\` as proof of mounted account scope only, not proof that every downstream AWS service API is authorized.`,
           `For region-scoped AWS inventory, do not blindly loop raw \`aws ec2 describe-regions --all-regions\` output.`,
-          `Use the mounted AWS region scope from the context pack when present, or run \`bash ${AWS_ACCOUNT_SCOPE_HELPER}\` first to discover the current account's queryable EC2 regions.`,
+          `Use the mounted AWS region scope from the context pack when present, or run the checked-in \`aws_region_scope\` helper first to discover the current account's queryable EC2 regions.`,
           `Treat \`not-opted-in\` regions as skipped scope, not as a global credential failure, and report skipped regions separately when they matter to the investigation.`,
           `For broad multi-service AWS inventory, capture exact per-service \`AccessDenied\` results and continue with the remaining allowed services when the denied API is not central to the task. Only stop immediately on account-scope/auth failures, region-scope discovery failures, or when the denied service is the core requested evidence.`,
         ]

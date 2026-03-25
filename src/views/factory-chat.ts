@@ -759,9 +759,27 @@ const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
     minHeightClass: "min-h-[320px]",
   });
 
+const isTerminalObjectiveStatusValue = (status?: string): boolean =>
+  status === "completed" || status === "failed" || status === "canceled";
+
+const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArray<FactoryChatItem> => {
+  if (model.items.length > 0) return model.items;
+  const thread = model.selectedThread;
+  const summary = thread?.summary?.trim();
+  if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !summary) return model.items;
+  const detail = thread.nextAction?.trim();
+  return [{
+    key: `objective-summary-${thread.objectiveId}-${thread.status}`,
+    kind: "assistant",
+    body: detail && detail !== summary ? `${summary}\n\nNext: ${detail}` : summary,
+    meta: displayLabel(thread.status) || thread.status,
+  }];
+};
+
 export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   const workbench = renderCenterWorkbench(model);
-  const grouped = groupChatItems(model.items);
+  const transcriptItems = synthesizedTranscriptItems(model);
+  const grouped = groupChatItems(transcriptItems);
   const body = grouped.length > 0
     ? grouped.map((group) =>
       group.kind === "single"
@@ -774,7 +792,7 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
         <div class="${sectionLabelClass}">Transcript</div>
-        <div class="text-[11px] text-muted-foreground">${esc(`${model.items.length}`)}</div>
+        <div class="text-[11px] text-muted-foreground">${esc(`${transcriptItems.length}`)}</div>
       </div>
       ${body}
     </section>

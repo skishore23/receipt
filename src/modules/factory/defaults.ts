@@ -98,6 +98,7 @@ export const initialFactoryState: FactoryState = {
   workflow: createFactoryWorkflowState("", 0),
   integration: emptyIntegration(0),
   scheduler: {},
+  planning: undefined,
   investigation: {
     reports: {},
     reportOrder: [],

@@ -74,6 +74,12 @@ export type FactoryExecutionScriptRun = {
 
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
 
+export type FactoryTaskCompletionRecord = {
+  readonly changed: ReadonlyArray<string>;
+  readonly proof: ReadonlyArray<string>;
+  readonly remaining: ReadonlyArray<string>;
+};
+
 export type FactoryInvestigationReport = {
   readonly conclusion: string;
   readonly evidence: ReadonlyArray<FactoryInvestigationEvidence>;
@@ -87,6 +93,7 @@ export type FactoryInvestigationTaskReport = {
   readonly candidateId: string;
   readonly summary: string;
   readonly handoff: string;
+  readonly completion: FactoryTaskCompletionRecord;
   readonly report: FactoryInvestigationReport;
   readonly artifactRefs: Readonly<Record<string, GraphRef>>;
   readonly evidenceCommit?: string;
@@ -101,6 +108,24 @@ export type FactoryInvestigationSynthesisRecord = {
 };
 
 export type FactoryTaskExecutionMode = "worktree" | "isolated";
+
+export type FactoryPlanningTaskRecord = {
+  readonly taskId: string;
+  readonly title: string;
+  readonly dependsOn: ReadonlyArray<string>;
+  readonly workerType: FactoryWorkerType;
+  readonly executionMode: FactoryTaskExecutionMode;
+  readonly status: FactoryTaskStatus;
+};
+
+export type FactoryPlanningReceiptRecord = {
+  readonly goal: string;
+  readonly constraints: ReadonlyArray<string>;
+  readonly taskGraph: ReadonlyArray<FactoryPlanningTaskRecord>;
+  readonly acceptanceCriteria: ReadonlyArray<string>;
+  readonly validationPlan: ReadonlyArray<string>;
+  readonly plannedAt: number;
+};
 
 export type FactoryObjectiveProfilePolicy = {
   readonly allowedWorkerTypes: ReadonlyArray<FactoryWorkerType>;
@@ -245,6 +270,7 @@ export type FactoryCandidateRecord = {
   readonly headCommit?: string;
   readonly summary?: string;
   readonly handoff?: string;
+  readonly completion?: FactoryTaskCompletionRecord;
   readonly checkResults: ReadonlyArray<FactoryCheckResult>;
   readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly artifactRefs: Readonly<Record<string, GraphRef>>;
@@ -318,6 +344,7 @@ export type FactoryState = {
   readonly workflow: FactoryWorkflowState;
   readonly integration: FactoryIntegrationRecord;
   readonly scheduler: FactorySchedulerRecord;
+  readonly planning?: FactoryPlanningReceiptRecord;
   readonly investigation: {
     readonly reports: Readonly<Record<string, FactoryInvestigationTaskReport>>;
     readonly reportOrder: ReadonlyArray<string>;

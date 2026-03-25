@@ -1,0 +1,8 @@
+{
+  "id": "aws_account_scope",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["account", "identity", "sts", "profile", "scope", "whoami"],
+  "description": "Capture the active AWS caller identity, profile, and region defaults.",
+  "entrypoint": "run.py"
+}

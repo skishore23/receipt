@@ -117,7 +117,7 @@ test("factory investigation: no-diff reports complete without integration and sy
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
       const schema = JSON.parse(await fs.readFile(input.outputSchemaPath!, "utf-8")) as Record<string, unknown>;
-      expect(schema.required).toEqual(["outcome", "summary", "artifacts", "nextAction", "report"]);
+      expect(schema.required).toEqual(["outcome", "summary", "artifacts", "completion", "nextAction", "report"]);
       const report = (schema.properties as Record<string, Record<string, unknown>>).report;
       expect(report.type).toEqual(["object", "null"]);
       expect(report.required).toEqual(["conclusion", "evidence", "scriptsRun", "disagreements", "nextSteps"]);
@@ -129,6 +129,11 @@ test("factory investigation: no-diff reports complete without integration and sy
         outcome: "approved",
         summary: "Collected the current AWS access posture.",
         artifacts: [{ label: "AWS CLI inspection", path: "/tmp/aws-access-posture.json", summary: "Read-only identity details were collected successfully." }],
+        completion: {
+          changed: ["Captured a structured AWS access posture report."],
+          proof: ["aws sts get-caller-identity confirmed the mounted principal."],
+          remaining: [],
+        },
         nextAction: "Investigation is ready for synthesis.",
         report: {
           conclusion: "The configured AWS identity has read access but no mutation path was exercised.",
@@ -175,7 +180,13 @@ test("factory investigation: blocked results with a structured report are treate
       const structured = {
         outcome: "blocked",
         summary: "Inventory is incomplete because some AWS read APIs were denied.",
-        handoff: "Summarize the confirmed findings and the access gaps for the operator.",
+        artifacts: [],
+        completion: {
+          changed: ["Collected partial AWS inventory findings."],
+          proof: ["The inventory script captured the denied APIs and the successful EC2 reads."],
+          remaining: ["Summarize the confirmed findings and the access gaps for the operator."],
+        },
+        nextAction: "Summarize the confirmed findings and the access gaps for the operator.",
         report: {
           conclusion: "Partial AWS evidence was collected, but ELB and CloudWatch access gaps left the inventory incomplete.",
           evidence: [{ title: "EC2 inventory", summary: "Instance and EBS counts were collected successfully.", detail: null }],
@@ -424,6 +435,11 @@ test("factory investigation: multiple reported tasks synthesize directly without
       candidateId: "task_01_candidate_01",
       summary: "Signal A implicates service health.",
       handoff: "First report complete.",
+      completion: {
+        changed: ["Captured the first investigation report."],
+        proof: ["Health checks degraded before the deployment change."],
+        remaining: [],
+      },
       report: {
         conclusion: "Service health evidence points to an application-side fault.",
         evidence: [{ title: "Health checks", summary: "Service health degraded before the deployment change.", detail: null }],
@@ -441,6 +457,11 @@ test("factory investigation: multiple reported tasks synthesize directly without
       candidateId: "task_02_candidate_01",
       summary: "Signal B implicates deployment drift.",
       handoff: "Second report complete.",
+      completion: {
+        changed: ["Captured the second investigation report."],
+        proof: ["The deployment diff changed core infrastructure settings."],
+        remaining: ["Validate the application fix path before any infra rollback."],
+      },
       report: {
         conclusion: "Deployment evidence points to an infrastructure-side drift.",
         evidence: [{ title: "Deployment diff", summary: "The latest rollout changed core infrastructure settings.", detail: null }],
@@ -590,7 +611,7 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   expect(packet.renderedPrompt).not.toContain("gcloud is available");
 }, 120_000);
 
-test("factory investigation: infrastructure task prompts require deterministic scripts for AWS CLI work", async () => {
+test("factory investigation: infrastructure task prompts require helper-first AWS CLI guidance", async () => {
   const mixedContext: FactoryCloudExecutionContext = {
     summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/csagent-api-service in account 445567089271 with region us-west-2.",
     availableProviders: ["aws"],
@@ -657,35 +678,55 @@ test("factory investigation: infrastructure task prompts require deterministic s
   expect(capturedSandboxMode).toBe("danger-full-access");
   expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
   expect(capturedReasoningEffort).toBe("high");
-  expect(prompt).toContain("## Script-First Execution");
+  expect(prompt).toContain("## Helper-First Execution");
   expect(prompt).toContain("Profile Cloud Provider: aws");
-  expect(prompt).toContain("prefer a deterministic shell script over ad hoc one-off commands");
-  expect(prompt).toContain("stop bootstrap and immediately write and run the script");
-  expect(prompt).toContain("If the script succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
-  expect(prompt).toContain("Treat successful AWS CLI JSON output as sufficient machine-readable evidence");
-  expect(prompt).toContain("Record the script path and invocation in report.scriptsRun");
-  expect(prompt).toContain("capture `aws sts get-caller-identity` in the script first");
+  expect(prompt).toContain("prefer a checked-in helper over ad hoc one-off commands or a task-local script");
+  expect(prompt).toContain("If the task prompt is broad, first narrow it to one concrete investigation question, one primary evidence path, and one stop condition");
+  expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command");
+  expect(prompt).toContain("stop bootstrap and run the best matching checked-in helper");
+  expect(prompt).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json <helper-id> -- ...");
+  expect(prompt).toContain("Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.");
+  expect(prompt).toContain("If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
+  expect(prompt).toContain("Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue.");
+  expect(prompt).toContain("Treat successful helper JSON output as sufficient machine-readable evidence");
+  expect(prompt).toContain("Record the helper runner command in report.scriptsRun");
+  expect(prompt).toContain("prefer the checked-in `aws_account_scope` and `aws_region_scope` helpers");
+  expect(prompt).toContain("Make a short internal plan before the first tool");
+  expect(prompt).toContain("Use Codex subagents only for bounded sidecar work");
+  expect(prompt).toContain("Keep this task session as the single owner of the final JSON result.");
+  expect(prompt).toContain("Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.");
+  expect(prompt).toContain("Do not fan out broad parallel exploration");
   expect(prompt).toContain("Local execution context already indicates aws. Use that provider");
   expect(prompt).toContain("Infrastructure profile is AWS-only for now");
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
   expect(prompt).toContain("do not blindly loop raw `aws ec2 describe-regions --all-regions` output");
-  expect(prompt).toContain("bash skills/factory-infrastructure-aws/scripts/aws-account-scope.sh");
+  expect(prompt).toContain("run the checked-in `aws_region_scope` helper first");
   expect(prompt).toContain("Treat `not-opted-in` regions as skipped scope, not as a global credential failure");
   expect(payload.executionMode).toBe("isolated");
   expect(payload.workspacePath).toContain("/factory/runtimes/");
   expect(prompt).toContain("This task runs in an isolated runtime directory, not a git worktree.");
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
+  expect(prompt).toContain("Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON.");
   expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");
   expect(prompt).toContain("Helper evidence files written under .receipt/ do not count as repo changes");
+  expect(prompt).toContain("skills/factory-helper-runtime/SKILL.md");
+  expect(prompt).toContain("skills/factory-helper-authoring/SKILL.md");
+  expect(prompt).toContain("skills/factory-aws-cli-cookbook/SKILL.md");
   expect(prompt).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
+  expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-helper-runtime/SKILL.md");
+  expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-helper-authoring/SKILL.md");
+  expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-aws-cli-cookbook/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).not.toContain("skills/factory-run-orchestrator/SKILL.md");
   await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-receipt-worker", "SKILL.md"))).resolves.toBeNull();
+  await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-helper-runtime", "SKILL.md"))).resolves.toBeNull();
+  await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-helper-authoring", "SKILL.md"))).resolves.toBeNull();
+  await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-aws-cli-cookbook", "SKILL.md"))).resolves.toBeNull();
   await expect(fs.access(path.join(payload.workspacePath, "skills", "factory-infrastructure-aws", "SKILL.md"))).resolves.toBeNull();
 }, 120_000);
 
-test("factory investigation: infrastructure runs promote reusable knowledge and remount it on matching follow-ups", async () => {
+test("factory investigation: infrastructure task packets mount selected checked-in helpers for matching AWS prompts", async () => {
   const awsContext: FactoryCloudExecutionContext = {
     summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/csagent-api-service in account 445567089271 with region us-west-2.",
     availableProviders: ["aws"],
@@ -705,51 +746,15 @@ test("factory investigation: infrastructure runs promote reusable knowledge and 
       },
     },
   };
-  const prompts: string[] = [];
-  let runCount = 0;
   const { service, queue } = await createFactoryService({
-    codexRun: async (input) => {
-      prompts.push(input.prompt);
-      runCount += 1;
-      if (runCount === 1) {
-        const scriptRelPath = ".receipt/factory/reusable_bucket_inventory.sh";
-        const outputRelPath = ".receipt/factory/reusable_bucket_inventory.json";
-        await fs.mkdir(path.join(input.workspacePath, ".receipt", "factory"), { recursive: true });
-        await fs.writeFile(
-          path.join(input.workspacePath, scriptRelPath),
-          "#!/usr/bin/env bash\nset -euo pipefail\naws s3api list-buckets --output json\n",
-          "utf-8",
-        );
-        await fs.writeFile(
-          path.join(input.workspacePath, outputRelPath),
-          JSON.stringify({ buckets: ["alpha-bucket", "beta-bucket"] }, null, 2),
-          "utf-8",
-        );
-        const raw = JSON.stringify({
-          outcome: "approved",
-          summary: "Collected the current S3 bucket inventory.",
-          artifacts: [
-            { label: "Bucket inventory script", path: scriptRelPath, summary: "Reusable S3 inventory probe." },
-            { label: "Bucket inventory JSON", path: outputRelPath, summary: "Structured bucket list for the active AWS account." },
-          ],
-          nextAction: null,
-          report: {
-            conclusion: "S3 bucket inventory completed for the active AWS account.",
-            evidence: [{ title: "Bucket inventory JSON", summary: "Structured bucket list for the active AWS account.", detail: outputRelPath }],
-            scriptsRun: [{ command: `bash ${scriptRelPath}`, summary: "Listed S3 buckets.", status: "ok" }],
-            disagreements: [],
-            nextSteps: [],
-          },
-        });
-        return { stdout: raw, stderr: "", lastMessage: raw };
-      }
+    codexRun: async () => {
       const raw = JSON.stringify({
         outcome: "approved",
-        summary: "Reused prior bucket inventory knowledge.",
+        summary: "Checked-in helpers were available in the task packet.",
         artifacts: [],
         nextAction: null,
         report: {
-          conclusion: "The prior reusable bucket inventory knowledge was available in the task packet.",
+          conclusion: "The task packet mounted checked-in helper metadata for the AWS bucket prompt.",
           evidence: [],
           scriptsRun: [],
           disagreements: [],
@@ -761,7 +766,7 @@ test("factory investigation: infrastructure runs promote reusable knowledge and 
     cloudExecutionContextProvider: async () => awsContext,
   });
 
-  const first = await service.createObjective({
+  const objective = await service.createObjective({
     title: "List buckets",
     prompt: "show me the aws list of buckets",
     objectiveMode: "investigation",
@@ -769,64 +774,36 @@ test("factory investigation: infrastructure runs promote reusable knowledge and 
     checks: ["true"],
     profileId: "infrastructure",
   });
-  await runObjectiveStartup(service, first.objectiveId);
-  const [firstJob] = await objectiveTaskJobs(queue, first.objectiveId);
-  expect(firstJob).toBeTruthy();
-  await service.runTask(firstJob!.payload as FactoryTaskJobPayload);
-
-  const knowledgeRepos = await fs.readdir(path.join(service.dataDir, "factory", "knowledge"));
-  expect(knowledgeRepos.length).toBe(1);
-  const infraRoot = path.join(service.dataDir, "factory", "knowledge", knowledgeRepos[0]!, "infrastructure");
-  const index = JSON.parse(await fs.readFile(path.join(infraRoot, "index.json"), "utf-8")) as ReadonlyArray<{
-    readonly knowledgePath: string;
-    readonly keywords?: ReadonlyArray<string>;
-    readonly scriptPaths?: ReadonlyArray<string>;
-  }>;
-  expect(index).toHaveLength(1);
-  const knowledgePath = index[0]!.knowledgePath;
-  const storedScriptPath = index[0]!.scriptPaths?.[0];
-  expect(index[0]!.keywords).not.toContain("aws");
-  expect(knowledgePath).toContain("/entries/");
-  await expect(fs.access(knowledgePath)).resolves.toBeNull();
-  expect(storedScriptPath).toContain("/scripts/");
-  await expect(fs.access(storedScriptPath!)).resolves.toBeNull();
-
-  const second = await service.createObjective({
-    title: "List buckets again",
-    prompt: "show me the list of buckets",
-    objectiveMode: "investigation",
-    severity: 2,
-    checks: ["true"],
-    profileId: "infrastructure",
-  });
-  await runObjectiveStartup(service, second.objectiveId);
-  const [secondJob] = await objectiveTaskJobs(queue, second.objectiveId);
-  expect(secondJob).toBeTruthy();
-  const secondPayload = secondJob!.payload as FactoryTaskJobPayload;
+  await runObjectiveStartup(service, objective.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, objective.objectiveId);
+  expect(job).toBeTruthy();
+  const secondPayload = job!.payload as FactoryTaskJobPayload;
   const contextPack = JSON.parse(await fs.readFile(secondPayload.contextPackPath, "utf-8")) as {
-    readonly infrastructureKnowledge?: {
-      readonly roleLabel?: string;
-      readonly selectedEntries?: ReadonlyArray<{
-        readonly knowledgePath?: string;
-        readonly scriptPaths?: ReadonlyArray<string>;
+    readonly helperCatalog?: {
+      readonly runnerPath?: string;
+      readonly selectedHelpers?: ReadonlyArray<{
+        readonly id?: string;
+        readonly manifestPath?: string;
+        readonly entrypointPath?: string;
       }>;
     };
     readonly contextSources?: {
       readonly sharedArtifactRefs?: ReadonlyArray<{
         readonly ref?: string;
+        readonly label?: string;
       }>;
     };
   };
-  expect(contextPack.infrastructureKnowledge?.roleLabel).toBe("Infrastructure engineer");
-  expect(contextPack.infrastructureKnowledge?.selectedEntries?.[0]?.knowledgePath).toBe(knowledgePath);
-  expect(contextPack.infrastructureKnowledge?.selectedEntries?.[0]?.scriptPaths?.[0]).toBe(storedScriptPath);
-  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.ref === knowledgePath)).toBe(true);
-  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.ref === storedScriptPath)).toBe(true);
+  expect(contextPack.helperCatalog?.runnerPath).toContain("/skills/factory-helper-runtime/runner.py");
+  expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) => helper.id === "aws_resource_inventory")).toBe(true);
+  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper manifest")).toBe(true);
+  expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper entrypoint")).toBe(true);
 
   await service.runTask(secondPayload);
-  expect(prompts[1]).toContain("Act as the infrastructure engineer for this task.");
-  expect(prompts[1]).toContain(knowledgePath);
-  expect(prompts[1]).toContain(storedScriptPath!);
+  const prompt = await fs.readFile(secondPayload.promptPath, "utf-8");
+  expect(prompt).toContain("Use the checked-in helper runner");
+  expect(prompt).toContain("Selected helpers for this scope:");
+  expect(prompt).toContain("aws_resource_inventory");
 }, 120_000);
 
 test("factory investigation: infrastructure objectives can start from a dirty source repo without an explicit baseHash", async () => {

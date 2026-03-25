@@ -1,6 +1,6 @@
 import { fold } from "@receipt/core/chain";
 
-import { initial as initialAgent, reduce as reduceAgent } from "../../modules/agent";
+import { initial as initialAgent, reduce as reduceAgent, type AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
 
@@ -398,7 +398,7 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
   return undefined;
 };
 
-const formatRunMeta = (runId: string, state: ReturnType<typeof fold<AgentRunChain[number], ReturnType<typeof initialAgent>>>, firstTs?: number): string => {
+const formatRunMeta = (runId: string, state: AgentState, firstTs?: number): string => {
   const parts = [`Run ${runId}`];
   if (typeof firstTs === "number") parts.push(new Date(firstTs).toLocaleString());
   parts.push(state.status);
