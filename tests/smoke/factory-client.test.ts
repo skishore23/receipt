@@ -100,6 +100,7 @@ const createHarness = () => {
 
   const popup = new MockElement("DIV");
   popup.id = "factory-composer-completions";
+  popup.classList.add("hidden");
 
   const status = new MockElement("DIV");
   status.id = "factory-composer-status";
@@ -193,4 +194,17 @@ test("factory client: autocomplete opens, filters, navigates, inserts, and submi
   expect(fetchCalls[0]?.url).toContain("/factory/compose?profile=generalist");
   expect(status.textContent).toBe("");
   expect(submit.disabled).toBe(true);
+});
+
+test("factory client: enter submits the composer", async () => {
+  const { textarea, form } = createHarness();
+  let requestSubmitCalls = 0;
+  form.requestSubmit = () => {
+    requestSubmitCalls += 1;
+    form.dispatchEvent(new MockEvent({ type: "submit", target: form } as never));
+  };
+  textarea.value = "Send this comment";
+  textarea.selectionStart = textarea.value.length;
+  textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "Enter", target: textarea } as never));
+  expect(requestSubmitCalls).toBe(1);
 });
