@@ -218,6 +218,12 @@
             return;
           }
         }
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          var submitForm = composerForm();
+          if (submitForm) submitForm.requestSubmit();
+          return;
+        }
         if (!event || !(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
         event.preventDefault();
         var form = composerForm();
