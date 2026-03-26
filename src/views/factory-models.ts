@@ -1,3 +1,4 @@
+import type { ObjectiveAnalysis } from "../factory-cli/analyze";
 import type { FactoryState } from "../modules/factory";
 import type { FactoryObjectiveDetail } from "../services/factory-types";
 import type { FactoryWorkbenchModel } from "./factory-workbench";
@@ -221,7 +222,7 @@ export type FactoryNavModel = {
   readonly showAll?: boolean;
 };
 
-export type FactoryInspectorPanel = "overview" | "execution" | "live" | "receipts" | "debug";
+export type FactoryInspectorPanel = "overview" | "analysis" | "execution" | "live" | "receipts" | "debug";
 
 export type FactoryInspectorRouteModel = {
   readonly panel: FactoryInspectorPanel;
@@ -244,6 +245,7 @@ export type FactoryInspectorModel = FactoryInspectorRouteModel & {
   readonly activeRun?: FactoryLiveRunCard;
   readonly workbench?: FactoryWorkbenchModel;
   readonly jobs: ReadonlyArray<FactoryChatJobNav>;
+  readonly analysis?: ObjectiveAnalysis;
   readonly receipts?: FactoryObjectiveDetail["recentReceipts"];
   readonly debugInfo?: FactoryState;
   readonly tasks?: FactoryObjectiveDetail["tasks"];

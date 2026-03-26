@@ -39,6 +39,7 @@ import { buildInvestigationReportPanelValue, defaultObjectivePanelForDetail } fr
 import { createFactoryCliRuntime } from "./runtime";
 import { terminalTheme } from "./theme";
 import type { FactoryObjectivePanel } from "./view-model";
+import { readObjectiveAnalysis, renderObjectiveAnalysisText } from "./analyze";
 import { loadFactoryHelperCatalog, runFactoryHelper } from "../services/factory-helper-catalog";
 import type { FactoryCloudProvider } from "../services/factory-cloud-context";
 
@@ -926,6 +927,17 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           return;
         }
         console.log(renderChatReplayText(replay));
+        return;
+      }
+      case "analyze": {
+        const objectiveId = args[1];
+        if (!objectiveId) throw new Error("factory analyze requires <objective-id>");
+        const analysis = await readObjectiveAnalysis(config.dataDir, objectiveId);
+        if (json || !isInteractiveTerminal()) {
+          printJson(analysis);
+          return;
+        }
+        console.log(renderObjectiveAnalysisText(analysis));
         return;
       }
       case "resume": {

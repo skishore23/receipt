@@ -3,6 +3,9 @@ export type ComposerCommand =
       readonly type: "help";
     }
   | {
+      readonly type: "analyze";
+    }
+  | {
       readonly type: "new";
       readonly prompt: string;
       readonly title?: string;
@@ -54,6 +57,7 @@ export type ComposerCommandDefinition = {
 
 export const COMPOSER_COMMANDS: ReadonlyArray<ComposerCommandDefinition> = [
   { name: "help", label: "/help", usage: "/help or /?", description: "Show slash command help.", aliases: ["?", "help"] },
+  { name: "analyze", label: "/analyze", usage: "/analyze", description: "Open the run analysis for the selected objective." },
   { name: "new", label: "/new", usage: "/new <prompt>", description: "Start a new thread from the prompt." },
   { name: "react", label: "/react", usage: "/react [message]", description: "React to the selected objective." },
   { name: "watch", label: "/watch", usage: "/watch <objective-id>", description: "Focus an objective by id." },
@@ -200,6 +204,11 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
     case "?":
     case "help":
       return { ok: true, command: { type: "help" } };
+    case "analyze":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before opening its analysis." };
+      }
+      return { ok: true, command: { type: "analyze" } };
     case "new":
       if (!payload) {
         return { ok: false, error: "Use /new followed by an objective prompt." };

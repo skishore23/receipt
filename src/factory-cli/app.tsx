@@ -12,6 +12,7 @@ import {
   reactObjectiveMutation,
   requireActiveObjectiveJob,
 } from "./actions";
+import { readObjectiveAnalysis, type ObjectiveAnalysis } from "./analyze";
 import type { FactoryCliRuntime } from "./runtime";
 import { COMPOSER_COMMANDS, parseComposerDraft } from "./composer";
 import { FactoryThemeProvider, InlineAlert, statusColor, terminalTheme, tone } from "./theme";
@@ -68,11 +69,12 @@ type MissionControlSnapshot = {
   readonly detail?: FactoryObjectiveDetail;
   readonly live?: FactoryLiveProjection;
   readonly debug?: FactoryDebugProjection;
+  readonly analysis?: ObjectiveAnalysis;
 };
 
 const HOTKEYS = [
   ["j/k, ↑/↓", "select"],
-  ["1-9", "panel"],
+  ["1-9,0", "panel"],
   ["tab", "focus"],
   ["/", "command"],
   ["enter", "send/open"],
@@ -169,10 +171,11 @@ const PanelTabs = ({ panel }: { readonly panel: FactoryObjectivePanel }): React.
   <Box flexWrap="wrap" marginBottom={1}>
     {PANEL_ORDER.map((candidate) => {
       const active = candidate === panel;
+      const shortcut = panelIndex(candidate) === 10 ? 0 : panelIndex(candidate);
       return (
         <Box key={candidate} marginRight={1} marginBottom={1}>
           <Text color={active ? tone("selection") : tone("muted")} bold={active}>
-            [{panelIndex(candidate)}] {PANEL_LABELS[candidate]}
+            [{shortcut}] {PANEL_LABELS[candidate]}
           </Text>
         </Box>
       );
@@ -459,6 +462,50 @@ const ReceiptsPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
   </Box>
 );
 
+const AnalysisPanel = ({ analysis }: { readonly analysis?: ObjectiveAnalysis }): React.ReactElement => {
+  if (!analysis) {
+    return <Text color={tone("muted")}>Analysis is not available for this objective yet.</Text>;
+  }
+  return (
+    <Box flexDirection="column">
+      {analysis.latestSummary ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold color={tone("text")}>Current signal</Text>
+          <Text color={tone("text")}>{truncate(analysis.latestSummary, 220)}</Text>
+        </Box>
+      ) : null}
+      <Box flexWrap="wrap">
+        <MetricCell label="Concurrency" value={`${analysis.metrics.objective.maxObservedActiveTasks}/${analysis.metrics.objective.concurrencyLimit}`} />
+        <MetricCell label="Control jobs" value={String(analysis.metrics.jobs.controlJobs)} />
+        <MetricCell label="Tool errors" value={`${analysis.metrics.agent.toolErrors}/${analysis.metrics.agent.toolCalls}`} />
+        <MetricCell label="Run mismatch" value={String(analysis.metrics.agent.mismatchedRuns)} />
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={tone("text")}>Top tools</Text>
+        {analysis.metrics.agent.topTools.length ? analysis.metrics.agent.topTools.slice(0, 5).map((tool) => (
+          <Text key={tool.tool} color={tool.errorCount > 0 ? tone("warning") : tone("muted")}>
+            {truncate(`${tool.tool} · ${tool.count} calls · ${tool.errorCount} errors`, 120)}
+          </Text>
+        )) : <Text color={tone("muted")}>No tool calls recorded.</Text>}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={tone("text")}>Anomalies</Text>
+        {analysis.anomalies.length ? analysis.anomalies.slice(0, 6).map((anomaly, index) => (
+          <Text key={`${anomaly.kind}:${index}`} color={anomaly.severity === "high" ? tone("danger") : anomaly.severity === "medium" ? tone("warning") : tone("muted")}>
+            {truncate(`${anomaly.kind} · ${anomaly.summary}`, 220)}
+          </Text>
+        )) : <Text color={tone("muted")}>No anomalies detected.</Text>}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={tone("text")}>Recommendations</Text>
+        {analysis.recommendations.length ? analysis.recommendations.slice(0, 4).map((recommendation, index) => (
+          <Text key={`${index}:${recommendation}`} color={tone("muted")}>{truncate(`- ${recommendation}`, 220)}</Text>
+        )) : <Text color={tone("muted")}>No recommendations surfaced.</Text>}
+      </Box>
+    </Box>
+  );
+};
+
 const ExecutionWorkbenchRail = ({
   detail,
   live,
@@ -532,11 +579,13 @@ const ObjectivePanelContent = ({
   detail,
   live,
   debug,
+  analysis,
   panel,
 }: {
   readonly detail: FactoryObjectiveDetail;
   readonly live: FactoryLiveProjection;
   readonly debug: FactoryDebugProjection;
+  readonly analysis?: ObjectiveAnalysis;
   readonly panel: FactoryObjectivePanel;
 }): React.ReactElement => {
   switch (panel) {
@@ -558,6 +607,8 @@ const ObjectivePanelContent = ({
       return <DebugPanel debug={debug} />;
     case "receipts":
       return <ReceiptsPanel detail={detail} />;
+    case "analysis":
+      return <AnalysisPanel analysis={analysis} />;
     default:
       return <OverviewPanel detail={detail} />;
   }
@@ -567,12 +618,14 @@ const RightRail = ({
   detail,
   live,
   debug,
+  analysis,
   panel,
   compact,
 }: {
   readonly detail?: FactoryObjectiveDetail;
   readonly live?: FactoryLiveProjection;
   readonly debug?: FactoryDebugProjection;
+  readonly analysis?: ObjectiveAnalysis;
   readonly panel: FactoryObjectivePanel;
   readonly compact: boolean;
 }): React.ReactElement => (
@@ -611,7 +664,7 @@ const RightRail = ({
         <Box marginTop={1} flexDirection="column">
           <Text bold color={tone("text")}>Panel</Text>
           <PanelTabs panel={panel} />
-          <ObjectivePanelContent detail={detail} live={live} debug={debug} panel={panel} />
+          <ObjectivePanelContent detail={detail} live={live} debug={debug} analysis={analysis} panel={panel} />
         </Box>
       </Box>
     ) : (
@@ -792,6 +845,7 @@ const MissionControlScreen = ({
               detail={snapshot.detail}
               live={snapshot.live}
               debug={snapshot.debug}
+              analysis={snapshot.analysis}
               panel={panel}
               compact={compact}
             />
@@ -909,7 +963,7 @@ export const FactoryTerminalApp = ({
     exit();
   };
 
-  const refresh = async (): Promise<void> => {
+  const refresh = async (panelOverride: FactoryObjectivePanel = panel): Promise<void> => {
     try {
       setError(undefined);
       const compose = await runtime.service.buildComposeModel();
@@ -933,9 +987,12 @@ export const FactoryTerminalApp = ({
         runtime.service.buildLiveProjection(nextSelected),
         runtime.service.getObjectiveDebug(nextSelected),
       ]);
+      const analysis = panelOverride === "analysis"
+        ? await readObjectiveAnalysis(runtime.service.dataDir, nextSelected).catch(() => undefined)
+        : undefined;
       await runtime.focusObjective(nextSelected);
       runtime.trackTaskLogs(nextSelected, detail.tasks);
-      setSnapshot({ compose, board, detail, live, debug });
+      setSnapshot({ compose, board, detail, live, debug, analysis });
       if (!busyRef.current) {
         setMessage(`Watching ${detail.objectiveId} · ${labelize(detail.phase)} · ${labelize(detail.integration.status)}`);
       }
@@ -965,7 +1022,7 @@ export const FactoryTerminalApp = ({
   }, []);
 
   useEffect(() => {
-    void refresh();
+    void refresh(panel);
   }, [panel]);
 
   useEffect(() => {
@@ -1056,6 +1113,13 @@ export const FactoryTerminalApp = ({
       setDraft("");
       await refresh();
       setMessage(`Focused ${next}.`);
+      return;
+    }
+    if (command.type === "analyze") {
+      setPanel("analysis");
+      setDraft("");
+      await refresh("analysis");
+      setMessage(`Opened analysis for ${selectedObjectiveIdRef.current}.`);
       return;
     }
     if (command.type === "new") {
@@ -1219,8 +1283,9 @@ export const FactoryTerminalApp = ({
       if (selectedObjectiveIdRef.current) setFocusArea("composer");
       return;
     }
-    if (/^[1-9]$/.test(input)) {
-      const next = PANEL_ORDER[Number(input) - 1];
+    if (/^[0-9]$/.test(input)) {
+      const index = input === "0" ? PANEL_ORDER.length - 1 : Number(input) - 1;
+      const next = PANEL_ORDER[index];
       if (next) setPanel(next);
       return;
     }

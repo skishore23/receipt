@@ -57,6 +57,7 @@ import type {
   FactoryInspectorTabsModel,
 } from "../../views/factory-models";
 import type { QueueJob } from "../../adapters/jsonl-queue";
+import { readObjectiveAnalysis } from "../../factory-cli/analyze";
 import { parseComposerDraft, prepareObjectiveCreation } from "../../factory-cli/composer";
 import {
   listReceiptFiles,
@@ -105,6 +106,14 @@ import {
 
 const FACTORY_INSPECTOR_TABS_TRIGGER = "sse:factory-refresh throttle:900ms, sse:job-refresh throttle:900ms";
 const FACTORY_INSPECTOR_PANEL_TRIGGER = "sse:factory-refresh throttle:450ms, sse:job-refresh throttle:450ms";
+
+const isInspectorPanel = (value: string | undefined): value is FactoryInspectorPanel =>
+  value === "overview"
+  || value === "analysis"
+  || value === "execution"
+  || value === "live"
+  || value === "receipts"
+  || value === "debug";
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
@@ -163,16 +172,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const requestedPanel = (req: Request): FactoryInspectorPanel => {
     const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-    return panel === "execution" || panel === "live" || panel === "receipts" || panel === "debug"
-      ? panel
-      : "overview";
+    return isInspectorPanel(panel) ? panel : "overview";
   };
 
   const requestedPanelParam = (req: Request): FactoryInspectorPanel | undefined => {
     const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-    return panel === "overview" || panel === "execution" || panel === "live" || panel === "receipts" || panel === "debug"
-      ? panel
-      : undefined;
+    return isInspectorPanel(panel) ? panel : undefined;
   };
 
   const requestedShowAll = (req: Request): boolean =>
@@ -789,6 +794,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       workbench,
       jobs: relevantJobs,
       tasks: selectedObjective?.tasks,
+      analysis: inspectorPanel === "analysis" && resolvedObjectiveId
+        ? await readObjectiveAnalysis(service.dataDir, resolvedObjectiveId).catch(() => undefined)
+        : undefined,
     };
     return {
       activeProfileId: resolved.root.id,
@@ -1193,6 +1201,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       workbench,
       jobs: relevantJobs,
       tasks: detail.tasks,
+      analysis: panel === "analysis"
+        ? await readObjectiveAnalysis(service.dataDir, objectiveId).catch(() => undefined)
+        : undefined,
     };
   };
 
@@ -1488,12 +1499,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const hydrateInspectorPanel = async (model: FactoryInspectorModel): Promise<FactoryInspectorModel> => {
     const objectiveId = model.objectiveId ?? model.selectedObjective?.objectiveId;
     const panel = model.panel;
+    let analysis: FactoryInspectorModel["analysis"];
     let receipts: FactoryInspectorModel["receipts"];
     let debugInfo: FactoryInspectorModel["debugInfo"];
     let tasks: FactoryInspectorModel["tasks"];
 
     if (objectiveId) {
-      if (panel === "receipts" && !model.receipts) {
+      if (panel === "analysis" && !model.analysis) {
+        analysis = await readObjectiveAnalysis(service.dataDir, objectiveId).catch(() => undefined);
+      } else if (panel === "receipts" && !model.receipts) {
         try {
           receipts = await service.listObjectiveReceipts(objectiveId, 100);
         } catch {
@@ -1521,6 +1535,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       ...model,
       panel,
+      analysis: analysis ?? model.analysis,
       receipts: receipts ?? model.receipts,
       debugInfo: debugInfo ?? model.debugInfo,
       tasks: tasks ?? model.tasks,
@@ -1645,6 +1660,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                     focusId: currentFocusId,
                   })}#factory-command-help`,
                 );
+              case "analyze":
+                if (!objectiveId) return navigationError(req, 409, "Select an objective before opening its analysis.");
+                return navigationResponse(req, buildChatLink({
+                  profileId: resolved.root.id,
+                  chatId: requestedChat,
+                  objectiveId,
+                  runId: requestedRun,
+                  jobId: requestedJob,
+                  panel: "analysis",
+                  focusKind: currentFocusKind,
+                  focusId: currentFocusId,
+                }));
               case "watch": {
                 const nextObjectiveId = await resolveWatchedObjectiveId(command.objectiveId ?? objectiveId);
                 if (!nextObjectiveId) {

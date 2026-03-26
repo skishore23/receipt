@@ -58,7 +58,7 @@ Commands:
   receipt jobs abort <job-id> [--reason <text>]
   receipt abort <job-id> [--reason <text>]
   receipt memory <read|search|summarize|commit|diff> <scope> [options]
-  receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|resume|react|promote|cancel|cleanup|archive|abort-job|codex-probe]`);
+  receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|analyze|resume|react|promote|cancel|cleanup|archive|abort-job|codex-probe]`);
 };
 
 const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {

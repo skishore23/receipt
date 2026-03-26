@@ -22,8 +22,11 @@ type StreamManifest = {
 };
 
 const STREAM_MANIFEST = "_streams.json";
+const STREAM_MANIFEST_LOCK_SUFFIX = ".lock";
 const BRANCH_META_STREAM = "__meta/branches";
 const BRANCH_META_EVENT = "branch.meta.upsert";
+const STREAM_MANIFEST_LOCK_STALE_MS = 30_000;
+const STREAM_MANIFEST_LOCK_RETRY_MS = 25;
 
 const sha256 = (s: string): string =>
   createHash("sha256").update(s).digest("hex");
@@ -65,6 +68,42 @@ const appendJsonl = async <B>(file: string, r: Receipt<B>): Promise<void> => {
   await fs.promises.appendFile(file, `${JSON.stringify(r)}\n`, "utf-8");
 };
 
+const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const streamManifestEquals = (left: StreamManifest, right: StreamManifest): boolean => {
+  const leftStreams = Object.keys(left.byStream);
+  const rightStreams = Object.keys(right.byStream);
+  const leftKeys = Object.keys(left.byKey);
+  const rightKeys = Object.keys(right.byKey);
+  if (leftStreams.length !== rightStreams.length || leftKeys.length !== rightKeys.length) return false;
+  return leftStreams.every((stream) => right.byStream[stream] === left.byStream[stream])
+    && leftKeys.every((key) => right.byKey[key] === left.byKey[key]);
+};
+
+const firstStreamInJsonl = async (file: string): Promise<string | undefined> => {
+  if (!await fileExists(file)) return undefined;
+  const rl = createInterface({
+    input: fs.createReadStream(file, { encoding: "utf-8" }),
+    crlfDelay: Infinity,
+  });
+  try {
+    for await (const line of rl) {
+      const raw = line.trim();
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as { readonly stream?: unknown };
+      return typeof parsed.stream === "string" && parsed.stream.trim()
+        ? parsed.stream.trim()
+        : undefined;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    rl.close();
+  }
+  return undefined;
+};
+
 export type StreamLocator = {
   readonly fileFor: (stream: string) => Promise<string>;
   readonly keyFor: (stream: string) => Promise<string>;
@@ -86,6 +125,7 @@ const withSerialQueue = <T>(key: string, fn: () => Promise<T>): Promise<T> => {
 export const createStreamLocator = (dir: string): StreamLocator => {
   fs.mkdirSync(dir, { recursive: true });
   const manifestPath = path.join(dir, STREAM_MANIFEST);
+  const manifestLockPath = `${manifestPath}${STREAM_MANIFEST_LOCK_SUFFIX}`;
   let loaded: StreamManifest | null = null;
 
   const emptyManifest = (): StreamManifest => ({
@@ -122,7 +162,7 @@ export const createStreamLocator = (dir: string): StreamLocator => {
     return loaded;
   };
 
-  const persistManifest = async (manifest: StreamManifest): Promise<void> => {
+  const persistManifestUnlocked = async (manifest: StreamManifest): Promise<void> => {
     const tempPath = `${manifestPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     const body = JSON.stringify(manifest, null, 2);
     try {
@@ -134,15 +174,112 @@ export const createStreamLocator = (dir: string): StreamLocator => {
     }
   };
 
+  const withManifestLock = async <T>(fn: () => Promise<T>): Promise<T> =>
+    withSerialQueue(manifestLockPath, async () => {
+      while (true) {
+        let handle: fs.promises.FileHandle | undefined;
+        try {
+          handle = await fs.promises.open(manifestLockPath, "wx");
+          await handle.writeFile(String(process.pid), "utf-8").catch(() => undefined);
+          try {
+            return await fn();
+          } finally {
+            await handle.close().catch(() => undefined);
+            await fs.promises.unlink(manifestLockPath).catch(() => undefined);
+          }
+        } catch (err) {
+          await handle?.close().catch(() => undefined);
+          const code = err && typeof err === "object" && "code" in err ? String((err as { readonly code?: unknown }).code) : undefined;
+          if (code !== "EEXIST") throw err;
+          const stat = await fs.promises.stat(manifestLockPath).catch(() => undefined);
+          if (stat && Date.now() - stat.mtimeMs > STREAM_MANIFEST_LOCK_STALE_MS) {
+            await fs.promises.unlink(manifestLockPath).catch(() => undefined);
+            continue;
+          }
+          await sleep(STREAM_MANIFEST_LOCK_RETRY_MS);
+        }
+      }
+    });
+
+  const repairManifest = async (manifest: StreamManifest): Promise<StreamManifest> => {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const presentKeys = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name.replace(/\.jsonl$/u, ""));
+    const presentKeySet = new Set(presentKeys);
+
+    const byStream: Record<string, string> = {};
+    const byKey: Record<string, string> = {};
+    let dirty = false;
+
+    for (const [stream, key] of Object.entries(manifest.byStream)) {
+      if (!presentKeySet.has(key)) {
+        dirty = true;
+        continue;
+      }
+      if (manifest.byKey[key] !== stream) dirty = true;
+      byStream[stream] = key;
+      byKey[key] = stream;
+    }
+
+    if (!dirty && presentKeys.length === Object.keys(byKey).length) {
+      return manifest;
+    }
+
+    for (const key of presentKeys) {
+      if (byKey[key]) continue;
+      const stream = await firstStreamInJsonl(path.join(dir, `${key}.jsonl`));
+      if (!stream) continue;
+      if (byStream[stream] && byStream[stream] !== key) {
+        dirty = true;
+        continue;
+      }
+      if (manifest.byKey[key] !== stream || manifest.byStream[stream] !== key) dirty = true;
+      byStream[stream] = key;
+      byKey[key] = stream;
+    }
+
+    return dirty
+      ? {
+          version: 1,
+          byStream,
+          byKey,
+        }
+      : manifest;
+  };
+
+  const refreshManifestWithRepair = async (): Promise<StreamManifest> => {
+    const disk = await readManifestFromDisk();
+    const repaired = await repairManifest(disk);
+    if (streamManifestEquals(disk, repaired)) {
+      loaded = repaired;
+      return repaired;
+    }
+    return withManifestLock(async () => {
+      const latest = await readManifestFromDisk();
+      const repairedLatest = await repairManifest(latest);
+      if (!streamManifestEquals(latest, repairedLatest)) {
+        await persistManifestUnlocked(repairedLatest);
+      } else {
+        loaded = repairedLatest;
+      }
+      return repairedLatest;
+    });
+  };
+
   const ensureStreamKey = async (stream: string): Promise<string> => {
     const existing = (await readManifest()).byStream[stream];
     if (existing) return existing;
 
-    return withSerialQueue(manifestPath, async () => {
-      const manifest = await readManifestFromDisk();
+    return withManifestLock(async () => {
+      const manifest = await repairManifest(await readManifestFromDisk());
       const found = manifest.byStream[stream];
       if (found) {
-        loaded = manifest;
+        if (!streamManifestEquals(await readManifestFromDisk(), manifest)) {
+          await persistManifestUnlocked(manifest);
+        } else {
+          loaded = manifest;
+        }
         return found;
       }
 
@@ -161,7 +298,7 @@ export const createStreamLocator = (dir: string): StreamLocator => {
         byStream: { ...manifest.byStream, [stream]: key },
         byKey: { ...manifest.byKey, [key]: stream },
       };
-      await persistManifest(next);
+      await persistManifestUnlocked(next);
       return key;
     });
   };
@@ -170,7 +307,7 @@ export const createStreamLocator = (dir: string): StreamLocator => {
   const existingKeyFor = async (stream: string): Promise<string | undefined> => {
     const manifest = await readManifest();
     if (manifest.byStream[stream]) return manifest.byStream[stream];
-    return (await refreshManifest()).byStream[stream];
+    return (await refreshManifestWithRepair()).byStream[stream];
   };
   const fileFor = async (stream: string): Promise<string> =>
     path.join(dir, `${await ensureStreamKey(stream)}.jsonl`);
@@ -181,10 +318,10 @@ export const createStreamLocator = (dir: string): StreamLocator => {
   const streamForKey = async (key: string): Promise<string | undefined> => {
     const manifest = await readManifest();
     if (manifest.byKey[key]) return manifest.byKey[key];
-    return (await refreshManifest()).byKey[key];
+    return (await refreshManifestWithRepair()).byKey[key];
   };
   const listStreams = async (prefix?: string): Promise<ReadonlyArray<string>> =>
-    Object.keys((await refreshManifest()).byStream)
+    Object.keys((await refreshManifestWithRepair()).byStream)
       .filter((stream) => (prefix ? stream.startsWith(prefix) : true))
       .sort((a, b) => a.localeCompare(b));
 

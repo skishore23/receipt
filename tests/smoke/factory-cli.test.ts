@@ -17,6 +17,7 @@ import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent } from "../../src/modules/agent";
 import { decideFactory, initialFactoryState, reduceFactory, DEFAULT_FACTORY_OBJECTIVE_POLICY, type FactoryCmd, type FactoryEvent } from "../../src/modules/factory";
+import { decide as decideJob, initial as initialJobState, reduce as reduceJob, type JobCmd, type JobEvent } from "../../src/modules/job";
 import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
 import {
   historicalInfrastructureChatReceipts,
@@ -293,6 +294,27 @@ const seedAgentReplay = async (
     decideAgent,
     reduceAgent,
     initialAgent,
+  );
+  for (const [index, event] of receipts.entries()) {
+    await runtime.execute(stream, {
+      type: "emit",
+      event,
+      eventId: `${stream}:${index + 1}`,
+    });
+  }
+};
+
+const seedJobReplay = async (
+  dataDir: string,
+  stream: string,
+  receipts: ReadonlyArray<JobEvent>,
+): Promise<void> => {
+  const runtime = createRuntime<JobCmd, JobEvent, typeof initialJobState>(
+    jsonlStore<JobEvent>(dataDir),
+    jsonBranchStore(dataDir),
+    decideJob,
+    reduceJob,
+    initialJobState,
   );
   for (const [index, event] of receipts.entries()) {
     await runtime.execute(stream, {
@@ -686,6 +708,532 @@ test("factory cli: replay-chat exposes the historical infrastructure binding pat
     `thread.bound:dispatch_update:${historicalInfrastructureStartupObjectiveId}`,
     `run.continued::${historicalInfrastructureStartupObjectiveId}`,
   ]);
+}, 120_000);
+
+test("factory cli: analyze summarizes run sequence, job control noise, and agent tool errors", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  const objectiveId = "objective_test_analysis_01";
+  const task01JobId = `job_factory_${objectiveId}_task_01_task_01_candidate_01`;
+  const task02JobId = `job_factory_${objectiveId}_task_02_task_02_candidate_01`;
+  const controlJob1 = "job_test_control_01";
+  const controlJob2 = "job_test_control_02";
+  const agentRunStream = `agents/factory/test/infrastructure/objectives/${objectiveId}/runs/run_analysis_01`;
+
+  await seedObjectiveReplay(runtimeConfig.dataDir, objectiveId, [
+    {
+      type: "objective.created",
+      objectiveId,
+      title: "Analyze a flaky infrastructure run",
+      prompt: "Inspect the run and explain what went wrong.",
+      channel: "results",
+      baseHash: "abc123",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "infrastructure",
+        rootProfileLabel: "Infrastructure",
+        resolvedProfileHash: "profile-hash",
+        promptHash: "prompt-hash",
+        promptPath: "profiles/infrastructure/PROFILE.md",
+        selectedSkills: ["skills/factory-infrastructure-aws/SKILL.md"],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 1_000,
+    },
+    {
+      type: "task.added",
+      objectiveId,
+      createdAt: 1_100,
+      task: {
+        nodeId: "task_01",
+        taskId: "task_01",
+        taskKind: "planned",
+        title: "list ec2 containers",
+        prompt: "Inspect ECS and EKS resources.",
+        workerType: "codex",
+        baseCommit: "abc123",
+        dependsOn: [],
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [],
+        artifactRefs: {},
+        createdAt: 1_100,
+      },
+    },
+    {
+      type: "task.ready",
+      objectiveId,
+      taskId: "task_01",
+      readyAt: 1_200,
+    },
+    {
+      type: "candidate.created",
+      objectiveId,
+      createdAt: 1_250,
+      candidate: {
+        candidateId: "task_01_candidate_01",
+        taskId: "task_01",
+        status: "planned",
+        baseCommit: "abc123",
+        checkResults: [],
+        artifactRefs: {},
+        createdAt: 1_250,
+        updatedAt: 1_250,
+      },
+    },
+    {
+      type: "task.dispatched",
+      objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      jobId: task01JobId,
+      workspaceId: "workspace_task_01",
+      workspacePath: "/tmp/workspace_task_01",
+      skillBundlePaths: [],
+      contextRefs: [],
+      startedAt: 1_300,
+    },
+    {
+      type: "objective.operator.noted",
+      objectiveId,
+      message: "Current run failed with `Module not found \"/usr/src/cli.ts\"`.",
+      notedAt: 1_500,
+    },
+    {
+      type: "task.blocked",
+      objectiveId,
+      taskId: "task_01",
+      reason: "Module not found \"/usr/src/cli.ts\"",
+      blockedAt: 1_600,
+    },
+    {
+      type: "task.superseded",
+      objectiveId,
+      taskId: "task_01",
+      reason: "Superseded by operator follow-up.",
+      supersededAt: 1_700,
+    },
+    {
+      type: "task.added",
+      objectiveId,
+      createdAt: 1_800,
+      task: {
+        nodeId: "task_02",
+        taskId: "task_02",
+        taskKind: "planned",
+        title: "list ec2 containers",
+        prompt: "Use AWS CLI directly and report concrete evidence.",
+        workerType: "codex",
+        baseCommit: "abc123",
+        dependsOn: [],
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [],
+        artifactRefs: {},
+        createdAt: 1_800,
+      },
+    },
+    {
+      type: "task.ready",
+      objectiveId,
+      taskId: "task_02",
+      readyAt: 1_850,
+    },
+    {
+      type: "candidate.created",
+      objectiveId,
+      createdAt: 1_875,
+      candidate: {
+        candidateId: "task_02_candidate_01",
+        taskId: "task_02",
+        status: "planned",
+        baseCommit: "abc123",
+        checkResults: [],
+        artifactRefs: {},
+        createdAt: 1_875,
+        updatedAt: 1_875,
+      },
+    },
+    {
+      type: "task.dispatched",
+      objectiveId,
+      taskId: "task_02",
+      candidateId: "task_02_candidate_01",
+      jobId: task02JobId,
+      workspaceId: "workspace_task_02",
+      workspacePath: "/tmp/workspace_task_02",
+      skillBundlePaths: [],
+      contextRefs: [],
+      startedAt: 1_900,
+    },
+    {
+      type: "investigation.reported",
+      objectiveId,
+      taskId: "task_02",
+      candidateId: "task_02_candidate_01",
+      summary: "Used AWS CLI directly and confirmed the workload is Fargate-only.",
+      handoff: "Ready for synthesis.",
+      completion: {
+        changed: [],
+        proof: ["aws ecs list-clusters", "aws ecs describe-tasks"],
+        remaining: [],
+      },
+      report: {
+        conclusion: "No EC2-backed container workloads found.",
+        evidence: [{
+          title: "ECS result",
+          summary: "The only running tasks were Fargate.",
+        }],
+        scriptsRun: [{
+          command: "aws ecs list-clusters",
+          status: "ok",
+          summary: "Enumerated ECS clusters.",
+        }],
+        disagreements: [],
+        nextSteps: [],
+      },
+      artifactRefs: {},
+      reportedAt: 2_500,
+    },
+    {
+      type: "objective.completed",
+      objectiveId,
+      summary: "Used AWS CLI directly and confirmed the workload is Fargate-only.",
+      completedAt: 2_600,
+    },
+  ]);
+
+  await seedAgentReplay(runtimeConfig.dataDir, agentRunStream, [
+    {
+      type: "problem.set",
+      runId: "run_analysis_01",
+      problem: "analyze the latest run and identify what should improve",
+      agentId: "orchestrator",
+    },
+    {
+      type: "run.configured",
+      runId: "run_analysis_01",
+      agentId: "orchestrator",
+      workflow: { id: "factory-chat-v1", version: "1.0.0" },
+      config: {
+        maxIterations: 4,
+        maxToolOutputChars: 6_000,
+        memoryScope: `repos/test/profiles/infrastructure/objectives/${objectiveId}`,
+        workspace: ".",
+        extra: {
+          profileId: "infrastructure",
+          objectiveId,
+          stream: `agents/factory/test/infrastructure/objectives/${objectiveId}`,
+        },
+      },
+      model: "gpt-5.2",
+      promptHash: "prompt-hash",
+      promptPath: "profiles/infrastructure/PROFILE.md",
+    },
+    {
+      type: "thread.bound",
+      runId: "run_analysis_01",
+      agentId: "orchestrator",
+      objectiveId,
+      reason: "startup",
+    },
+    {
+      type: "run.status",
+      runId: "run_analysis_01",
+      status: "running",
+      agentId: "orchestrator",
+    },
+    {
+      type: "iteration.started",
+      runId: "run_analysis_01",
+      iteration: 1,
+      agentId: "orchestrator",
+    },
+    {
+      type: "thought.logged",
+      runId: "run_analysis_01",
+      iteration: 1,
+      agentId: "orchestrator",
+      content: "Need the concrete task output before proposing fixes.",
+    },
+    {
+      type: "action.planned",
+      runId: "run_analysis_01",
+      iteration: 1,
+      agentId: "orchestrator",
+      actionType: "tool",
+      name: "factory.output",
+      input: { objectiveId },
+    },
+    {
+      type: "tool.called",
+      runId: "run_analysis_01",
+      iteration: 1,
+      agentId: "orchestrator",
+      tool: "factory.output",
+      input: { objectiveId },
+      summary: "failed",
+      durationMs: 3,
+      error: "factory.output requires focusKind/focusId, taskId/jobId, or an objective with exactly one task",
+    },
+    {
+      type: "iteration.started",
+      runId: "run_analysis_01",
+      iteration: 2,
+      agentId: "orchestrator",
+    },
+    {
+      type: "action.planned",
+      runId: "run_analysis_01",
+      iteration: 2,
+      agentId: "orchestrator",
+      actionType: "tool",
+      name: "factory.output",
+      input: { objectiveId, taskId: "task_02" },
+    },
+    {
+      type: "tool.called",
+      runId: "run_analysis_01",
+      iteration: 2,
+      agentId: "orchestrator",
+      tool: "factory.output",
+      input: { objectiveId, taskId: "task_02" },
+      summary: "task output",
+      durationMs: 12,
+    },
+    {
+      type: "tool.observed",
+      runId: "run_analysis_01",
+      iteration: 2,
+      agentId: "orchestrator",
+      tool: "factory.output",
+      output: "{\"status\":\"completed\"}",
+      truncated: false,
+    },
+    {
+      type: "validation.report",
+      runId: "run_analysis_01",
+      iteration: 2,
+      agentId: "orchestrator",
+      gate: "model_json",
+      ok: true,
+      summary: "native structured action parsed",
+    },
+    {
+      type: "response.finalized",
+      runId: "run_analysis_01",
+      agentId: "orchestrator",
+      content: "Task 01 failed due to the CLI path assumption, then task 02 recovered with direct AWS CLI evidence.",
+    },
+    {
+      type: "run.status",
+      runId: "run_analysis_01",
+      status: "completed",
+      agentId: "orchestrator",
+    },
+  ]);
+
+  await seedJobReplay(runtimeConfig.dataDir, `jobs/${task01JobId}`, [
+    {
+      type: "job.enqueued",
+      jobId: task01JobId,
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId,
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+      },
+      maxAttempts: 2,
+      sessionKey: `factory:${objectiveId}:task_01`,
+      singletonMode: "allow",
+      createdAt: 1_300,
+    },
+    {
+      type: "job.leased",
+      jobId: task01JobId,
+      workerId: "worker-codex",
+      leaseMs: 900_000,
+      attempt: 1,
+    },
+    {
+      type: "job.progress",
+      jobId: task01JobId,
+      workerId: "worker-codex",
+      result: {
+        summary: "Codex started working.",
+        progressAt: 1_320,
+        eventType: "turn.started",
+      },
+    },
+    {
+      type: "queue.command",
+      jobId: task01JobId,
+      commandId: "cmd_abort_01",
+      command: "abort",
+      lane: "steer",
+      payload: { reason: "rerun without relying on /usr/src/cli.ts" },
+      by: "factory.chat",
+      createdAt: 1_550,
+    },
+    {
+      type: "job.canceled",
+      jobId: task01JobId,
+      reason: "abort requested",
+      by: "worker-codex",
+    },
+  ]);
+
+  await seedJobReplay(runtimeConfig.dataDir, `jobs/${task02JobId}`, [
+    {
+      type: "job.enqueued",
+      jobId: task02JobId,
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId,
+        taskId: "task_02",
+        candidateId: "task_02_candidate_01",
+      },
+      maxAttempts: 2,
+      sessionKey: `factory:${objectiveId}:task_02`,
+      singletonMode: "allow",
+      createdAt: 1_900,
+    },
+    {
+      type: "job.leased",
+      jobId: task02JobId,
+      workerId: "worker-codex",
+      leaseMs: 900_000,
+      attempt: 1,
+    },
+    {
+      type: "job.progress",
+      jobId: task02JobId,
+      workerId: "worker-codex",
+      result: {
+        summary: "Codex completed the turn.",
+        progressAt: 2_480,
+        eventType: "turn.completed",
+        tokensUsed: 456,
+      },
+    },
+    {
+      type: "job.completed",
+      jobId: task02JobId,
+      workerId: "worker-codex",
+      result: {
+        objectiveId,
+        taskId: "task_02",
+        candidateId: "task_02_candidate_01",
+        summary: "Used AWS CLI directly.",
+        tokensUsed: 456,
+      },
+    },
+  ]);
+
+  for (const controlJobId of [controlJob1, controlJob2]) {
+    await seedJobReplay(runtimeConfig.dataDir, `jobs/${controlJobId}`, [
+      {
+        type: "job.enqueued",
+        jobId: controlJobId,
+        agentId: "factory",
+        lane: "steer",
+        payload: {
+          kind: "factory.objective.control",
+          objectiveId,
+        },
+        maxAttempts: 1,
+        sessionKey: `factory:objective:${objectiveId}`,
+        singletonMode: "allow",
+        createdAt: 2_700,
+      },
+      {
+        type: "job.leased",
+        jobId: controlJobId,
+        workerId: "worker-factory",
+        leaseMs: 60_000,
+        attempt: 1,
+      },
+      {
+        type: "job.completed",
+        jobId: controlJobId,
+        workerId: "worker-factory",
+        result: {
+          objectiveId,
+          summary: "control reconcile complete",
+        },
+      },
+    ]);
+  }
+
+  const analyze = await runCli([
+    "factory",
+    "analyze",
+    objectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(analyze.code).toBe(0);
+  const payload = JSON.parse(analyze.stdout) as {
+    readonly objectiveId: string;
+    readonly metrics: {
+      readonly objective: {
+        readonly maxObservedActiveTasks: number;
+        readonly eventCounts: Readonly<Record<string, number>>;
+      };
+      readonly tasks: {
+        readonly total: number;
+      };
+      readonly jobs: {
+        readonly total: number;
+        readonly controlJobs: number;
+      };
+      readonly agent: {
+        readonly runCount: number;
+        readonly toolCalls: number;
+        readonly toolErrors: number;
+        readonly topTools: ReadonlyArray<{
+          readonly tool: string;
+          readonly count: number;
+          readonly errorCount: number;
+        }>;
+      };
+    };
+    readonly anomalies: ReadonlyArray<{
+      readonly kind: string;
+      readonly summary: string;
+    }>;
+    readonly recommendations: ReadonlyArray<string>;
+  };
+
+  expect(payload.objectiveId).toBe(objectiveId);
+  expect(payload.metrics.objective.maxObservedActiveTasks).toBe(1);
+  expect(payload.metrics.objective.eventCounts["task.dispatched"]).toBe(2);
+  expect(payload.metrics.tasks.total).toBe(2);
+  expect(payload.metrics.jobs.total).toBe(4);
+  expect(payload.metrics.jobs.controlJobs).toBe(2);
+  expect(payload.metrics.agent.runCount).toBe(1);
+  expect(payload.metrics.agent.toolCalls).toBe(2);
+  expect(payload.metrics.agent.toolErrors).toBe(1);
+  expect(payload.metrics.agent.topTools[0]).toMatchObject({
+    tool: "factory.output",
+    count: 2,
+    errorCount: 1,
+  });
+  expect(payload.anomalies.some((anomaly) => anomaly.kind === "tool_error")).toBe(true);
+  expect(payload.anomalies.some((anomaly) => anomaly.kind === "repeated_control_job")).toBe(true);
+  expect(payload.recommendations).toContain("When inspecting a multi-task objective, do not call `factory.output` with only `objectiveId`. Pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
 }, 120_000);
 
 test("factory runtime config: shared resolver follows .receipt/config.json", async () => {

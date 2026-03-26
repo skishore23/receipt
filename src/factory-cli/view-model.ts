@@ -16,7 +16,8 @@ export type FactoryObjectivePanel =
   | "activity"
   | "live"
   | "debug"
-  | "receipts";
+  | "receipts"
+  | "analysis";
 
 export const PANEL_ORDER: readonly FactoryObjectivePanel[] = [
   "overview",
@@ -28,6 +29,7 @@ export const PANEL_ORDER: readonly FactoryObjectivePanel[] = [
   "live",
   "debug",
   "receipts",
+  "analysis",
 ] as const;
 
 export const PANEL_LABELS: Readonly<Record<FactoryObjectivePanel, string>> = {
@@ -40,6 +42,7 @@ export const PANEL_LABELS: Readonly<Record<FactoryObjectivePanel, string>> = {
   live: "Live",
   debug: "Debug",
   receipts: "Receipts",
+  analysis: "Analysis",
 };
 
 export const BOARD_SECTION_META = {

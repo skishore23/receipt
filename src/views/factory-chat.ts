@@ -226,6 +226,7 @@ import type {
   FactoryChatShellModel,
   FactoryNavModel,
   FactoryLiveCodexCard,
+  FactoryInspectorPanel,
 } from "./factory-models";
 
 type FactoryChatRouteContext = {
@@ -234,7 +235,7 @@ type FactoryChatRouteContext = {
   readonly objectiveId?: string;
   readonly runId?: string;
   readonly jobId?: string;
-  readonly panel?: "overview" | "execution" | "live" | "receipts" | "debug";
+  readonly panel?: FactoryInspectorPanel;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
 };
@@ -1057,7 +1058,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
   const composerPlaceholder = model.inspector.objectiveMissing
     ? "This thread no longer exists. Send a message to start a new thread."
     : model.objectiveId
-    ? "Ask for status, or use /react, /promote, /cancel, /cleanup, /archive, /abort-job..."
+    ? "Ask for status, or use /analyze, /react, /promote, /cancel, /cleanup, /archive, /abort-job..."
     : "Send the first message to start a new thread. Slash commands run direct actions.";
   return `<!doctype html>
 <html class="dark h-full">

@@ -33,6 +33,13 @@ const formatBytes = (bytes: number | undefined): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const analysisSeverityClass = (severity: "high" | "medium" | "low"): string =>
+  severity === "high"
+    ? "border-destructive/30 bg-destructive/10 text-destructive"
+    : severity === "medium"
+      ? "border-warning/30 bg-warning/10 text-warning"
+      : "border-info/30 bg-info/10 text-info";
+
 const renderTokenUsageHero = (tokensUsed: number): string => `<div class="rounded-2xl border border-info/25 bg-info/10 px-4 py-3">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
@@ -126,6 +133,12 @@ const renderInspectorEmptyState = (
 ): string => {
   const config = (() => {
     switch (panel) {
+      case "analysis":
+        return {
+          icon: iconStatus("h-5 w-5"),
+          eyebrow: "Analysis",
+          message: "Choose a thread to inspect run metrics, tool patterns, anomalies, and recommendations.",
+        };
       case "execution":
         return {
           icon: iconTask("h-5 w-5"),
@@ -369,6 +382,92 @@ const renderExecutionPanel = (model: FactoryInspectorModel): string => {
   </div>`;
 };
 
+const renderAnalysisPanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
+  if (!model.analysis) {
+    return renderInspectorEmptyState("analysis", {
+      title: "Analysis unavailable.",
+      message: "Factory could not derive analysis metrics for this thread yet.",
+    });
+  }
+
+  const analysis = model.analysis;
+  const objectiveMetrics = analysis.metrics.objective;
+  const jobMetrics = analysis.metrics.jobs;
+  const agentMetrics = analysis.metrics.agent;
+  const recentSequence = analysis.sequence.slice(-8).reverse();
+
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
+    ${analysis.latestSummary ? `<div class="${softPanelClass} p-3">
+      <div class="${sectionLabelClass} mb-1">Current Signal</div>
+      <div class="text-sm text-foreground">${esc(analysis.latestSummary)}</div>
+    </div>` : ""}
+
+    <div class="grid grid-cols-2 gap-3">
+      ${statPill("Concurrency", `${objectiveMetrics.maxObservedActiveTasks} observed / ${objectiveMetrics.concurrencyLimit} limit`, { icon: iconTask("h-3.5 w-3.5") })}
+      ${statPill("Control Jobs", String(jobMetrics.controlJobs), { icon: iconStatus("h-3.5 w-3.5") })}
+      ${statPill("Tool Errors", `${agentMetrics.toolErrors} / ${agentMetrics.toolCalls}`, { icon: iconWorker("h-3.5 w-3.5") })}
+      ${statPill("Run Mismatch", String(agentMetrics.mismatchedRuns), { icon: iconRun("h-3.5 w-3.5") })}
+      ${statPill("Receipts", String(analysis.receiptCount), { icon: iconReceipt("h-3.5 w-3.5") })}
+      ${statPill("Candidate Tokens", analysis.metrics.candidates.totalTokensUsed.toLocaleString(), { icon: iconTokens("h-3.5 w-3.5") })}
+    </div>
+
+    ${analysis.anomalies.length ? `<div class="space-y-2">
+      <div class="${sectionLabelClass}">Anomalies</div>
+      ${analysis.anomalies.slice(0, 8).map((anomaly) => `<div class="${softPanelClass} p-3 flex flex-col gap-1.5">
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-foreground">${esc(anomaly.kind.replaceAll("_", " "))}</div>
+            <div class="mt-1 text-xs text-foreground">${esc(anomaly.summary)}</div>
+          </div>
+          <span class="inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${analysisSeverityClass(anomaly.severity)}">${esc(anomaly.severity)}</span>
+        </div>
+        <div class="text-[10px] text-muted-foreground">
+          ${esc([
+            anomaly.at ? formatTs(anomaly.at) : undefined,
+            anomaly.taskId ? `Task ${anomaly.taskId}` : undefined,
+            anomaly.jobId ? `Job ${anomaly.jobId}` : undefined,
+            anomaly.runId ? `Run ${anomaly.runId}` : undefined,
+          ].filter(Boolean).join(" · ") || "Derived signal")}
+        </div>
+      </div>`).join("")}
+    </div>` : ""}
+
+    ${analysis.recommendations.length ? `<div class="space-y-2">
+      <div class="${sectionLabelClass}">Recommendations</div>
+      ${analysis.recommendations.slice(0, 6).map((recommendation) => `<div class="${softPanelClass} p-3 text-xs text-foreground">${esc(recommendation)}</div>`).join("")}
+    </div>` : ""}
+
+    ${agentMetrics.topTools.length ? `<div class="space-y-2">
+      <div class="${sectionLabelClass}">Top Tools</div>
+      ${agentMetrics.topTools.slice(0, 6).map((tool) => `<div class="${softPanelClass} p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-sm font-semibold text-foreground">${esc(tool.tool)}</div>
+          <div class="text-[10px] text-muted-foreground">${esc(`${tool.count} calls · ${tool.errorCount} errors`)}</div>
+        </div>
+        <div class="mt-1 text-[11px] text-muted-foreground">
+          ${esc([
+            tool.avgDurationMs ? `${Math.round(tool.avgDurationMs)} ms avg` : undefined,
+            tool.totalDurationMs ? `${Math.round(tool.totalDurationMs)} ms total` : undefined,
+            tool.truncatedObservations ? `${tool.truncatedObservations} truncated` : undefined,
+          ].filter(Boolean).join(" · ") || "Observed without duration data")}
+        </div>
+      </div>`).join("")}
+    </div>` : ""}
+
+    ${recentSequence.length ? `<div class="space-y-2">
+      <div class="${sectionLabelClass}">Recent Sequence</div>
+      ${recentSequence.map((entry) => `<div class="${softPanelClass} p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs font-semibold text-foreground">${esc(entry.type)}</div>
+          <div class="text-[10px] text-muted-foreground">${esc(formatTs(entry.at))}</div>
+        </div>
+        <div class="mt-1 text-xs text-foreground">${esc(entry.summary)}</div>
+      </div>`).join("")}
+    </div>` : ""}
+  </div>`;
+};
+
 const renderLivePanel = (model: FactoryInspectorModel): string => {
   if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   const liveSteps = renderFactoryRunSteps(model.activeRun, {
@@ -482,6 +581,7 @@ const renderDebugPanel = (model: FactoryInspectorModel): string => {
 const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: FactoryInspectorIslandOptions): string => {
   const tabs: ReadonlyArray<{ readonly id: FactoryInspectorRouteModel["panel"]; readonly label: string }> = [
     { id: "overview", label: "Overview" },
+    { id: "analysis", label: "Analysis" },
     { id: "execution", label: "Tasks" },
     { id: "live", label: "Live Output" },
     { id: "receipts", label: "Receipts" },
@@ -511,6 +611,7 @@ const renderInspectorPanel = (model: FactoryInspectorModel): string => {
   let content = "";
   switch (model.panel) {
     case "overview": content = renderOverviewPanel(model); break;
+    case "analysis": content = renderAnalysisPanel(model); break;
     case "execution": content = renderExecutionPanel(model); break;
     case "live": content = renderLivePanel(model); break;
     case "receipts": content = renderReceiptsPanel(model); break;
