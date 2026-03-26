@@ -1,13 +1,67 @@
 # CLI API (`receipt`)
 
-Binary entrypoint: `receipt` (runs `src/cli.ts` through Bun).
+Binary entrypoint: `receipt`.
 
-If not installed globally, run through Bun:
+Install published CLI:
+
+```bash
+npm install -g receipt-agent-cli
+```
+
+Run from source (repo development):
 ```bash
 bun src/cli.ts <command> [args]
 ```
 
+## Setup and Prerequisites
+
+Minimum versions:
+
+- Node.js `>=20.0.0`
+- GitHub CLI (`gh`) `>=2.81.0`
+- AWS CLI v2 `>=2.0.0`
+
+First-run command:
+
+```bash
+receipt start
+```
+
+`receipt start` checks:
+
+1. OpenAI API key (required and validated)
+2. `gh` install + auth state for `github.com`
+3. `aws` install + auth state
+4. AWS account/profile selection
+5. Local config persistence
+
+Reconfigure behavior:
+
+- `receipt start`: reruns checks and reuses saved values as defaults
+- `receipt start --reset`: ignores saved values and configures from scratch
+
+Config path:
+
+- `~/.receipt/config.json`
+
 ## Commands
+
+### receipt start [--reset]
+- Purpose: configure or reconfigure CLI runtime credentials and identity targets.
+- Required checks:
+  - valid OpenAI API key
+  - authenticated `gh` login on `github.com`
+  - authenticated AWS identity via CLI credentials/profile
+- Behavior:
+  - `receipt start` reruns checks and pre-fills from saved config where possible
+  - `receipt start --reset` ignores saved selections and runs full setup as new
+- Output:
+  - success summary with saved config path and selected GitHub/AWS identities
+  - non-zero exit when required checks are not satisfied and user aborts retries
+- Example:
+```bash
+receipt start --reset
+```
 
 ### receipt new <agent-id>
 - Purpose: scaffold `src/agents/<agent-id>.agent.ts`.
@@ -220,6 +274,16 @@ receipt factory abort-job job_demo --reason "cancel stale run"
 ```bash
 receipt factory codex-probe --mode both --reply status-ok
 ```
+
+## Setup Troubleshooting
+
+| Failure | Command to run | Then |
+| --- | --- | --- |
+| `gh` not found | `brew install gh` (or your package manager) | rerun `receipt start` |
+| GitHub auth missing | `gh auth login` | rerun `receipt start` |
+| `aws` not found | `brew install awscli` (or your package manager) | rerun `receipt start` |
+| AWS auth missing | `aws configure` or `aws sso login --profile <profile>` | rerun `receipt start` |
+| OpenAI key invalid | provide a valid API key when prompted | retry inside setup |
 
 ## Resolution Rules
 - `run-id|stream` arguments:

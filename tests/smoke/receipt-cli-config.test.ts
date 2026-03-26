@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   hydrateEnvFromReceiptCliConfig,
   loadReceiptCliConfig,
+  readReceiptCliConfigState,
   resolveReceiptCliConfigPath,
   writeReceiptCliConfig,
   type ReceiptCliConfig,
@@ -34,6 +35,12 @@ test("receipt cli config: write and load round-trip", async () => {
   };
   const written = await writeReceiptCliConfig(config, tempHome);
   expect(written).toBe(resolveReceiptCliConfigPath(tempHome));
+  if (process.platform !== "win32") {
+    const configDirMode = (await fs.stat(path.dirname(written))).mode & 0o777;
+    const configFileMode = (await fs.stat(written)).mode & 0o777;
+    expect(configDirMode).toBe(0o700);
+    expect(configFileMode).toBe(0o600);
+  }
   const loaded = await loadReceiptCliConfig(tempHome);
   expect(loaded).toEqual(config);
 }, 60_000);
@@ -68,5 +75,18 @@ test("receipt cli config: hydrates environment values", () => {
     process.env.RECEIPT_GITHUB_USER = priorGithubUser;
     process.env.AWS_PROFILE = priorAwsProfile;
     process.env.RECEIPT_AWS_ACCOUNT_ID = priorAwsAccount;
+  }
+});
+
+test("receipt cli config: reports invalid schema with reason", async () => {
+  const tempHome = await createTempDir("receipt-cli-config-invalid");
+  const configPath = resolveReceiptCliConfigPath(tempHome);
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify({ version: 999 }), "utf-8");
+  const state = await readReceiptCliConfigState(tempHome);
+  expect(state.status).toBe("invalid");
+  if (state.status === "invalid") {
+    expect(state.reason).toContain("unsupported config version");
+    expect(state.configPath).toBe(configPath);
   }
 });

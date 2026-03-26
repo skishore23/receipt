@@ -13,15 +13,62 @@ A receipt-native framework for long-lived agents. Every message, tool call, and 
 
 ## Install
 
+For CLI users:
+
+```bash
+npm install -g receipt-agent-cli
+```
+
+For repo contributors:
+
 ```bash
 bun install
 bun run build # prepares web assets
 ```
 
+## CLI Quickstart
+
+```bash
+receipt start
+```
+
+`receipt start` checks and configures:
+
+- OpenAI API key (validated before setup continues)
+- GitHub CLI authentication for `github.com`
+- AWS CLI authentication and selected account/profile
+
+### Prerequisites (minimum versions)
+
+- Node.js `>=20.0.0`
+- GitHub CLI (`gh`) `>=2.81.0`
+- AWS CLI v2 `>=2.0.0`
+
+### Setup behavior
+
+- `receipt start`: reruns full setup checks and reuses saved selections as defaults
+- `receipt start --reset`: reruns setup from scratch and ignores saved selections
+
+### Troubleshooting
+
+| Check failed | What to run | Retry path |
+| --- | --- | --- |
+| `gh` missing | `brew install gh` (or your package manager) | Re-run `receipt start` |
+| GitHub auth missing | `gh auth login` | Re-run `receipt start` |
+| `aws` missing | `brew install awscli` (or your package manager) | Re-run `receipt start` |
+| AWS auth missing | `aws configure` or `aws sso login --profile <profile>` | Re-run `receipt start` |
+| OpenAI key invalid | Enter a valid key when prompted | Stay in setup prompt and retry |
+
+### Config and security
+
+- Setup writes local config to `~/.receipt/config.json`.
+- Stored values include OpenAI key, selected GitHub login, and selected AWS identity.
+- Use `receipt start --reset` to rotate/reselect credentials and rewrite this file.
+
 ## CLI
 
 ```bash
-receipt start # one-time setup (OpenAI key + GitHub + AWS)
+receipt start # setup/recheck OpenAI key + GitHub + AWS
 receipt new my-agent --template basic
 receipt dev
 receipt run theorem --problem "Prove a simple claim"

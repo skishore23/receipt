@@ -1,8 +1,21 @@
 {
-  "name": "receipt-cli",
+  "name": "receipt-agent-cli",
   "private": false,
   "type": "module",
   "version": "0.1.0",
+  "description": "Immutable, replayable chains for agent runs",
+  "author": "Receipt contributors",
+  "homepage": "https://github.com/skishore23/receipt",
+  "bugs": {
+    "url": "https://github.com/skishore23/receipt/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skishore23/receipt.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "workspaces": [
     "packages/*"
   ],
@@ -10,16 +23,16 @@
     "node": ">=20"
   },
   "bin": {
-    "receipt": "src/cli.ts"
+    "receipt": "dist/cli.js"
   },
   "files": [
-    "src",
     "dist",
     "prompts",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build:cli": "node scripts/build-cli.mjs",
     "assets:prepare": "bun scripts/copy-runtime-assets.mjs",
     "css:build": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --minify",
     "css:watch": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --watch",
@@ -43,19 +56,21 @@
     "docker:up": "bash scripts/docker-dev.sh",
     "docker:down": "bash scripts/docker-dev.sh down",
     "clean": "bun -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "bun run clean && bun run assets:prepare && bun run css:build",
+    "build": "bun run clean && bun run build:cli && bun run assets:prepare && bun run css:build",
+    "prepack": "npm run build:cli",
+    "pack:smoke": "node scripts/smoke-pack-install.mjs",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
-    "verify": "bun run build && bun run check:no-any && bun run test:smoke"
+    "verify": "bun run build && bun run check:no-any && bun run test:smoke",
+    "verify:release": "npm run build:cli && bun run test:smoke && npm run pack:smoke && node scripts/check-changelog.mjs"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
     "@hono/zod-validator": "^0.7.6",
     "@inkjs/ui": "^2.0.0",
     "@oblivionocean/minigfm": "^1.0.7",
-    "@receipt/core": "workspace:*",
     "@resonatehq/sdk": "^0.9.6",
     "@tailwindcss/cli": "^4.2.1",
     "clsx": "^2.1.1",
@@ -69,9 +84,11 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@receipt/core": "workspace:*",
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
+    "esbuild": "^0.25.12",
     "ts-morph": "^27.0.2",
     "typescript": "^5.6.0"
   }

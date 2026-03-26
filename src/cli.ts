@@ -21,7 +21,7 @@ import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
 import { resolveBunRuntime } from "./lib/runtime-paths";
 import { resolveResonateGroups } from "./adapters/resonate-config";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "./modules/job";
-import { hydrateEnvFromReceiptCliConfig, loadReceiptCliConfig } from "./receipt-cli/config";
+import { hydrateEnvFromReceiptCliConfig, readReceiptCliConfigState } from "./receipt-cli/config";
 import { runReceiptStart } from "./receipt-cli/start";
 
 type ParsedArgs = {
@@ -31,8 +31,6 @@ type ParsedArgs = {
 };
 
 const ROOT = process.cwd();
-const RECEIPT_CLI_CONFIG = await loadReceiptCliConfig();
-hydrateEnvFromReceiptCliConfig(RECEIPT_CLI_CONFIG);
 const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
 const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
@@ -132,6 +130,9 @@ const asIntegerFlag = (flags: Flags, ...keys: ReadonlyArray<string>): number | u
   }
   return undefined;
 };
+
+const asBoolean = (flags: Flags, key: string): boolean =>
+  flags[key] === true || flags[key] === "true";
 
 const getQueue = () => {
   const runtime = createRuntime<JobCmd, JobEvent, JobState>(
@@ -680,6 +681,17 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
 const main = async (): Promise<void> => {
   const parsed = parseArgs(process.argv.slice(2));
   const command = parsed.command;
+  const configState = await readReceiptCliConfigState();
+  const isStartReset = command === "start" && asBoolean(parsed.flags, "reset");
+  if (configState.status === "invalid") {
+    if (!isStartReset) {
+      throw new Error(
+        `Invalid receipt setup config at ${configState.configPath} (${configState.reason}). Run \`receipt start --reset\` to reconfigure.`,
+      );
+    }
+  } else if (configState.status === "valid" && !isStartReset) {
+    hydrateEnvFromReceiptCliConfig(configState.config);
+  }
 
   if (!command) {
     if (isInteractiveTerminal()) {
