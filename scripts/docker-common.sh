@@ -89,3 +89,25 @@ receipt_docker_prepare() {
     echo "[receipt-docker] warning: ${HOST_HOME}/.codex does not look initialized; Codex auth may fail until the host CLI is signed in." >&2
   fi
 }
+
+receipt_docker_stop_conflicting_projects() {
+  local target_project="${1}"
+  local project
+  local container_ids
+  local stopped_any=0
+  local projects=("receipt" "receipt-dev" "receipt-prod")
+
+  for project in "${projects[@]}"; do
+    if [ "${project}" = "${target_project}" ]; then
+      continue
+    fi
+    container_ids="$(docker ps -q --filter "label=com.docker.compose.project=${project}")"
+    if [ -n "${container_ids}" ]; then
+      echo "[receipt-docker] stopping conflicting ${project} stack" >&2
+      docker rm -f ${container_ids} >/dev/null 2>&1 || true
+      stopped_any=1
+    fi
+  done
+
+  return "${stopped_any}"
+}
