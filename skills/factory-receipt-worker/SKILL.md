@@ -21,6 +21,7 @@ Do this before making code or review claims:
 ## Working Rules
 
 - Treat the worktree packet and receipt surfaces as the primary worker context.
+- Treat Resonate as the execution control plane and receipts as the evidence/read-model. When job state and packet evidence disagree, inspect the current objective state and recent receipts before assuming old queue behavior.
 - Do not run `receipt factory inspect` from inside a task worktree unless the runtime explicitly mounted a writable receipt snapshot.
 - If the packet links to an objective, use the mounted recent receipts and memory output before claiming prior decisions, inherited failures, or missing context.
 - Treat the prompt as bootstrap only.

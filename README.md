@@ -124,7 +124,11 @@ bun run test:smoke
 
 The repo now includes a single-container Docker setup that runs:
 
-- the Receipt server
+- the Receipt API process
+- the Resonate driver process
+- the chat worker process
+- the control worker process
+- the codex worker process
 - an embedded Resonate server with SQLite persistence
 - the `resonate` CLI
 - the `codex` CLI used by Factory task workers
@@ -132,10 +136,23 @@ The repo now includes a single-container Docker setup that runs:
 Start it with:
 
 ```bash
-LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) docker compose up --build
+bun run docker:up
 ```
 
-The container mounts the repo into `/workspace/receipt`, stores Resonate state at `.receipt/resonate/resonate.db`, and exposes:
+That launcher:
+
+- detects and forwards your local UID/GID
+- mounts the repo plus `${HOME}/.codex`
+- creates the local `.receipt` and Codex mount directories if needed
+- applies the tuned Resonate worker and queue defaults automatically
+
+If you want detached mode:
+
+```bash
+bun run docker:up -- up --build -d
+```
+
+The container mounts the repo into `/workspace/receipt`, stores Resonate state at `.receipt/resonate/resonate.db`, runs with `JOB_BACKEND=resonate`, and exposes:
 
 - `http://localhost:8787` for Receipt
 - `http://localhost:8001` for Resonate HTTP
@@ -145,7 +162,15 @@ The compose file also mounts `${HOME}/.codex` into the container so `codex exec`
 
 For Linux hosts, the compose service sets `seccomp=unconfined` and `apparmor=unconfined` so Codex can install its own nested Landlock/seccomp sandbox inside the container. If you remove those, `codex exec --sandbox read-only|workspace-write` may fail inside Docker.
 
-The canonical source entrypoints in this repo are `bun src/cli.ts` and `bun --watch src/server.ts`.
+For local non-Docker startup with the Resonate control plane, use:
+
+```bash
+bun run start:resonate
+```
+
+That command now starts both the local Resonate server and the full multi-process Receipt runtime. It uses SQLite at `.receipt/resonate/resonate.db`, so the only extra local prerequisite is that the `resonate` CLI is installed on your machine.
+
+The canonical source entrypoints in this repo are `bun src/cli.ts`, `bun src/server.ts`, and `bun scripts/start-resonate-runtime.mjs`.
 
 The server auto-loads route modules from `src/agents/*.agent.ts`.
 

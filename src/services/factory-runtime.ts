@@ -1,4 +1,5 @@
 import { LocalCodexExecutor } from "../adapters/codex-executor";
+import type { JobBackend } from "../adapters/job-backend";
 import {
   createMemoryTools,
   decideMemory,
@@ -10,7 +11,6 @@ import {
   type MemoryTools,
 } from "../adapters/memory-tools";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { jsonlQueue } from "../adapters/jsonl-queue";
 import { embed } from "../adapters/openai";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobHandler } from "../engine/runtime/job-worker";
@@ -19,7 +19,7 @@ import type { JobCmd, JobEvent, JobState } from "../modules/job";
 import { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory-service";
 import { runFactoryCodexJob } from "../agents/factory-chat";
 
-export type FactoryQueue = ReturnType<typeof jsonlQueue>;
+export type FactoryQueue = JobBackend;
 export type FactoryJobRuntime = ReturnType<typeof createRuntime<JobCmd, JobEvent, JobState>>;
 
 type FactoryServiceRuntimeOptions = {

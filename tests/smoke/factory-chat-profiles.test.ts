@@ -94,12 +94,12 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.objectivePolicy.defaultObjectiveMode).toBe("investigation");
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("none");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("isolated");
-  expect(resolved.objectivePolicy.maxParallelChildren).toBe(1);
+  expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
   expect(resolved.promptPath).toBe("profiles/infrastructure/PROFILE.md");
   expect(resolved.toolAllowlist).toContain("factory.dispatch");
   expect(resolved.toolAllowlist).not.toContain("profile.handoff");
   expect(resolved.systemPrompt).toContain("You are the active Factory profile in the product UI.");
-  expect(resolved.systemPrompt).toContain("single task at a time");
+  expect(resolved.systemPrompt).toContain("up to 20 parallel child runs");
 });
 
 test("factory chat profiles: falls back to the default profile without route-hint selection", async () => {
@@ -177,7 +177,7 @@ test("factory chat profiles: checked-in software profile resolves worktree deliv
   expect(resolved.objectivePolicy.defaultObjectiveMode).toBe("delivery");
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("repo_profile");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
-  expect(resolved.objectivePolicy.maxParallelChildren).toBe(1);
+  expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
   expect(resolved.systemPrompt).toContain("published or clearly blocked");
   expect(resolved.systemPrompt).toContain("PR link");
 });

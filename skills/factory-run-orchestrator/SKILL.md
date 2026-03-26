@@ -28,6 +28,7 @@ Stay grounded in the live run and objective state. Inspect receipts, child jobs,
 ## Orchestration Rules
 
 - The objective stream is the authority for planning, scoring, rebracketing, and integration.
+- The default runtime uses Resonate for execution and receipts for projections. Prefer current objective state, job state, and evidence cards over assumptions from old queue behavior.
 - Child jobs and child run streams are evidence producers, not decision makers.
 - Codex is a worker. Treat it like a child producer whose output must be inspected and integrated.
 - Treat direct `codex.run` as a read-only probe. If the work needs code changes, create or react a Factory objective instead.

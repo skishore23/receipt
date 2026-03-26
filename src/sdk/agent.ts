@@ -17,6 +17,8 @@ export type RunAgentInput<
   readonly stream: string;
   readonly runId: string;
   readonly deps: Deps;
+  readonly remoteActionDeps?: Deps;
+  readonly remoteActions?: Parameters<typeof runAgentLoop<Cmd, Event, State, Receipts, View, Deps>>[0]["remoteActions"];
   readonly now?: () => number;
   readonly wrap?: (event: Event, meta: { readonly eventId: string; readonly expectedPrev?: string }) => Cmd;
 };
@@ -58,6 +60,8 @@ export async function runDefinedAgent<
     runId: input.runId,
     wrap: input.wrap ?? defaultWrap<Cmd, Event>,
     deps: input.deps,
+    remoteActionDeps: input.remoteActionDeps,
+    remoteActions: input.remoteActions,
     now: input.now,
   });
 }

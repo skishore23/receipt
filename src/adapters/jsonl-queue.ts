@@ -102,6 +102,7 @@ export type WaitForWorkOptions = {
 export type JsonlQueue = {
   readonly enqueue: (input: EnqueueJobInput) => Promise<QueueJob>;
   readonly leaseNext: (opts: LeaseOptions) => Promise<QueueJob | undefined>;
+  readonly leaseJob: (jobId: string, workerId: string, leaseMs: number) => Promise<QueueJob | undefined>;
   readonly heartbeat: (jobId: string, workerId: string, leaseMs: number) => Promise<QueueJob | undefined>;
   readonly progress: (
     jobId: string,
@@ -137,6 +138,7 @@ type JsonlQueueOptions = {
   readonly now?: () => number;
   readonly onJobChange?: (jobs: ReadonlyArray<QueueJob>) => Promise<void> | void;
   readonly watchDir?: string;
+  readonly expireLeasesOnRefresh?: boolean;
 };
 
 const TERMINAL = new Set<JobStatus>(["completed", "failed", "canceled"]);
@@ -183,15 +185,18 @@ const compareQueuedJobs = (left: QueueJob, right: QueueJob): number =>
   || left.id.localeCompare(right.id);
 
 const CROSS_PROCESS_POLL_MS = 250;
+const CROSS_PROCESS_FULL_REFRESH_MS = 30_000;
 const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
 export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   const nowTs = opts.now ?? Date.now;
+  const expireLeasesOnRefresh = opts.expireLeasesOnRefresh ?? true;
   const jobStateCache = new Map<string, JobState>();
   let knownJobIds: ReadonlyArray<string> | undefined;
   let writeLock = Promise.resolve();
   let manifestSyncAt = 0;
+  let lastFullRefreshAt = 0;
   type QueueWaiter = {
     readonly ready: (snapshot: QueueSnapshot) => boolean;
     readonly resolve: (snapshot: QueueSnapshot) => void;
@@ -486,7 +491,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     commands: record.commands.map(toCommandRecord),
   });
 
-  const refresh = async (): Promise<QueueSnapshot> => {
+  const refreshAllJobs = async (): Promise<ReadonlyArray<QueueJob>> => {
     const changed = await withWriteLock(async () => {
       const ids = await discoverJobIds();
       const jobs = (await Promise.all(ids.map((jobId) => loadQueueJob(jobId))))
@@ -495,9 +500,42 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       for (const job of resetIndex(jobs)) {
         changedJobs.set(job.id, cloneJob(job));
       }
-      await handleExpiredLeases(nowTs(), changedJobs);
+      if (expireLeasesOnRefresh) {
+        await handleExpiredLeases(nowTs(), changedJobs);
+      }
       return [...changedJobs.values()].sort(compareRecentJobs);
     });
+    lastFullRefreshAt = nowTs();
+    return changed;
+  };
+
+  const refresh = async (): Promise<QueueSnapshot> => {
+    if (expireLeasesOnRefresh || !index.loaded || (nowTs() - lastFullRefreshAt) >= CROSS_PROCESS_FULL_REFRESH_MS) {
+      const changed = await refreshAllJobs();
+      if (changed.length > 0) notifyWaiters();
+      await publishChangedJobList(changed);
+      return snapshot();
+    }
+
+    const ids = await discoverJobIds();
+    const changedJobs = new Map<string, QueueJob>();
+    const idsToRefresh = [
+      ...new Set([
+        ...ids.filter((jobId) => !index.jobsById.has(jobId)),
+        ...[...index.jobsById.values()]
+          .filter((job) => !TERMINAL.has(job.status))
+          .map((job) => job.id),
+      ]),
+    ];
+    if (idsToRefresh.length === 0) return snapshot();
+
+    await withWriteLock(async () => {
+      for (const jobId of idsToRefresh) {
+        await loadAuthoritativeJob(jobId, changedJobs);
+      }
+      index.loaded = true;
+    });
+    const changed = [...changedJobs.values()].sort(compareRecentJobs);
     if (changed.length > 0) notifyWaiters();
     await publishChangedJobList(changed);
     return snapshot();
@@ -750,6 +788,29 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         }, changed);
         const current = index.jobsById.get(next.id);
         return current ? cloneJob(current) : undefined;
+      });
+      if (changed.size > 0) notifyWaiters();
+      await publishChangedJobs(changed);
+      return leased;
+    },
+
+    leaseJob: async (jobId, workerId, leaseMs) => {
+      await ensureIndexLoaded();
+      const changed = new Map<string, QueueJob>();
+      const leased = await withWriteLock(async () => {
+        const currentJob = await loadAuthoritativeJob(jobId, changed);
+        if (!currentJob) return undefined;
+        if (currentJob.status !== "queued") return cloneJob(currentJob);
+        const attempt = currentJob.attempt + 1;
+        await emitEvent({
+          type: "job.leased",
+          jobId,
+          workerId,
+          leaseMs: Math.max(1_000, leaseMs),
+          attempt,
+        }, changed);
+        const next = index.jobsById.get(jobId);
+        return next ? cloneJob(next) : undefined;
       });
       if (changed.size > 0) notifyWaiters();
       await publishChangedJobs(changed);

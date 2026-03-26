@@ -7,14 +7,19 @@ import { pathToFileURL } from "node:url";
 
 import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryState } from "./adapters/memory-tools";
 import { embed } from "./adapters/openai";
+import type { JobBackend } from "./adapters/job-backend";
 import { jsonBranchStore, jsonlStore } from "./adapters/jsonl";
 import { jsonlQueue } from "./adapters/jsonl-queue";
+import { resonateJobBackend } from "./adapters/resonate-job-backend";
+import { createResonateClient, createResonateDriverStarter } from "./adapters/resonate-runtime";
 import type { Flags } from "./cli.types";
 import { createRuntime } from "@receipt/core/runtime";
 import { runAgentLoop } from "./engine/runtime/agent-loop";
+import { createResonateAgentActionAdapter } from "./engine/runtime/resonate-agent-actions";
 import { handleFactoryCommand } from "./factory-cli/commands";
 import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
 import { resolveBunRuntime } from "./lib/runtime-paths";
+import { resolveResonateGroups } from "./adapters/resonate-config";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "./modules/job";
 
 type ParsedArgs = {
@@ -26,6 +31,7 @@ type ParsedArgs = {
 const ROOT = process.cwd();
 const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
+const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
 const isInteractiveTerminal = (): boolean =>
   Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
@@ -44,7 +50,12 @@ Commands:
   receipt replay <run-id|stream>
   receipt fork <run-id|stream> --at <index> [--name <branch-name>]
   receipt inspect <run-id|stream>
-  receipt jobs [--status queued|leased|running|completed|failed|canceled] [--limit <n>]
+  receipt jobs [list] [--status queued|leased|running|completed|failed|canceled] [--limit <n>]
+  receipt jobs enqueue <agent-id> [--lane chat|collect|steer|follow_up] [--payload-json <json>] [--job-id <id>] [--max-attempts <n>] [--session-key <key>] [--singleton-mode allow|cancel|steer]
+  receipt jobs wait <job-id> [--timeout-ms <n>]
+  receipt jobs steer <job-id> [--payload-json <json>]
+  receipt jobs follow-up <job-id> [--payload-json <json>]
+  receipt jobs abort <job-id> [--reason <text>]
   receipt abort <job-id> [--reason <text>]
   receipt memory <read|search|summarize|commit|diff> <scope> [options]
   receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|resume|react|promote|cancel|cleanup|archive|abort-job|codex-probe]`);
@@ -126,6 +137,16 @@ const getQueue = () => {
     initialJob
   );
   return jsonlQueue({ runtime, stream: "jobs" });
+};
+
+const getJobBackend = (): JobBackend => {
+  const base = getQueue();
+  if (JOB_BACKEND !== "resonate") return base;
+  const client = createResonateClient("api");
+  return resonateJobBackend({
+    base,
+    startDriver: createResonateDriverStarter(client),
+  });
 };
 
 const getMemoryTools = () => {
@@ -333,12 +354,21 @@ const commandRun = async (agentId: string, flags: Flags): Promise<void> => {
       });
     }
 
+    const remoteActions = JOB_BACKEND === "resonate"
+      ? createResonateAgentActionAdapter(createResonateClient("api"), {
+        dataDir: DATA_DIR,
+        defaultTargetGroup: resolveResonateGroups().chat,
+        })
+      : undefined;
+
     await runAgentLoop({
       spec: loadedDefault as unknown as Parameters<typeof runAgentLoop>[0]["spec"],
       runtime,
       stream: runStream,
       runId,
       deps: {},
+      remoteActionDeps: {},
+      remoteActions,
       wrap: (event, meta) => ({
         type: "emit",
         event,
@@ -431,8 +461,18 @@ const commandFork = async (runOrStream: string, flags: Flags): Promise<void> => 
   console.log(JSON.stringify({ ok: true, stream, at: Math.floor(at), branch: branchName }, null, 2));
 };
 
-const commandJobs = async (flags: Flags): Promise<void> => {
-  const queue = getQueue();
+const parseJsonFlag = (flags: Flags, key: string): Record<string, unknown> | undefined => {
+  const raw = asString(flags, key);
+  if (!raw) return undefined;
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`--${key} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+};
+
+const commandJobsList = async (flags: Flags): Promise<void> => {
+  const queue = getJobBackend();
   const status = asString(flags, "status");
   const limitRaw = asString(flags, "limit");
   const limit = limitRaw ? Number(limitRaw) : 50;
@@ -445,7 +485,7 @@ const commandJobs = async (flags: Flags): Promise<void> => {
 
 const commandAbort = async (jobId: string, flags: Flags): Promise<void> => {
   const reason = asString(flags, "reason") ?? "abort requested";
-  const queue = getQueue();
+  const queue = getJobBackend();
   const queued = await queue.queueCommand({
     jobId,
     command: "abort",
@@ -458,6 +498,92 @@ const commandAbort = async (jobId: string, flags: Flags): Promise<void> => {
   }
 
   console.log(JSON.stringify({ ok: true, jobId, commandId: queued.id }, null, 2));
+};
+
+const commandJobsEnqueue = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const agentId = args[0];
+  if (!agentId) throw new Error("agent id is required");
+  const queue = getJobBackend();
+  const payload = parseJsonFlag(flags, "payload-json") ?? {};
+  const laneRaw = asString(flags, "lane");
+  const lane = laneRaw === "chat" || laneRaw === "collect" || laneRaw === "steer" || laneRaw === "follow_up"
+    ? laneRaw
+    : undefined;
+  const singletonModeRaw = asString(flags, "singleton-mode");
+  const singletonMode = singletonModeRaw === "allow" || singletonModeRaw === "cancel" || singletonModeRaw === "steer"
+    ? singletonModeRaw
+    : undefined;
+  const maxAttempts = parseNumberFlag(flags, "max-attempts");
+  const job = await queue.enqueue({
+    agentId,
+    payload,
+    ...(lane ? { lane } : {}),
+    ...(singletonMode ? { singletonMode } : {}),
+    ...(typeof maxAttempts === "number" ? { maxAttempts } : {}),
+    ...(asString(flags, "job-id") ? { jobId: asString(flags, "job-id") } : {}),
+    ...(asString(flags, "session-key") ? { sessionKey: asString(flags, "session-key") } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, job }, null, 2));
+};
+
+const commandJobsWait = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const jobId = args[0];
+  if (!jobId) throw new Error("job id is required");
+  const queue = getJobBackend();
+  const timeoutMs = parseNumberFlag(flags, "timeout-ms");
+  const job = await queue.waitForJob(jobId, timeoutMs ?? 15_000, 200);
+  if (!job) throw new Error(`job not found: ${jobId}`);
+  console.log(JSON.stringify({ job }, null, 2));
+};
+
+const commandJobsCommand = async (
+  args: ReadonlyArray<string>,
+  flags: Flags,
+  command: "steer" | "follow_up" | "abort",
+): Promise<void> => {
+  const jobId = args[0];
+  if (!jobId) throw new Error("job id is required");
+  if (command === "abort") {
+    await commandAbort(jobId, flags);
+    return;
+  }
+  const queue = getJobBackend();
+  const payload = parseJsonFlag(flags, "payload-json") ?? {};
+  const queued = await queue.queueCommand({
+    jobId,
+    command,
+    payload,
+    by: "receipt-cli",
+  });
+  if (!queued) throw new Error(`job not found: ${jobId}`);
+  console.log(JSON.stringify({ ok: true, jobId, commandId: queued.id }, null, 2));
+};
+
+const commandJobs = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const subcommand = args[0];
+  switch (subcommand) {
+    case undefined:
+    case "list":
+      await commandJobsList(flags);
+      return;
+    case "enqueue":
+      await commandJobsEnqueue(args.slice(1), flags);
+      return;
+    case "wait":
+      await commandJobsWait(args.slice(1), flags);
+      return;
+    case "steer":
+      await commandJobsCommand(args.slice(1), flags, "steer");
+      return;
+    case "follow-up":
+      await commandJobsCommand(args.slice(1), flags, "follow_up");
+      return;
+    case "abort":
+      await commandJobsCommand(args.slice(1), flags, "abort");
+      return;
+    default:
+      throw new Error(`Unknown jobs subcommand '${subcommand}'`);
+  }
 };
 
 const parseNumberFlag = (flags: Flags, key: string): number | undefined => {
@@ -586,7 +712,7 @@ const main = async (): Promise<void> => {
       return;
     }
     case "jobs":
-      await commandJobs(parsed.flags);
+      await commandJobs(parsed.args, parsed.flags);
       return;
     case "abort": {
       const jobId = parsed.args[0];

@@ -51,8 +51,13 @@ RUN bun install --frozen-lockfile
 COPY . .
 
 ENV PORT=8787
+ENV JOB_BACKEND=resonate
 ENV RESONATE_URL=http://127.0.0.1:8001
-ENV RESONATE_GROUP=receipt
+ENV RESONATE_GROUP_API=receipt-api
+ENV RESONATE_GROUP_DRIVER=receipt-driver
+ENV RESONATE_GROUP_CHAT=receipt-chat
+ENV RESONATE_GROUP_CONTROL=receipt-control
+ENV RESONATE_GROUP_CODEX=receipt-codex
 ENV RECEIPT_CODEX_BIN=codex
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/usr/local/bin/receipt-entrypoint.sh"]

@@ -126,7 +126,7 @@ const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryChatResolvedObjectivePolicy = {
   defaultValidationMode: "repo_profile",
   defaultObjectiveMode: "delivery",
   defaultSeverity: 1,
-  maxParallelChildren: 1,
+  maxParallelChildren: 20,
   allowObjectiveCreation: true,
 };
 
@@ -223,7 +223,7 @@ const renderObjectivePolicy = (
   `- Default task runtime: ${objectivePolicy.defaultTaskExecutionMode}`,
   `- Cloud provider: ${profile.cloudProvider ?? "unspecified"}`,
   `- Skills: ${profile.skills.join(", ") || "none"}`,
-  `- Worker model: single task at a time, default worker ${objectivePolicy.defaultWorkerType}`,
+  `- Worker model: up to ${objectivePolicy.maxParallelChildren} parallel child runs, default worker ${objectivePolicy.defaultWorkerType}`,
 ].join("\n");
 
 export const repoKeyForRoot = (repoRoot: string): string =>

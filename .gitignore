@@ -3,6 +3,7 @@ node_modules/
 dist/
 data/
 .receipt/data/
+.receipt/resonate/
 *.log
 .DS_Store
 .env

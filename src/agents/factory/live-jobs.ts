@@ -1,6 +1,4 @@
-import { fold } from "@receipt/core/chain";
-
-import { initial as initialAgent, reduce as reduceAgent, type AgentState } from "../../modules/agent";
+import type { AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import { summarizeFactoryQueueJob } from "../../views/factory/job-presenters";
 import type {
@@ -22,9 +20,9 @@ import {
   jobParentRunId,
   jobRunId,
   normalizedWorkerId,
-  reverseFind,
   type AgentRunChain,
 } from "./shared";
+import { projectAgentRun } from "./run-projection";
 
 export const summarizeJob = (job: QueueJob): string => {
   const payloadProblem = asString(job.payload.problem);
@@ -557,8 +555,9 @@ export const summarizeActiveRunCard = (input: {
   readonly chatId?: string;
   readonly objectiveId?: string;
 }): FactoryLiveRunCard => {
-  const state = fold(input.runChain, reduceAgent, initialAgent);
-  const final = reverseFind(input.runChain, (receipt) => receipt.body.type === "response.finalized")?.body;
+  const projection = projectAgentRun(input.runChain);
+  const state = projection.state;
+  const final = projection.final;
   const failure = state.failure?.message;
   const finalContent = final?.type === "response.finalized"
     ? final.content.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim()

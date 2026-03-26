@@ -1,4 +1,22 @@
 #!/bin/sh
-export DATA_DIR='/Users/kishore/receipt/.receipt/data'
-export RECEIPT_DATA_DIR='/Users/kishore/receipt/.receipt/data'
-exec '/Users/kishore/.bun/bin/bun' '/Users/kishore/receipt/src/cli.ts' "$@"
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
+DATA_DIR="${DATA_DIR:-${ROOT}/.receipt/data}"
+RECEIPT_DATA_DIR="${RECEIPT_DATA_DIR:-${DATA_DIR}}"
+export DATA_DIR RECEIPT_DATA_DIR
+
+if [ -n "${RECEIPT_BUN_BIN:-}" ]; then
+  BUN_BIN="${RECEIPT_BUN_BIN}"
+else
+  BUN_BIN="$(command -v bun 2>/dev/null || true)"
+fi
+
+if [ -z "${BUN_BIN}" ]; then
+  echo "receipt: bun is not available on PATH" >&2
+  exit 127
+fi
+
+exec "${BUN_BIN}" "${ROOT}/src/cli.ts" "$@"

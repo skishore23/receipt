@@ -1,6 +1,6 @@
 import type { Runtime } from "@receipt/core/runtime";
 import type { Chain } from "@receipt/core/types";
-import type { AgentAction } from "../../sdk/actions";
+import type { ActionExecutionMode, AgentAction } from "../../sdk/actions";
 import type { MergePolicy } from "../../sdk/merge";
 import type { ReceiptBody, ReceiptDeclaration } from "../../sdk/receipt";
 import { runMergePolicy } from "../merge/policy";
@@ -28,6 +28,28 @@ type ViewHelpers<Receipts extends ReceiptMap> = {
 };
 
 type MergeResult = ReturnType<typeof runMergePolicy<any, any>>;
+type BufferedEvent = {
+  readonly type: string;
+  readonly body: Record<string, unknown>;
+};
+type ActionExecutionResult = {
+  readonly emitted: ReadonlyArray<BufferedEvent>;
+};
+type RemoteActionRequest<View, Deps extends Record<string, unknown>> = {
+  readonly agentId: string;
+  readonly agentVersion: string;
+  readonly stream: string;
+  readonly runId: string;
+  readonly actionId: string;
+  readonly kind: string;
+  readonly invocationId: string;
+  readonly targetGroup?: string;
+  readonly deps: Deps;
+  readonly view: View;
+};
+type RemoteActionAdapter<View, Deps extends Record<string, unknown>> = {
+  readonly execute: (input: RemoteActionRequest<View, Deps>) => Promise<ActionExecutionResult>;
+};
 
 export type ModernAgentSpec<
   Receipts extends ReceiptMap,
@@ -68,6 +90,8 @@ export type AgentLoopInput<
   readonly runId: string;
   readonly wrap: (event: Event, meta: { readonly eventId: string; readonly expectedPrev?: string }) => Cmd;
   readonly deps: Deps;
+  readonly remoteActionDeps?: Deps;
+  readonly remoteActions?: RemoteActionAdapter<View, Deps>;
   readonly now?: () => number;
   readonly afterEmit?: (event: Event | ControlReceipt) => void | Promise<void>;
 };
@@ -77,7 +101,7 @@ const toErrorMessage = (err: unknown): string =>
 
 const isEventType = (event: AnyEvent, type: string): boolean => event.type === type;
 
-const buildView = <Receipts extends ReceiptMap, View>(
+export const buildAgentView = <Receipts extends ReceiptMap, View>(
   chain: Chain<AnyEvent>,
   spec: ModernAgentSpec<Receipts, View, Record<string, unknown>>
 ): View => {
@@ -102,6 +126,41 @@ const buildView = <Receipts extends ReceiptMap, View>(
 
   return spec.view(helpers);
 };
+
+const collectActionEvents = async <
+  Receipts extends ReceiptMap,
+  View,
+  Deps extends Record<string, unknown>
+>(
+  current: AgentAction<View, <K extends keyof Receipts & string>(type: K, body: ReceiptBody<Receipts[K]>) => Promise<void> | void>,
+  input: {
+    readonly view: View;
+    readonly deps: Deps;
+  },
+): Promise<ActionExecutionResult> => {
+  const emitted: BufferedEvent[] = [];
+  const bufferedEmitDomain = <K extends keyof Receipts & string>(
+    type: K,
+    body: ReceiptBody<Receipts[K]>
+  ): Promise<void> => {
+    emitted.push({
+      type,
+      body: body as Record<string, unknown>,
+    });
+    return Promise.resolve();
+  };
+
+  await current.run({
+    ...(input.deps as Record<string, unknown>),
+    view: input.view,
+    emit: bufferedEmitDomain,
+  } as Deps & { readonly view: View; readonly emit: typeof bufferedEmitDomain });
+
+  return { emitted };
+};
+
+const actionExecutionMode = <View, EmitFn>(action: AgentAction<View, EmitFn>): ActionExecutionMode =>
+  action.execution === "remote" ? "remote" : "local";
 
 export const runAgentLoop = async <
   Cmd,
@@ -179,7 +238,7 @@ export const runAgentLoop = async <
 
   for (let iter = 0; iter < maxIterations; iter += 1) {
     const chain = await input.runtime.chain(input.stream) as Chain<AnyEvent>;
-    const view = buildView(chain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
+    const view = buildAgentView(chain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
     const emitDomain = <K extends keyof Receipts & string>(
       type: K,
       body: ReceiptBody<Receipts[K]>
@@ -193,7 +252,7 @@ export const runAgentLoop = async <
 
     const actionList = [...spec.actions(input.deps)];
     const runnable = actionList.filter((candidate) => (candidate.when ? candidate.when({ view }) : true));
-    const selection = selectDeterministicActions(runnable, spec.maxConcurrency ?? 1);
+    const selection = selectDeterministicActions(runnable, spec.maxConcurrency ?? 8);
 
     await emit({
       type: "action.selected",
@@ -205,7 +264,7 @@ export const runAgentLoop = async <
 
     if (selection.selected.length === 0) {
       const mergeChain = await input.runtime.chain(input.stream) as Chain<AnyEvent>;
-      const mergeView = buildView(mergeChain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
+      const mergeView = buildAgentView(mergeChain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
       const mergeApplied = await applyMergePolicy(mergeChain, mergeView, emitDomain);
       if (mergeApplied) continue;
       await emit({ type: "run.completed", runId: input.runId, note: "settled: no runnable actions" });
@@ -217,40 +276,51 @@ export const runAgentLoop = async <
       if (current.kind === "human") {
         await emit({ type: "human.requested", runId: input.runId, actionId: current.id });
       }
+    }
 
-      try {
-        const localEmits: Promise<void>[] = [];
-        const bufferedEmitDomain = <K extends keyof Receipts & string>(
-          type: K,
-          body: ReceiptBody<Receipts[K]>
-        ): Promise<void> => {
-          const pending = emit({ type, ...(body as Record<string, unknown>) } as unknown as Event);
-          localEmits.push(pending);
-          return pending;
-        };
-
-        await current.run({
-          ...(input.deps as Record<string, unknown>),
+    const executionResults = await Promise.allSettled(selection.selected.map(async (current, index) => {
+      if (actionExecutionMode(current) === "remote" && input.remoteActions) {
+        return input.remoteActions.execute({
+          agentId: spec.id,
+          agentVersion: spec.version,
+          stream: input.stream,
+          runId: input.runId,
+          actionId: current.id,
+          kind: current.kind,
+          invocationId: `${input.stream}:${input.runId}:iter:${iter}:action:${index}:${current.id}`,
+          targetGroup: current.targetGroup,
+          deps: (input.remoteActionDeps ?? input.deps) as Deps,
           view,
-          emit: bufferedEmitDomain,
-        } as Deps & { readonly view: View; readonly emit: typeof bufferedEmitDomain });
+        });
+      }
+      return collectActionEvents<Receipts, View, Deps>(current, {
+        deps: input.deps,
+        view,
+      });
+    }));
 
-        await Promise.all(localEmits);
-
-        if (current.kind === "human") {
-          await emit({ type: "human.responded", runId: input.runId, actionId: current.id });
-        }
-        await emit({ type: "action.completed", runId: input.runId, actionId: current.id, kind: current.kind });
-      } catch (err) {
-        const error = toErrorMessage(err);
+    for (const [index, current] of selection.selected.entries()) {
+      const outcome = executionResults[index];
+      if (!outcome || outcome.status === "rejected") {
+        const error = toErrorMessage(outcome?.reason);
         await emit({ type: "action.failed", runId: input.runId, actionId: current.id, kind: current.kind, error });
         await emit({ type: "run.failed", runId: input.runId, error });
-        throw err;
+        throw outcome?.reason;
       }
+      for (const buffered of outcome.value.emitted) {
+        await emit({
+          type: buffered.type,
+          ...(buffered.body as Record<string, unknown>),
+        } as unknown as Event);
+      }
+      if (current.kind === "human") {
+        await emit({ type: "human.responded", runId: input.runId, actionId: current.id });
+      }
+      await emit({ type: "action.completed", runId: input.runId, actionId: current.id, kind: current.kind });
     }
 
     const mergeChain = await input.runtime.chain(input.stream) as Chain<AnyEvent>;
-    const mergeView = buildView(mergeChain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
+    const mergeView = buildAgentView(mergeChain, spec as ModernAgentSpec<Receipts, View, Record<string, unknown>>);
     await applyMergePolicy(mergeChain, mergeView, emitDomain);
   }
 

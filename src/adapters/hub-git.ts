@@ -92,6 +92,7 @@ type HubGitOptions = {
 const HASH_RE = /^[0-9a-f]{4,64}$/i;
 const RECORD_SEP = "\x1e";
 const FIELD_SEP = "\x1f";
+const REMOTE_LOCK_STALE_MS = 30_000;
 
 const clean = (value: string): string => value.trim();
 
@@ -719,17 +720,30 @@ export class HubGit {
       try {
         await fs.promises.mkdir(this.bareDir, { recursive: true });
         handle = await fs.promises.open(lockPath, "wx");
-        const result = await op();
-        await handle.close();
-        await fs.promises.unlink(lockPath).catch(() => undefined);
-        return result;
+        await handle.writeFile(JSON.stringify({
+          pid: process.pid,
+          startedAt: Date.now(),
+          repoRoot: this.repoRoot,
+        }));
+        try {
+          return await op();
+        } finally {
+          await handle.close().catch(() => undefined);
+          await fs.promises.unlink(lockPath).catch(() => undefined);
+        }
       } catch (err) {
         await handle?.close().catch(() => undefined);
         if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+          const stale = await fs.promises.stat(lockPath)
+            .then((stat) => (Date.now() - stat.mtimeMs) > REMOTE_LOCK_STALE_MS)
+            .catch(() => false);
+          if (stale) {
+            await fs.promises.unlink(lockPath).catch(() => undefined);
+            continue;
+          }
           await delay(10);
           continue;
         }
-        await fs.promises.unlink(lockPath).catch(() => undefined);
         throw err;
       }
     }

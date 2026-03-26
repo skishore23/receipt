@@ -1,4 +1,5 @@
 export type ActionKind = "action" | "assistant" | "tool" | "human";
+export type ActionExecutionMode = "local" | "remote";
 
 export type ActionRunContext<View, EmitFn> = {
   readonly view: View;
@@ -13,6 +14,8 @@ export type AgentAction<View, EmitFn = (type: string, body: Record<string, unkno
   readonly watch?: ReadonlyArray<string>;
   readonly exclusive?: boolean;
   readonly maxConcurrency?: number;
+  readonly execution?: ActionExecutionMode;
+  readonly targetGroup?: string;
 };
 
 const mkAction = <View, EmitFn>(kind: ActionKind, id: string, spec: Omit<AgentAction<View, EmitFn>, "id" | "kind">): AgentAction<View, EmitFn> => ({

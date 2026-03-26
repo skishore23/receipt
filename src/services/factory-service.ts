@@ -330,17 +330,17 @@ const normalizeObjectiveSeverityInput = (
 const severityMaxParallelChildren = (severity: FactoryObjectiveSeverity): number => {
   switch (severity) {
     case 1:
-      return 1;
+      return 20;
     case 2:
-      return 2;
+      return 12;
     case 3:
-      return 4;
+      return 8;
     case 4:
-      return 2;
+      return 4;
     case 5:
-      return 1;
+      return 2;
     default:
-      return 1;
+      return 2;
   }
 };
 
@@ -642,6 +642,10 @@ export class FactoryService {
 
   private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
   private objectiveProjectionVersion = 0;
+  private objectiveStateListCache?: {
+    readonly version: number;
+    readonly states: ReadonlyArray<FactoryState>;
+  };
   private objectiveListCache?: {
     readonly version: number;
     readonly cards: ReadonlyArray<FactoryObjectiveCard>;
@@ -704,6 +708,7 @@ export class FactoryService {
 
   private invalidateObjectiveProjection(objectiveId?: string): void {
     this.objectiveProjectionVersion += 1;
+    this.objectiveStateListCache = undefined;
     this.objectiveListCache = undefined;
     if (objectiveId) {
       this.objectiveCardCache.delete(objectiveId);
@@ -1838,14 +1843,23 @@ export class FactoryService {
   }
 
   private async listObjectiveStates(): Promise<ReadonlyArray<FactoryState>> {
+    const cached = this.objectiveStateListCache;
+    if (cached && cached.version === this.objectiveProjectionVersion) {
+      return cached.states;
+    }
     await this.ensureBootstrap();
     const streams = await this.discoverObjectiveStreams();
     const states = await Promise.all(
       streams.map(async (stream) => normalizeFactoryState(await this.runtime.state(stream))),
     );
-    return states
+    const resolvedStates = states
       .filter((state) => Boolean(state.objectiveId))
       .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
+    this.objectiveStateListCache = {
+      version: this.objectiveProjectionVersion,
+      states: resolvedStates,
+    };
+    return resolvedStates;
   }
 
   private queuePositionsForStates(states: ReadonlyArray<FactoryState>): ReadonlyMap<string, number> {
@@ -3770,7 +3784,13 @@ export class FactoryService {
     if (cached?.key === cacheKey) return cached.card;
     const projection = buildFactoryProjection(state);
     const latestCandidate = projection.candidates.at(-1);
-    const resolvedReceipts = receipts ?? this.summarizedReceipts(await this.runtime.chain(objectiveStream(state.objectiveId)), 60);
+    const needsBlockedReceipts = Boolean(state.blockedReason)
+      || state.status === "blocked"
+      || state.integration.status === "conflicted";
+    const resolvedReceipts = receipts
+      ?? (needsBlockedReceipts
+        ? this.summarizedReceipts(await this.runtime.chain(objectiveStream(state.objectiveId)), 60)
+        : []);
     const slotState = (this.isTerminalObjectiveStatus(state.status) || this.releasesObjectiveSlot(state) || state.scheduler.releasedAt)
       ? "released"
       : (state.scheduler.slotState ?? "active");
@@ -3793,7 +3813,9 @@ export class FactoryService {
       updatedAt: state.updatedAt,
       latestSummary: state.latestSummary,
       blockedReason: state.blockedReason,
-      blockedExplanation: this.buildBlockedExplanation(state, resolvedReceipts),
+      blockedExplanation: needsBlockedReceipts
+        ? this.buildBlockedExplanation(state, resolvedReceipts)
+        : undefined,
       latestDecision: this.deriveLatestDecision(state),
       nextAction: this.deriveNextAction(state, queuePosition),
       activeTaskCount: projection.activeTasks.length,
@@ -4025,36 +4047,32 @@ export class FactoryService {
     const discovered = new Set<string>();
     const manifestPath = path.join(this.dataDir, "_streams.json");
     const raw = await fs.readFile(manifestPath, "utf-8").catch(() => "");
+    let manifestLoaded = false;
     if (raw.trim()) {
       try {
         const manifest = JSON.parse(raw) as { readonly byStream?: Record<string, string> };
+        manifestLoaded = true;
         for (const stream of Object.keys(manifest.byStream ?? {})) {
           if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
             discovered.add(stream);
           }
         }
       } catch {
-        // fall through to file scan
+        manifestLoaded = false;
       }
     }
-    const files = await fs.readdir(this.dataDir).catch(() => []);
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      const filePath = path.join(this.dataDir, file);
-      const firstLine = (await fs.readFile(filePath, "utf-8").catch(() => ""))
-        .split(/\r?\n/)
-        .find((line) => line.trim());
-      if (!firstLine) continue;
-      try {
-        const parsed = JSON.parse(firstLine) as { readonly stream?: string };
-        if (typeof parsed.stream === "string" && parsed.stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
-          discovered.add(parsed.stream);
-        }
-      } catch {
-        // ignore unrelated or corrupt files here; the runtime will surface corruption on actual reads
+
+    if (discovered.size > 0 || manifestLoaded) {
+      return [...discovered].sort((a, b) => a.localeCompare(b));
+    }
+
+    const runtimeStreams = await this.runtime.listStreams(`${FACTORY_STREAM_PREFIX}/`);
+    for (const stream of runtimeStreams) {
+      if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
+        discovered.add(stream);
       }
     }
-    return [...discovered];
+    return [...discovered].sort((a, b) => a.localeCompare(b));
   }
 
   private dependsTransitivelyOn(

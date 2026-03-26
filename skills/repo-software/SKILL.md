@@ -21,8 +21,10 @@ Build a fast, evidence-based picture of the current codebase so decisions come f
 ## Repo Working Rules
 
 - Treat receipts and reducers as the durable behavior layer.
+- Treat Resonate as the default execution control plane; treat receipts as the audit log and read-model unless the code path explicitly says otherwise.
 - Treat services as adapters and side-effect coordinators, not the source of truth.
 - Treat worktrees as disposable execution sandboxes, not orchestration state.
+- Check `.receipt/config.json` before assuming current Factory policy defaults; the checked-in config can intentionally override module defaults like task concurrency.
 - Prefer current code, tests, and receipts over old prompt assumptions.
 - When behavior is unclear, inspect the owning module and the nearest smoke test together.
 

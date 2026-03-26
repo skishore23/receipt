@@ -221,7 +221,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       if (preferred) return preferred;
     }
     if (!objectiveId) throw new FactoryServiceError(409, "Select an objective before sending job commands.");
-    const jobs = (await ctx.queue.listJobs({ limit: 160 }))
+    const jobs = (await loadRecentJobs(160))
       .filter((job) => jobObjectiveId(job) === objectiveId)
       .sort((left, right) => {
         const leftActive = isActiveJobStatus(left.status) ? 1 : 0;
@@ -242,10 +242,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     throw new FactoryServiceError(409, "Selected objective has no active job to control.");
   };
 
-  const projectionCacheTtlMs = 180;
+  const projectionCacheTtlMs = 900;
   const chatShellCache = new Map<string, {
     readonly expiresAt: number;
     readonly value: Promise<FactoryChatShellModel>;
+  }>();
+  const recentJobsCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<ReadonlyArray<QueueJob>>;
+  }>();
+  const profileCatalogCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<ReadonlyArray<FactoryChatProfile>>;
   }>();
   const sidebarCache = new Map<string, {
     readonly expiresAt: number;
@@ -281,6 +289,21 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     }, projectionCacheTtlMs + 20);
     return value;
   };
+
+  const loadRecentJobs = async (limit = 120): Promise<ReadonlyArray<QueueJob>> => withProjectionCache(
+    recentJobsCache,
+    JSON.stringify({
+      limit,
+      queueVersion: ctx.queue.snapshot?.().version ?? 0,
+    }),
+    () => ctx.queue.listJobs({ limit }),
+  );
+
+  const loadFactoryProfiles = async (): Promise<ReadonlyArray<FactoryChatProfile>> => withProjectionCache(
+    profileCatalogCache,
+    profileRoot,
+    () => discoverFactoryChatProfiles(profileRoot),
+  );
 
   const resolveSessionObjectiveId = async (input: {
     readonly repoRoot: string;
@@ -335,15 +358,27 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const explicitObjectiveId = input.objectiveId?.trim();
     const repoRoot = service.git.repoRoot;
     const scopedUi = Boolean(input.objectiveId?.trim() || input.chatId?.trim());
-    const [resolved, profiles, jobs] = await Promise.all([
+    const [resolved, profiles] = await Promise.all([
       resolveFactoryChatProfile({
         repoRoot,
         profileRoot,
         requestedId: input.profileId,
       }),
-      discoverFactoryChatProfiles(profileRoot),
-      ctx.queue.listJobs({ limit: 120 }),
+      loadFactoryProfiles(),
     ]);
+    let initialSessionStream: string | undefined;
+    let initialIndexChain: Awaited<ReturnType<typeof agentRuntime.chain>> = [];
+    let jobs: ReadonlyArray<QueueJob> = [];
+
+    if (explicitObjectiveId || input.jobId || input.runId) {
+      jobs = await loadRecentJobs();
+    } else if (input.chatId) {
+      initialSessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
+      initialIndexChain = await agentRuntime.chain(initialSessionStream);
+      if (collectRunIds(initialIndexChain).length > 0) {
+        jobs = await loadRecentJobs();
+      }
+    }
 
     if (explicitObjectiveId && !input.chatId) {
       const [state, detail] = await Promise.all([
@@ -557,7 +592,11 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       objectiveId: resolvedObjectiveId,
       job: selectedJob,
     });
-    const indexChain = stream ? await agentRuntime.chain(stream) : [];
+    const indexChain = stream
+      ? stream === initialSessionStream
+        ? initialIndexChain
+        : await agentRuntime.chain(stream)
+      : [];
 
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
@@ -655,7 +694,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       jobs: relevantQueueJobs,
     });
     const objectiveCards = scopedUi
-      ? await service.listObjectives({ objectiveIds: scopedObjectiveIds })
+      ? (scopedObjectiveIds.length > 0
+          ? await service.listObjectives({ objectiveIds: scopedObjectiveIds })
+          : [])
       : objectives;
     const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = objectiveCards
       .filter((objective) => !objective.archivedAt || objective.objectiveId === resolvedObjectiveId)
@@ -782,11 +823,20 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       profileRoot,
       requestedId: input.profileId,
     });
-    const shouldLoadJobs = !explicitObjectiveId || Boolean(input.jobId);
-    const [profiles, jobs] = await Promise.all([
-      discoverFactoryChatProfiles(profileRoot),
-      shouldLoadJobs ? ctx.queue.listJobs({ limit: 120 }) : Promise.resolve([] as QueueJob[]),
-    ]);
+    const profilesPromise = loadFactoryProfiles();
+    let jobs: ReadonlyArray<QueueJob> = [];
+    if (explicitObjectiveId) {
+      if (input.jobId) jobs = await loadRecentJobs();
+    } else if (input.jobId || input.runId) {
+      jobs = await loadRecentJobs();
+    } else if (input.chatId) {
+      const initialSessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
+      const indexChain = await agentRuntime.chain(initialSessionStream);
+      if (collectRunIds(indexChain).length > 0) {
+        jobs = await loadRecentJobs();
+      }
+    }
+    const profiles = await profilesPromise;
     const objectives = scopedUi ? [] : await service.listObjectives();
     const liveObjectives = objectives.filter((objective) => !objective.archivedAt);
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
@@ -816,18 +866,21 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     if (selectedJob && !scopedJobs.some((job) => job.id === selectedJob.id)) {
       scopedJobs.unshift(selectedJob);
     }
+    const scopedObjectiveIds = explicitObjectiveId
+      ? [explicitObjectiveId]
+      : collectScopedObjectiveIds({
+          requestedObjectiveId: input.objectiveId,
+          resolvedObjectiveId,
+          chatId: input.chatId,
+          items: [],
+          jobs: scopedJobs,
+        });
     const objectiveCards = scopedUi
-      ? await service.listObjectives({
-          objectiveIds: explicitObjectiveId
-            ? [explicitObjectiveId]
-            : collectScopedObjectiveIds({
-                requestedObjectiveId: input.objectiveId,
-                resolvedObjectiveId,
-                chatId: input.chatId,
-                items: [],
-                jobs: scopedJobs,
-              }),
-        })
+      ? (scopedObjectiveIds.length > 0
+          ? await service.listObjectives({
+              objectiveIds: scopedObjectiveIds,
+            })
+          : [])
       : objectives;
     const selectedObjective = objectiveCards.find((objective) => objective.objectiveId === resolvedObjectiveId);
     const profileNav: ReadonlyArray<FactoryChatProfileNav> = profiles.map((profile) => ({
@@ -982,7 +1035,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         ? service.getObjectiveState(objectiveId).catch(() => undefined)
         : Promise.resolve(undefined),
       panel === "overview" || panel === "live"
-        ? ctx.queue.listJobs({ limit: 120 }).then((jobs) =>
+        ? loadRecentJobs().then((jobs) =>
             jobs
               .filter((job) => jobObjectiveId(job) === objectiveId)
               .sort(compareJobsByRecency)
@@ -1079,7 +1132,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
     const recentJobs = objectiveJobs.length > 0
       ? objectiveJobs
-      : await ctx.queue.listJobs({ limit: 120 }).then((jobs) =>
+      : await loadRecentJobs().then((jobs) =>
           jobs
             .filter((job) => jobObjectiveId(job) === objectiveId)
             .sort(compareJobsByRecency)
@@ -1163,7 +1216,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     });
     const jobs = explicitObjectiveId && !input.jobId
       ? []
-      : await ctx.queue.listJobs({ limit: 120 });
+      : await loadRecentJobs();
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
     const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
     const resolvedObjectiveId = explicitObjectiveId ?? await resolveSessionObjectiveId({
@@ -1216,7 +1269,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       profileRoot,
       requestedId: input.profileId,
     });
-    const jobs = await ctx.queue.listJobs({ limit: 120 });
+    const jobs = await loadRecentJobs();
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
     const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
     const resolvedObjectiveId = await resolveSessionObjectiveId({
@@ -1486,7 +1539,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       profileRoot,
       requestedId: input.profileId,
     });
-    const jobs = await ctx.queue.listJobs({ limit: 120 });
+    const jobs = await loadRecentJobs();
     const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
     const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
     const resolvedObjectiveId = await resolveSessionObjectiveId({
@@ -1557,7 +1610,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           });
           const [objectives, jobs] = await Promise.all([
             service.listObjectives(),
-            ctx.queue.listJobs({ limit: 120 }),
+            loadRecentJobs(),
           ]);
           const liveObjectives = objectives.filter((objective) => !objective.archivedAt);
           const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
@@ -1806,7 +1859,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const chatId = requestedChatId(c.req.raw);
           const jobId = requestedJobId(c.req.raw);
           const selectedJob = jobId ? await ctx.queue.getJob(jobId) : undefined;
-          const jobs = await ctx.queue.listJobs({ limit: 120 });
+          const jobs = await loadRecentJobs();
           const objectiveId = await resolveSessionObjectiveId({
             repoRoot: service.git.repoRoot,
             profileId: resolved.root.id,
@@ -1968,7 +2021,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const chatId = requestedChatId(c.req.raw);
           const jobId = requestedJobId(c.req.raw);
           const selectedJob = jobId ? await ctx.queue.getJob(jobId) : undefined;
-          const jobs = await ctx.queue.listJobs({ limit: 120 });
+          const jobs = await loadRecentJobs();
           const objectiveId = await resolveSessionObjectiveId({
             repoRoot: service.git.repoRoot,
             profileId: resolved.root.id,

@@ -377,7 +377,7 @@ test("factory policy: promotion gate blocks when task completion reports remaini
   expect(detail.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote")).toBe(false);
 }, 120_000);
 
-test("factory policy: objectives stay single-task by default and still normalize dispatch policy", async () => {
+test("factory policy: objectives default to higher parallel capacity and still normalize dispatch policy", async () => {
   const { service } = await createFactoryService();
 
   const created = await service.createObjective({
@@ -392,13 +392,13 @@ test("factory policy: objectives stay single-task by default and still normalize
   await runObjectiveStartup(service, created.objectiveId);
   const ready = await service.getObjective(created.objectiveId);
 
-  expect(ready.policy.concurrency.maxActiveTasks).toBe(4);
+  expect(ready.policy.concurrency.maxActiveTasks).toBe(20);
   expect(ready.policy.throttles.maxDispatchesPerReact).toBe(1);
   expect(ready.profile.rootProfileId).toBe("software");
   expect(ready.profile.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
-  expect(ready.activeTaskCount).toBe(1);
-  expect(ready.readyTaskCount).toBe(0);
-  expect(ready.taskCount).toBe(1);
+  expect(ready.profile.objectivePolicy.maxParallelChildren).toBe(20);
+  expect(ready.activeTaskCount).toBeGreaterThanOrEqual(1);
+  expect(ready.taskCount).toBeGreaterThanOrEqual(ready.activeTaskCount);
 });
 
 test("factory policy: maxTaskRuns blocks further dispatch and surfaces a deterministic reason", async () => {

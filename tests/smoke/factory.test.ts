@@ -28,6 +28,7 @@ import {
 import type { AgentEvent } from "../../src/modules/agent";
 import createFactoryRoute, { buildActiveCodexCard, buildChatItemsForRun } from "../../src/agents/factory.agent";
 import { agentRunStream } from "../../src/agents/agent.streams";
+import { projectAgentRun } from "../../src/agents/factory/run-projection";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { factoryChatSessionStream, factoryChatStream } from "../../src/services/factory-chat-profiles";
 import { factoryChatIsland, factoryChatShell, factorySidebarIsland } from "../../src/views/factory-chat";
@@ -306,6 +307,7 @@ const createRouteTestApp = (overrides?: {
   readonly jobs?: ReadonlyArray<QueueJob>;
   readonly agentEvents?: Readonly<Record<string, ReadonlyArray<AgentEvent>>>;
   readonly onSubscribeMany?: (subscriptions: ReadonlyArray<{ readonly topic: string; readonly stream?: string }>) => void;
+  readonly onListJobs?: (limit?: number) => void;
   readonly onEnqueue?: (input: Record<string, unknown>) => QueueJob | Promise<QueueJob>;
   readonly service?: Partial<Pick<
     FactoryService,
@@ -376,7 +378,10 @@ const createRouteTestApp = (overrides?: {
     getJob: async (jobId: string) =>
       enqueuedJobs.get(jobId)
       ?? overrides?.jobs?.find((job) => job.id === jobId),
-    listJobs: async () => [...(overrides?.jobs ?? []), ...enqueuedJobs.values()],
+    listJobs: async (options?: { readonly limit?: number }) => {
+      overrides?.onListJobs?.(options?.limit);
+      return [...(overrides?.jobs ?? []), ...enqueuedJobs.values()];
+    },
     waitForJob: async () => undefined,
   };
   const stubService = {
@@ -545,6 +550,84 @@ test("factory service: objective control jobs use a dedicated worker id so /fact
   const jobs = await queue.listJobs({ limit: 10 });
   expect(jobs[0]?.agentId).toBe("factory-control");
   expect(jobs[0]?.payload.kind).toBe("factory.objective.control");
+});
+
+test("factory service: listObjectives uses the stream manifest instead of scanning the whole data dir", async () => {
+  const dataDir = await createTempDir("receipt-factory-objective-manifest");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Manifest-backed discovery",
+    prompt: "Ensure Factory objective discovery does not scan every receipt file.",
+    checks: ["git status --short"],
+  });
+
+  const originalReaddir = fs.readdir;
+  (fs as unknown as { readdir: typeof fs.readdir }).readdir = (async (...args: Parameters<typeof fs.readdir>) => {
+    const target = args[0];
+    if (typeof target === "string" && path.resolve(target) === path.resolve(dataDir)) {
+      throw new Error("factory discovery should not scan the data dir");
+    }
+    return originalReaddir(...args);
+  }) as typeof fs.readdir;
+
+  try {
+    const objectives = await service.listObjectives();
+    expect(objectives.some((objective) => objective.objectiveId === created.objectiveId)).toBe(true);
+  } finally {
+    (fs as unknown as { readdir: typeof fs.readdir }).readdir = originalReaddir;
+  }
+});
+
+test("factory service: listObjectives skips receipt-chain reads for non-blocked cards", async () => {
+  const dataDir = await createTempDir("receipt-factory-objective-card-fast-path");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Fast objective card",
+    prompt: "Keep objective cards on the fast path when nothing is blocked.",
+    checks: ["git status --short"],
+  });
+
+  const runtime = (service as unknown as { runtime: { chain: typeof service["jobRuntime"]["chain"] } }).runtime;
+  const originalChain = runtime.chain.bind(runtime);
+  let objectiveChainReads = 0;
+  runtime.chain = (async (streamName: string) => {
+    if (streamName === `factory/objectives/${created.objectiveId}`) {
+      objectiveChainReads += 1;
+    }
+    return originalChain(streamName);
+  }) as typeof runtime.chain;
+
+  try {
+    const objectives = await service.listObjectives();
+    const objective = objectives.find((item) => item.objectiveId === created.objectiveId);
+    expect(objective).toBeTruthy();
+    expect(objective?.blockedExplanation).toBeUndefined();
+    expect(objectiveChainReads).toBe(0);
+  } finally {
+    runtime.chain = originalChain;
+  }
 });
 
 test("factory service: check runner resolves source-backed workspace packages without dist outputs", async () => {
@@ -2131,6 +2214,76 @@ test("factory route: chat shell stays empty-state when thread is missing", async
   expect(response.status).toBe(200);
   expect(body).not.toContain("/factory/control?thread=objective_live");
   expect(body).toContain("No objective selected.");
+});
+
+test("factory route: empty scoped chat skips global objective and job scans", async () => {
+  let listJobsCalls = 0;
+  let listObjectivesCalls = 0;
+  const app = createRouteTestApp({
+    onListJobs: () => {
+      listJobsCalls += 1;
+    },
+    service: {
+      listObjectives: async () => {
+        listObjectivesCalls += 1;
+        return [];
+      },
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=test");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(listJobsCalls).toBe(0);
+  expect(listObjectivesCalls).toBe(0);
+  expect(body).toContain("No objective selected.");
+});
+
+test("factory run projection: reuses the folded run state for the same chain snapshot", () => {
+  const runStream = "agents/factory/demo/runs/run_projection";
+  let prev: string | undefined;
+  const push = (body: AgentEvent, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_projection",
+      problem: "Check the cached run projection.",
+      agentId: "factory",
+    }, 1),
+    push({
+      type: "run.status",
+      runId: "run_projection",
+      status: "running",
+      note: "Collecting context.",
+      agentId: "factory",
+    }, 2),
+    push({
+      type: "response.finalized",
+      runId: "run_projection",
+      content: "Projection cached.",
+      agentId: "factory",
+    }, 3),
+    push({
+      type: "run.status",
+      runId: "run_projection",
+      status: "completed",
+      note: "Done.",
+      agentId: "factory",
+    }, 4),
+  ];
+
+  const first = projectAgentRun(chain);
+  const second = projectAgentRun(chain);
+
+  expect(second).toBe(first);
+  expect(first.problem?.problem).toBe("Check the cached run projection.");
+  expect(first.final?.content).toBe("Projection cached.");
+  expect(first.state.status).toBe("completed");
 });
 
 test("factory route: explicit thread view hydrates transcript items from the objective stream", async () => {

@@ -113,6 +113,40 @@ test("jsonl queue: lane filters keep fast chat work separate from heavy jobs", a
   }
 });
 
+test("jsonl queue: leaseJob leases a specific queued job without scanning order", async () => {
+  const dir = await mkTmp("receipt-queue-lease-job");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    const first = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_first" },
+      maxAttempts: 1,
+    });
+    const second = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_second" },
+      maxAttempts: 1,
+    });
+
+    const leased = await queue.leaseJob(second.id, "worker_specific", 5_000);
+    expect(leased?.id).toBe(second.id);
+    expect(leased?.attempt).toBe(1);
+
+    const untouched = await queue.getJob(first.id);
+    expect(untouched?.status).toBe("queued");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: steer/follow-up/abort command lanes", async () => {
   const dir = await mkTmp("receipt-queue-cmd");
   try {
@@ -630,6 +664,43 @@ test("jsonl queue: refresh reaps expired leases even when no new lease is reques
 
     expect(failed?.status).toBe("failed");
     expect(failed?.lastError).toBe("lease expired");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("jsonl queue: refresh can stay read-only when lease expiry is owned elsewhere", async () => {
+  const dir = await mkTmp("receipt-queue-refresh-read-only");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({
+      runtime,
+      stream: "jobs",
+      expireLeasesOnRefresh: false,
+    });
+
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_refresh_read_only" },
+      maxAttempts: 2,
+    });
+    await queue.leaseNext({ workerId: "w_read_only", leaseMs: 1_000 });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    const before = await runtime.chain(`jobs/${job.id}`);
+    await queue.refresh();
+    const after = await runtime.chain(`jobs/${job.id}`);
+    const current = await queue.getJob(job.id);
+
+    expect(after).toHaveLength(before.length);
+    expect(current?.status).toBe("leased");
+    expect(current?.lastError).toBe(undefined);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

@@ -238,7 +238,7 @@ export const normalizeFactoryObjectivePolicy = (policy?: FactoryObjectivePolicy)
   const maxActiveTasks = clampInt(
     policy?.concurrency?.maxActiveTasks,
     1,
-    8,
+    50,
     DEFAULT_FACTORY_OBJECTIVE_POLICY.concurrency.maxActiveTasks,
   );
   return {
@@ -269,8 +269,8 @@ export const normalizeFactoryObjectivePolicy = (policy?: FactoryObjectivePolicy)
       maxDispatchesPerReact: clampInt(
         policy?.throttles?.maxDispatchesPerReact,
         1,
-        8,
-        maxActiveTasks,
+        30,
+        DEFAULT_FACTORY_OBJECTIVE_POLICY.throttles.maxDispatchesPerReact,
       ),
     },
     promotion: {

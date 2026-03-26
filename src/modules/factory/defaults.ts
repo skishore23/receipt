@@ -19,7 +19,7 @@ export const FACTORY_TASK_WORKFLOW_BUCKETS = {
 
 export const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryNormalizedObjectivePolicy = {
   concurrency: {
-    maxActiveTasks: 4,
+    maxActiveTasks: 20,
   },
   budgets: {
     maxTaskRuns: 50,
@@ -27,7 +27,7 @@ export const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryNormalizedObjectivePolicy 
     maxObjectiveMinutes: 1_440,
   },
   throttles: {
-    maxDispatchesPerReact: 4,
+    maxDispatchesPerReact: 10,
   },
   promotion: {
     autoPromote: true,
@@ -48,7 +48,7 @@ export const DEFAULT_FACTORY_OBJECTIVE_PROFILE: FactoryObjectiveProfileSnapshot 
     defaultValidationMode: "repo_profile",
     defaultObjectiveMode: "delivery",
     defaultSeverity: 1,
-    maxParallelChildren: 1,
+    maxParallelChildren: 20,
     allowObjectiveCreation: true,
   },
 };

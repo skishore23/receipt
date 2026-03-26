@@ -80,6 +80,32 @@ test("hub git mirrors source publish remotes into factory worktrees", async () =
   await expect(git(workspace.path, ["remote", "get-url", "source"])).resolves.toBe(canonicalRepoRoot);
 });
 
+test("hub git reaps a stale remote config lock during bootstrap", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-stale-lock-source");
+  const dataDir = await mkTmp("receipt-hub-git-stale-lock-data");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git stale lock test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const bareDir = path.join(dataDir, "hub", "repo.git");
+  await fs.mkdir(bareDir, { recursive: true });
+  const lockPath = path.join(bareDir, ".receipt-remote.lock");
+  await fs.writeFile(lockPath, "stale lock\n", "utf-8");
+  const staleAt = new Date(Date.now() - 120_000);
+  await fs.utimes(lockPath, staleAt, staleAt);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  await expect(fs.access(lockPath)).rejects.toThrow();
+  await expect(git(bareDir, ["remote", "get-url", "source"])).resolves.toBe(await fs.realpath(repoRoot));
+});
+
 test("hub git promotes disjoint worktree commits into a dirty source repo", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-dirty-source");
   const dataDir = await mkTmp("receipt-hub-git-dirty-data");

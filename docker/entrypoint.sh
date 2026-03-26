@@ -21,16 +21,20 @@ if [ ! -d node_modules ] || [ ! -e node_modules/.bin/tailwindcss ]; then
   bun install --frozen-lockfile
 fi
 
+echo "[entrypoint] preparing runtime assets"
+bun run assets:prepare
+bun run css:build
+
 shutdown() {
   local exit_code="${1:-0}"
   trap - INT TERM
-  if [ -n "${receipt_pid:-}" ] && kill -0 "${receipt_pid}" 2>/dev/null; then
-    kill "${receipt_pid}" 2>/dev/null || true
+  if [ -n "${app_pid:-}" ] && kill -0 "${app_pid}" 2>/dev/null; then
+    kill "${app_pid}" 2>/dev/null || true
   fi
   if [ -n "${resonate_pid:-}" ] && kill -0 "${resonate_pid}" 2>/dev/null; then
     kill "${resonate_pid}" 2>/dev/null || true
   fi
-  wait "${receipt_pid:-}" 2>/dev/null || true
+  wait "${app_pid:-}" 2>/dev/null || true
   wait "${resonate_pid:-}" 2>/dev/null || true
   exit "${exit_code}"
 }
@@ -41,21 +45,32 @@ echo "[entrypoint] starting Resonate with SQLite at ${RESONATE_SQLITE_PATH}"
 resonate serve --aio-store-sqlite-path "${RESONATE_SQLITE_PATH}" &
 resonate_pid=$!
 
+resonate_ready() {
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "${RESONATE_HTTP_URL}/" || true)"
+  [ -n "${code}" ] && [ "${code}" != "000" ]
+}
+
 for _ in $(seq 1 60); do
-  if curl -fsS "${RESONATE_HTTP_URL}/healthz" >/dev/null 2>&1; then
+  if resonate_ready; then
     break
   fi
   sleep 1
 done
 
-if ! curl -fsS "${RESONATE_HTTP_URL}/healthz" >/dev/null 2>&1; then
+if ! resonate_ready; then
   echo "[entrypoint] Resonate failed to become healthy" >&2
   exit 1
 fi
 
-echo "[entrypoint] starting Receipt on port ${PORT}"
-bun run start &
-receipt_pid=$!
+if [ "${JOB_BACKEND:-resonate}" = "resonate" ]; then
+  echo "[entrypoint] starting Receipt Resonate runtime"
+  bun scripts/start-resonate-runtime.mjs &
+else
+  echo "[entrypoint] starting Receipt on port ${PORT}"
+  bun src/server.ts &
+fi
+app_pid=$!
 
-wait -n "${resonate_pid}" "${receipt_pid}"
+wait -n "${resonate_pid}" "${app_pid}"
 shutdown "$?"

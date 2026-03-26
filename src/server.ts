@@ -7,6 +7,7 @@ import path from "node:path";
 
 import { Hono } from "hono";
 
+import type { JobBackend } from "./adapters/job-backend";
 import { jsonlStore, jsonBranchStore } from "./adapters/jsonl";
 import { jsonlQueue, type EnqueueJobInput } from "./adapters/jsonl-queue";
 import {
@@ -20,6 +21,9 @@ import {
 } from "./adapters/memory-tools";
 import { createDelegationTools } from "./adapters/delegation";
 import { createHeartbeat, type HeartbeatSpec } from "./adapters/heartbeat";
+import { resonateJobBackend } from "./adapters/resonate-job-backend";
+import { createResonateDriverStarter, createResonateRoleRuntime } from "./adapters/resonate-runtime";
+import { resolveProcessRole } from "./adapters/resonate-config";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobCmd, JobEvent, JobState } from "./modules/job";
 import { decide as decideJob, reduce as reduceJob, initial as initialJob } from "./modules/job";
@@ -38,6 +42,7 @@ import { SseHub } from "./framework/sse-hub";
 import { makeEventId, text } from "./framework/http";
 import { JobWorker, type JobHandler } from "./engine/runtime/job-worker";
 import { deriveJobFailureDecision } from "./engine/runtime/job-failure-policy";
+import { registerResonateAgentActionWorker } from "./engine/runtime/resonate-agent-actions";
 import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
 
 // ============================================================================
@@ -48,6 +53,15 @@ const PORT = Number(process.env.PORT ?? 8787);
 const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(process.cwd());
 const WORKSPACE_ROOT = FACTORY_RUNTIME.repoRoot;
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
+const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
+const STARTUP_SETTLE_MS = (() => {
+  const fallback = JOB_BACKEND === "resonate" ? 1_000 : 0;
+  const parsed = Number(process.env.RESONATE_STARTUP_SETTLE_MS ?? fallback);
+  return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : fallback;
+})();
+const PROCESS_ROLE = JOB_BACKEND === "resonate" && !process.env.RECEIPT_PROCESS_ROLE
+  ? "api"
+  : resolveProcessRole(process.env.RECEIPT_PROCESS_ROLE);
 
 // ============================================================================
 // Composition: Store -> Runtime
@@ -99,9 +113,9 @@ const parseWorkerConcurrency = (value: string | undefined, fallback: number): nu
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
 };
-const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURRENCY, 30);
-const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, 2);
-const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, 10);
+const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURRENCY, 50);
+const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, 20);
+const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, 30);
 const jobIdleResyncMs = Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000);
 const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 300_000);
 const codexJobLeaseMs = Number(process.env.CODEX_JOB_LEASE_MS ?? 900_000);
@@ -138,11 +152,11 @@ const objectiveIdForJob = (job: { readonly payload: Record<string, unknown>; rea
     : undefined;
 };
 
-let queue!: ReturnType<typeof jsonlQueue>;
-queue = jsonlQueue({
+const baseQueue = jsonlQueue({
   runtime: jobRuntime,
   stream: JOB_STREAM,
   watchDir: DATA_DIR,
+  expireLeasesOnRefresh: JOB_BACKEND === "jsonl",
   onJobChange: async (jobs) => {
     for (const job of jobs) {
       sse.publish("jobs", job.id);
@@ -177,6 +191,26 @@ queue = jsonlQueue({
     sse.publish("receipt");
   },
 });
+let queueImpl: JobBackend = baseQueue;
+const queue: JobBackend = {
+  enqueue: (input) => queueImpl.enqueue(input),
+  leaseNext: (opts) => queueImpl.leaseNext(opts),
+  leaseJob: (jobId, workerId, leaseMs) => queueImpl.leaseJob(jobId, workerId, leaseMs),
+  heartbeat: (jobId, workerId, leaseMs) => queueImpl.heartbeat(jobId, workerId, leaseMs),
+  progress: (jobId, workerId, result) => queueImpl.progress(jobId, workerId, result),
+  complete: (jobId, workerId, result) => queueImpl.complete(jobId, workerId, result),
+  fail: (jobId, workerId, error, noRetry, result) => queueImpl.fail(jobId, workerId, error, noRetry, result),
+  cancel: (jobId, reason, by) => queueImpl.cancel(jobId, reason, by),
+  queueCommand: (input) => queueImpl.queueCommand(input),
+  consumeCommands: (jobId, filter) => queueImpl.consumeCommands(jobId, filter),
+  getJob: (jobId) => queueImpl.getJob(jobId),
+  listJobs: (opts) => queueImpl.listJobs(opts),
+  waitForJob: (jobId, timeoutMs, pollMs) => queueImpl.waitForJob(jobId, timeoutMs, pollMs),
+  waitForWork: (opts) => queueImpl.waitForWork(opts),
+  notifyWorkAvailable: () => queueImpl.notifyWorkAvailable(),
+  snapshot: () => queueImpl.snapshot(),
+  refresh: () => queueImpl.refresh(),
+};
 
 const enqueueJob = async (job: EnqueueJobInput): Promise<void> => {
   const created = await queue.enqueue(job);
@@ -711,10 +745,52 @@ const workers = [
     },
   }),
 ];
-for (const worker of workers) worker.start();
-factoryService.resumeObjectives().catch((err) => {
-  console.error("[factory] resumeObjectives failed on startup", err);
-});
+const resonateRoleRuntime = JOB_BACKEND === "resonate"
+  ? createResonateRoleRuntime(PROCESS_ROLE, {
+      queue,
+      handlers: jobHandlers,
+      onError: (error) => {
+        console.error(`[resonate ${PROCESS_ROLE}]`, error);
+      },
+    })
+  : undefined;
+if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "worker-chat") {
+  registerResonateAgentActionWorker(resonateRoleRuntime!.client, DATA_DIR);
+}
+if (JOB_BACKEND === "resonate") {
+  queueImpl = resonateJobBackend({
+    base: baseQueue,
+    startDriver: createResonateDriverStarter(resonateRoleRuntime!.client),
+    onDispatchError: (error, job) => {
+      console.error(`[resonate dispatch ${job.id}]`, error);
+    },
+  });
+}
+const startRuntimeWorkers = async (): Promise<void> => {
+  if (JOB_BACKEND === "jsonl") {
+    for (const worker of workers) worker.start();
+    return;
+  }
+  await resonateRoleRuntime?.start();
+};
+
+let objectiveResumeScheduled = false;
+const scheduleObjectiveResume = (): void => {
+  if (objectiveResumeScheduled) return;
+  if (JOB_BACKEND === "resonate" && PROCESS_ROLE !== "api") return;
+  objectiveResumeScheduled = true;
+  const runResume = () => {
+    factoryService.resumeObjectives().catch((err) => {
+      console.error("[factory resume]", err);
+    });
+  };
+  if (STARTUP_SETTLE_MS <= 0) {
+    queueMicrotask(runResume);
+    return;
+  }
+  const timer = setTimeout(runResume, STARTUP_SETTLE_MS);
+  timer.unref();
+};
 
 // ============================================================================
 // Heartbeat
@@ -754,7 +830,6 @@ const heartbeats = parseHeartbeatSpecs().map((spec) =>
     },
   })
 );
-for (const hb of heartbeats) hb.start();
 
 const app = new Hono();
 
@@ -865,6 +940,8 @@ app.get("/healthz", async () => jsonResponse(200, {
   ok: true,
   uptimeSec: Math.floor(process.uptime()),
   dataDir: DATA_DIR,
+  jobBackend: JOB_BACKEND,
+  processRole: PROCESS_ROLE,
   queue: queue.snapshot(),
   codexBin: process.env.RECEIPT_CODEX_BIN ?? process.env.HUB_CODEX_BIN ?? "codex",
   resonateUrl: process.env.RESONATE_URL ?? "http://127.0.0.1:8001",
@@ -1041,16 +1118,64 @@ app.get("/assets/:file", async (c) => {
 
 app.notFound(() => text(404, "Not found"));
 
-const receiptWatcher = (() => {
-  try {
-    return fs.watch(DATA_DIR, { persistent: false }, () => {
-      sse.publish("receipt");
+const shouldServeHttp = JOB_BACKEND === "jsonl" || PROCESS_ROLE === "api";
+const shouldRunHeartbeats = JOB_BACKEND === "jsonl" || PROCESS_ROLE === "api";
+const queueRefreshMs = Number(process.env.RESONATE_QUEUE_REFRESH_MS ?? 1_000);
+let uiWarmupScheduled = false;
+const scheduleUiWarmup = (): void => {
+  if (uiWarmupScheduled) return;
+  if (!shouldServeHttp || PROCESS_ROLE !== "api") return;
+  uiWarmupScheduled = true;
+  const runWarmup = async (): Promise<void> => {
+    try {
+      await factoryService.ensureBootstrap();
+      await Promise.allSettled([
+        factoryService.listObjectives(),
+        queue.listJobs({ limit: 120 }),
+      ]);
+    } catch (err) {
+      console.error("[factory ui warmup]", err);
+    }
+  };
+  const timer = setTimeout(() => {
+    void runWarmup();
+  }, Math.max(50, Math.min(STARTUP_SETTLE_MS || 250, 500)));
+  timer.unref();
+};
+
+try {
+  await startRuntimeWorkers();
+} catch (err) {
+  console.error("[runtime] startup failed", err);
+  process.exit(1);
+}
+
+if (shouldRunHeartbeats) {
+  for (const hb of heartbeats) hb.start();
+}
+
+let queueRefreshTimer: ReturnType<typeof setInterval> | undefined;
+if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "api" && Number.isFinite(queueRefreshMs) && queueRefreshMs > 0) {
+  queueRefreshTimer = setInterval(() => {
+    queue.refresh().catch((err) => {
+      console.error("[resonate queue refresh]", err);
     });
-  } catch (err) {
-    console.warn("Receipt watcher failed:", err);
-    return undefined;
-  }
-})();
+  }, Math.max(100, Math.floor(queueRefreshMs)));
+  queueRefreshTimer.unref();
+}
+
+const receiptWatcher = shouldServeHttp
+  ? (() => {
+      try {
+        return fs.watch(DATA_DIR, { persistent: false }, () => {
+          sse.publish("receipt");
+        });
+      } catch (err) {
+        console.warn("Receipt watcher failed:", err);
+        return undefined;
+      }
+    })()
+  : undefined;
 
 const SERVER_IDLE_TIMEOUT_SECONDS = 30;
 const serverOptions: Bun.Serve.Options<undefined> = {
@@ -1060,10 +1185,19 @@ const serverOptions: Bun.Serve.Options<undefined> = {
 };
 const serveWithOptions = Bun.serve as (options: Bun.Serve.Options<undefined>) => Bun.Server<undefined>;
 
-const httpServer = serveWithOptions(serverOptions);
-console.log(`Receipt server listening on http://localhost:${PORT}`);
+const httpServer = shouldServeHttp ? serveWithOptions(serverOptions) : undefined;
+if (httpServer) {
+  console.log(`Receipt server listening on http://localhost:${PORT}`);
+} else {
+  console.log(`Receipt ${PROCESS_ROLE} runtime connected to ${process.env.RESONATE_URL ?? "http://127.0.0.1:8001"}`);
+}
+
+scheduleObjectiveResume();
+scheduleUiWarmup();
+
 console.log(`Receipt runtime root: ${WORKSPACE_ROOT}`);
 console.log(`Receipt data dir: ${DATA_DIR}${FACTORY_RUNTIME.configPath ? ` (from ${FACTORY_RUNTIME.configPath})` : ""}`);
+console.log(`Receipt backend: ${JOB_BACKEND}${JOB_BACKEND === "resonate" ? ` (${PROCESS_ROLE})` : ""}`);
 
 let shuttingDown = false;
 const shutdown = (signal: string): void => {
@@ -1071,16 +1205,22 @@ const shutdown = (signal: string): void => {
   shuttingDown = true;
   console.log(`Receipt server shutting down (${signal})`);
   receiptWatcher?.close();
+  if (queueRefreshTimer) clearInterval(queueRefreshTimer);
   for (const worker of workers) worker.stop();
   for (const hb of heartbeats) hb.stop();
+  resonateRoleRuntime?.stop();
   const forceExit = setTimeout(() => {
     process.exit(0);
   }, 2_000);
   forceExit.unref();
-  httpServer.stop();
+  httpServer?.stop();
   clearTimeout(forceExit);
   process.exit(0);
 };
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+if (!httpServer) {
+  await new Promise<void>(() => {});
+}

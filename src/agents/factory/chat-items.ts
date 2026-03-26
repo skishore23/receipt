@@ -1,6 +1,4 @@
-import { fold } from "@receipt/core/chain";
-
-import { initial as initialAgent, reduce as reduceAgent, type AgentState } from "../../modules/agent";
+import type { AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
 
@@ -14,6 +12,7 @@ import {
   reverseFind,
   type AgentRunChain,
 } from "./shared";
+import { projectAgentRun } from "./run-projection";
 
 const asRecordArray = (value: unknown): ReadonlyArray<Record<string, unknown>> =>
   Array.isArray(value)
@@ -411,9 +410,10 @@ export const buildChatItemsForRun = (
   jobsById: ReadonlyMap<string, QueueJob>,
 ): ReadonlyArray<FactoryChatItem> => {
   const items: FactoryChatItem[] = [];
-  const state = fold(chain, reduceAgent, initialAgent);
-  const firstTs = chain[0]?.ts;
-  const problem = chain.find((receipt) => receipt.body.type === "problem.set")?.body;
+  const projection = projectAgentRun(chain);
+  const state = projection.state;
+  const firstTs = projection.firstTs;
+  const problem = projection.problem;
   if (problem?.type === "problem.set") {
     items.push({
       key: `${runId}-user`,
@@ -516,7 +516,7 @@ export const buildChatItemsForRun = (
   const hasRunningWorkCard = (): boolean =>
     items.some((item) => item.kind === "work" && Boolean(item.card.running));
 
-  const final = reverseFind(chain, (receipt) => receipt.body.type === "response.finalized")?.body;
+  const final = projection.final;
   const continued = reverseFind(chain, (receipt) => receipt.body.type === "run.continued")?.body;
   const latestChildCard = [...items].reverse().find((item): item is Extract<FactoryChatItem, { kind: "work" }> =>
     item.kind === "work" && Boolean(item.card.jobId) && item.card.worker === "codex"
