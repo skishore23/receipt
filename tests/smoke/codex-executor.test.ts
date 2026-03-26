@@ -69,6 +69,35 @@ const createSchemaCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
+const createSandboxFallbackCodexStub = async (): Promise<{
+  readonly scriptPath: string;
+  readonly attemptsPath: string;
+}> => {
+  const dir = await mkTmp("receipt-codex-executor-sandbox-fallback");
+  const scriptPath = path.join(dir, "codex-sandbox-fallback-stub");
+  const attemptsPath = path.join(dir, "attempts.log");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const sandboxMode = args[args.indexOf('--sandbox') + 1];",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
+    "if (!sandboxMode || !lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
+    "fs.appendFileSync(attemptsPath, `${sandboxMode}\\n`, 'utf8');",
+    "if (sandboxMode !== 'danger-full-access') {",
+    "  process.stderr.write('bwrap: Unknown option --argv0\\n');",
+    "  process.exit(1);",
+    "}",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'fallback approved', handoff: 'fallback handoff' }), 'utf8');",
+    "process.stdout.write('fallback-ok\\n');",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return { scriptPath, attemptsPath };
+};
+
 const createLastMessageHungCodexStub = async (): Promise<string> => {
   const dir = await mkTmp("receipt-codex-executor-last-message");
   const scriptPath = path.join(dir, "codex-last-message-hang-stub");
@@ -615,4 +644,42 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("isolated-home-ok");
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
+}, 15_000);
+
+test("local codex executor retries with danger-full-access when sandbox bootstrap fails", async () => {
+  const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
+  const { scriptPath, attemptsPath } = await createSandboxFallbackCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      SANDBOX_ATTEMPTS_PATH: attemptsPath,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("fallback-ok");
+  expect(result.lastMessage).toContain("\"summary\":\"fallback approved\"");
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\ndanger-full-access\n");
+  const stderrLog = await fs.readFile(stderrPath, "utf-8");
+  expect(stderrLog).toContain("bwrap: Unknown option --argv0");
+  expect(stderrLog).toContain("[factory] codex sandbox bootstrap failed under workspace-write; retrying with danger-full-access");
+  expect(stderrLog).toContain("[factory] codex restart");
 }, 15_000);
