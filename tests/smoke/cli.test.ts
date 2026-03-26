@@ -27,6 +27,7 @@ test("cli: help and jobs commands are available", async () => {
   const help = await run(["help"]);
   expect(help.code).toBe(0);
   expect(help.stdout.includes("receipt <command>")).toBe(true);
+  expect(help.stdout.includes("receipt start [--reset]")).toBe(true);
 
   const jobs = await run(["jobs", "--limit", "1"]);
   expect(jobs.code).toBe(0);

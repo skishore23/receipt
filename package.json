@@ -1,11 +1,14 @@
 {
-  "name": "receipt",
-  "private": true,
+  "name": "receipt-cli",
+  "private": false,
   "type": "module",
   "version": "0.1.0",
   "workspaces": [
     "packages/*"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "receipt": "src/cli.ts"
   },

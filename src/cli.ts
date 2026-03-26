@@ -21,6 +21,8 @@ import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
 import { resolveBunRuntime } from "./lib/runtime-paths";
 import { resolveResonateGroups } from "./adapters/resonate-config";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "./modules/job";
+import { hydrateEnvFromReceiptCliConfig, loadReceiptCliConfig } from "./receipt-cli/config";
+import { runReceiptStart } from "./receipt-cli/start";
 
 type ParsedArgs = {
   readonly command?: string;
@@ -29,6 +31,8 @@ type ParsedArgs = {
 };
 
 const ROOT = process.cwd();
+const RECEIPT_CLI_CONFIG = await loadReceiptCliConfig();
+hydrateEnvFromReceiptCliConfig(RECEIPT_CLI_CONFIG);
 const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
 const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
@@ -43,6 +47,7 @@ In this repo, prefer:
   bun src/cli.ts factory
 
 Commands:
+  receipt start [--reset]
   receipt new <agent-id> [--template basic|assistant-tool|human-loop|merge]
   receipt dev
   receipt run <agent-id> --problem <text> [--stream agents/<agentId>] [--run-id <runId>] [--max-iterations <n>] [--workspace <path>]
@@ -691,6 +696,9 @@ const main = async (): Promise<void> => {
   }
 
   switch (command) {
+    case "start":
+      await runReceiptStart(parsed.flags);
+      return;
     case "new": {
       const id = parsed.args[0];
       if (!id) throw new Error("agent id is required");

@@ -21,6 +21,7 @@ bun run build # prepares web assets
 ## CLI
 
 ```bash
+receipt start # one-time setup (OpenAI key + GitHub + AWS)
 receipt new my-agent --template basic
 receipt dev
 receipt run theorem --problem "Prove a simple claim"
@@ -32,6 +33,12 @@ receipt replay <run-id>
 receipt inspect <run-id>
 receipt fork <run-id> --at 12
 ```
+
+`receipt start` requires:
+
+- `OPENAI_API_KEY` (or paste during setup)
+- `gh` installed and authenticated to `github.com`
+- `aws` installed and authenticated
 
 ```bash
 npm run eval:axiom:first
