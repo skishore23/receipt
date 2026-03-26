@@ -25,6 +25,9 @@ copy_optional_file() {
 copy_optional_dir() {
   local source_path="${1}"
   local target_path="${2}"
+  local rel_path
+  local source_entry
+  local target_entry
   if [ ! -d "${source_path}" ]; then
     return 0
   fi
@@ -32,7 +35,23 @@ copy_optional_dir() {
     return 0
   fi
   mkdir -p "${target_path}"
-  cp -R "${source_path}/." "${target_path}/"
+  find "${target_path}" \( -type s -o -type p -o -type b -o -type c \) -delete 2>/dev/null || true
+  while IFS= read -r -d '' rel_path; do
+    source_entry="${source_path}/${rel_path#./}"
+    target_entry="${target_path}/${rel_path#./}"
+    if [ -d "${source_entry}" ] && [ ! -L "${source_entry}" ]; then
+      if [ -e "${target_entry}" ] && [ ! -d "${target_entry}" ]; then
+        rm -rf "${target_entry}"
+      fi
+      mkdir -p "${target_entry}"
+      continue
+    fi
+    mkdir -p "$(dirname "${target_entry}")"
+    if [ -d "${target_entry}" ] && [ ! -L "${target_entry}" ]; then
+      rm -rf "${target_entry}"
+    fi
+    cp -P "${source_entry}" "${target_entry}"
+  done < <(cd "${source_path}" && find . -mindepth 1 \( -type d -o -type f -o -type l \) -print0)
 }
 
 sync_host_auth() {
