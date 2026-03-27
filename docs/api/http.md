@@ -11,6 +11,18 @@ Base URL: `http://localhost:8787` (or `PORT`).
 
 ## Core Server APIs
 
+### GET /healthz
+- Purpose: Lightweight health probe for uptime checks.
+- Query params: none.
+- Body: none.
+- Success: `200` with a status payload.
+- Errors: none expected.
+- Side effects: none.
+- Example:
+```bash
+curl -sS http://localhost:8787/healthz
+```
+
 ### POST /agents/:id/jobs
 - Purpose: Enqueue a job for any registered agent (`agent`, `factory`, `codex`).
 - Query params: none.
