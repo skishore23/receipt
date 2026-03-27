@@ -140,16 +140,17 @@ curl -sS -X POST http://localhost:8787/jobs/job_abc123/abort \
 
 ## Factory Web Surface
 
-Factory operator mutations are CLI-first. The `/factory` pages remain available for read-only inspection, live output, and receipts/debug views, but the old mutating `/factory` POST routes have been removed.
+Factory operator mutations are CLI-first. The `/factory` pages still use `POST /factory/compose` for browser chat submissions, while objective lifecycle operations remain CLI-first.
 
 Use the CLI for mutations:
 
 - `receipt factory run|create|compose|react|promote|cancel|cleanup|archive`
 - `receipt factory steer|follow-up|abort-job`
 
-Read-only Factory HTTP routes that remain supported:
+Factory HTTP routes that remain supported:
 
 - `GET /factory`
+- `POST /factory/compose`
 - `GET /factory/control`
 - `GET /factory/island/*`
 - `GET /factory/events`
@@ -159,6 +160,8 @@ Read-only Factory HTTP routes that remain supported:
 - `GET /factory/api/objectives/:id/debug`
 - `GET /factory/api/objectives/:id/receipts`
 - `GET /factory/api/live-output`
+
+`POST /factory/compose` accepts browser composer submissions. When the request includes `Accept: application/json`, success responses return `{ location, live? }`, where `live` carries the immediate shell handoff scope (`profileId`, `chatId`, `objectiveId?`, `runId`, `jobId`).
 
 ### POST /memory/:scope/read
 - Purpose: Read recent memory entries for a scope.

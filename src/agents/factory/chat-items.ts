@@ -19,6 +19,43 @@ const asRecordArray = (value: unknown): ReadonlyArray<Record<string, unknown>> =
     ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
     : [];
 
+const normalizeStatusLike = (value: string | undefined): string | undefined =>
+  value?.trim().toLowerCase();
+
+const FACTORY_TERMINAL_STATUS_SET = new Set([
+  "approved",
+  "blocked",
+  "canceled",
+  "cancelled",
+  "completed",
+  "conflicted",
+  "failed",
+  "idle",
+  "integrated",
+  "promoted",
+  "ready_to_promote",
+  "rejected",
+  "superseded",
+  "validated",
+]);
+
+const isLiveFactoryStatusLike = (value: string | undefined): boolean => {
+  const normalized = normalizeStatusLike(value);
+  if (!normalized || FACTORY_TERMINAL_STATUS_SET.has(normalized)) return false;
+  return [
+    "active",
+    "executing",
+    "integrating",
+    "leased",
+    "pending",
+    "planning",
+    "promoting",
+    "queued",
+    "reviewing",
+    "running",
+  ].includes(normalized);
+};
+
 const summarizeObservationJob = (record: Record<string, unknown>): string | undefined => {
   const result = asObject(record.result);
   const failure = asObject(result?.failure);
@@ -325,6 +362,8 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
   }
   if (observation.tool === "factory.dispatch" || observation.tool === "factory.status") {
     const action = asString(parsed?.action);
+    const status = asString(parsed?.status) ?? "updated";
+    const hasActiveJobs = Array.isArray(parsed?.activeJobs) && parsed.activeJobs.length > 0;
     return {
       key: `${observation.tool}-${asString(parsed?.objectiveId) ?? observation.summary ?? "factory"}`,
       title: observation.tool === "factory.status"
@@ -339,11 +378,11 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
                 ? "Thread stopped"
                 : action === "cleanup"
                   ? "Worktrees removed"
-                  : action === "archive"
-                    ? "Thread archived"
+                : action === "archive"
+                  ? "Thread archived"
                     : "Factory thread",
       worker: asString(parsed?.worker) ?? "factory",
-      status: asString(parsed?.status) ?? "updated",
+      status,
       summary: asString(parsed?.summary) ?? observation.summary ?? "Factory updated.",
       detail: buildDetail(
         asString(parsed?.title) ? `Title: ${asString(parsed?.title)}` : undefined,
@@ -359,7 +398,7 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       meta: [action, durationLabel].filter(Boolean).join(" · "),
       link: asString(parsed?.link),
       objectiveId: asString(parsed?.objectiveId),
-      running: !isTerminalJobStatus(asString(parsed?.status)),
+      running: hasActiveJobs || isLiveFactoryStatusLike(status),
     };
   }
   if (observation.tool === "factory.output") {
@@ -370,7 +409,11 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
         ? "Live task output"
         : "Live output";
     const status = asString(parsed?.status) ?? "unknown";
-    const active = parsed?.active === true || !isTerminalJobStatus(status);
+    const active = parsed?.active === true
+      ? true
+      : parsed?.active === false
+        ? false
+        : isLiveFactoryStatusLike(status);
     return {
       key: `${observation.tool}-${asString(parsed?.jobId) ?? asString(parsed?.focusId) ?? observation.summary ?? "factory-output"}`,
       title: focusLabel,

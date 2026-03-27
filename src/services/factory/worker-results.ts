@@ -16,6 +16,10 @@ export type FactoryPublishResult = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const isMissingPathError = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+};
 
 const optionalTrimmedString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
@@ -35,9 +39,14 @@ const isValidUrl = (value: string): boolean => {
 export const parseJsonObjectCandidate = (raw: string): Record<string, unknown> | undefined => {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  const candidates = trimmed.includes("\n")
-    ? trimmed.split("\n").map((line) => line.trim()).filter(Boolean).reverse()
-    : [trimmed];
+  const candidates = [
+    trimmed,
+    ...(
+      trimmed.includes("\n")
+        ? trimmed.split("\n").map((line) => line.trim()).filter(Boolean).reverse()
+        : []
+    ),
+  ];
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
@@ -47,18 +56,6 @@ export const parseJsonObjectCandidate = (raw: string): Record<string, unknown> |
     }
   }
   return undefined;
-};
-
-export const parseFactoryTaskResult = (raw: string): Record<string, unknown> => {
-  if (!raw.trim()) throw new FactoryServiceError(500, "missing factory task result.json");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new FactoryServiceError(500, `malformed factory task result.json: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (!isRecord(parsed)) throw new FactoryServiceError(500, "factory task result must be an object");
-  return parsed;
 };
 
 export const normalizeFactoryPublishResult = (raw: Record<string, unknown>): FactoryPublishResult => {
@@ -91,32 +88,24 @@ export const normalizeFactoryPublishResult = (raw: Record<string, unknown>): Fac
   };
 };
 
-export const parseFactoryPublishResult = (raw: string): FactoryPublishResult => {
-  if (!raw.trim()) throw new FactoryServiceError(500, "missing factory publish result.json");
-  let parsed: unknown;
+const readTextIfPresent = async (targetPath: string): Promise<string | undefined> => {
   try {
-    parsed = JSON.parse(raw);
+    return await fs.readFile(targetPath, "utf-8");
   } catch (err) {
-    throw new FactoryServiceError(500, `malformed factory publish result.json: ${err instanceof Error ? err.message : String(err)}`);
+    if (isMissingPathError(err)) return undefined;
+    throw err;
   }
-  if (!isRecord(parsed)) throw new FactoryServiceError(500, "factory publish result must be an object");
-  return normalizeFactoryPublishResult(parsed);
 };
 
 export const resolveFactoryTaskWorkerResult = async (
-  payload: Pick<FactoryTaskJobPayload, "resultPath" | "lastMessagePath">,
+  payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
   execution: { readonly lastMessage?: string; readonly tokensUsed?: number },
 ): Promise<Record<string, unknown>> => {
-  let result: Record<string, unknown> | undefined;
-  const rawResult = await fs.readFile(payload.resultPath, "utf-8").catch(() => "");
-  if (rawResult.trim()) {
-    result = parseFactoryTaskResult(rawResult);
-  } else {
-    const rawLastMessage = execution.lastMessage?.trim()
-      ? execution.lastMessage
-      : await fs.readFile(payload.lastMessagePath, "utf-8").catch(() => "");
-    result = rawLastMessage ? parseJsonObjectCandidate(rawLastMessage) : undefined;
-  }
+  const rawLastMessage = execution.lastMessage?.trim()
+    ? execution.lastMessage
+    : await readTextIfPresent(payload.lastMessagePath) ?? "";
+  const result = parseJsonObjectCandidate(rawLastMessage)
+    ?? parseJsonObjectCandidate(await readTextIfPresent(payload.resultPath) ?? "");
   if (!result) {
     throw new FactoryServiceError(500, "missing structured factory task result from codex");
   }
@@ -126,14 +115,12 @@ export const resolveFactoryTaskWorkerResult = async (
 };
 
 export const resolveFactoryPublishWorkerResult = async (
-  payload: Pick<FactoryIntegrationPublishJobPayload, "resultPath" | "lastMessagePath">,
+  payload: Pick<FactoryIntegrationPublishJobPayload, "lastMessagePath">,
   execution: { readonly lastMessage?: string },
 ): Promise<FactoryPublishResult> => {
-  const rawResult = await fs.readFile(payload.resultPath, "utf-8").catch(() => "");
-  if (rawResult.trim()) return parseFactoryPublishResult(rawResult);
   const rawLastMessage = execution.lastMessage?.trim()
     ? execution.lastMessage
-    : await fs.readFile(payload.lastMessagePath, "utf-8").catch(() => "");
+    : await readTextIfPresent(payload.lastMessagePath) ?? "";
   const parsed = rawLastMessage ? parseJsonObjectCandidate(rawLastMessage) : undefined;
   if (!parsed) {
     throw new FactoryServiceError(500, "missing structured factory publish result from codex");

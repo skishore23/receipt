@@ -42,11 +42,6 @@ import { COMPOSER_COMMANDS } from "../factory-cli/composer";
 
 const md = new MiniGFM();
 
-const FACTORY_CHAT_REFRESH_MS = 180;
-const FACTORY_SIDEBAR_REFRESH_MS = 450;
-const FACTORY_INSPECTOR_TABS_REFRESH_MS = 900;
-const FACTORY_INSPECTOR_PANEL_REFRESH_MS = 450;
-
 const FACTORY_MARKDOWN_SECTION_HEADINGS = new Set([
   "conclusion",
   "evidence",
@@ -256,12 +251,6 @@ const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   return query ? `?${query}` : "";
 };
 
-const factoryChatSseTrigger = (throttleMs: number): string =>
-  `sse:agent-refresh throttle:${throttleMs}ms, sse:factory-refresh throttle:${throttleMs}ms, sse:job-refresh throttle:${throttleMs}ms`;
-
-const factoryStatusSseTrigger = (throttleMs: number): string =>
-  `sse:factory-refresh throttle:${throttleMs}ms, sse:job-refresh throttle:${throttleMs}ms`;
-
 const renderJobControls = (jobId: string, running?: boolean, abortRequested?: boolean): string =>
   running ? `<div class="mt-4">${renderJobActionCards(jobId, { abortRequested })}</div>` : "";
 
@@ -282,7 +271,7 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
     const phaseLabel = displayLabel(objective.phase) || displayLabel(objective.status) || "active";
     pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.phase || objective.status), iconProject("h-3 w-3")));
     if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning", iconQueue("h-3 w-3")));
-    if (objective.tokensUsed) pills.push(shellPill(`${objective.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")));
+    if (typeof objective.tokensUsed === "number") pills.push(shellPill(`${objective.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")));
   }
   if (model.inspector.activeCodex) {
     pills.push(shellPill(`Codex ${displayLabel(model.inspector.activeCodex.status) || "active"}`, toneForValue(model.inspector.activeCodex.status), iconCodex("h-3 w-3")));
@@ -364,7 +353,11 @@ const systemBadgeLabel = (item: Extract<FactoryChatItem, { readonly kind: "syste
 
 const renderChatItem = (
   item: FactoryChatItem,
-  activeProfileLabel: string,
+  context: {
+    readonly activeProfileId: string;
+    readonly activeProfileLabel: string;
+    readonly chatId?: string;
+  },
 ): string => {
   if (item.kind === "user") {
     return `<section class="flex justify-end">
@@ -380,7 +373,7 @@ const renderChatItem = (
     return `<section class="flex justify-start">
       <div class="w-full max-w-3xl space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <div class="flex min-w-0 items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} ${esc(activeProfileLabel)}</div>
+          <div class="flex min-w-0 items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} ${esc(context.activeProfileLabel)}</div>
           ${item.meta ? `<span class="text-[11px] text-muted-foreground">${esc(item.meta)}</span>` : ""}
         </div>
         <div class="${assistantResponseCardClass}">
@@ -409,15 +402,18 @@ const renderChatItem = (
     </section>`;
   }
   if (item.kind === "objective_event") {
-    return `<section class="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 cursor-pointer hover:bg-primary/20 transition"
-      hx-get="/factory/island/inspector?thread=${encodeURIComponent(item.objectiveId)}"
-      hx-target="#factory-inspector"
-      hx-swap="innerHTML">
+    return `<a class="block rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 transition hover:bg-primary/20"
+      href="/factory${factoryChatQuery({
+        profileId: context.activeProfileId,
+        chatId: context.chatId,
+        objectiveId: item.objectiveId,
+        panel: "overview",
+      })}">
       <div class="flex items-center gap-2 text-sm font-semibold text-primary">
         ${iconProject("w-4 h-4")} ${esc(item.title)}
       </div>
       <div class="mt-1 text-xs text-foreground">${esc(item.summary)}</div>
-    </section>`;
+    </a>`;
   }
   const card = item.card;
   return `<section class="rounded-lg border border-border bg-muted px-3 py-2">
@@ -469,16 +465,20 @@ const groupChatItems = (items: ReadonlyArray<FactoryChatItem>): ReadonlyArray<Ch
 
 const renderWorkGroup = (
   items: ReadonlyArray<Extract<FactoryChatItem, { readonly kind: "work" }>>,
-  activeProfileLabel: string,
+  context: {
+    readonly activeProfileId: string;
+    readonly activeProfileLabel: string;
+    readonly chatId?: string;
+  },
 ): string => {
   const latest = items[items.length - 1]!;
   const earlier = items.slice(0, -1);
-  const latestHtml = renderChatItem(latest, activeProfileLabel);
+  const latestHtml = renderChatItem(latest, context);
   return `<div class="space-y-1">
     <details>
       <summary class="cursor-pointer list-none rounded-md px-2 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground hover:bg-accent transition">${esc(`${earlier.length} earlier update${earlier.length > 1 ? "s" : ""}`)}</summary>
       <div class="mt-1 space-y-1">
-        ${earlier.map((item) => renderChatItem(item, activeProfileLabel)).join("")}
+        ${earlier.map((item) => renderChatItem(item, context)).join("")}
       </div>
     </details>
     ${latestHtml}
@@ -502,10 +502,10 @@ const renderLiveExecutionCard = (
       </div>
       <a class="shrink-0 text-[11px] font-medium text-primary transition hover:text-primary/80" href="${esc(card.rawLink)}">Inspect</a>
     </div>
-    ${(card.updatedAt || card.tokensUsed)
+    ${(card.updatedAt || typeof card.tokensUsed === "number")
       ? `<div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
         ${card.updatedAt ? `<span>${esc(formatTs(card.updatedAt))}</span>` : ""}
-        ${card.tokensUsed ? shellPill(`${card.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")) : ""}
+        ${typeof card.tokensUsed === "number" ? shellPill(`${card.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")) : ""}
       </div>`
       : ""}
   </section>`;
@@ -768,6 +768,17 @@ const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
+const objectiveSidebarStateValue = (objective: Pick<FactoryChatObjectiveNav, "phase" | "status" | "integrationStatus" | "slotState">): string | undefined =>
+  objective.phase || objective.status || objective.integrationStatus || objective.slotState;
+
+const isRunningSidebarObjective = (objective: FactoryChatObjectiveNav): boolean => {
+  if (objective.blockedReason) return false;
+  const state = objectiveSidebarStateValue(objective);
+  if (!state) return true;
+  if (isTerminalObjectiveStatusValue(state)) return false;
+  return state !== "blocked" && state !== "conflicted";
+};
+
 const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArray<FactoryChatItem> => {
   if (model.items.length > 0) return model.items;
   const thread = model.selectedThread;
@@ -786,14 +797,19 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   const workbench = renderCenterWorkbench(model);
   const transcriptItems = synthesizedTranscriptItems(model);
   const grouped = groupChatItems(transcriptItems);
+  const renderContext = {
+    activeProfileId: model.activeProfileId,
+    activeProfileLabel: model.activeProfileLabel,
+    chatId: model.chatId,
+  };
   const body = grouped.length > 0
     ? grouped.map((group) =>
       group.kind === "single"
-        ? renderChatItem(group.item, model.activeProfileLabel)
-        : renderWorkGroup(group.items, model.activeProfileLabel)
+        ? renderChatItem(group.item, renderContext)
+        : renderWorkGroup(group.items, renderContext)
     ).join("")
     : renderTranscriptEmptyState(model);
-  return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 pt-4 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}">
+  return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 pt-4 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
     ${workbench}
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
@@ -910,22 +926,20 @@ const renderSidebarLinks = (profileId: string, obj: FactorySelectedObjectiveCard
   return `<div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
     <a class="font-medium text-primary hover:underline" href="${otherThreadsHref}">See other threads</a>
     <a class="font-medium text-primary hover:underline" href="${obj.receiptsLink}">Receipts</a>
-    <a class="font-medium text-primary hover:underline" href="${obj.debugLink}">Debug</a>
   </div>`;
 };
 
 
 const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjectiveNav): string => {
   const href = factoryChatQuery({
-    profileId: model.activeProfileId,
-    chatId: model.chatId,
+    profileId: objective.profileId || model.activeProfileId,
     objectiveId: objective.objectiveId,
   });
   const selectedClass = objective.selected
     ? "border-primary/30 bg-primary/10"
     : "border-border bg-muted hover:bg-accent";
-  const displayStatus = objective.phase || objective.status;
-  const summary = compactStatusText(objective.summary ?? "", 92);
+  const displayStatus = objective.blockedReason ? "blocked" : (objective.phase || objective.status);
+  const summary = compactStatusText(objective.blockedReason ?? objective.summary ?? "", 92);
   const tone = toneForValue(displayStatus);
   return `<a class="block min-w-0 rounded-xl border px-3 py-2.5 transition ${selectedClass}" href="${href}">
     <div class="flex min-w-0 items-start gap-2.5">
@@ -935,7 +949,8 @@ const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjec
       <div class="min-w-0 flex-1">
         <div class="text-sm font-semibold leading-5 text-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(objective.title)}</div>
         ${summary ? `<div class="mt-1 text-[11px] leading-4 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(summary)}</div>` : ""}
-        ${objective.tokensUsed ? renderObjectiveTokenCallout(objective.tokensUsed) : ""}
+        ${objective.profileLabel ? `<div class="mt-1.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">${esc(objective.profileLabel)}</div>` : ""}
+        ${typeof objective.tokensUsed === "number" ? renderObjectiveTokenCallout(objective.tokensUsed) : ""}
       </div>
     </div>
     <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
@@ -950,15 +965,17 @@ const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjec
   </a>`;
 };
 
-const renderSidebarEmptyState = (blankChat: boolean): string =>
+const renderSidebarEmptyState = (input: {
+  readonly eyebrow: string;
+  readonly title: string;
+  readonly message: string;
+}): string =>
   renderEmptyState({
     icon: iconProject("h-5 w-5"),
     tone: "neutral",
-    eyebrow: blankChat ? "New Chat" : "Threads",
-    title: blankChat ? "No threads yet" : "No tracked threads",
-    message: blankChat
-      ? "Send the first message below to create a thread in this profile."
-      : "This profile does not have any recent objectives to show right now.",
+    eyebrow: input.eyebrow,
+    title: input.title,
+    message: input.message,
     minHeightClass: "min-h-[168px]",
   });
 
@@ -969,7 +986,7 @@ const renderSidebarMetrics = (profileId: string, obj?: FactorySelectedObjectiveC
       <div class="${sectionLabelClass}">Thread Snapshot</div>
       <div class="text-[10px] text-muted-foreground">${esc(titleCaseLabel(obj.slotState ?? obj.phase ?? obj.status) || "Idle")}</div>
     </div>
-    ${obj.tokensUsed ? renderSidebarTokenHero(obj.tokensUsed) : ""}
+    ${typeof obj.tokensUsed === "number" ? renderSidebarTokenHero(obj.tokensUsed) : ""}
     ${renderSidebarSignalCard(obj)}
     ${renderSidebarDetailRows(obj)}
     ${renderSidebarLinks(profileId, obj)}
@@ -977,18 +994,31 @@ const renderSidebarMetrics = (profileId: string, obj?: FactorySelectedObjectiveC
 };
 
 const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard): string => {
-  const blankChat = !selectedObjective;
-  const visibleObjectives = model.showAll ? model.objectives : model.objectives.slice(0, 5);
-  const hasMoreObjectives = !model.showAll && model.objectives.length > 5;
+  const runningObjectives = model.objectives.filter((objective) => isRunningSidebarObjective(objective));
+  const previousSessions = model.objectives.filter((objective) => !isRunningSidebarObjective(objective));
+  const visiblePreviousSessions = model.showAll ? previousSessions : previousSessions.slice(0, 5);
+  const hasMorePreviousSessions = !model.showAll && previousSessions.length > 5;
   const selectedObjectiveQuery = factoryChatQuery({
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: selectedObjective?.objectiveId,
+    panel: model.panel,
   });
   const viewAllQuery = `${selectedObjectiveQuery}${selectedObjectiveQuery.includes("?") ? "&" : "?"}all=1`;
-  const objectiveCards = visibleObjectives.length > 0
-    ? visibleObjectives.map((objective) => renderObjectiveLink(model, objective)).join("")
-    : renderSidebarEmptyState(blankChat);
+  const runningObjectiveCards = runningObjectives.length > 0
+    ? runningObjectives.map((objective) => renderObjectiveLink(model, objective)).join("")
+    : renderSidebarEmptyState({
+        eyebrow: "Running",
+        title: "No running objectives",
+        message: "Queued, active, and integrating work will stay pinned here across profiles.",
+      });
+  const previousSessionCards = visiblePreviousSessions.length > 0
+    ? visiblePreviousSessions.map((objective) => renderObjectiveLink(model, objective)).join("")
+    : renderSidebarEmptyState({
+        eyebrow: "Previous Sessions",
+        title: "No previous sessions",
+        message: "Completed, failed, and canceled objectives will appear here once this repo has history.",
+      });
   const profileLinks = model.profiles.length > 0
     ? model.profiles.map((profile) => {
         const selectedClass = profile.selected
@@ -996,8 +1026,6 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
           : "border-border bg-secondary/65 text-muted-foreground hover:bg-accent hover:text-foreground";
         return `<a class="rounded-full border px-3 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
           profileId: profile.id,
-          chatId: model.chatId,
-          objectiveId: selectedObjective?.objectiveId,
         })}">${esc(profile.label)}</a>`;
       }).join("")
     : "";
@@ -1012,17 +1040,26 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
     </div>
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
-        <div class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} ${blankChat ? "Recent" : "Threads"}</div>
-        <div class="text-[10px] text-muted-foreground">${esc(`${model.objectives.length}`)}</div>
+        <div class="flex items-center gap-1.5 ${sectionLabelClass}">${iconProject("w-3.5 h-3.5")} Running</div>
+        <div class="text-[10px] text-muted-foreground">${esc(`${runningObjectives.length}`)}</div>
       </div>
       <div class="space-y-2">
-        ${objectiveCards}
+        ${runningObjectiveCards}
       </div>
-      ${hasMoreObjectives ? `<div>
-        <button hx-get="/factory/island/sidebar${viewAllQuery}" hx-target="#factory-sidebar" hx-swap="innerHTML" class="text-[10px] font-medium text-primary hover:underline text-left cursor-pointer">View all</button>
-      </div>` : ""}
     </section>
     ${renderSidebarMetrics(model.activeProfileId, selectedObjective)}
+    <section class="space-y-2">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} Previous Sessions</div>
+        <div class="text-[10px] text-muted-foreground">${esc(`${previousSessions.length}`)}</div>
+      </div>
+      <div class="space-y-2">
+        ${previousSessionCards}
+      </div>
+      ${hasMorePreviousSessions ? `<div>
+        <a href="/factory${viewAllQuery}" class="text-[10px] font-medium text-primary hover:underline">View all</a>
+      </div>` : ""}
+    </section>
   </div>`;
 };
 
@@ -1050,10 +1087,6 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       }
     : routeContext;
   const composerQuery = factoryChatQuery(composerRouteContext);
-  const islandTrigger = factoryChatSseTrigger(FACTORY_CHAT_REFRESH_MS);
-  const sidebarTrigger = factoryStatusSseTrigger(FACTORY_SIDEBAR_REFRESH_MS);
-  const inspectorTabsTrigger = factoryStatusSseTrigger(FACTORY_INSPECTOR_TABS_REFRESH_MS);
-  const inspectorPanelTrigger = factoryStatusSseTrigger(FACTORY_INSPECTOR_PANEL_REFRESH_MS);
   const currentJobId = model.inspector.objectiveMissing ? undefined : composerJobId(model);
   const composerPlaceholder = model.inspector.objectiveMissing
     ? "This thread no longer exists. Send a message to start a new thread."
@@ -1071,15 +1104,14 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
   <script src="/assets/htmx.min.js"></script>
-  <script src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js"></script>
 </head>
-<body data-factory-chat data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden md:h-screen md:overflow-hidden" hx-ext="sse" sse-connect="/factory/events${shellQuery}">
+<body data-factory-chat data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden md:h-screen md:overflow-hidden">
   <div class="relative min-h-screen bg-background text-foreground md:h-screen">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,hsl(13_73%_55%/0.06),transparent_40%),radial-gradient(circle_at_top_right,hsl(210_38%_65%/0.08),transparent_40%)]"></div>
     <div class="relative flex min-h-screen flex-col md:grid md:h-screen md:min-h-0 md:grid-cols-[248px_minmax(0,1fr)_320px] lg:grid-cols-[256px_minmax(0,1fr)_336px] md:overflow-hidden">
       <aside class="order-2 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:order-0 md:min-h-0 md:border-r md:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
-          <div id="factory-sidebar" hx-get="/factory/island/sidebar${shellQuery}" hx-trigger="${sidebarTrigger}" hx-swap="innerHTML">
+          <div id="factory-sidebar" hx-get="/factory/island/sidebar${shellQuery}" hx-swap="innerHTML">
             ${factoryRailIsland(model.nav, model.inspector.selectedObjective)}
           </div>
         </div>
@@ -1090,8 +1122,8 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
             <div class="flex items-center justify-between gap-3 px-4 py-2.5">
               <div class="min-w-0 flex flex-1 items-center gap-2 overflow-x-auto factory-scrollbar">
                 <span class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} Thread</span>
-                <h1 class="min-w-0 truncate text-sm font-semibold text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
-                ${renderShellStatusPills(model)}
+                <h1 id="factory-shell-title" class="min-w-0 truncate text-sm font-semibold text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
+                <span id="factory-shell-status-pills" class="contents">${renderShellStatusPills(model)}</span>
               </div>
               <div class="flex shrink-0 items-center gap-1.5">
                 <a
@@ -1106,14 +1138,18 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
             </div>
           </header>
           <section id="factory-chat-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <div id="factory-chat" hx-get="/factory/island/chat${shellQuery}" hx-trigger="${islandTrigger}" hx-swap="innerHTML">
+            <div id="factory-chat" data-active-profile-label="${esc(model.activeProfileLabel)}" hx-get="/factory/island/chat${shellQuery}" hx-swap="innerHTML">
               ${factoryChatIsland(model.chat)}
+            </div>
+            <div id="factory-chat-live" class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 md:px-8 xl:px-10">
+              <div id="factory-chat-streaming" class="space-y-2" aria-live="polite"></div>
+              <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
             </div>
           </section>
           <section class="shrink-0 border-t border-border bg-background px-2 py-2 sm:px-3">
             <div class="${composerShellClass}">
               <form id="factory-composer" action="/factory/compose${composerQuery}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
-                ${currentJobId ? `<input type="hidden" name="currentJobId" value="${esc(currentJobId)}" />` : ""}
+                <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="${esc(currentJobId ?? "")}" />
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
                 <div class="${composerPanelClass}">
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
@@ -1131,10 +1167,7 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       <aside class="order-3 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:min-h-0 md:border-l md:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
           <div id="factory-inspector" class="factory-inspector-panel">
-            ${factoryInspectorIsland(model.inspector, {
-              tabsTrigger: inspectorTabsTrigger,
-              panelTrigger: inspectorPanelTrigger,
-            })}
+            ${factoryInspectorIsland(model.inspector)}
           </div>
         </div>
       </aside>

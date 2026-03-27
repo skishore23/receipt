@@ -174,7 +174,7 @@ test("factory investigation: no-diff reports complete without integration and sy
   expect(detail.evidenceCards.some((card) => card.kind === "report" && card.receiptType === "investigation.synthesized")).toBe(true);
 }, 120_000);
 
-test("factory investigation: blocked results with a structured report are treated as partial reports and still synthesize", async () => {
+test("factory investigation: blocked structured reports stay non-approvable and do not synthesize", async () => {
   const { service, queue } = await createFactoryService({
     codexRun: async () => {
       const structured = {
@@ -214,12 +214,79 @@ test("factory investigation: blocked results with a structured report are treate
   await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
-  expect(detail.status).toBe("completed");
-  expect(detail.tasks[0]?.status).toBe("approved");
-  expect(detail.investigation.synthesized?.report.conclusion).toContain("access gaps");
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.blocked")).toBe(false);
+  expect(detail.status).toBe("blocked");
+  expect(detail.tasks[0]?.status).toBe("blocked");
+  expect(detail.investigation.reports[0]?.outcome).toBe("blocked");
+  expect(detail.investigation.synthesized).toBeUndefined();
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.blocked")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.reported")).toBe(true);
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(false);
+}, 120_000);
+
+test("factory investigation: approved results downgrade to partial when captured evidence artifacts record errors", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async (input) => {
+      const artifactName = "task_01.evidence.json";
+      const artifactDir = path.join(input.workspacePath, ".receipt", "factory");
+      await fs.mkdir(artifactDir, { recursive: true });
+      await fs.writeFile(
+        path.join(artifactDir, artifactName),
+        JSON.stringify({
+          status: "ok",
+          summary: "Collected mixed AWS evidence.",
+          errors: [{
+            error: "aws logs describe-log-groups failed: Unknown options: --order-by, --descending, LastEventTime",
+          }],
+        }, null, 2),
+        "utf-8",
+      );
+      const structured = {
+        outcome: "approved",
+        summary: "No alarming signals were detected in the sampled AWS services.",
+        artifacts: [{
+          label: "AWS evidence snapshot",
+          path: `/workspace/receipt/.receipt/factory/${artifactName}`,
+          summary: "Structured evidence from the helper run.",
+        }],
+        completion: {
+          changed: [],
+          proof: ["Helper run completed."],
+          remaining: [],
+        },
+        nextAction: "Share the findings with the operator.",
+        report: {
+          conclusion: "The sampled AWS services look healthy.",
+          evidence: [{ title: "Alarm scan", summary: "No alarms were in ALARM state.", detail: null }],
+          scriptsRun: [{ command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary", summary: "Collected alarm state.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      };
+      const raw = JSON.stringify(structured);
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate live AWS health",
+    prompt: "Investigate current AWS health signals without making changes.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("blocked");
+  expect(detail.tasks[0]?.status).toBe("blocked");
+  expect(detail.investigation.reports[0]?.outcome).toBe("partial");
+  expect(detail.investigation.reports[0]?.summary).toContain("remains partial");
+  expect(detail.investigation.reports[0]?.report.scriptsRun.some((item) => item.command === "artifact:task_01.evidence.json" && item.status === "error")).toBe(true);
+  expect(detail.investigation.synthesized).toBeUndefined();
 }, 120_000);
 
 test("factory investigation: missing final JSON fails instead of falling back to stdout", async () => {
@@ -433,6 +500,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
       objectiveId: created.objectiveId,
       taskId: firstTask.taskId,
       candidateId: "task_01_candidate_01",
+      outcome: "approved",
       summary: "Signal A implicates service health.",
       handoff: "First report complete.",
       completion: {
@@ -455,6 +523,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
       objectiveId: created.objectiveId,
       taskId: secondTask.taskId,
       candidateId: "task_02_candidate_01",
+      outcome: "approved",
       summary: "Signal B implicates deployment drift.",
       handoff: "Second report complete.",
       completion: {
@@ -675,7 +744,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
       readonly selectedSkills?: ReadonlyArray<string>;
     };
   };
-  expect(capturedSandboxMode).toBe("danger-full-access");
+  expect(capturedSandboxMode).toBeUndefined();
   expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
   expect(capturedReasoningEffort).toBe("high");
   expect(prompt).toContain("## Helper-First Execution");

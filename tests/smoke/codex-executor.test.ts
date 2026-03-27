@@ -69,7 +69,7 @@ const createSchemaCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
-const createSandboxFallbackCodexStub = async (): Promise<{
+const createSandboxBootstrapFailureCodexStub = async (): Promise<{
   readonly scriptPath: string;
   readonly attemptsPath: string;
 }> => {
@@ -85,12 +85,8 @@ const createSandboxFallbackCodexStub = async (): Promise<{
     "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
     "if (!sandboxMode || !lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
     "fs.appendFileSync(attemptsPath, `${sandboxMode}\\n`, 'utf8');",
-    "if (sandboxMode !== 'danger-full-access') {",
-    "  process.stderr.write('bwrap: Unknown option --argv0\\n');",
-    "  process.exit(1);",
-    "}",
-    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'fallback approved', handoff: 'fallback handoff' }), 'utf8');",
-    "process.stdout.write('fallback-ok\\n');",
+    "process.stderr.write('bwrap: Unknown option --argv0\\n');",
+    "process.exit(1);",
     "",
   ].join("\n");
   await fs.writeFile(scriptPath, body, "utf-8");
@@ -646,9 +642,9 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
 }, 15_000);
 
-test("local codex executor retries with danger-full-access when sandbox bootstrap fails", async () => {
+test("local codex executor fails closed when sandbox bootstrap fails", async () => {
   const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
-  const { scriptPath, attemptsPath } = await createSandboxFallbackCodexStub();
+  const { scriptPath, attemptsPath } = await createSandboxBootstrapFailureCodexStub();
   const artifactDir = path.join(root, ".receipt", "factory");
   const promptPath = path.join(artifactDir, "task.prompt.md");
   const lastMessagePath = path.join(artifactDir, "task.last-message.md");
@@ -663,7 +659,7 @@ test("local codex executor retries with danger-full-access when sandbox bootstra
     },
   });
 
-  const result = await executor.run({
+  await expect(executor.run({
     prompt: "# Task\nReturn the final JSON only.\n",
     workspacePath: root,
     promptPath,
@@ -672,14 +668,10 @@ test("local codex executor retries with danger-full-access when sandbox bootstra
     stderrPath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  });
+  })).rejects.toThrow(/Unknown option --argv0|codex exited with 1/);
 
-  expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("fallback-ok");
-  expect(result.lastMessage).toContain("\"summary\":\"fallback approved\"");
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\ndanger-full-access\n");
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\n");
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
   expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).toContain("[factory] codex sandbox bootstrap failed under workspace-write; retrying with danger-full-access");
-  expect(stderrLog).toContain("[factory] codex restart");
+  expect(stderrLog).not.toContain("retrying with danger-full-access");
 }, 15_000);

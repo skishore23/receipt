@@ -21,6 +21,8 @@ const globalTopicKey = (topic: Topic): string | undefined => (
     ? "receipt:*"
     : topic === "jobs"
       ? "jobs:*"
+      : topic === "factory"
+        ? "factory:*"
       : undefined
 );
 
@@ -118,7 +120,9 @@ export class SseHub {
 
   publish(topic: Topic, stream?: string): void {
     const event = topicEvent[topic];
-    const data = String(Date.now());
+    const data = topic === "factory" && typeof stream === "string" && stream.trim().length > 0
+      ? stream
+      : String(Date.now());
     const key = topicKey(topic, stream);
     this.sendToKey(key, event, data);
     const globalKey = globalTopicKey(topic);

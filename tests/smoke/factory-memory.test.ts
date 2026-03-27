@@ -19,11 +19,12 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../../src/services/factory-service";
+import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI_PATH = path.join(ROOT, "src", "cli.ts");
-const BUN = process.env.BUN_BIN?.trim() || "bun";
+const BUN = resolveBunRuntime();
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {

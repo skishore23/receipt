@@ -40,6 +40,7 @@ import { createFactoryCliRuntime } from "./runtime";
 import { terminalTheme } from "./theme";
 import type { FactoryObjectivePanel } from "./view-model";
 import { readObjectiveAnalysis, renderObjectiveAnalysisText } from "./analyze";
+import { readFactoryParsedRun, renderFactoryParsedRunText } from "./parse";
 import { loadFactoryHelperCatalog, runFactoryHelper } from "../services/factory-helper-catalog";
 import type { FactoryCloudProvider } from "../services/factory-cloud-context";
 
@@ -938,6 +939,16 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           return;
         }
         console.log(renderObjectiveAnalysisText(analysis));
+        return;
+      }
+      case "parse": {
+        const targetId = args[1];
+        const parsed = await readFactoryParsedRun(config.dataDir, config.repoRoot, targetId);
+        if (json || !isInteractiveTerminal()) {
+          printJson(parsed);
+          return;
+        }
+        console.log(renderFactoryParsedRunText(parsed));
         return;
       }
       case "resume": {

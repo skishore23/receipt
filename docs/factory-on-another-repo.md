@@ -89,6 +89,7 @@ Do not point one old `DATA_DIR` at a completely different source repo unless you
 ### Option 1: Run Receipt from this repo, but point Factory at another repo
 
 This is the easiest way to dogfood the current codebase against an external project.
+`bun run dev` starts the local Resonate server and the full multi-process runtime by default, so make sure the `resonate` CLI is installed first.
 
 ```bash
 cd /Users/kishore/receipt

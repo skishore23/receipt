@@ -24,6 +24,9 @@ if [ -n "${RECEIPT_BUN_BIN:-}" ]; then
   BUN_BIN="${RECEIPT_BUN_BIN}"
 else
   BUN_BIN="$(command -v bun 2>/dev/null || true)"
+  if [ -z "${BUN_BIN}" ] && [ -n "${HOME:-}" ] && [ -x "${HOME}/.bun/bin/bun" ]; then
+    BUN_BIN="${HOME}/.bun/bin/bun"
+  fi
 fi
 
 if [ -z "${BUN_BIN}" ]; then

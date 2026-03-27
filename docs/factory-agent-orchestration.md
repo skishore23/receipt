@@ -151,7 +151,7 @@ Once the service computes legal semantic actions, the orchestrator can choose on
 - input: objective snapshot, tasks, candidates, integration state, legal actions, current head hash
 - output: `selectedActionId`, `reason`, `confidence`
 
-If OpenAI is disabled, fails, or returns an invalid action, Factory uses a deterministic fallback chooser.
+The current runtime records these decisions directly as `rebracket.applied` with source `runtime`.
 
 ## What OpenAI Does Not Do
 
@@ -563,7 +563,7 @@ sequenceDiagram
 
 ## Current Quirks Worth Knowing
 
-- OpenAI is optional. Factory still works with deterministic fallbacks, but orchestration becomes less adaptive.
+- OpenAI is optional. The current runtime still records orchestration decisions without a separate fallback chooser path.
 - Codex is the default worker, but Factory is not hard-coded to Codex-only tasks.
 - direct `codex.run` packets now mirror the task-packet model, but remain read-only probes instead of delivery paths.
 - Integration validation shares the `codex` lane for scheduling simplicity even though validation itself is local shell execution.

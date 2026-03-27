@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
-const BUN = process.env.BUN_BIN?.trim() || "bun";
+const BUN = process.env.BUN_BIN?.trim() || process.execPath;
 
 type CommandResult = {
   readonly code: number | null;
@@ -48,6 +48,8 @@ test("smoke: project builds", async () => {
   ).toBe(
     0,
   );
+  expect(fs.existsSync(path.join(ROOT, "src", "client", "factory-client.ts"))).toBe(true);
+  expect(fs.existsSync(path.join(ROOT, "src", "client", "factory-client.js"))).toBe(false);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "factory.css"))).toBe(true);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "factory-client.js"))).toBe(true);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "htmx.min.js"))).toBe(true);

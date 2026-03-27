@@ -26,10 +26,11 @@ import {
   historicalInfrastructureObjectiveReceipts,
   historicalInfrastructureStartupObjectiveId,
 } from "../fixtures/factory-infrastructure-replay";
+import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI = path.join(ROOT, "src", "cli.ts");
-const BUN = process.env.BUN_BIN?.trim() || "bun";
+const BUN = resolveBunRuntime();
 const execFileAsync = promisify(execFile);
 const stripAnsi = (value: string): string =>
   value.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "");
@@ -83,11 +84,11 @@ const createCodexStub = async (): Promise<string> => {
     "  const workspace = args[args.indexOf('--cd') + 1];",
     "  const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
     "  const prompt = await readAll();",
-    "  const match = prompt.match(/Write JSON to (.+?) with:/);",
+    "  const taskIdMatch = prompt.match(/^Task ID:\\s*(\\S+)/m);",
+    "  const taskId = taskIdMatch ? taskIdMatch[1].trim() : '';",
     "  if (!workspace || !lastMessagePath) throw new Error('codex stub missing required args');",
-    "  const resultPath = match ? match[1].trim() : '';",
-    "  const isPublish = prompt.includes('# Factory Integration Publish') || prompt.includes('Return exactly one JSON object matching this schema:');",
-    "  if (!match && !isPublish) throw new Error('codex stub missing match or publish flag');",
+    "  const isPublish = prompt.includes('# Factory Integration Publish');",
+    "  if (!taskId && !isPublish) throw new Error('codex stub missing task or publish flag');",
     "  if (isPublish) {",
     "    const publishResult = {",
     "      summary: 'Published PR #17.',",
@@ -101,12 +102,12 @@ const createCodexStub = async (): Promise<string> => {
     "    process.stdout.write(`${raw}\\n`);",
     "    return;",
     "  }",
-    "  if (resultPath.includes('task_02')) {",
+    "  if (taskId === 'task_02') {",
     "    const packageJsonPath = path.join(workspace, 'package.json');",
     "    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));",
     "    packageJson.scripts = { ...(packageJson.scripts || {}), smoke: 'bun run build' };",
     "    fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\\n', 'utf8');",
-    "  } else if (resultPath.includes('task_03')) {",
+    "  } else if (taskId === 'task_03') {",
     "    const readmePath = path.join(workspace, 'README.md');",
     "    const existing = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, 'utf8') : '';",
     "    if (!existing.includes('Smoke validation checked.')) {",
@@ -115,10 +116,21 @@ const createCodexStub = async (): Promise<string> => {
     "  } else {",
     "    fs.writeFileSync(path.join(workspace, 'CLI_SMOKE.txt'), 'created by stub\\n', 'utf8');",
     "  }",
-    "  if (match) {",
-    "    fs.writeFileSync(resultPath, JSON.stringify({ outcome: 'approved', summary: 'Stub approved result.', handoff: 'Ready for integration.' }, null, 2));",
-    "  }",
-    "  fs.writeFileSync(lastMessagePath, 'stub completed\\n', 'utf8');",
+    "  const taskResult = {",
+    "    outcome: 'approved',",
+    "    summary: 'Stub approved result.',",
+    "    artifacts: [],",
+    "    scriptsRun: [],",
+    "    completion: {",
+    "      changed: taskId === 'task_02' ? ['package.json'] : taskId === 'task_03' ? ['README.md'] : ['CLI_SMOKE.txt'],",
+    "      proof: ['Stub workspace mutation applied.'],",
+    "      remaining: [],",
+    "    },",
+    "    nextAction: null,",
+    "  };",
+    "  const raw = JSON.stringify(taskResult);",
+    "  fs.writeFileSync(lastMessagePath, raw, 'utf8');",
+    "  process.stdout.write(`${raw}\\n`);",
     "})().catch((err) => {",
     "  console.error(err instanceof Error ? err.message : String(err));",
     "  process.exit(1);",
@@ -133,7 +145,7 @@ const createCodexStub = async (): Promise<string> => {
     return cmdPath;
   }
   const scriptPath = path.join(dir, "codex-stub");
-  await fs.writeFile(scriptPath, `#!/usr/bin/env bun\n${nodeBody}`, "utf-8");
+  await fs.writeFile(scriptPath, `#!${BUN}\n${nodeBody}`, "utf-8");
   await fs.chmod(scriptPath, 0o755);
   return scriptPath;
 };
@@ -170,7 +182,7 @@ const createCodexReplyStub = async (delayMs = 1_100): Promise<string> => {
     return cmdPath;
   }
   const scriptPath = path.join(dir, "codex-reply-stub");
-  await fs.writeFile(scriptPath, `#!/usr/bin/env bun\n${nodeBody}`, "utf-8");
+  await fs.writeFile(scriptPath, `#!${BUN}\n${nodeBody}`, "utf-8");
   await fs.chmod(scriptPath, 0o755);
   return scriptPath;
 };
@@ -256,7 +268,7 @@ const createAwsStub = async (): Promise<string> => {
     return dir;
   }
   const scriptPath = path.join(dir, "aws");
-  await fs.writeFile(scriptPath, `#!/usr/bin/env bun\n${nodeBody}`, "utf-8");
+  await fs.writeFile(scriptPath, `#!${BUN}\n${nodeBody}`, "utf-8");
   await fs.chmod(scriptPath, 0o755);
   return dir;
 };
@@ -878,6 +890,7 @@ test("factory cli: analyze summarizes run sequence, job control noise, and agent
       objectiveId,
       taskId: "task_02",
       candidateId: "task_02_candidate_01",
+      outcome: "approved",
       summary: "Used AWS CLI directly and confirmed the workload is Fargate-only.",
       handoff: "Ready for synthesis.",
       completion: {
@@ -1233,7 +1246,565 @@ test("factory cli: analyze summarizes run sequence, job control noise, and agent
   });
   expect(payload.anomalies.some((anomaly) => anomaly.kind === "tool_error")).toBe(true);
   expect(payload.anomalies.some((anomaly) => anomaly.kind === "repeated_control_job")).toBe(true);
-  expect(payload.recommendations).toContain("When inspecting a multi-task objective, do not call `factory.output` with only `objectiveId`. Pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
+  expect(payload.recommendations).toContain("Teach `factory.output` to infer a single active or nonterminal task automatically; when the objective is genuinely ambiguous, pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
+}, 120_000);
+
+test("factory cli: parse stitches chat, objective, job, and task artifact data into one bundle", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  const chatId = "chat_parse_bundle_01";
+  const objectiveId = "objective_parse_bundle_01";
+  const runId = "run_parse_bundle_01";
+  const taskJobId = `job_factory_${objectiveId}_task_01_task_01_candidate_01`;
+  const sessionStream = `agents/factory/test/infrastructure/sessions/${chatId}`;
+  const runStream = `${sessionStream}/runs/${runId}`;
+
+  const containerRoot = path.posix.join("/workspace", path.basename(repoDir));
+  const workspaceId = `${objectiveId}_task_01_task_01_candidate_01`;
+  const localFactoryDir = path.join(repoDir, ".receipt", "data", "hub", "worktrees", workspaceId, ".receipt", "factory");
+  const containerFactoryDir = path.posix.join(containerRoot, ".receipt", "data", "hub", "worktrees", workspaceId, ".receipt", "factory");
+
+  await fs.mkdir(localFactoryDir, { recursive: true });
+  await fs.writeFile(path.join(localFactoryDir, "task_01.manifest.json"), JSON.stringify({
+    objective: {
+      objectiveId,
+      title: "Check last month AWS spend",
+      prompt: "What was my AWS bill last month?",
+    },
+    task: {
+      taskId: "task_01",
+      title: "Collect AWS billing evidence",
+      prompt: "Use Cost Explorer and return the monthly total with evidence.",
+    },
+    candidate: {
+      candidateId: "task_01_candidate_01",
+    },
+  }, null, 2), "utf-8");
+  await fs.writeFile(path.join(localFactoryDir, "task_01.context-pack.json"), JSON.stringify({
+    objectiveId,
+    title: "Check last month AWS spend",
+    task: {
+      taskId: "task_01",
+      title: "Collect AWS billing evidence",
+      prompt: "Use Cost Explorer and return the monthly total with evidence.",
+      candidateId: "task_01_candidate_01",
+      status: "running",
+    },
+    recentReceipts: [
+      {
+        type: "task.dispatched",
+        at: 2_220,
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+        summary: "task.dispatched",
+      },
+    ],
+  }, null, 2), "utf-8");
+  await fs.writeFile(path.join(localFactoryDir, "task_01.result.json"), JSON.stringify({
+    outcome: "approved",
+    summary: "Reported total cost of 42.42 USD for the previous month.",
+    tokensUsed: 3210,
+    report: {
+      conclusion: "Total cost was 42.42 USD for 2026-02-01 through 2026-03-01.",
+    },
+  }, null, 2), "utf-8");
+  await fs.writeFile(
+    path.join(localFactoryDir, "task_01.last-message.md"),
+    "{\"outcome\":\"approved\",\"summary\":\"Reported total cost of 42.42 USD for the previous month.\"}\n",
+    "utf-8",
+  );
+  await fs.writeFile(
+    path.join(localFactoryDir, "task_01.stdout.log"),
+    [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_parse_bundle_01" }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "item_1",
+          type: "command_execution",
+          command: "python3 tools/billing.py --month previous",
+          aggregated_output: "",
+          exit_code: null,
+          status: "in_progress",
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_1",
+          type: "command_execution",
+          command: "python3 tools/billing.py --month previous",
+          aggregated_output: "{\"total\":\"42.42\",\"currency\":\"USD\"}",
+          exit_code: 0,
+          status: "completed",
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_2",
+          type: "agent_message",
+          text: "{\"outcome\":\"approved\",\"summary\":\"Reported total cost of 42.42 USD for the previous month.\"}",
+        },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 111,
+          cached_input_tokens: 22,
+          output_tokens: 33,
+        },
+      }),
+    ].join("\n") + "\n",
+    "utf-8",
+  );
+  await fs.writeFile(path.join(localFactoryDir, "task_01.stderr.log"), "", "utf-8");
+
+  await seedObjectiveReplay(runtimeConfig.dataDir, objectiveId, [
+    {
+      type: "objective.created",
+      objectiveId,
+      title: "Check last month AWS spend",
+      prompt: "What was my AWS bill last month?",
+      channel: "results",
+      baseHash: "abc123",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "infrastructure",
+        rootProfileLabel: "Infrastructure",
+        resolvedProfileHash: "profile-hash",
+        promptHash: "prompt-hash",
+        promptPath: "profiles/infrastructure/PROFILE.md",
+        selectedSkills: ["skills/factory-infrastructure-aws/SKILL.md"],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 2_000,
+    },
+    {
+      type: "task.added",
+      objectiveId,
+      createdAt: 2_100,
+      task: {
+        nodeId: "task_01",
+        taskId: "task_01",
+        taskKind: "planned",
+        title: "Collect AWS billing evidence",
+        prompt: "Use Cost Explorer and return the monthly total with evidence.",
+        workerType: "codex",
+        baseCommit: "abc123",
+        dependsOn: [],
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [],
+        artifactRefs: {},
+        createdAt: 2_100,
+      },
+    },
+    {
+      type: "task.ready",
+      objectiveId,
+      taskId: "task_01",
+      readyAt: 2_150,
+    },
+    {
+      type: "candidate.created",
+      objectiveId,
+      createdAt: 2_180,
+      candidate: {
+        candidateId: "task_01_candidate_01",
+        taskId: "task_01",
+        status: "planned",
+        baseCommit: "abc123",
+        checkResults: [],
+        artifactRefs: {},
+        createdAt: 2_180,
+        updatedAt: 2_180,
+      },
+    },
+    {
+      type: "task.dispatched",
+      objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      jobId: taskJobId,
+      workspaceId,
+      workspacePath: path.posix.join(containerRoot, ".receipt", "data", "hub", "worktrees", workspaceId),
+      skillBundlePaths: [],
+      contextRefs: [],
+      startedAt: 2_220,
+    },
+    {
+      type: "investigation.reported",
+      objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      outcome: "approved",
+      summary: "Reported total cost of 42.42 USD for the previous month.",
+      handoff: "Ready to answer the operator.",
+      completion: {
+        changed: [],
+        proof: ["Cost Explorer returned 42.42 USD."],
+        remaining: [],
+      },
+      report: {
+        conclusion: "Total cost was 42.42 USD for 2026-02-01 through 2026-03-01.",
+        evidence: [{
+          title: "Cost Explorer total",
+          summary: "Returned 42.42 USD.",
+        }],
+        scriptsRun: [{
+          command: "python3 tools/billing.py --month previous",
+          status: "ok",
+          summary: "Queried Cost Explorer.",
+        }],
+        disagreements: [],
+        nextSteps: [],
+      },
+      artifactRefs: {
+        result: {
+          kind: "file",
+          ref: path.posix.join(containerFactoryDir, "task_01.result.json"),
+          label: "task result",
+        },
+      },
+      reportedAt: 2_900,
+    },
+    {
+      type: "objective.completed",
+      objectiveId,
+      summary: "Reported total cost of 42.42 USD for the previous month.",
+      completedAt: 2_950,
+    },
+  ]);
+
+  await seedJobReplay(runtimeConfig.dataDir, `jobs/${taskJobId}`, [
+    {
+      type: "job.enqueued",
+      jobId: taskJobId,
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId,
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+        workspaceId,
+        workspacePath: path.posix.join(containerRoot, ".receipt", "data", "hub", "worktrees", workspaceId),
+        promptPath: path.posix.join(containerFactoryDir, "task_01.prompt.md"),
+        resultPath: path.posix.join(containerFactoryDir, "task_01.result.json"),
+        stdoutPath: path.posix.join(containerFactoryDir, "task_01.stdout.log"),
+        stderrPath: path.posix.join(containerFactoryDir, "task_01.stderr.log"),
+        lastMessagePath: path.posix.join(containerFactoryDir, "task_01.last-message.md"),
+        manifestPath: path.posix.join(containerFactoryDir, "task_01.manifest.json"),
+        contextPackPath: path.posix.join(containerFactoryDir, "task_01.context-pack.json"),
+      },
+      maxAttempts: 1,
+      sessionKey: `factory:${objectiveId}:task_01`,
+      singletonMode: "allow",
+      createdAt: 2_220,
+    },
+    {
+      type: "job.leased",
+      jobId: taskJobId,
+      workerId: "worker-codex",
+      leaseMs: 900_000,
+      attempt: 1,
+    },
+    {
+      type: "job.progress",
+      jobId: taskJobId,
+      workerId: "worker-codex",
+      result: {
+        status: "running",
+        summary: "Running billing query.",
+        progressAt: 2_400,
+        eventType: "item.started",
+      },
+    },
+    {
+      type: "job.progress",
+      jobId: taskJobId,
+      workerId: "worker-codex",
+      result: {
+        status: "running",
+        summary: "Codex completed the turn.",
+        progressAt: 2_880,
+        eventType: "turn.completed",
+        lastMessage: "{\"outcome\":\"approved\",\"summary\":\"Reported total cost of 42.42 USD for the previous month.\"}",
+        tokensUsed: 3210,
+      },
+    },
+    {
+      type: "job.completed",
+      jobId: taskJobId,
+      workerId: "worker-codex",
+      result: {
+        objectiveId,
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+        summary: "Reported total cost of 42.42 USD for the previous month.",
+      },
+    },
+  ]);
+
+  await seedAgentReplay(runtimeConfig.dataDir, sessionStream, [
+    {
+      type: "problem.set",
+      runId,
+      problem: "what was my AWS bill last month?",
+      agentId: "orchestrator",
+    },
+    {
+      type: "run.configured",
+      runId,
+      agentId: "orchestrator",
+      workflow: { id: "factory-chat-v1", version: "1.0.0" },
+      config: {
+        maxIterations: 8,
+        maxToolOutputChars: 6_000,
+        memoryScope: `repos/test/profiles/infrastructure/objectives/${objectiveId}`,
+        workspace: ".",
+        extra: {
+          profileId: "infrastructure",
+          objectiveId,
+          stream: sessionStream,
+        },
+      },
+      model: "gpt-5.2",
+      promptHash: "prompt-hash",
+      promptPath: "profiles/infrastructure/PROFILE.md",
+    },
+    {
+      type: "thread.bound",
+      runId,
+      agentId: "orchestrator",
+      objectiveId,
+      chatId,
+      reason: "startup",
+    },
+    {
+      type: "response.finalized",
+      runId,
+      agentId: "orchestrator",
+      content: "Your AWS bill last month was $42.42 USD.",
+    },
+    {
+      type: "run.status",
+      runId,
+      agentId: "orchestrator",
+      status: "completed",
+    },
+  ]);
+
+  await seedAgentReplay(runtimeConfig.dataDir, runStream, [
+    {
+      type: "problem.set",
+      runId,
+      problem: "what was my AWS bill last month?",
+      agentId: "orchestrator",
+    },
+    {
+      type: "run.configured",
+      runId,
+      agentId: "orchestrator",
+      workflow: { id: "factory-chat-v1", version: "1.0.0" },
+      config: {
+        maxIterations: 8,
+        maxToolOutputChars: 6_000,
+        memoryScope: `repos/test/profiles/infrastructure/objectives/${objectiveId}`,
+        workspace: ".",
+        extra: {
+          profileId: "infrastructure",
+          objectiveId,
+          stream: sessionStream,
+        },
+      },
+      model: "gpt-5.2",
+      promptHash: "prompt-hash",
+      promptPath: "profiles/infrastructure/PROFILE.md",
+    },
+    {
+      type: "thread.bound",
+      runId,
+      agentId: "orchestrator",
+      objectiveId,
+      chatId,
+      reason: "startup",
+    },
+    {
+      type: "run.status",
+      runId,
+      agentId: "orchestrator",
+      status: "running",
+    },
+    {
+      type: "iteration.started",
+      runId,
+      iteration: 1,
+      agentId: "orchestrator",
+    },
+    {
+      type: "thought.logged",
+      runId,
+      iteration: 1,
+      agentId: "orchestrator",
+      content: "Wait for the task output, then answer with the total.",
+    },
+    {
+      type: "action.planned",
+      runId,
+      iteration: 1,
+      agentId: "orchestrator",
+      actionType: "tool",
+      name: "factory.output",
+      input: { objectiveId, taskId: "task_01" },
+    },
+    {
+      type: "tool.called",
+      runId,
+      iteration: 1,
+      agentId: "orchestrator",
+      tool: "factory.output",
+      input: { objectiveId, taskId: "task_01" },
+      summary: "task output",
+      durationMs: 14,
+    },
+    {
+      type: "tool.observed",
+      runId,
+      iteration: 1,
+      agentId: "orchestrator",
+      tool: "factory.output",
+      output: "{\"summary\":\"Reported total cost of 42.42 USD for the previous month.\"}",
+      truncated: false,
+    },
+    {
+      type: "response.finalized",
+      runId,
+      agentId: "orchestrator",
+      content: "Your AWS bill last month was $42.42 USD.",
+    },
+    {
+      type: "run.status",
+      runId,
+      agentId: "orchestrator",
+      status: "completed",
+    },
+  ]);
+
+  const parse = await runCli([
+    "factory",
+    "parse",
+    chatId,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+
+  expect(parse.code).toBe(0);
+  const payload = JSON.parse(parse.stdout) as {
+    readonly resolved: {
+      readonly kind: string;
+    };
+    readonly links: {
+      readonly objectiveId?: string;
+      readonly chatId?: string;
+      readonly jobId?: string;
+      readonly runId?: string;
+    };
+    readonly outputs: {
+      readonly finalResponse?: string;
+      readonly result?: {
+        readonly summary?: string;
+      };
+    };
+    readonly taskRuns: ReadonlyArray<{
+      readonly jobId: string;
+      readonly resultFile: {
+        readonly exists: boolean;
+        readonly resolvedPath?: string;
+      };
+      readonly stdout: {
+        readonly commands: ReadonlyArray<{
+          readonly command: string;
+          readonly exitCode?: number | null;
+          readonly status: string;
+        }>;
+        readonly usage?: {
+          readonly outputTokens?: number;
+        };
+      };
+    }>;
+    readonly timeline: ReadonlyArray<{
+      readonly source: string;
+      readonly type: string;
+    }>;
+  };
+
+  expect(payload.resolved.kind).toBe("chat");
+  expect(payload.links.objectiveId).toBe(objectiveId);
+  expect(payload.links.chatId).toBe(chatId);
+  expect(payload.links.jobId).toBe(taskJobId);
+  expect(payload.links.runId).toBe(runId);
+  expect(payload.outputs.finalResponse).toBe("Your AWS bill last month was $42.42 USD.");
+  expect(payload.outputs.result?.summary).toBe("Reported total cost of 42.42 USD for the previous month.");
+  expect(payload.taskRuns).toHaveLength(1);
+  expect(payload.taskRuns[0]?.jobId).toBe(taskJobId);
+  expect(payload.taskRuns[0]?.resultFile.exists).toBe(true);
+  expect(payload.taskRuns[0]?.resultFile.resolvedPath).toBe(path.join(localFactoryDir, "task_01.result.json"));
+  expect(payload.taskRuns[0]?.stdout.commands[0]).toMatchObject({
+    command: "python3 tools/billing.py --month previous",
+    exitCode: 0,
+    status: "completed",
+  });
+  expect(payload.taskRuns[0]?.stdout.usage?.outputTokens).toBe(33);
+  expect(payload.timeline.some((entry) => entry.source === "objective" && entry.type === "objective.completed")).toBe(true);
+  expect(payload.timeline.some((entry) => entry.source === "run" && entry.type === "response.finalized")).toBe(true);
+
+  const parseCandidate = await runCli([
+    "factory",
+    "parse",
+    "task_01_candidate_01",
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+
+  expect(parseCandidate.code).toBe(0);
+  const candidatePayload = JSON.parse(parseCandidate.stdout) as {
+    readonly resolved: {
+      readonly kind: string;
+      readonly focusKind?: string;
+      readonly focusId?: string;
+    };
+    readonly links: {
+      readonly objectiveId?: string;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+      readonly jobId?: string;
+    };
+    readonly outputs: {
+      readonly result?: {
+        readonly summary?: string;
+      };
+    };
+  };
+
+  expect(candidatePayload.resolved.kind).toBe("objective");
+  expect(candidatePayload.resolved.focusKind).toBe("candidate");
+  expect(candidatePayload.resolved.focusId).toBe("task_01_candidate_01");
+  expect(candidatePayload.links.objectiveId).toBe(objectiveId);
+  expect(candidatePayload.links.taskId).toBe("task_01");
+  expect(candidatePayload.links.candidateId).toBe("task_01_candidate_01");
+  expect(candidatePayload.links.jobId).toBe(taskJobId);
+  expect(candidatePayload.outputs.result?.summary).toBe("Reported total cost of 42.42 USD for the previous month.");
 }, 120_000);
 
 test("factory runtime config: shared resolver follows .receipt/config.json", async () => {

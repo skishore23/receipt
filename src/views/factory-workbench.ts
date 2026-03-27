@@ -28,6 +28,18 @@ const isActiveTask = (task: Pick<FactoryTaskView, "status" | "jobStatus">): bool
   || task.status === "reviewing"
   || isActiveJobStatus(task.jobStatus);
 
+const isTerminalTaskStatus = (status: string | undefined): boolean =>
+  status === "approved" || status === "blocked" || status === "integrated" || status === "superseded";
+
+const isWorkbenchExecutionJob = (payload: Record<string, unknown>): boolean => {
+  const kind = asString(payload.kind);
+  return kind === "factory.task.run"
+    || kind === "factory.integration.validate"
+    || kind === "factory.integration.publish"
+    || Boolean(asString(payload.taskId))
+    || Boolean(asString(payload.candidateId));
+};
+
 const emphasisForReceipt = (type: string): WorkbenchEmphasis => {
   if (type.includes("failed") || type.includes("error")) return "danger";
   if (type.includes("blocked") || type.includes("conflicted")) return "warning";
@@ -217,20 +229,29 @@ export const buildFactoryWorkbench = (input: {
     lastMessagePath: task.lastMessagePath,
   } satisfies FactoryWorkbenchTaskCard);
   });
-  const jobs = (input.recentJobs ?? []).map((job) => {
+  const taskById = new Map(tasks.map((task) => [task.taskId, task] as const));
+  const jobs = (input.recentJobs ?? []).flatMap((job) => {
     const payload = asRecord(job.payload) ?? {};
-    return {
+    if (!isWorkbenchExecutionJob(payload)) return [];
+    const taskId = asString(payload.taskId);
+    const linkedTask = taskId ? taskById.get(taskId) : undefined;
+    const linkedTaskTerminal = linkedTask ? isTerminalTaskStatus(linkedTask.status) : false;
+    const running = !objectiveStopsLiveExecution && !linkedTaskTerminal && !isTerminalJobStatus(job.status);
+    const effectiveStatus = running
+      ? job.status
+      : linkedTask?.status
+        ?? (objectiveStopsLiveExecution && !isTerminalJobStatus(job.status) ? detail.status : job.status);
+    return [{
       jobId: job.id,
       agentId: job.agentId,
-      status: job.status,
+      status: effectiveStatus,
       summary: summarizeFactoryQueueJob(job),
       updatedAt: job.updatedAt,
-      taskId: asString(payload.taskId),
+      taskId,
       candidateId: asString(payload.candidateId),
-      running: !isTerminalJobStatus(job.status),
-    } satisfies FactoryWorkbenchJobCard;
+      running,
+    } satisfies FactoryWorkbenchJobCard];
   });
-  const taskById = new Map(tasks.map((task) => [task.taskId, task] as const));
   const defaultTask = tasks.find((task) => task.isActive) ?? tasks.find((task) => task.isReady) ?? tasks[0];
   const requestedFocusKind = input.requestedFocusKind === "job" || input.requestedFocusKind === "task"
     ? input.requestedFocusKind

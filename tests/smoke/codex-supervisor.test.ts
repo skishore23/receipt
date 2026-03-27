@@ -1031,3 +1031,134 @@ test("codex supervisor can wait for factory.status changes instead of tight poll
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("codex supervisor only caps the first factory.status wait before allowing longer waits", async () => {
+  const dir = await mkTmp("receipt-codex-supervisor-factory-first-wait");
+  const dataDir = path.join(dir, "data");
+  const workspaceRoot = path.join(dir, "workspace");
+
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.mkdir(workspaceRoot, { recursive: true });
+
+  const runtime = mkAgentRuntime(dataDir);
+  const jobRuntime = mkJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = mkMemoryTools();
+  const delegationTools = mkDelegationTools();
+  let firstStatusSnapshotAt: number | undefined;
+  const activeTs = Date.now();
+  const completedTs = activeTs + 1_000;
+
+  const factoryService = {
+    getObjective: async () => {
+      firstStatusSnapshotAt = firstStatusSnapshotAt ?? Date.now();
+      const done = Date.now() - firstStatusSnapshotAt >= 350;
+      return {
+        objectiveId: "objective_wait_demo",
+        title: "Wait demo",
+        status: done ? "completed" : "active",
+        phase: done ? "completed" : "executing",
+        latestSummary: done ? "Objective completed." : "Objective still running.",
+        nextAction: done ? "Summarize completion." : "Wait for the active task pass to finish.",
+        integration: { status: done ? "promoted" : "idle", queuedCandidateIds: [] },
+        latestDecision: done
+          ? { summary: "Promotion completed.", at: completedTs, source: "runtime" as const }
+          : { summary: "Wait for task_01 to finish.", at: activeTs, source: "runtime" as const },
+        blockedExplanation: undefined,
+        evidenceCards: [],
+        tasks: [],
+      };
+    },
+    getObjectiveDebug: async () => {
+      firstStatusSnapshotAt = firstStatusSnapshotAt ?? Date.now();
+      const done = Date.now() - firstStatusSnapshotAt >= 350;
+      return {
+        activeJobs: done ? [] : [{
+          id: "job_task_wait",
+          agentId: "codex",
+          status: "running",
+          updatedAt: activeTs,
+        }],
+        taskWorktrees: [],
+        integrationWorktree: undefined,
+        latestContextPacks: [],
+        recentReceipts: done
+          ? [{ type: "objective.completed", hash: "hash_done", ts: completedTs, summary: "Objective completed." }]
+          : [{ type: "task.dispatched", hash: "hash_wait", ts: activeTs, summary: "Task is still running." }],
+      };
+    },
+  } as unknown as FactoryService;
+
+  let structuredCalls = 0;
+  const result = await runCodexSupervisor({
+    stream: "agents/agent",
+    runId: "wait_for_factory_change_budget",
+    problem: "Watch the objective and surface progress quickly.",
+    config: {
+      maxIterations: 3,
+      maxToolOutputChars: 5000,
+      memoryScope: "agent",
+      workspace: ".",
+    },
+    runtime,
+    prompts: promptTemplate,
+    llmText: async () => "unused",
+    llmStructured: async () => {
+      structuredCalls += 1;
+      if (structuredCalls <= 2) {
+        return {
+          parsed: {
+            thought: structuredCalls === 1 ? "surface the first live snapshot quickly" : "now wait for completion",
+            action: {
+              type: "tool",
+              name: "factory.status",
+              input: JSON.stringify({ objectiveId: "objective_wait_demo", waitForChangeMs: 500 }),
+              text: null,
+            },
+          },
+          raw: "",
+        };
+      }
+      return {
+        parsed: {
+          thought: "done",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "The objective finished.",
+          },
+        },
+        raw: "",
+      };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools,
+    workspaceRoot,
+    queue,
+    dataDir,
+    factoryService,
+  });
+
+  try {
+    const chain = await runtime.chain("agents/agent/runs/wait_for_factory_change_budget");
+    const observations = chain
+      .filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "tool.observed" }> } =>
+        receipt.body.type === "tool.observed" && receipt.body.tool === "factory.status"
+      )
+      .map((receipt) => JSON.parse(receipt.body.output) as { waitedMs?: number; changed?: boolean; status?: string });
+
+    expect(result.status).toBe("completed");
+    expect(observations).toHaveLength(2);
+    expect(observations[0]?.waitedMs ?? 0).toBeGreaterThan(0);
+    expect(observations[0]?.waitedMs ?? 0).toBeLessThan(250);
+    expect(observations[0]?.changed).toBe(false);
+    expect(observations[1]?.waitedMs ?? 0).toBeGreaterThan(observations[0]?.waitedMs ?? 0);
+    expect(observations[1]?.changed).toBe(true);
+    expect(observations[1]?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

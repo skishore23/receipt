@@ -156,6 +156,59 @@ test("hub git revalidates the source remote on sync for long-lived instances", a
   await expect(hub.sourceHead()).resolves.toBe(sourceHead);
 });
 
+test("hub git sync prefers the configured source remote when repoRoot becomes stale", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-sync-prefers-remote-source");
+  const dataDir = await mkTmp("receipt-hub-git-sync-prefers-remote-data");
+  const bareDir = path.join(dataDir, "hub", "repo.git");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git preferred remote test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  const mutableHub = hub as unknown as {
+    repoRoot: string;
+    ensureRemote: () => Promise<void>;
+  };
+  mutableHub.repoRoot = path.join(path.dirname(repoRoot), "missing-source-repo");
+  mutableHub.ensureRemote = async () => undefined;
+
+  await expect(hub.syncFromSource()).resolves.toBeUndefined();
+  await expect(git(bareDir, ["rev-parse", "--verify", "refs/remotes/source/main"])).resolves.toMatch(/[0-9a-f]{40}/);
+});
+
+test("hub git sync falls back to repoRoot when the configured source remote is stale", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-sync-fallback-source");
+  const dataDir = await mkTmp("receipt-hub-git-sync-fallback-data");
+  const bareDir = path.join(dataDir, "hub", "repo.git");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git fallback test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  await git(bareDir, ["remote", "set-url", "source", path.join(path.dirname(repoRoot), "missing-source-remote")]);
+  const mutableHub = hub as unknown as {
+    ensureRemote: () => Promise<void>;
+  };
+  mutableHub.ensureRemote = async () => undefined;
+
+  await expect(hub.syncFromSource()).resolves.toBeUndefined();
+  await expect(git(bareDir, ["rev-parse", "--verify", "refs/remotes/source/main"])).resolves.toMatch(/[0-9a-f]{40}/);
+});
+
 test("hub git promotes disjoint worktree commits into a dirty source repo", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-dirty-source");
   const dataDir = await mkTmp("receipt-hub-git-dirty-data");

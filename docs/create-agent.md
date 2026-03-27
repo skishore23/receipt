@@ -135,6 +135,8 @@ For server-driven workflows and UI routes:
 receipt dev
 ```
 
+`receipt dev` starts the local Resonate runtime by default. If you explicitly need the legacy single-process backend, use `JOB_BACKEND=jsonl receipt dev`.
+
 Route modules are auto-discovered from `src/agents/*.agent.ts`.
 
 ## Stream model

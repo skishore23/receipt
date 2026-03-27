@@ -3,9 +3,13 @@ node_modules/
 dist/
 data/
 .receipt/data/
+.receipt/factory/
 .receipt/resonate/
 .receipt/home/
 .receipt/docker/
+.receipt/tmp/
+.receipt/test-data-smoke/
+.receipt/bin/resonate
 *.log
 .DS_Store
 .env

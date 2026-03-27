@@ -34,7 +34,7 @@ import { loadAgentPrompts, hashAgentPrompts } from "./prompts/agent";
 import { normalizeAgentConfig } from "./agents/agent";
 import { createQueuedBudgetContinuation, parseContinuationDepth } from "./agents/agent-continuation";
 import { runOrchestrator, normalizeFactoryChatConfig, runFactoryCodexJob } from "./agents/orchestrator";
-import { agentRunStream } from "./agents/agent.streams";
+import { emitToContinuedRun, resolveContinuedRunTarget } from "./agents/run-target";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime";
 import { FACTORY_CONTROL_AGENT_ID } from "./services/factory-service";
 import { loadAgentRoutes } from "./framework/agent-loader";
@@ -106,6 +106,11 @@ const AGENT_PROMPTS = loadAgentPrompts();
 const AGENT_PROMPTS_HASH = hashAgentPrompts(AGENT_PROMPTS);
 const AGENT_PROMPTS_PATH = "prompts/agent.prompts.json";
 const AGENT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.2";
+const FACTORY_CHAT_MODEL =
+  process.env.RECEIPT_FACTORY_CHAT_MODEL?.trim()
+  || process.env.HUB_FACTORY_CHAT_MODEL?.trim()
+  || process.env.OPENAI_MODEL
+  || "gpt-5.4-mini";
 
 const JOB_STREAM = "jobs";
 const jobWorkerId = process.env.JOB_WORKER_ID ?? `worker_${process.pid}`;
@@ -178,7 +183,7 @@ const baseQueue = jsonlQueue({
             agentId: "factory-control",
             lane: "collect",
             sessionKey: `factory:objective:${objectiveId}`,
-            singletonMode: "allow",
+            singletonMode: "steer",
             maxAttempts: 1,
             payload: {
               kind: "factory.objective.control",
@@ -398,7 +403,7 @@ const factoryRunner = createAgentRunner({
   defaultStream: "agents/factory", sseTopic: "agent", sseTokenEvent: "agent-token",
   jobKind: "factory.run",
   normalizeConfig: normalizeFactoryChatConfig, runtime: agentRuntime,
-  prompts: AGENT_PROMPTS, model: AGENT_MODEL,
+  prompts: AGENT_PROMPTS, model: FACTORY_CHAT_MODEL,
   promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
   runFn: runOrchestrator as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
   extras: {
@@ -440,19 +445,20 @@ const emitMergedSummary = async (opts: {
   readonly summary: string;
 }): Promise<void> => {
   if (!opts.parentStream || !opts.parentRunId || !opts.summary.trim()) return;
-  const rs = agentRunStream(opts.parentStream, opts.parentRunId);
-  await agentRuntime.execute(rs, {
-    type: "emit",
-    eventId: makeEventId(rs),
-    event: {
+  await emitToContinuedRun({
+    runtime: agentRuntime,
+    baseStream: opts.parentStream,
+    parentRunId: opts.parentRunId,
+    eventIdForStream: makeEventId,
+    eventForRun: (runId) => ({
       type: "subagent.merged",
-      runId: opts.parentRunId,
+      runId,
       agentId: "orchestrator",
       subJobId: opts.subJobId,
       subRunId: opts.subRunId,
       task: opts.task,
       summary: opts.summary,
-    },
+    }),
   });
   sse.publish("receipt");
 };
@@ -469,6 +475,8 @@ const summarizeSubJob = async (jobId: string, timeoutMs = subJobWaitMs): Promise
 
 const scheduleSubJobJoin = (opts: {
   readonly parentJobId: string;
+  readonly parentStream: string;
+  readonly parentRunId: string;
   readonly subJobId: string;
   readonly subRunId: string;
   readonly emitMerged: (summary: string) => Promise<void>;
@@ -480,16 +488,24 @@ const scheduleSubJobJoin = (opts: {
     await opts.emitMerged(settled.summary);
     sse.publish("receipt");
 
-    const parent = await queue.getJob(opts.parentJobId);
-    if (!parent) return;
-    if (parent.status === "queued" || parent.status === "leased" || parent.status === "running") {
+    const target = await resolveContinuedRunTarget({
+      runtime: agentRuntime,
+      baseStream: opts.parentStream,
+      parentRunId: opts.parentRunId,
+    });
+    const candidateJobIds = [...new Set([target.jobId, opts.parentJobId].filter((value): value is string => Boolean(value)))];
+    for (const jobId of candidateJobIds) {
+      const parent = await queue.getJob(jobId);
+      if (!parent) continue;
+      if (parent.status !== "queued" && parent.status !== "leased" && parent.status !== "running") continue;
       await queue.queueCommand({
-        jobId: opts.parentJobId,
+        jobId,
         command: "follow_up",
         payload: { note: `Sub-agent summary (${opts.subRunId}):\n${settled.summary}` },
         by: "subagent-join",
       });
-      sse.publish("jobs", opts.parentJobId);
+      sse.publish("jobs", jobId);
+      break;
     }
   })().catch((err) => {
     console.error("sub-agent join failed", err);
@@ -505,8 +521,7 @@ type WorkerHandlerSpec = {
   readonly defaultAgentId: string;
   readonly kind: string;
   readonly defaultSubConfig: Record<string, unknown>;
-  readonly runtime: { execute: (stream: string, cmd: AgentCmd) => Promise<AgentEvent[]> };
-  readonly runStreamFn: (base: string, runId: string) => string;
+  readonly runtime: Pick<typeof agentRuntime, "chain" | "execute">;
   readonly runner: AgentRunner;
   readonly mergeEventExtras?: Record<string, unknown>;
 };
@@ -565,20 +580,19 @@ const handleDelegates = async (
     const base = typeof merged.problem === "string" ? merged.problem : "";
     merged.problem = `${base}\n\nSub-agent summary (${subRunId}):\n${summaryNow.summary}`.trim();
 
-    const rs = typeof merged.runStream === "string" && merged.runStream.trim().length > 0
-      ? merged.runStream
-      : spec.runStreamFn(parentStream, parentRunId);
-
     const mergedEvent = {
-      type: "subagent.merged", runId: parentRunId, agentId: "orchestrator",
+      type: "subagent.merged", agentId: "orchestrator",
       subJobId: subJob.id, subRunId, task: delegate.task,
       ...(spec.mergeEventExtras ?? {}),
     } as const;
 
     const emitMerged = async (summary: string) => {
-      await spec.runtime.execute(rs, {
-        type: "emit", eventId: makeEventId(rs),
-        event: { ...mergedEvent, summary } satisfies AgentEvent,
+      await emitToContinuedRun({
+        runtime: spec.runtime,
+        baseStream: parentStream,
+        parentRunId,
+        eventIdForStream: makeEventId,
+        eventForRun: (runId) => ({ ...mergedEvent, runId, summary } satisfies AgentEvent),
       });
     };
 
@@ -586,7 +600,14 @@ const handleDelegates = async (
     sse.publish("receipt");
 
     if (!summaryNow.done) {
-      scheduleSubJobJoin({ parentJobId: job.id, subJobId: subJob.id, subRunId, emitMerged });
+      scheduleSubJobJoin({
+        parentJobId: job.id,
+        parentStream,
+        parentRunId,
+        subJobId: subJob.id,
+        subRunId,
+        emitMerged,
+      });
     }
   }
 };
@@ -630,7 +651,7 @@ const jobHandlers = {
   agent: createWorkerHandler({
     defaultStream: "agents/agent", defaultAgentId: "agent", kind: "agent.run",
     defaultSubConfig: { maxIterations: 3, maxToolOutputChars: 2500, memoryScope: "agent", workspace: "." },
-    runtime: agentRuntime, runStreamFn: agentRunStream, runner: agentRunner,
+    runtime: agentRuntime, runner: agentRunner,
   }),
   factory: createWorkerHandler({
     defaultStream: "agents/factory", defaultAgentId: "factory", kind: "factory.run",
@@ -640,7 +661,7 @@ const jobHandlers = {
       memoryScope: "repos/factory/profiles/generalist",
       workspace: ".",
     },
-    runtime: agentRuntime, runStreamFn: agentRunStream, runner: factoryRunner,
+    runtime: agentRuntime, runner: factoryRunner,
   }),
   ...factoryWorkerHandlers,
   codex: async (job, ctx) => {

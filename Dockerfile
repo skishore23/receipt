@@ -19,10 +19,15 @@ RUN apt-get update \
     dumb-init \
     git \
     gh \
+    iproute2 \
     jq \
+    lsof \
     openssh-client \
+    procps \
+    psmisc \
     python3 \
     ripgrep \
+    sqlite3 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=bun-binary /usr/local/bin/bun /usr/local/bin/bun
@@ -34,11 +39,16 @@ RUN case "${TARGETARCH}" in \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
   && curl -fsSL \
+    "https://github.com/resonatehq/resonate/releases/download/${RESONATE_VERSION}/resonate_linux_${resonate_arch}.tar.gz.sha256" \
+    -o /tmp/resonate.tar.gz.sha256 \
+  && curl -fsSL \
     "https://github.com/resonatehq/resonate/releases/download/${RESONATE_VERSION}/resonate_linux_${resonate_arch}.tar.gz" \
     -o /tmp/resonate.tar.gz \
+  && (cd /tmp && sha256sum -c /tmp/resonate.tar.gz.sha256) \
   && tar -xzf /tmp/resonate.tar.gz -C /usr/local/bin resonate \
   && chmod +x /usr/local/bin/resonate \
-  && rm -f /tmp/resonate.tar.gz
+  && resonate serve --help >/dev/null 2>&1 \
+  && rm -f /tmp/resonate.tar.gz /tmp/resonate.tar.gz.sha256
 
 RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 
@@ -46,7 +56,8 @@ WORKDIR /workspace/receipt
 
 COPY docker/entrypoint.sh /usr/local/bin/receipt-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/receipt-healthcheck.sh
-RUN chmod +x /usr/local/bin/receipt-entrypoint.sh /usr/local/bin/receipt-healthcheck.sh
+COPY docker/debug-env.sh /usr/local/bin/receipt-debug-env
+RUN chmod +x /usr/local/bin/receipt-entrypoint.sh /usr/local/bin/receipt-healthcheck.sh /usr/local/bin/receipt-debug-env
 
 ENV PORT=8787
 ENV DATA_DIR=/workspace/receipt/.receipt/data

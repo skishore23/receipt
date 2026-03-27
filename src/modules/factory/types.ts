@@ -58,6 +58,12 @@ export type FactoryObjectiveSeverity =
   | 4
   | 5;
 
+export type FactoryTaskResultOutcome =
+  | "approved"
+  | "changes_requested"
+  | "blocked"
+  | "partial";
+
 export type FactoryProfileCloudProvider = "aws" | "gcp" | "azure";
 
 export type FactoryInvestigationEvidence = {
@@ -91,6 +97,7 @@ export type FactoryInvestigationReport = {
 export type FactoryInvestigationTaskReport = {
   readonly taskId: string;
   readonly candidateId: string;
+  readonly outcome: FactoryTaskResultOutcome;
   readonly summary: string;
   readonly handoff: string;
   readonly completion: FactoryTaskCompletionRecord;
@@ -226,7 +233,7 @@ export type FactoryRebracketRecord = {
   readonly selectedActionId?: string;
   readonly reason: string;
   readonly confidence?: number;
-  readonly source: "orchestrator" | "fallback" | "runtime";
+  readonly source: "orchestrator" | "runtime";
   readonly appliedAt: number;
   readonly basedOn?: string;
 };

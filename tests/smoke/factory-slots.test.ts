@@ -142,6 +142,25 @@ test("slot release: failing an objective admits the next queued objective", asyn
   expect(refreshedSecond.scheduler.slotState).toBe("active");
 }, 30_000);
 
+test("objective control: reconcile preserves the reconcile reason", async () => {
+  const dataDir = await createTempDir("slots-reconcile");
+  const repoRoot = await createSourceRepo();
+  const service = createService(dataDir, repoRoot);
+
+  const created = await service.createObjective({ title: "First", prompt: "hold slot", checks: ["true"] });
+  const result = await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: created.objectiveId,
+    reason: "reconcile",
+  });
+
+  expect(result).toMatchObject({
+    objectiveId: created.objectiveId,
+    status: "completed",
+    reason: "reconcile",
+  });
+}, 30_000);
+
 test("slot release: promoting status releases the slot", async () => {
   const dataDir = await createTempDir("slots-promote-status");
   const repoRoot = await createSourceRepo();

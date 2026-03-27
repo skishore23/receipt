@@ -390,7 +390,7 @@ const objectiveEventSummary = (event: FactoryEvent): string => {
     case "candidate.reviewed":
       return `${event.candidateId} ${event.status}: ${truncateInline(event.summary)}`;
     case "investigation.reported":
-      return `${event.taskId} reported: ${truncateInline(event.summary)}`;
+      return `${event.taskId} ${event.outcome}: ${truncateInline(event.summary)}`;
     case "investigation.synthesized":
       return `Investigation synthesized: ${truncateInline(event.summary)}`;
     case "candidate.conflicted":
@@ -854,7 +854,7 @@ const buildRecommendations = (anomalies: ReadonlyArray<AnalysisAnomaly>): Readon
   const recommendations = new Set<string>();
   for (const anomaly of anomalies) {
     if (anomaly.kind === "tool_error" && anomaly.summary.includes("factory.output requires focusKind/focusId")) {
-      recommendations.add("When inspecting a multi-task objective, do not call `factory.output` with only `objectiveId`. Pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
+      recommendations.add("Teach `factory.output` to infer a single active or nonterminal task automatically; when the objective is genuinely ambiguous, pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
     }
     if (anomaly.summary.includes("/usr/src/cli.ts")) {
       recommendations.add("Stop assuming `/usr/src/cli.ts` exists inside worker containers. Resolve the checked-in Receipt entrypoint from the mounted workspace or use the direct AWS CLI path already present in the task prompt.");
@@ -870,6 +870,9 @@ const buildRecommendations = (anomalies: ReadonlyArray<AnalysisAnomaly>): Readon
     }
     if (anomaly.summary.includes("api.github.com") || anomaly.summary.toLowerCase().includes("publish failed")) {
       recommendations.add("Separate transient publish/network failures from integration conflicts in the UI. Report the publish job failure directly and preserve the already-integrated candidate state.");
+    }
+    if (anomaly.kind === "repeated_live_output_poll") {
+      recommendations.add("When one child is clearly active, keep the same `factory.output` focus and use `waitForChangeMs` instead of tight re-polling or bouncing between output and status tools.");
     }
   }
   return [...recommendations];
@@ -1050,6 +1053,17 @@ export const readObjectiveAnalysis = async (
         kind: "cross_objective_run",
         severity: "high",
         summary: `${run.runId}: run stream for ${objectiveId} carried objective ${run.mismatchedObjectiveIds.join(", ")}`,
+        runId: run.runId,
+        stream: run.stream,
+      });
+    }
+    const repeatedLiveOutputPolls = run.toolTransitions.find((transition) =>
+      transition.fromTool === "factory.output" && transition.toTool === "factory.output");
+    if ((repeatedLiveOutputPolls?.count ?? 0) >= 3) {
+      addAnomaly(anomalies, {
+        kind: "repeated_live_output_poll",
+        severity: "low",
+        summary: `${run.runId}: repeated factory.output polling (${repeatedLiveOutputPolls!.count + 1} consecutive calls observed)`,
         runId: run.runId,
         stream: run.stream,
       });

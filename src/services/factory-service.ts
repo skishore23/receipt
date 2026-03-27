@@ -40,6 +40,7 @@ import {
   type FactoryObjectiveStatus,
   type FactoryState,
   type FactoryTaskExecutionMode,
+  type FactoryTaskResultOutcome,
   type FactoryTaskRecord,
   type FactoryTaskStatus,
   type FactoryWorkerType,
@@ -98,6 +99,18 @@ import {
   resolveFactoryTaskWorkerResult,
   type FactoryPublishResult,
 } from "./factory/worker-results";
+import {
+  detectArtifactIssues,
+  pathExists,
+  readTextIfPresent,
+  readdirIfPresent,
+  type FactoryArtifactIssue,
+} from "./factory/artifact-inspection";
+import { inferObjectiveLiveOutputFocusFromDetail } from "./factory/live-output";
+import {
+  processObjectiveReconcileControl,
+  processObjectiveStartupControl,
+} from "./factory/objective-control";
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
 import { type GraphRef } from "@receipt/core/graph";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
@@ -113,6 +126,7 @@ const DEFAULT_CHECKS = ["bun run build"] as const;
 const FACTORY_DATA_DIR = ".receipt/factory";
 const DEFAULT_FACTORY_PROFILE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const FACTORY_CONTROL_AGENT_ID = "factory-control";
+const OBJECTIVE_CONTROL_REDRIVE_AGE_MS = 30_000;
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "infra"]);
 
 const resolveRepoRoot = (repoRoot?: string): string =>
@@ -149,8 +163,6 @@ const clipText = (value: string | undefined, max = 280): string | undefined => {
   if (!trimmed) return undefined;
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 };
-const pathExists = async (targetPath: string): Promise<boolean> =>
-  fs.access(targetPath).then(() => true).catch(() => false);
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 const tailText = (value: string, maxChars: number): string =>
@@ -167,6 +179,15 @@ const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: s
     .map((entry) => entry?.trim())
     .filter((entry): entry is string => Boolean(entry))
     .reduceRight<string>((acc, entry) => prependPath(entry, acc), currentPath ?? "");
+const runtimeBunPathEntries = (): ReadonlyArray<string> => {
+  const candidates = [
+    process.env.RECEIPT_BUN_BIN?.trim() ? path.dirname(process.env.RECEIPT_BUN_BIN.trim()) : undefined,
+    path.basename(process.execPath || "").toLowerCase().includes("bun") ? path.dirname(process.execPath) : undefined,
+    process.env.BUN_INSTALL?.trim() ? path.join(process.env.BUN_INSTALL.trim(), "bin") : undefined,
+    process.env.HOME?.trim() ? path.join(process.env.HOME.trim(), ".bun", "bin") : undefined,
+  ];
+  return [...new Set(candidates.filter((entry): entry is string => Boolean(entry)))];
+};
 const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
   const relative = path.relative(rootPath, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -610,14 +631,7 @@ const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
   return SUPPORTED_WORKER_TYPES.has(normalized) ? normalized : "codex";
 };
 
-const sandboxModeForTask = (input: {
-  readonly profileCloudProvider?: string;
-  readonly objectiveMode: FactoryObjectiveMode;
-}): CodexRunInput["sandboxMode"] | undefined => {
-  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return undefined;
-  // Infrastructure investigations need live cloud API access, which the default Codex sandbox blocks.
-  return "danger-full-access";
-};
+const sandboxModeForTask = (): CodexRunInput["sandboxMode"] | undefined => undefined;
 
 const taskOrdinalId = (index: number): string => `task_${String(index + 1).padStart(2, "0")}`;
 
@@ -1493,6 +1507,15 @@ export class FactoryService {
     return this.buildObjectiveDetail(state, queuePositions.get(objectiveId));
   }
 
+  async inferObjectiveLiveOutputFocus(objectiveId: string): Promise<{
+    readonly focusKind: FactoryLiveOutputTargetKind;
+    readonly focusId: string;
+    readonly inferredBy: "single_active_task" | "single_nonterminal_task" | "single_task";
+  } | undefined> {
+    const detail = await this.getObjective(objectiveId);
+    return inferObjectiveLiveOutputFocusFromDetail(detail);
+  }
+
   async getObjectiveDebug(objectiveId: string): Promise<FactoryDebugProjection> {
     const state = await this.getObjectiveState(objectiveId);
     const states = await this.listObjectiveStates();
@@ -1750,13 +1773,13 @@ export class FactoryService {
       const task = state.workflow.tasksById[taskId];
       if (task?.workspacePath) workspacePaths.add(task.workspacePath);
     }
-    const diskEntries = await fs.readdir(this.git.worktreesDir, { withFileTypes: true }).catch(() => []);
+    const diskEntries = await readdirIfPresent(this.git.worktreesDir, { withFileTypes: true });
     for (const entry of diskEntries) {
       if (!entry.isDirectory()) continue;
       if (!entry.name.startsWith(`${objectiveId}_`) && !entry.name.startsWith(`factory_integration_${objectiveId}`)) continue;
       workspacePaths.add(path.join(this.git.worktreesDir, entry.name));
     }
-    const runtimeEntries = await fs.readdir(this.taskRuntimesRoot(), { withFileTypes: true }).catch(() => []);
+    const runtimeEntries = await readdirIfPresent(this.taskRuntimesRoot(), { withFileTypes: true });
     for (const entry of runtimeEntries) {
       if (!entry.isDirectory()) continue;
       if (!entry.name.startsWith(`${objectiveId}_`)) continue;
@@ -1787,6 +1810,7 @@ export class FactoryService {
 
   async resumeObjectives(): Promise<void> {
     await this.queue.refresh();
+    await this.reconcileQueuedObjectiveControlJobs();
     await this.rebalanceObjectiveSlots();
     const objectives = await this.listObjectives();
     for (const objective of objectives.filter((item) =>
@@ -1798,6 +1822,75 @@ export class FactoryService {
         await this.reactObjective(objective.objectiveId);
       } catch {
         await this.enqueueObjectiveControl(objective.objectiveId, "admitted");
+      }
+    }
+  }
+
+  private isObjectiveControlJob(job: QueueJob): job is QueueJob & {
+    readonly payload: FactoryObjectiveControlJobPayload;
+  } {
+    return job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.payload.kind === "factory.objective.control"
+      && typeof job.payload.objectiveId === "string"
+      && job.payload.objectiveId.trim().length > 0;
+  }
+
+  private compareRecentQueueJobs(left: QueueJob, right: QueueJob): number {
+    return right.updatedAt - left.updatedAt
+      || right.createdAt - left.createdAt
+      || right.id.localeCompare(left.id);
+  }
+
+  private controlJobCancelReason(state: FactoryState | undefined): string | undefined {
+    if (!state) return "objective control job canceled because the objective no longer exists";
+    if (state.archivedAt) return "objective control job canceled because the objective is archived";
+    if (state.status === "blocked") return "objective control job canceled because the objective is blocked";
+    if (this.isTerminalObjectiveStatus(state.status)) {
+      return `objective control job canceled because the objective is ${state.status}`;
+    }
+    return undefined;
+  }
+
+  private shouldRedriveQueuedControlJob(job: QueueJob, now: number): boolean {
+    if (job.commands.length > 0) return true;
+    const ageMs = Math.max(now - job.updatedAt, now - job.createdAt);
+    return ageMs >= OBJECTIVE_CONTROL_REDRIVE_AGE_MS;
+  }
+
+  private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
+    const queued = (await this.queue.listJobs({ status: "queued", limit: 500 }))
+      .filter((job) => this.isObjectiveControlJob(job));
+    if (queued.length === 0) return;
+
+    const states = await this.listObjectiveStates();
+    const statesById = new Map(states.map((state) => [state.objectiveId, state] as const));
+    const grouped = new Map<string, QueueJob[]>();
+    for (const job of queued) {
+      const key = job.sessionKey?.trim() || `factory:objective:${job.payload.objectiveId}`;
+      const bucket = grouped.get(key) ?? [];
+      bucket.push(job);
+      grouped.set(key, bucket);
+    }
+
+    const now = Date.now();
+    for (const jobs of grouped.values()) {
+      const ranked = [...jobs].sort((left, right) => this.compareRecentQueueJobs(left, right));
+      const current = ranked[0];
+      if (!current) continue;
+
+      for (const duplicate of ranked.slice(1)) {
+        await this.queue.cancel(duplicate.id, "superseded duplicate objective control job", "factory.resume");
+      }
+
+      const state = statesById.get(current.payload.objectiveId);
+      const cancelReason = this.controlJobCancelReason(state);
+      if (cancelReason) {
+        await this.queue.cancel(current.id, cancelReason, "factory.resume");
+        continue;
+      }
+
+      if (this.redriveQueuedJob && this.shouldRedriveQueuedControlJob(current, now)) {
+        await this.redriveQueuedJob(current);
       }
     }
   }
@@ -2185,7 +2278,7 @@ export class FactoryService {
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
-      singletonMode: "allow",
+      singletonMode: reason === "admitted" ? "cancel" : "steer",
       maxAttempts: 2,
       payload: {
         kind: "factory.objective.control",
@@ -2194,6 +2287,13 @@ export class FactoryService {
       } satisfies FactoryObjectiveControlJobPayload,
     });
     this.sse.publish("jobs", created.id);
+    if (
+      this.redriveQueuedJob
+      && created.status === "queued"
+      && reason === "reconcile"
+    ) {
+      await this.redriveQueuedJob(created);
+    }
   }
 
   async runObjectiveControl(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2201,9 +2301,15 @@ export class FactoryService {
       throw new FactoryServiceError(400, "invalid factory control payload");
     }
     const objectiveId = requireNonEmpty(payload.objectiveId, "objectiveId required");
-    const reason = payload.reason === "admitted" ? "admitted" : "startup";
+    const reason = payload.reason === "admitted" || payload.reason === "reconcile"
+      ? payload.reason
+      : "startup";
     await this.ensureBootstrap();
-    await this.processObjectiveStartup(objectiveId, reason as FactoryObjectiveControlJobPayload["reason"]);
+    if (reason === "reconcile") {
+      await this.processObjectiveReconcile(objectiveId);
+    } else {
+      await this.processObjectiveStartup(objectiveId, reason);
+    }
     return {
       objectiveId,
       status: "completed",
@@ -2255,17 +2361,23 @@ export class FactoryService {
 
   private async processObjectiveStartup(
     objectiveId: string,
-    _reason: FactoryObjectiveControlJobPayload["reason"],
+    _reason: Exclude<FactoryObjectiveControlJobPayload["reason"], "reconcile">,
   ): Promise<void> {
-    await this.rebalanceObjectiveSlots();
-    const state = await this.getObjectiveState(objectiveId);
-    if (this.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
-      await this.rebalanceObjectiveSlots();
-      return;
-    }
-    if (state.scheduler.slotState !== "active") return;
-    await this.reactObjective(objectiveId);
-    await this.rebalanceObjectiveSlots();
+    await processObjectiveStartupControl({
+      getObjectiveState: (targetObjectiveId) => this.getObjectiveState(targetObjectiveId),
+      isTerminalObjectiveStatus: (status) => this.isTerminalObjectiveStatus(status),
+      rebalanceObjectiveSlots: () => this.rebalanceObjectiveSlots(),
+      reactObjective: (targetObjectiveId) => this.reactObjective(targetObjectiveId),
+    }, objectiveId);
+  }
+
+  private async processObjectiveReconcile(objectiveId: string): Promise<void> {
+    await processObjectiveReconcileControl({
+      getObjectiveState: (targetObjectiveId) => this.getObjectiveState(targetObjectiveId),
+      isTerminalObjectiveStatus: (status) => this.isTerminalObjectiveStatus(status),
+      rebalanceObjectiveSlots: () => this.rebalanceObjectiveSlots(),
+      reactObjective: (targetObjectiveId) => this.reactObjective(targetObjectiveId),
+    }, objectiveId);
   }
 
   private async latestObjectiveOperatorNote(objectiveId: string): Promise<string | undefined> {
@@ -2518,7 +2630,7 @@ export class FactoryService {
         finalProjection.tasks.length > 0
         && finalProjection.readyTasks.length === 0
         && finalProjection.activeTasks.length === 0
-        && finalProjection.tasks.every((task) => ["approved", "blocked", "superseded"].includes(task.status))
+        && finalProjection.tasks.every((task) => ["approved", "superseded"].includes(task.status))
         && this.finalInvestigationReports(state).length > 0
       );
       const investigationBlocked = (
@@ -2761,7 +2873,7 @@ export class FactoryService {
       await this.materializeIsolatedTaskSupportFiles(parsed.workspacePath, this.workerTaskProfile(parsed.profile));
     }
     const packetPresent = await this.taskPacketPresent(parsed);
-    if (rebuiltPacket || !packetPresent) {
+    if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
       await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
     }
     const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(parsed.workspacePath);
@@ -2785,10 +2897,7 @@ export class FactoryService {
       completionSignalPath: parsed.lastMessagePath,
       completionQuietMs: 1_500,
       reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
-      sandboxMode: sandboxModeForTask({
-        profileCloudProvider: parsed.profile.cloudProvider,
-        objectiveMode: parsed.objectiveMode,
-      }),
+      sandboxMode: sandboxModeForTask(),
       isolateCodexHome: true,
       objectiveId: parsed.objectiveId,
       taskId: parsed.taskId,
@@ -2815,6 +2924,17 @@ export class FactoryService {
     };
   }
 
+  private async detectArtifactIssues(
+    workspacePath: string,
+    workerArtifacts: ReadonlyArray<{
+      readonly label: string;
+      readonly path: string | null | undefined;
+      readonly summary: string | null | undefined;
+    }>,
+  ): Promise<ReadonlyArray<FactoryArtifactIssue>> {
+    return detectArtifactIssues(workspacePath, workerArtifacts);
+  }
+
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
     const state = await this.getObjectiveState(payload.objectiveId);
     const task = state.workflow.tasksById[payload.taskId];
@@ -2835,27 +2955,52 @@ export class FactoryService {
         `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`
       ).join("\n")}`
       : undefined;
-    const handoff = [nextAction ?? summary, workerArtifactSummary].filter(Boolean).join("\n\n") || summary;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
-    const outcome = optionalTrimmedString(rawResult.outcome) ?? "approved";
+    const completedAt = Date.now();
+    const isInvestigation = state.objectiveMode === "investigation";
+    const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
+    let outcome: FactoryTaskResultOutcome;
+    switch (optionalTrimmedString(rawResult.outcome)) {
+      case "changes_requested":
+      case "blocked":
+      case "partial":
+        outcome = optionalTrimmedString(rawResult.outcome) as FactoryTaskResultOutcome;
+        break;
+      default:
+        outcome = "approved";
+        break;
+    }
+    const artifactIssues = isInvestigation
+      ? await this.detectArtifactIssues(payload.workspacePath, workerArtifacts)
+      : [];
+    const forcedPartialFromArtifacts = isInvestigation && outcome === "approved" && artifactIssues.length > 0;
+    if (forcedPartialFromArtifacts) outcome = "partial";
+    const artifactIssueSummary = artifactIssues.length > 0
+      ? `Captured artifact warnings:\n${artifactIssues.map((issue) =>
+        `- ${issue.summary}${issue.detail ? ` ${issue.detail}` : ""}`
+      ).join("\n")}`
+      : undefined;
+    const effectiveSummary = forcedPartialFromArtifacts
+      ? `${summary}${summary.endsWith(".") ? "" : "."} Captured evidence artifacts recorded command errors, so this investigation remains partial.`
+      : summary;
+    const handoff = [nextAction ?? effectiveSummary, workerArtifactSummary, artifactIssueSummary]
+      .filter(Boolean)
+      .join("\n\n") || effectiveSummary;
     const initialCompletion = normalizeTaskCompletionRecord(
       rawResult.completion,
       buildDefaultTaskCompletion({
-        summary,
+        summary: effectiveSummary,
         workerArtifacts,
         scriptsRun,
       }),
     );
-    const completedAt = Date.now();
-    const isInvestigation = state.objectiveMode === "investigation";
-    const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
 
     if ((outcome === "blocked" || (outcome === "partial" && !isInvestigation)) && !hasStructuredInvestigationReport) {
       await this.commitTaskMemory(
         state,
         task,
         payload.candidateId,
-        renderDeliveryResultText({ summary, handoff, scriptsRun, completion: initialCompletion }),
+        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
         outcome,
       );
       await this.emitObjective(payload.objectiveId, {
@@ -2875,12 +3020,12 @@ export class FactoryService {
     const failedCheck = checkResults.find((check) => !check.ok);
 
     if (payload.executionMode === "isolated" && !isInvestigation) {
-      const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${summary}`;
+      const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${effectiveSummary}`;
       await this.commitTaskMemory(
         state,
         task,
         payload.candidateId,
-        renderDeliveryResultText({ summary, handoff, scriptsRun, completion: initialCompletion }),
+        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
         "blocked_no_diff",
       );
       await this.emitObjective(payload.objectiveId, {
@@ -2894,12 +3039,12 @@ export class FactoryService {
     }
 
     if (!status.dirty && !isInvestigation) {
-      const noDiffReason = `factory task produced no tracked diff: ${summary}`;
+      const noDiffReason = `factory task produced no tracked diff: ${effectiveSummary}`;
       await this.commitTaskMemory(
         state,
         task,
         payload.candidateId,
-        renderDeliveryResultText({ summary, handoff, scriptsRun, completion: initialCompletion }),
+        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
         "blocked_no_diff",
       );
       await this.emitObjective(payload.objectiveId, {
@@ -2937,7 +3082,7 @@ export class FactoryService {
         hasStructuredInvestigationReport
           ? rawResult.report
           : {
-              conclusion: summary,
+              conclusion: effectiveSummary,
               evidence: workerArtifacts.map((item) => ({
                 title: item.label,
                 summary: item.summary ?? item.path ?? item.label,
@@ -2947,13 +3092,41 @@ export class FactoryService {
               disagreements: [],
               nextSteps: nextAction ? [nextAction] : [],
             },
-        summary,
+        effectiveSummary,
       );
-      const reportWithChecks: FactoryInvestigationReport = checkResults.length > 0
+      const reportWithArtifactIssues: FactoryInvestigationReport = artifactIssues.length > 0
         ? {
             ...report,
             evidence: [
               ...report.evidence,
+              {
+                title: "Captured artifact warnings",
+                summary: clipText(artifactIssues.map((issue) => issue.summary).join(" "), 280)
+                  ?? "Captured evidence artifacts recorded command errors.",
+                detail: clipText(
+                  artifactIssues
+                    .map((issue) => issue.detail ?? issue.path)
+                    .filter(Boolean)
+                    .join("\n"),
+                  600,
+                ),
+              },
+            ],
+            scriptsRun: [
+              ...report.scriptsRun,
+              ...artifactIssues.map((issue) => ({
+                command: `artifact:${path.basename(issue.path)}`,
+                summary: issue.summary,
+                status: issue.status,
+              } satisfies FactoryInvestigationReport["scriptsRun"][number])),
+            ],
+          }
+        : report;
+      const reportWithChecks: FactoryInvestigationReport = checkResults.length > 0
+        ? {
+            ...reportWithArtifactIssues,
+            evidence: [
+              ...reportWithArtifactIssues.evidence,
               ...checkResults.map((check) => ({
                 title: check.ok ? "Check passed" : "Check failed",
                 summary: `${check.command} exited ${String(check.exitCode ?? "unknown")}`,
@@ -2961,7 +3134,7 @@ export class FactoryService {
               })),
             ],
             scriptsRun: [
-              ...report.scriptsRun,
+              ...reportWithArtifactIssues.scriptsRun,
               ...checkResults.map((check) => ({
                 command: check.command,
                 summary: check.ok ? "Passed." : "Failed.",
@@ -2969,11 +3142,11 @@ export class FactoryService {
               } satisfies FactoryInvestigationReport["scriptsRun"][number])),
             ],
           }
-        : report;
+        : reportWithArtifactIssues;
       const investigationCompletion = normalizeTaskCompletionRecord(
         rawResult.completion,
         buildDefaultTaskCompletion({
-          summary,
+          summary: effectiveSummary,
           workerArtifacts,
           scriptsRun: reportWithChecks.scriptsRun,
           report: reportWithChecks,
@@ -2989,7 +3162,8 @@ export class FactoryService {
         objectiveId: payload.objectiveId,
         taskId: payload.taskId,
         candidateId: payload.candidateId,
-        summary,
+        outcome,
+        summary: effectiveSummary,
         handoff,
         completion: investigationCompletion,
         report: reportWithChecks,
@@ -3001,7 +3175,7 @@ export class FactoryService {
         state,
         task,
         payload.candidateId,
-        renderInvestigationReportText(summary, reportWithChecks, investigationCompletion, [resultRefs]),
+        renderInvestigationReportText(effectiveSummary, reportWithChecks, investigationCompletion, [resultRefs]),
         outcome === "blocked" || outcome === "partial" ? "investigation_reported_partial" : "investigation_reported",
       );
       return;
@@ -3010,7 +3184,7 @@ export class FactoryService {
     const deliveryCompletion = normalizeTaskCompletionRecord(
       rawResult.completion,
       buildDefaultTaskCompletion({
-        summary,
+        summary: effectiveSummary,
         workerArtifacts,
         scriptsRun,
         checkResults,
@@ -3028,7 +3202,7 @@ export class FactoryService {
       candidateId: payload.candidateId,
       taskId: payload.taskId,
       headCommit: committed?.hash ?? payload.baseCommit,
-      summary,
+      summary: effectiveSummary,
       handoff,
       completion: deliveryCompletion,
       checkResults,
@@ -3050,7 +3224,7 @@ export class FactoryService {
       const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
         inheritedOnly && outcome === "approved" ? "approved" : "changes_requested";
       const reviewSummary = inheritedOnly
-        ? `${summary} (checks only reproduced an inherited failure in ${failedCheck.command})`
+        ? `${effectiveSummary} (checks only reproduced an inherited failure in ${failedCheck.command})`
         : `Verification failed: ${failedCheck.command}`;
       const reviewHandoff = inheritedOnly
         ? `${handoff}\n\n${buildInheritedFactoryFailureNote(failedCheck, classification)}`
@@ -3081,14 +3255,14 @@ export class FactoryService {
     }
 
     const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
-      outcome === "changes_requested" ? "changes_requested" : outcome === "rejected" ? "rejected" : "approved";
+      outcome === "changes_requested" ? "changes_requested" : "approved";
     await this.emitObjective(payload.objectiveId, {
       type: "candidate.reviewed",
       objectiveId: payload.objectiveId,
       candidateId: payload.candidateId,
       taskId: payload.taskId,
       status: reviewStatus,
-      summary,
+      summary: effectiveSummary,
       handoff,
       reviewedAt: completedAt,
     });
@@ -3096,7 +3270,7 @@ export class FactoryService {
       state,
       task,
       payload.candidateId,
-      renderDeliveryResultText({ summary, handoff, scriptsRun, completion: deliveryCompletion }),
+      renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: deliveryCompletion }),
       reviewStatus,
     );
   }
@@ -4099,7 +4273,7 @@ export class FactoryService {
   private async discoverObjectiveStreams(): Promise<ReadonlyArray<string>> {
     const discovered = new Set<string>();
     const manifestPath = path.join(this.dataDir, "_streams.json");
-    const raw = await fs.readFile(manifestPath, "utf-8").catch(() => "");
+    const raw = await readTextIfPresent(manifestPath) ?? "";
     let manifestLoaded = false;
     if (raw.trim()) {
       try {
@@ -4291,7 +4465,7 @@ export class FactoryService {
       case "candidate.reviewed":
         return `${event.candidateId} ${event.status}: ${event.summary}`;
       case "investigation.reported":
-        return `${event.taskId} reported: ${event.summary}`;
+        return `${event.taskId} ${event.outcome}: ${event.summary}`;
       case "investigation.synthesized":
         return `investigation synthesized: ${event.summary}`;
       case "candidate.conflicted":
@@ -4908,6 +5082,11 @@ export class FactoryService {
     };
   }
 
+  private taskPromptPath(workspacePath: string, targetPath: string): string {
+    void workspacePath;
+    return targetPath;
+  }
+
   private async taskArtifactActivity(
     workspacePath: string,
     taskId: string,
@@ -5061,7 +5240,7 @@ export class FactoryService {
       objectiveId: state.objectiveId,
       taskId: task.taskId,
       candidateId,
-      contextPackPath: files.contextPackPath,
+      contextPackPath: path.basename(files.contextPackPath),
       defaultQuery: `${state.title}\n${task.title}\n${taskPrompt}`,
       defaultLimit: 6,
       defaultMaxChars: 2400,
@@ -5460,6 +5639,10 @@ export class FactoryService {
     const memorySummary = await this.loadMemorySummary(`factory/objectives/${state.objectiveId}/tasks/${task.taskId}`, taskPrompt);
     const validationSection = this.renderTaskValidationSection(state, task);
     const planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now());
+    const manifestPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.manifestPath);
+    const contextPackPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.contextPackPath);
+    const memoryScriptPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.memoryScriptPath);
+    const resultPathForPrompt = payload.resultPath;
     return [
       `# Factory Task`,
       ``,
@@ -5502,6 +5685,9 @@ export class FactoryService {
       state.objectiveMode === "investigation"
         ? `Interpret command and script outputs in plain language. Do not just paste logs.`
         : `Capture implementation and validation results precisely in the handoff.`,
+      state.objectiveMode === "investigation"
+        ? `Do not convert a failed query, denied API, or helper error into "zero results". If a primary evidence path errors or stays incomplete, record that command as warning/error and use outcome "partial" or "blocked" instead of "approved".`
+        : `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
       `Make a short internal plan before the first tool: name the concrete question, the primary evidence path, the stop condition, and the one follow-up check that would change your answer.`,
       `Runtime compatibility: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
       `Use Codex subagents only for bounded sidecar work such as parsing a captured artifact, checking one secondary evidence path, or verifying a concrete claim.`,
@@ -5526,9 +5712,9 @@ export class FactoryService {
       `The prompt is bootstrap only. Prefer the packet files and memory script over broad repo exploration.`,
       `Read, in order:`,
       `1. AGENTS.md and skills/factory-receipt-worker/SKILL.md`,
-      `2. Manifest: ${payload.manifestPath}`,
-      `3. Context Pack: ${payload.contextPackPath}`,
-      `4. Memory Script: ${payload.memoryScriptPath}`,
+      `2. Manifest: ${manifestPathForPrompt}`,
+      `3. Context Pack: ${contextPackPathForPrompt}`,
+      `4. Memory Script: ${memoryScriptPathForPrompt}`,
       `5. Repo skills from the manifest, especially any execution or permissions landscape notes`,
       `Mounted profile skills for this task:`,
       payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
@@ -5542,22 +5728,25 @@ export class FactoryService {
         : `If the packet and memory script are still insufficient, say which evidence is missing in the handoff instead of probing live objective state from the isolated runtime.`,
       ``,
       `## Memory Access`,
-      `Use the layered memory script at ${payload.memoryScriptPath} instead of raw memory dumps.`,
+      `Use the layered memory script at ${memoryScriptPathForPrompt} instead of raw memory dumps.`,
       `Recommended commands:`,
-      `- bun ${payload.memoryScriptPath} context 2800`,
-      `- bun ${payload.memoryScriptPath} objective 1800`,
-      `- bun ${payload.memoryScriptPath} scope task "${task.title}" 1400`,
-      `- bun ${payload.memoryScriptPath} search repo "${task.title}" 6`,
+      `- bun ${memoryScriptPathForPrompt} context 2800`,
+      `- bun ${memoryScriptPathForPrompt} objective 1800`,
+      `- bun ${memoryScriptPathForPrompt} scope task "${task.title}" 1400`,
+      `- bun ${memoryScriptPathForPrompt} search repo "${task.title}" 6`,
       `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
       ``,
       `## Result Contract`,
-      `Write JSON to ${payload.resultPath} with:`,
+      `Return exactly one JSON object matching this schema:`,
+      `Write JSON to ${resultPathForPrompt} with:`,
       state.objectiveMode === "investigation"
         ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
         : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null }`,
-      `Do not write this file yourself. Return exactly that JSON object as your final response and the runtime will persist it to the result path.`,
+      `Do not write this file yourself.`,
+      `Do not write ${resultPathForPrompt} yourself. Return exactly that JSON object as your final response and the runtime will persist it there.`,
       `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
       `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
+      `Before you return final JSON, sanity-check that report.scriptsRun statuses match the actual command outcomes and that any artifact-level errors are reflected in outcome, summary, or next steps.`,
       state.objectiveMode === "investigation"
         ? `For investigation tasks, always include the report key. Use a report object whenever you gathered meaningful evidence; otherwise use null. Always include completion with changed, proof, and remaining arrays. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
         : `For delivery tasks, keep the envelope small. Always include scriptsRun and completion. Use [] when no command or small script materially informed the result, and use [] in completion.remaining when nothing is left.`,
@@ -5820,14 +6009,14 @@ export class FactoryService {
   }
 
   private async resolveTaskWorkerResult(
-    payload: Pick<FactoryTaskJobPayload, "resultPath" | "lastMessagePath">,
+    payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
     execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
   ): Promise<Record<string, unknown>> {
     return resolveFactoryTaskWorkerResult(payload, execution);
   }
 
   private async resolvePublishWorkerResult(
-    payload: Pick<FactoryIntegrationPublishJobPayload, "resultPath" | "lastMessagePath">,
+    payload: Pick<FactoryIntegrationPublishJobPayload, "lastMessagePath">,
     execution: { readonly lastMessage?: string },
   ): Promise<FactoryPublishResult> {
     return resolveFactoryPublishWorkerResult(payload, execution);
@@ -5897,7 +6086,10 @@ export class FactoryService {
       : undefined;
     return {
       receiptBinDir,
-      path: prependPaths([receiptBinDir, workspaceNodeModulesBin, repoNodeModulesBin, repoReceiptBinDir], process.env.PATH),
+      path: prependPaths(
+        [receiptBinDir, workspaceNodeModulesBin, repoNodeModulesBin, repoReceiptBinDir, ...runtimeBunPathEntries()],
+        process.env.PATH,
+      ),
     };
   }
 

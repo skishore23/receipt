@@ -41,12 +41,20 @@ export const readTextTail = async (filePath: string, maxChars: number): Promise<
 };
 
 export const buildFactoryMemoryScriptSource = (configPath: string): string => {
-  const normalizedConfigPath = configPath.replace(/\\/g, "\\\\");
+  const configFileName = path.basename(configPath);
   return [
     "#!/usr/bin/env bun",
+    `const path = require("node:path");`,
     `const fs = require("node:fs");`,
     `const { execFileSync } = require("node:child_process");`,
-    `const config = JSON.parse(fs.readFileSync(${JSON.stringify(normalizedConfigPath)}, "utf-8"));`,
+    `const scriptPath = fs.realpathSync(process.argv[1]);`,
+    `const configPath = path.join(path.dirname(scriptPath), ${JSON.stringify(configFileName)});`,
+    `const configDir = path.dirname(configPath);`,
+    `const resolvePacketPath = (targetPath) => {`,
+    `  if (typeof targetPath !== "string" || !targetPath.trim()) return undefined;`,
+    `  return path.isAbsolute(targetPath) ? targetPath : path.join(configDir, targetPath);`,
+    `};`,
+    `const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));`,
     `const args = process.argv.slice(2);`,
     `const compact = (value, maxChars) => value.length <= maxChars ? value : \`\${value.slice(0, Math.max(0, maxChars - 1))}…\`;`,
     `const formatTree = (nodes, depth = 0) => (nodes || []).flatMap((node) => {`,
@@ -64,7 +72,8 @@ export const buildFactoryMemoryScriptSource = (configPath: string): string => {
     `const command = args[0] || "overview";`,
     `if (command === "context") {`,
     `  const maxChars = Number(args[1] || config.defaultMaxChars || 2800) || 2800;`,
-    `  const pack = config.contextPackPath ? JSON.parse(fs.readFileSync(config.contextPackPath, "utf-8")) : undefined;`,
+    `  const contextPackPath = resolvePacketPath(config.contextPackPath);`,
+    `  const pack = contextPackPath ? JSON.parse(fs.readFileSync(contextPackPath, "utf-8")) : undefined;`,
     `  if (!pack) {`,
     `    process.stdout.write("No recursive context pack found.\\n");`,
     `    process.exit(0);`,
@@ -103,7 +112,8 @@ export const buildFactoryMemoryScriptSource = (configPath: string): string => {
     `}`,
     `if (command === "objective") {`,
     `  const maxChars = Number(args[1] || 1800) || 1800;`,
-    `  const pack = config.contextPackPath ? JSON.parse(fs.readFileSync(config.contextPackPath, "utf-8")) : undefined;`,
+    `  const contextPackPath = resolvePacketPath(config.contextPackPath);`,
+    `  const pack = contextPackPath ? JSON.parse(fs.readFileSync(contextPackPath, "utf-8")) : undefined;`,
     `  if (!pack?.objectiveSlice) {`,
     `    process.stdout.write("No objective slice found.\\n");`,
     `    process.exit(0);`,

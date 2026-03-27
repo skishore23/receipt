@@ -621,13 +621,7 @@ The practical split is:
 flowchart TD
   Start["Reducer state"] --> Legal["FactoryService builds legal actions"]
   Legal --> Evidence["emit merge.evidence.computed / merge.candidate.scored"]
-  Evidence --> Enabled{"orchestrator enabled?"}
-  Enabled -- no --> Fallback["deterministic fallbackFactoryDecision()"]
-  Enabled -- yes --> LLM["FactoryOrchestrator.decide()"]
-  LLM --> Valid{"selected action valid?"}
-  Valid -- no --> Fallback
-  Valid -- yes --> Apply["emit rebracket.applied"]
-  Fallback --> Apply
+  Evidence --> Apply["runtime selects one action and emits rebracket.applied"]
   Apply --> Receipts["emit mutation / integration / promotion receipts"]
 ```
 
@@ -650,18 +644,8 @@ Output:
 - `reason`
 - `confidence`
 
-The service always computes a deterministic fallback with `fallbackFactoryDecision()`.
-
-Current fallback preference order is:
-
-1. `queue_integration`
-2. `promote_integration`
-3. `split_task`
-4. `reassign_task`
-5. `supersede_task`
-6. `block_objective`
-
-If the LLM orchestrator is disabled or returns something invalid, fallback is used.
+The runtime currently records direct `rebracket.applied` decisions with source `runtime`.
+There is no separate `fallbackFactoryDecision()` path left in the current implementation.
 
 ## Worker Dispatch Model
 

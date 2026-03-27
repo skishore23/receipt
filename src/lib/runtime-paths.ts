@@ -35,7 +35,16 @@ export const resolveBunRuntime = (): string => {
   if (execPath && BUN_EXECUTABLE_RE.test(path.basename(execPath))) {
     return execPath;
   }
-  return process.env.BUN_BIN?.trim() || "bun";
+  const candidates = [
+    process.env.BUN_BIN?.trim(),
+    process.env.RECEIPT_BUN_BIN?.trim(),
+    process.env.BUN_INSTALL?.trim() ? path.join(process.env.BUN_INSTALL.trim(), "bin", "bun") : undefined,
+    process.env.HOME?.trim() ? path.join(process.env.HOME.trim(), ".bun", "bin", "bun") : undefined,
+  ];
+  const resolved = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+  if (resolved) return resolved;
+  const discovered = bunWhich("bun");
+  return discovered || "bun";
 };
 
 export const bunWhich = (command: string): string | undefined => {

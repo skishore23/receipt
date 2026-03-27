@@ -291,22 +291,10 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
     : {};
   const candidateOrder = normalizeCandidateOrder(state.candidateOrder, candidates);
 
-  const legacy = state as FactoryState & {
-    readonly taskOrder?: unknown;
-    readonly graph?: {
-      readonly status?: unknown;
-      readonly activeNodeIds?: unknown;
-      readonly order?: unknown;
-      readonly nodes?: unknown;
-      readonly updatedAt?: unknown;
-    };
-  };
   const currentWorkflow = isRecord(state.workflow) ? state.workflow : undefined;
   const taskNodes = isRecord(currentWorkflow?.tasksById)
     ? currentWorkflow.tasksById
-    : isRecord(legacy.graph?.nodes)
-      ? legacy.graph.nodes
-      : {};
+    : {};
   const tasksById = Object.fromEntries(
     Object.entries(taskNodes)
       .filter(([, task]) => isRecord(task) && typeof task.taskId === "string")
@@ -314,25 +302,17 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
   ) as Readonly<Record<string, FactoryTaskRecord>>;
   const orderedTaskIds = Array.isArray(currentWorkflow?.taskIds)
     ? currentWorkflow.taskIds.filter((taskId): taskId is string => typeof taskId === "string")
-    : Array.isArray(legacy.taskOrder)
-      ? legacy.taskOrder.filter((taskId): taskId is string => typeof taskId === "string")
-      : Array.isArray(legacy.graph?.order)
-        ? legacy.graph.order.filter((taskId): taskId is string => typeof taskId === "string")
-        : Object.keys(tasksById);
+    : Object.keys(tasksById);
   const taskIds = uniqueExistingTaskIds(orderedTaskIds, tasksById);
   const activeTaskIds = uniqueExistingTaskIds(
     Array.isArray(currentWorkflow?.activeTaskIds)
       ? currentWorkflow.activeTaskIds.filter((taskId): taskId is string => typeof taskId === "string")
-      : Array.isArray(legacy.graph?.activeNodeIds)
-        ? legacy.graph.activeNodeIds.filter((taskId): taskId is string => typeof taskId === "string")
-        : [],
+      : [],
     tasksById,
   );
   const workflowUpdatedAt = typeof currentWorkflow?.updatedAt === "number" && Number.isFinite(currentWorkflow.updatedAt)
     ? currentWorkflow.updatedAt
-    : typeof legacy.graph?.updatedAt === "number" && Number.isFinite(legacy.graph.updatedAt)
-      ? legacy.graph.updatedAt
-      : state.updatedAt;
+    : state.updatedAt;
   return {
     ...initialFactoryState,
     ...state,
@@ -341,7 +321,7 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
     candidateOrder,
     workflow: {
       objectiveId: state.objectiveId,
-      status: normalizeWorkflowStatus(currentWorkflow?.status ?? legacy.graph?.status),
+      status: normalizeWorkflowStatus(currentWorkflow?.status),
       activeTaskIds,
       taskIds,
       tasksById,

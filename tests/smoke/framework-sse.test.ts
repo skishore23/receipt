@@ -127,6 +127,27 @@ test("framework sse: factory topic publishes objective-scoped refresh events", a
   hub.publish("factory", "objective_demo");
   const published = await readChunk(streamReader);
   expect(published).toMatch(/event: factory-refresh/);
+  expect(published).toMatch(/data: objective_demo/);
+
+  abort.abort();
+  await streamReader.cancel();
+});
+
+test("framework sse: global factory subscription receives objective-specific publishes", async () => {
+  const hub = new SseHub();
+  const abort = new AbortController();
+  const response = hub.subscribe("factory", undefined, abort.signal);
+  const reader = response.body?.getReader();
+  expect(reader).toBeTruthy();
+  const streamReader = reader!;
+
+  const init = await readChunk(streamReader);
+  expect(init).toMatch(/event: factory-refresh/);
+
+  hub.publish("factory", "objective_demo");
+  const published = await readChunk(streamReader);
+  expect(published).toMatch(/event: factory-refresh/);
+  expect(published).toMatch(/data: objective_demo/);
 
   abort.abort();
   await streamReader.cancel();

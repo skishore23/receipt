@@ -123,6 +123,28 @@ const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
   return [packetFiles, extraArtifacts].filter(Boolean).join("");
 };
 
+const renderInspectorRailSummary = (model: FactoryInspectorModel): string => {
+  const objective = model.selectedObjective;
+  if (!objective) return "";
+  const receiptsHref = `/factory${inspectorQuery(model, { panel: "receipts" })}`;
+  const receiptsActive = model.panel === "receipts";
+  const receiptsCtaClass = receiptsActive
+    ? "inline-flex items-center justify-center rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-primary"
+    : "inline-flex items-center justify-center rounded-full border border-border bg-muted px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground transition hover:bg-accent hover:text-foreground";
+  return `<div class="space-y-3 border-b border-border px-3 py-3 md:px-3.5">
+    ${typeof objective.tokensUsed === "number" ? renderTokenUsageHero(objective.tokensUsed) : ""}
+    <div class="${softPanelClass} px-3 py-2.5">
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="${sectionLabelClass}">Thread</div>
+          <div class="mt-1 text-sm font-semibold text-foreground truncate">${esc(objective.title)}</div>
+        </div>
+        <a href="${receiptsHref}" class="${receiptsCtaClass}">${receiptsActive ? "Receipts Open" : "Receipts"}</a>
+      </div>
+    </div>
+  </div>`;
+};
+
 const renderInspectorEmptyState = (
   panel: FactoryInspectorRouteModel["panel"],
   options?: {
@@ -156,12 +178,6 @@ const renderInspectorEmptyState = (
           icon: iconReceipt("h-5 w-5"),
           eyebrow: "Receipts",
           message: "Receipts appear here once a thread is selected and Factory has recorded activity.",
-        };
-      case "debug":
-        return {
-          icon: iconWorker("h-5 w-5"),
-          eyebrow: "Debug",
-          message: "Select a thread to inspect raw debug data, runtime state, and supporting metadata.",
         };
       case "overview":
       default:
@@ -247,8 +263,6 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
       ${esc(obj.summary)}
     </div>` : ''}
 
-    ${obj.tokensUsed ? renderTokenUsageHero(obj.tokensUsed) : ''}
-
     <div class="grid grid-cols-2 gap-3">
       ${statPill("Slot State", obj.slotState + (obj.queuePosition ? ` (q${obj.queuePosition})` : ''), { icon: iconStatus("h-3.5 w-3.5") })}
       ${statPill("Tasks", `${obj.activeTaskCount ?? 0} active / ${obj.readyTaskCount ?? 0} ready / ${obj.taskCount ?? 0} total`, { icon: iconTask("h-3.5 w-3.5") })}
@@ -320,7 +334,7 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
     <div class="flex flex-col gap-2 pt-3 mt-1 border-t border-border">
       <div class="${sectionLabelClass} flex justify-between items-center">
         <span>Active Codex</span>
-        <button hx-get="/factory/island/inspector${inspectorQuery(model, { panel: 'live' })}" hx-target="#factory-inspector" hx-swap="innerHTML" class="text-[10px] text-primary hover:underline lowercase tracking-normal font-medium">View all live output &rarr;</button>
+        <a href="/factory${inspectorQuery(model, { panel: 'live' })}" class="text-[10px] text-primary hover:underline lowercase tracking-normal font-medium">View all live output &rarr;</a>
       </div>
       <div class="${softPanelClass} p-3 flex flex-col gap-2">
         <div class="text-xs text-foreground">${esc(model.activeCodex.summary)}</div>
@@ -396,8 +410,15 @@ const renderAnalysisPanel = (model: FactoryInspectorModel): string => {
   const jobMetrics = analysis.metrics.jobs;
   const agentMetrics = analysis.metrics.agent;
   const recentSequence = analysis.sequence.slice(-8).reverse();
+  const objective = model.selectedObjective;
 
   return `<div class="space-y-3 px-3 py-3 md:px-3.5">
+    ${objective ? `<div class="${softPanelClass} p-3">
+      <div class="${sectionLabelClass} mb-1">Thread</div>
+      <div class="text-sm font-semibold text-foreground">${esc(objective.title)}</div>
+      <div class="mt-1 text-[11px] text-muted-foreground">${esc([objective.objectiveId, objective.phase || objective.status].filter(Boolean).join(" · "))}</div>
+    </div>` : ""}
+
     ${analysis.latestSummary ? `<div class="${softPanelClass} p-3">
       <div class="${sectionLabelClass} mb-1">Current Signal</div>
       <div class="text-sm text-foreground">${esc(analysis.latestSummary)}</div>
@@ -565,19 +586,6 @@ const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
   </div>`;
 };
 
-const renderDebugPanel = (model: FactoryInspectorModel): string => {
-  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
-  if (!model.debugInfo) {
-    return renderInspectorEmptyState("debug", {
-      title: "No debug info available.",
-      message: "There is no captured debug payload for the current selection.",
-    });
-  }
-  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
-    <pre class="text-[11px] leading-5 p-3 rounded-lg border border-border bg-background text-foreground overflow-auto max-h-[70vh] font-mono shadow-inner">${esc(JSON.stringify(model.debugInfo, null, 2))}</pre>
-  </div>`;
-};
-
 const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: FactoryInspectorIslandOptions): string => {
   const tabs: ReadonlyArray<{ readonly id: FactoryInspectorRouteModel["panel"]; readonly label: string }> = [
     { id: "overview", label: "Overview" },
@@ -585,10 +593,8 @@ const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: Factory
     { id: "execution", label: "Tasks" },
     { id: "live", label: "Live Output" },
     { id: "receipts", label: "Receipts" },
-    { id: "debug", label: "Debug" }
   ];
   const tabsPath = options?.tabsPath ?? "/factory/island/inspector/tabs";
-  const selectPath = options?.selectPath ?? "/factory/island/inspector/select";
   const triggerAttrs = options?.tabsTrigger
     ? ` hx-get="${tabsPath}${inspectorQuery(model)}" hx-trigger="${esc(options.tabsTrigger)}" hx-swap="outerHTML"`
     : "";
@@ -596,13 +602,11 @@ const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: Factory
   return `<div id="factory-inspector-tabs" class="flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10"${triggerAttrs}>
     ${tabs.map(t => {
       const active = model.panel === t.id;
-      return `<button 
-        type="button"
-        hx-get="${selectPath}${inspectorQuery(model, { panel: t.id })}" 
-        hx-target="#factory-inspector-tabs" 
-        hx-swap="outerHTML"
+      return `<a
+        href="/factory${inspectorQuery(model, { panel: t.id })}"
+        ${active ? 'aria-current="page"' : ""}
         class="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap ${active ? 'bg-primary/10 text-primary border border-primary/20' : 'text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground'}"
-      >${esc(t.label)}</button>`;
+      >${esc(t.label)}</a>`;
     }).join('')}
   </div>`;
 };
@@ -615,7 +619,6 @@ const renderInspectorPanel = (model: FactoryInspectorModel): string => {
     case "execution": content = renderExecutionPanel(model); break;
     case "live": content = renderLivePanel(model); break;
     case "receipts": content = renderReceiptsPanel(model); break;
-    case "debug": content = renderDebugPanel(model); break;
     default: {
       const exhaustiveCheck: never = model.panel;
       throw new Error(`Unhandled panel type: ${exhaustiveCheck}`);
@@ -653,4 +656,5 @@ export const factoryInspectorIsland = (
   options?: FactoryInspectorIslandOptions,
 ): string =>
   factoryInspectorTabsIsland(model, options)
+  + renderInspectorRailSummary(model)
   + factoryInspectorPanelIsland(model, options);

@@ -188,10 +188,7 @@ export class HubGit {
       this.syncPromise = (async () => {
         try {
           await this.ensureRemote();
-          await this.execGit(
-            ["fetch", "--prune", this.repoRoot, "+refs/heads/*:refs/remotes/source/*"],
-            { gitDir: this.bareDir }
-          );
+          await this.fetchSourceMirror();
           this.invalidateGraph();
           this.lastSyncAt = Date.now();
           this.lastSyncError = undefined;
@@ -766,6 +763,30 @@ export class HubGit {
     const head = await this.sourceHead();
     if (!head) throw new HubGitError(503, "source repository has no commits");
     return head;
+  }
+
+  private sourceFetchRefspec(): string {
+    return `+refs/heads/*:refs/remotes/${this.remoteName}/*`;
+  }
+
+  private async fetchSourceMirror(): Promise<void> {
+    const refspec = this.sourceFetchRefspec();
+    try {
+      await this.execGit(["fetch", "--prune", this.remoteName, refspec], { gitDir: this.bareDir });
+      return;
+    } catch (remoteErr) {
+      const remoteMessage = remoteErr instanceof Error ? remoteErr.message : String(remoteErr);
+      try {
+        await this.execGit(["fetch", "--prune", this.repoRoot, refspec], { gitDir: this.bareDir });
+        return;
+      } catch (repoRootErr) {
+        const repoRootMessage = repoRootErr instanceof Error ? repoRootErr.message : String(repoRootErr);
+        throw new HubGitError(
+          500,
+          `unable to sync source mirror via remote '${this.remoteName}' or repoRoot '${this.repoRoot}': ${remoteMessage}; ${repoRootMessage}`,
+        );
+      }
+    }
   }
 
   private async graphKey(): Promise<string> {

@@ -403,22 +403,26 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     }
     case "investigation.reported": {
       const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
+      const taskStatus: FactoryTaskStatus = event.outcome === "approved"
+        ? "approved"
+        : "blocked";
       let next = updateCandidate(state, event.candidateId, {
-        status: "approved",
+        status: event.outcome === "approved" ? "approved" : "changes_requested",
         summary: event.summary,
         handoff: event.handoff,
         artifactRefs: event.artifactRefs,
         headCommit: event.evidenceCommit,
         latestReason: event.summary,
-        approvedAt: event.reportedAt,
+        approvedAt: event.outcome === "approved" ? event.reportedAt : undefined,
         updatedAt: event.reportedAt,
       });
       next = updateTask(next, event.taskId, {
-        status: "approved",
+        status: taskStatus,
         candidateId: event.candidateId,
         latestSummary: event.summary,
         artifactRefs: event.artifactRefs,
-        completedAt: event.reportedAt,
+        blockedReason: taskStatus === "blocked" ? event.handoff : undefined,
+        completedAt: taskStatus === "approved" ? event.reportedAt : undefined,
       });
       return {
         ...setActiveTaskIds(next, active, event.reportedAt),
@@ -429,6 +433,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
             [event.taskId]: {
               taskId: event.taskId,
               candidateId: event.candidateId,
+              outcome: event.outcome,
               summary: event.summary,
               handoff: event.handoff,
               completion: event.completion,

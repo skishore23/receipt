@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { FactoryCloudProvider } from "./factory-cloud-context";
+import { resolveBunRuntime } from "../lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -108,8 +110,50 @@ export type FactoryHelperResult = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+const isMissingPathError = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+};
+
 const pathExists = async (targetPath: string): Promise<boolean> =>
-  fs.access(targetPath).then(() => true).catch(() => false);
+  fs.access(targetPath).then(() => true).catch((err) => {
+    if (isMissingPathError(err)) return false;
+    throw err;
+  });
+
+const prependPath = (dir: string, currentPath: string | undefined): string =>
+  currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
+
+const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: string | undefined): string =>
+  entries
+    .map((entry) => entry?.trim())
+    .filter((entry): entry is string => Boolean(entry))
+    .reduceRight<string>((acc, entry) => prependPath(entry, acc), currentPath ?? "");
+
+const helperRuntimeBunPathEntries = (): ReadonlyArray<string> => {
+  const resolvedBun = resolveBunRuntime().trim();
+  const candidates = [
+    process.env.RECEIPT_BUN_BIN?.trim() ? path.dirname(process.env.RECEIPT_BUN_BIN.trim()) : undefined,
+    resolvedBun && resolvedBun !== "bun" ? path.dirname(resolvedBun) : undefined,
+    process.env.BUN_INSTALL?.trim() ? path.join(process.env.BUN_INSTALL.trim(), "bin") : undefined,
+    process.env.HOME?.trim() ? path.join(process.env.HOME.trim(), ".bun", "bin") : undefined,
+  ];
+  return [...new Set(candidates.filter((entry): entry is string => Boolean(entry)))];
+};
+
+const helperRuntimeEnv = (): NodeJS.ProcessEnv => ({
+  ...process.env,
+  PATH: prependPaths(helperRuntimeBunPathEntries(), process.env.PATH),
+});
+
+const readdirIfPresent = async (targetPath: string): Promise<ReadonlyArray<Dirent>> => {
+  try {
+    return await fs.readdir(targetPath, { withFileTypes: true });
+  } catch (err) {
+    if (isMissingPathError(err)) return [];
+    throw err;
+  }
+};
 
 const normalizeText = (value: string): string =>
   value
@@ -193,12 +237,12 @@ export const loadFactoryHelperCatalog = async (
   const catalogRoot = path.join(profileRoot, FACTORY_HELPER_CATALOG_RELATIVE_ROOT);
   const domains = domain
     ? [domain]
-    : (await fs.readdir(catalogRoot, { withFileTypes: true }).catch(() => []))
+    : (await readdirIfPresent(catalogRoot))
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
   const manifests = await Promise.all(domains.flatMap(async (domainName) => {
     const domainRoot = path.join(catalogRoot, domainName);
-    const entries = await fs.readdir(domainRoot, { withFileTypes: true }).catch(() => []);
+    const entries = await readdirIfPresent(domainRoot);
     return Promise.all(entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => parseHelperManifest(path.join(domainRoot, entry.name, "manifest.json"), domainName)));
@@ -356,7 +400,7 @@ export const runFactoryHelper = async (input: {
       cwd: input.profileRoot,
       encoding: "utf-8",
       maxBuffer: 16 * 1024 * 1024,
-      env: process.env,
+      env: helperRuntimeEnv(),
     });
     return JSON.parse(stdout) as FactoryHelperResult;
   } catch (error) {

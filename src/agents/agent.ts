@@ -4,7 +4,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 
 import { z } from "zod";
 
@@ -12,13 +11,19 @@ import type { Chain } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
 import { clampNumber, type AgentRunControl, createQueuedEmitter } from "../engine/runtime/workflow";
 import type { MemoryTools } from "../adapters/memory-tools";
-import type { AgentCmd, AgentEvent, AgentState, AgentToolName } from "../modules/agent";
+import type { AgentCmd, AgentEvent, AgentState } from "../modules/agent";
 import type { FailureRecord } from "../modules/failure";
 import { agentRunStream } from "./agent.streams";
 import type { DelegationTools } from "../adapters/delegation";
 import type { AgentPromptConfig } from "../prompts/agent";
 import { renderPrompt } from "../prompts/agent";
 import { buildAgentRunResult, type AgentRunResult } from "./agent.result";
+import {
+  AgentCapabilityRegistry,
+  createBuiltinAgentCapabilities,
+  type AgentCapabilitySpec,
+} from "./capabilities";
+import { runStructuredFunction } from "./structured-function";
 
 export const AGENT_WORKFLOW_ID = "agent-v1";
 export const AGENT_WORKFLOW_VERSION = "1.0.0";
@@ -89,8 +94,7 @@ export type AgentRunInput = {
   readonly workflowId?: string;
   readonly workflowVersion?: string;
   readonly extraConfig?: Readonly<Record<string, unknown>>;
-  readonly extraToolSpecs?: Readonly<Record<string, string>>;
-  readonly extraTools?: Readonly<Record<string, AgentToolExecutor>>;
+  readonly capabilities?: ReadonlyArray<AgentCapabilitySpec>;
   readonly toolAllowlist?: ReadonlyArray<string>;
   readonly promptContextBuilder?: (input: {
     readonly runId: string;
@@ -105,16 +109,6 @@ export type AgentRunInput = {
   readonly finalizer?: AgentFinalizer;
   readonly onIterationBudgetExhausted?: AgentIterationBudgetHandler;
 };
-
-export type AgentToolResult = {
-  readonly output: string;
-  readonly summary: string;
-  readonly pauseBudget?: boolean;
-  readonly events?: ReadonlyArray<AgentEvent>;
-  readonly reports?: ReadonlyArray<Omit<Extract<AgentEvent, { type: "validation.report" }>, "type" | "runId" | "iteration" | "agentId">>;
-};
-
-export type AgentToolExecutor = (input: Record<string, unknown>) => Promise<AgentToolResult>;
 
 export type AgentFinalizerResult = {
   readonly accept: boolean;
@@ -190,15 +184,6 @@ const compactPrompt = (text: string, targetChars: number): string => {
 const isContextOverflow = (err: unknown): boolean => {
   const message = err instanceof Error ? err.message : String(err);
   return /context|token|maximum context|input too large|prompt too long/i.test(message);
-};
-
-const resolveWorkspacePath = (root: string, rawPath: string): string => {
-  const normalizedRoot = path.resolve(root);
-  const resolved = path.resolve(normalizedRoot, rawPath);
-  if (resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}${path.sep}`)) {
-    throw new Error(`path escapes workspace: ${rawPath}`);
-  }
-  return resolved;
 };
 
 type ParsedAction =
@@ -330,335 +315,6 @@ class TerminalAgentFailure extends Error {
   }
 }
 
-const runShell = async (
-  cmd: string,
-  cwd: string,
-  timeoutMs: number
-): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null; readonly stdout: string; readonly stderr: string }> =>
-  new Promise((resolve) => {
-    const child = spawn(cmd, {
-      cwd,
-      env: process.env,
-      shell: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, Math.max(500, timeoutMs));
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
-    });
-  });
-
-const BASE_TOOL_SPECS: Readonly<Record<string, string>> = {
-  ls: '{"path"?: string} — List directory contents. Defaults to workspace root.',
-  read: '{"path": string, "startLine"?: number, "endLine"?: number, "start"?: number, "end"?: number, "maxChars"?: number} — Read file contents with optional line range. `start`/`end` are accepted aliases for line-based ranges.',
-  replace: '{"path": string, "find": string, "replace": string, "all"?: boolean} — Replace exact text in a file without shelling out. Prefer this for small targeted edits.',
-  write: '{"path": string, "content": string, "append"?: boolean} — Write or append to a file.',
-  bash: '{"cmd": string, "timeoutMs"?: number} — Execute a shell command (default timeout 20s, max 120s).',
-  grep: '{"pattern": string, "path"?: string, "maxMatches"?: number} — Search files using ripgrep.',
-  "memory.read": '{"scope"?: string, "limit"?: number} — Read recent memory entries for a scope.',
-  "memory.search": '{"scope"?: string, "query": string, "limit"?: number} — Semantic search over memory entries by meaning.',
-  "memory.summarize": '{"scope"?: string, "query"?: string, "limit"?: number, "maxChars"?: number} — Summarize memory entries, optionally filtered by query.',
-  "memory.commit": '{"scope"?: string, "text": string, "tags"?: string[]} — Persist a new memory entry.',
-  "memory.diff": '{"scope"?: string, "fromTs": number, "toTs"?: number} — List memory entries within a timestamp range.',
-  "agent.delegate": '{"agentId": string, "task": string, "config"?: object, "timeoutMs"?: number} — Delegate a sub-task to a specialized agent (theorem, writer, agent, axiom, inspector). Blocks until complete or timeout.',
-  "agent.status": '{"jobId": string} — Check status and result of a previously delegated job.',
-  "agent.inspect": '{"file": string, "maxChars"?: number} — Read another agent\'s event history by bare .jsonl filename or by stream id such as agents/factory/<repoKey>/<profileId>.',
-  "skill.read": '{"name": string} — Get the full parameter spec for any tool by name.',
-};
-
-const createTools = (opts: {
-  readonly workspaceRoot: string;
-  readonly defaultMemoryScope: string;
-  readonly maxToolOutputChars: number;
-  readonly memoryTools: MemoryTools;
-  readonly delegationTools: DelegationTools;
-  readonly extraToolSpecs?: Readonly<Record<string, string>>;
-  readonly extraTools?: Readonly<Record<string, AgentToolExecutor>>;
-  readonly toolAllowlist?: ReadonlyArray<string>;
-  readonly memoryAuditMeta?: Readonly<Record<string, unknown>>;
-}): { readonly toolSpecs: Readonly<Record<string, string>>; readonly tools: Readonly<Record<string, AgentToolExecutor>> } => {
-  const workspaceRoot = path.resolve(opts.workspaceRoot);
-  const defaultScope = opts.defaultMemoryScope;
-  const maxChars = opts.maxToolOutputChars;
-  const memory = opts.memoryTools;
-  const toolSpecs = {
-    ...BASE_TOOL_SPECS,
-    ...(opts.extraToolSpecs ?? {}),
-  } as const;
-
-  const normalizeScope = (input: Record<string, unknown>): string => {
-    if (typeof input.scope === "string" && input.scope.trim().length > 0) return input.scope.trim();
-    return defaultScope;
-  };
-
-  const parseLineNumber = (value: unknown): number | undefined =>
-    typeof value === "number" && Number.isFinite(value)
-      ? Math.max(1, Math.floor(value))
-      : undefined;
-
-  const blockedBashCommand = (cmd: string): string | undefined => {
-    const normalized = cmd.replace(/\s+/g, " ").trim();
-    if (/\bgit\s+checkout\s+--(?:\s|$)/.test(normalized)) {
-      return "bash command blocked: destructive git checkout -- is not allowed; use read/replace/write for file edits";
-    }
-    if (/\bgit\s+restore\b/.test(normalized)) {
-      return "bash command blocked: destructive git restore is not allowed; use read/replace/write for file edits";
-    }
-    if (/\bgit\s+reset\s+--hard\b/.test(normalized)) {
-      return "bash command blocked: destructive git reset --hard is not allowed";
-    }
-    if (/\bgit\s+clean\b/.test(normalized)) {
-      return "bash command blocked: destructive git clean is not allowed";
-    }
-    return undefined;
-  };
-
-  const summarize = (value: unknown): AgentToolResult => {
-    const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-    const clipped = truncateText(text, maxChars);
-    const summaryLine = clipped.text.split("\n")[0] ?? "";
-    return {
-      output: clipped.text,
-      summary: clipped.truncated ? `${summaryLine} (truncated)` : summaryLine,
-    };
-  };
-
-  const builtins: Record<string, AgentToolExecutor> = {
-    ls: async (input) => {
-      const rel = typeof input.path === "string" && input.path.trim().length > 0 ? input.path.trim() : ".";
-      const abs = resolveWorkspacePath(workspaceRoot, rel);
-      const entries = await fs.promises.readdir(abs, { withFileTypes: true });
-      const listing = entries
-        .slice(0, 500)
-        .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
-        .join("\n");
-      return summarize(listing || "(empty directory)");
-    },
-
-    read: async (input) => {
-      const rawPath = typeof input.path === "string" ? input.path.trim() : "";
-      if (!rawPath) throw new Error("read.path is required");
-      const abs = resolveWorkspacePath(workspaceRoot, rawPath);
-      const raw = await fs.promises.readFile(abs);
-      if (raw.includes(0)) throw new Error("binary file not supported by read tool");
-      const text = raw.toString("utf-8");
-      const startLine = parseLineNumber(input.startLine) ?? parseLineNumber(input.start) ?? 1;
-      const endLine = parseLineNumber(input.endLine) ?? parseLineNumber(input.end) ?? Number.MAX_SAFE_INTEGER;
-      const normalizedEndLine = Math.max(startLine, endLine);
-      const lines = text.split("\n");
-      const sliced = lines.slice(startLine - 1, normalizedEndLine).join("\n");
-      const localLimit = typeof input.maxChars === "number" && Number.isFinite(input.maxChars)
-        ? Math.max(100, Math.min(Math.floor(input.maxChars), maxChars))
-        : maxChars;
-      return summarize(truncateText(sliced, localLimit).text);
-    },
-
-    replace: async (input) => {
-      const rawPath = typeof input.path === "string" ? input.path.trim() : "";
-      const find = typeof input.find === "string" ? input.find : "";
-      const replace = typeof input.replace === "string" ? input.replace : "";
-      if (!rawPath) throw new Error("replace.path is required");
-      if (!find) throw new Error("replace.find is required");
-      const abs = resolveWorkspacePath(workspaceRoot, rawPath);
-      const current = await fs.promises.readFile(abs, "utf-8");
-      if (!current.includes(find)) {
-        throw new Error(`replace.find not found in ${rawPath}`);
-      }
-      let count = 0;
-      const next = input.all === true
-        ? current.replaceAll(find, () => {
-            count += 1;
-            return replace;
-          })
-        : current.replace(find, () => {
-            count += 1;
-            return replace;
-          });
-      await fs.promises.writeFile(abs, next, "utf-8");
-      return summarize(`replaced ${count} occurrence${count === 1 ? "" : "s"} in ${rawPath}`);
-    },
-
-    write: async (input) => {
-      const rawPath = typeof input.path === "string" ? input.path.trim() : "";
-      const content = typeof input.content === "string" ? input.content : "";
-      if (!rawPath) throw new Error("write.path is required");
-      const abs = resolveWorkspacePath(workspaceRoot, rawPath);
-      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-      if (input.append === true) {
-        await fs.promises.appendFile(abs, content, "utf-8");
-      } else {
-        await fs.promises.writeFile(abs, content, "utf-8");
-      }
-      return summarize(`wrote ${content.length} chars to ${rawPath}`);
-    },
-
-    bash: async (input) => {
-      const cmd = typeof input.cmd === "string" ? input.cmd.trim() : "";
-      if (!cmd) throw new Error("bash.cmd is required");
-      const blocked = blockedBashCommand(cmd);
-      if (blocked) throw new Error(blocked);
-      const timeoutMs = typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)
-        ? Math.max(500, Math.min(Math.floor(input.timeoutMs), 120_000))
-        : 20_000;
-      const result = await runShell(cmd, workspaceRoot, timeoutMs);
-      const merged = [
-        `exit: ${result.code ?? "null"} signal: ${result.signal ?? "none"}`,
-        result.stdout ? `stdout:\n${result.stdout}` : "",
-        result.stderr ? `stderr:\n${result.stderr}` : "",
-      ].filter(Boolean).join("\n\n");
-      return summarize(merged);
-    },
-
-    grep: async (input) => {
-      const pattern = typeof input.pattern === "string" ? input.pattern : "";
-      if (!pattern.trim()) throw new Error("grep.pattern is required");
-      const rel = typeof input.path === "string" && input.path.trim().length > 0 ? input.path.trim() : ".";
-      const abs = resolveWorkspacePath(workspaceRoot, rel);
-      const maxMatches = typeof input.maxMatches === "number" && Number.isFinite(input.maxMatches)
-        ? Math.max(1, Math.min(Math.floor(input.maxMatches), 200))
-        : 50;
-      const command = `rg -n --hidden --max-count ${maxMatches} ${JSON.stringify(pattern)} ${JSON.stringify(abs)}`;
-      const result = await runShell(command, workspaceRoot, 20_000);
-      const merged = [
-        `exit: ${result.code ?? "null"} signal: ${result.signal ?? "none"}`,
-        result.stdout ? `stdout:\n${result.stdout}` : "",
-        result.stderr ? `stderr:\n${result.stderr}` : "",
-      ].filter(Boolean).join("\n\n");
-      return summarize(merged);
-    },
-
-    "memory.read": async (input) => {
-      const scope = normalizeScope(input);
-      const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
-      const entries = await memory.read({
-        scope,
-        limit,
-        audit: {
-          ...(opts.memoryAuditMeta ?? {}),
-          tool: "memory.read",
-        },
-      });
-      return summarize(entries);
-    },
-
-    "memory.search": async (input) => {
-      const scope = normalizeScope(input);
-      const query = typeof input.query === "string" ? input.query : "";
-      const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
-      const entries = await memory.search({
-        scope,
-        query,
-        limit,
-        audit: {
-          ...(opts.memoryAuditMeta ?? {}),
-          tool: "memory.search",
-        },
-      });
-      return summarize(entries);
-    },
-
-    "memory.summarize": async (input) => {
-      const scope = normalizeScope(input);
-      const query = typeof input.query === "string" ? input.query : undefined;
-      const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
-      const localMaxChars = typeof input.maxChars === "number" && Number.isFinite(input.maxChars)
-        ? input.maxChars
-        : undefined;
-      const summary = await memory.summarize({
-        scope,
-        query,
-        limit,
-        maxChars: localMaxChars,
-        audit: {
-          ...(opts.memoryAuditMeta ?? {}),
-          tool: "memory.summarize",
-        },
-      });
-      return summarize(summary);
-    },
-
-    "memory.commit": async (input) => {
-      const scope = normalizeScope(input);
-      const text = typeof input.text === "string" ? input.text : "";
-      const tags = Array.isArray(input.tags)
-        ? input.tags.filter((tag): tag is string => typeof tag === "string")
-        : undefined;
-      const entry = await memory.commit({
-        scope,
-        text,
-        tags,
-        meta: {
-          ...(opts.memoryAuditMeta ?? {}),
-          tool: "memory.commit",
-        },
-      });
-      return summarize(entry);
-    },
-
-    "memory.diff": async (input) => {
-      const scope = normalizeScope(input);
-      const fromTs = typeof input.fromTs === "number" && Number.isFinite(input.fromTs)
-        ? input.fromTs
-        : Number.NaN;
-      if (!Number.isFinite(fromTs)) throw new Error("memory.diff.fromTs is required");
-      const toTs = typeof input.toTs === "number" && Number.isFinite(input.toTs) ? input.toTs : undefined;
-      const entries = await memory.diff({
-        scope,
-        fromTs,
-        toTs,
-        audit: {
-          ...(opts.memoryAuditMeta ?? {}),
-          tool: "memory.diff",
-        },
-      });
-      return summarize(entries);
-    },
-
-    "skill.read": async (input) => {
-      const name = typeof input.name === "string" ? input.name.trim() : "";
-      if (!name) throw new Error("skill.read.name is required");
-      const spec = toolSpecs[name];
-      if (!spec) throw new Error(`unknown tool '${name}'`);
-      return summarize(`${name}: ${spec}`);
-    },
-
-    ...opts.delegationTools,
-  };
-
-  const mergedTools = {
-    ...builtins,
-    ...(opts.extraTools ?? {}),
-  } as Readonly<Record<string, AgentToolExecutor>>;
-  const allow = opts.toolAllowlist?.length ? new Set(opts.toolAllowlist) : undefined;
-  if (!allow) {
-    return {
-      toolSpecs,
-      tools: mergedTools,
-    };
-  }
-  const filteredToolSpecs = Object.fromEntries(Object.entries(toolSpecs).filter(([name]) => allow.has(name)));
-  const filteredTools = Object.fromEntries(Object.entries(mergedTools).filter(([name]) => allow.has(name)));
-  return {
-    toolSpecs: filteredToolSpecs,
-    tools: filteredTools as Readonly<Record<string, AgentToolExecutor>>,
-  };
-};
-
 export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> => {
   const now = input.now ?? Date.now;
   const baseStream = input.stream;
@@ -680,19 +336,22 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
     workflowId,
     workspace: resolvedWorkspaceRoot,
   } as const;
-  const { tools, toolSpecs } = createTools({
-    workspaceRoot: resolvedWorkspaceRoot,
-    defaultMemoryScope: input.config.memoryScope,
-    maxToolOutputChars: input.config.maxToolOutputChars,
-    memoryTools: input.memoryTools,
-    delegationTools: input.delegationTools,
-    extraToolSpecs: input.extraToolSpecs,
-    extraTools: input.extraTools,
-    toolAllowlist: input.toolAllowlist,
-    memoryAuditMeta: memoryAuditBase,
+  const capabilityRegistry = new AgentCapabilityRegistry({
+    capabilities: [
+      ...createBuiltinAgentCapabilities({
+        workspaceRoot: resolvedWorkspaceRoot,
+        defaultMemoryScope: input.config.memoryScope,
+        maxToolOutputChars: input.config.maxToolOutputChars,
+        memoryTools: input.memoryTools,
+        delegationTools: input.delegationTools,
+        memoryAuditMeta: memoryAuditBase,
+      }),
+      ...(input.capabilities ?? []),
+    ],
+    allowlist: input.toolAllowlist,
   });
-  const availableTools = Object.keys(toolSpecs).sort();
-  const toolHelp = availableTools.map((name) => `- ${name}: ${toolSpecs[name]}`).join("\n");
+  const availableTools = capabilityRegistry.ids();
+  const toolHelp = capabilityRegistry.renderToolHelp();
 
   const emitRun = createQueuedEmitter({
     runtime: input.runtime,
@@ -952,62 +611,60 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         throw new Error(`canceled at iteration-${iteration}.before_llm`);
       }
       const promptText = await applyContextPolicy(iteration, user);
-      const invoke = (promptUser: string) => input.llmStructured({
-        system: prompts.system,
-        user: promptUser,
-        schema: structuredAgentActionSchema,
-        schemaName: "agent_action",
-      });
-
-      const parseResult = (result: { readonly parsed: StructuredAgentAction; readonly raw: string }) => ({
-        parsed: normalizeStructuredAction(result.parsed),
-        raw: result.raw,
-      });
-
-      try {
-        const result = await invoke(promptText);
-        if (await checkAbort(`iteration-${iteration}.after_llm`)) {
-          throw new Error(`canceled at iteration-${iteration}.after_llm`);
-        }
-        return parseResult(result);
-      } catch (err) {
-        if (isStructuredInputParseError(err)) {
-          const repairedPrompt = [
-            promptText,
-            "",
-            "Correction: for tool actions, set action.input to a valid JSON object encoded as a string. Do not wrap it in prose or markdown.",
-          ].join("\n");
-          const repaired = await invoke(repairedPrompt);
-          if (await checkAbort(`iteration-${iteration}.after_json_retry`)) {
-            throw new Error(`canceled at iteration-${iteration}.after_json_retry`);
-          }
-          return parseResult(repaired);
-        }
-        if (!isContextOverflow(err)) throw err;
-        const compacted = compactPrompt(promptText, 8_000);
-        await emit({
-          type: "context.compacted",
-          runId: input.runId,
-          iteration,
-          agentId: "orchestrator",
-          reason: "overflow",
-          before: promptText.length,
-          after: compacted.length,
-          note: "retry after overflow",
+      let invokeCount = 0;
+      const invoke = async (promptUser: string) => {
+        invokeCount += 1;
+        const result = await input.llmStructured({
+          system: prompts.system,
+          user: promptUser,
+          schema: structuredAgentActionSchema,
+          schemaName: "agent_action",
         });
-        await emit({
-          type: "overflow.recovered",
-          runId: input.runId,
-          iteration,
-          agentId: "orchestrator",
-          note: "recovered by compacting prompt and retrying once",
-        });
-        const result = await invoke(compacted);
-        if (await checkAbort(`iteration-${iteration}.after_overflow_retry`)) {
-          throw new Error(`canceled at iteration-${iteration}.after_overflow_retry`);
+        const stage = invokeCount === 1
+          ? `iteration-${iteration}.after_llm`
+          : `iteration-${iteration}.after_llm_retry_${invokeCount}`;
+        if (await checkAbort(stage)) {
+          throw new Error(`canceled at ${stage}`);
         }
-        return parseResult(result);
-      }
+        return {
+          parsed: normalizeStructuredAction(result.parsed),
+          raw: result.raw,
+        };
+      };
+
+      const result = await runStructuredFunction({
+        invoke,
+        user: promptText,
+        isRepairableError: isStructuredInputParseError,
+        repairUser: (currentPrompt) => [
+          currentPrompt,
+          "",
+          "Correction: for tool actions, set action.input to a valid JSON object encoded as a string. Do not wrap it in prose or markdown.",
+        ].join("\n"),
+        isCompactionError: isContextOverflow,
+        compactUser: async (currentPrompt) => {
+          const compacted = compactPrompt(currentPrompt, 8_000);
+          await emit({
+            type: "context.compacted",
+            runId: input.runId,
+            iteration,
+            agentId: "orchestrator",
+            reason: "overflow",
+            before: currentPrompt.length,
+            after: compacted.length,
+            note: "retry after overflow",
+          });
+          await emit({
+            type: "overflow.recovered",
+            runId: input.runId,
+            iteration,
+            agentId: "orchestrator",
+            note: "recovered by compacting prompt and retrying once",
+          });
+          return compacted;
+        },
+      });
+      return result;
     };
 
     let toolCallsSucceeded = 0;
@@ -1189,9 +846,7 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         input: parsed.input,
       });
 
-      const knownTool = parsed.name as AgentToolName;
-      const executor = tools[knownTool];
-      if (!executor) {
+      if (!capabilityRegistry.get(parsed.name)) {
         toolCallsFailed += 1;
         const message = `unknown tool '${parsed.name}'`;
         await emit({
@@ -1209,7 +864,7 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
 
       const started = now();
       try {
-        const result = await executor(parsed.input);
+        const result = await capabilityRegistry.execute(parsed.name, parsed.input);
         toolCallsSucceeded += 1;
         toolsUsed.add(parsed.name);
         await emit({

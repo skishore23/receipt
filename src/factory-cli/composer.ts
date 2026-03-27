@@ -93,8 +93,8 @@ const normalizeBody = (value: string): string =>
 const DIAGNOSTIC_INVESTIGATION_RE = /\b(investigate|investigation|debug|diagnose|diagnostic|root cause|triage|look into|find out|figure out|trace|explain why|what is causing|what's causing)\b/i;
 const FAILURE_TERMS_RE = /\b(fail|failing|failed|failure|broken|error|issue|problem|crash|hang|timeout|timed out|not working|regression|flake|flaky|build|test|tests|compile|compilation|lint|ci|deploy)\b/i;
 const EXPLICIT_DELIVERY_RE = /\b(fix|implement|add|update|change|refactor|remove|rename|support|ship|create|wire up)\b/i;
-const INVENTORY_PROMPT_RE = /\b(list|show|inventory|enumerate|count|what are|which|describe)\b/i;
-const AWS_RESOURCE_RE = /\b(aws|ec2|instance|instances|s3|bucket|buckets|rds|lambda|vpc|vpcs|subnet|subnets|security group|security groups|nat gateway|nat gateways|load balancer|load balancers|elb|ebs|volume|volumes|snapshot|snapshots|cloudwatch|iam|ecr|ecs|eks)\b/i;
+const INVENTORY_PROMPT_RE = /\b(list|show|inventory|enumerate|count|how many|what are|which|describe)\b/i;
+const AWS_RESOURCE_RE = /\b(aws|ec2|instance|instances|container|containers|cluster|clusters|service|services|fargate|s3|bucket|buckets|rds|lambda|vpc|vpcs|subnet|subnets|security group|security groups|nat gateway|nat gateways|load balancer|load balancers|elb|ebs|volume|volumes|snapshot|snapshots|cloudwatch|iam|ecr|ecs|eks)\b/i;
 
 const compactPrompt = (prompt: string): string =>
   normalizeBody(prompt).replace(/\s+/g, " ").trim();

@@ -23,7 +23,10 @@ receipt new release-notes --template assistant-tool
 ```
 
 ### receipt dev
-- Purpose: run `bun --watch src/server.ts`.
+- Purpose: start the local runtime in watch/dev mode.
+- Notes:
+  - defaults to the local Resonate runtime supervisor.
+  - use `JOB_BACKEND=jsonl receipt dev` to force the legacy single-process backend.
 - Flags: none.
 - Output: streams server logs to stdout/stderr.
 - Example:

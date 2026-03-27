@@ -80,7 +80,7 @@ export const createFactoryServiceRuntime = (opts: FactoryServiceRuntimeOptions):
 
 export const createFactoryWorkerHandlers = (service: FactoryService): Record<typeof FACTORY_CONTROL_AGENT_ID | "codex", JobHandler> => ({
   [FACTORY_CONTROL_AGENT_ID]: async (job, ctx) => {
-    await ctx.pullCommands(["abort"]);
+    await ctx.pullCommands(["abort", "steer"]);
     try {
       const result = await service.runObjectiveControl(job.payload as Record<string, unknown>);
       return { ok: true, result };

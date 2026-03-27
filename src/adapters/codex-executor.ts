@@ -113,6 +113,25 @@ const delay = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+const prependPath = (dir: string, currentPath: string | undefined): string =>
+  currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
+
+const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: string | undefined): string =>
+  entries
+    .map((entry) => entry?.trim())
+    .filter((entry): entry is string => Boolean(entry))
+    .reduceRight<string>((acc, entry) => prependPath(entry, acc), currentPath ?? "");
+
+const runtimeBunPathEntries = (env: NodeJS.ProcessEnv): string[] => {
+  const candidates = [
+    env.RECEIPT_BUN_BIN ? path.dirname(env.RECEIPT_BUN_BIN) : undefined,
+    path.basename(process.execPath || "").toLowerCase().includes("bun") ? path.dirname(process.execPath) : undefined,
+    env.BUN_INSTALL?.trim() ? path.join(env.BUN_INSTALL.trim(), "bin") : undefined,
+    env.HOME?.trim() ? path.join(env.HOME.trim(), ".bun", "bin") : undefined,
+  ];
+  return [...new Set(candidates.filter((entry): entry is string => Boolean(entry) && fs.existsSync(entry)))];
+};
+
 const normalizePositiveTimeoutMs = (
   value: unknown,
   minimumMs: number,
@@ -148,32 +167,33 @@ const prepareAttemptLog = async (targetPath: string, label: "stdout" | "stderr")
   await fsp.writeFile(targetPath, "", "utf-8");
 };
 
-const copyPathIfExists = async (sourcePath: string, targetPath: string): Promise<void> => {
+const isMissingPathError = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+};
+
+const copyFileIfExists = async (sourcePath: string, targetPath: string): Promise<void> => {
   try {
     const stat = await fsp.stat(sourcePath);
-    if (stat.isDirectory()) {
-      await fsp.mkdir(targetPath, { recursive: true });
-      const entries = await fsp.readdir(sourcePath, { withFileTypes: true });
-      for (const entry of entries) {
-        await copyPathIfExists(path.join(sourcePath, entry.name), path.join(targetPath, entry.name));
-      }
-      return;
-    }
+    if (!stat.isFile()) return;
     await fsp.mkdir(path.dirname(targetPath), { recursive: true });
     await fsp.copyFile(sourcePath, targetPath);
-  } catch {
-    // ignore missing or unreadable optional Codex home artifacts
+  } catch (err) {
+    if (isMissingPathError(err)) return;
+    throw err;
   }
 };
 
-const resolveIsolatedCodexHomeRoot = (env: NodeJS.ProcessEnv): string => {
+const resolveIsolatedCodexHomeRoot = (env: NodeJS.ProcessEnv, workspacePath: string): string => {
   const configuredRoot = env.RECEIPT_ISOLATED_CODEX_HOME_ROOT?.trim();
   if (configuredRoot) return path.resolve(configuredRoot);
-  const codexHome = env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
-  return path.join(codexHome, "runtime");
+  return path.join(workspacePath, ".receipt", "codex-home-runtime");
 };
 
-const prepareIsolatedCodexHome = async (env: NodeJS.ProcessEnv): Promise<string | undefined> => {
+const prepareIsolatedCodexHome = async (
+  env: NodeJS.ProcessEnv,
+  workspacePath: string,
+): Promise<string | undefined> => {
   const sourceHome = env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
   try {
     const stat = await fsp.stat(sourceHome);
@@ -181,14 +201,14 @@ const prepareIsolatedCodexHome = async (env: NodeJS.ProcessEnv): Promise<string 
   } catch {
     return undefined;
   }
-  const isolatedRoot = resolveIsolatedCodexHomeRoot(env);
+  const isolatedRoot = resolveIsolatedCodexHomeRoot(env, workspacePath);
   await fsp.mkdir(isolatedRoot, { recursive: true });
   const isolatedHome = await fsp.mkdtemp(path.join(isolatedRoot, "isolated-"));
   await Promise.all([
-    copyPathIfExists(path.join(sourceHome, "auth.json"), path.join(isolatedHome, "auth.json")),
-    copyPathIfExists(path.join(sourceHome, "config.toml"), path.join(isolatedHome, "config.toml")),
-    copyPathIfExists(path.join(sourceHome, "version.json"), path.join(isolatedHome, "version.json")),
-    copyPathIfExists(path.join(sourceHome, ".codex-global-state.json"), path.join(isolatedHome, ".codex-global-state.json")),
+    copyFileIfExists(path.join(sourceHome, "auth.json"), path.join(isolatedHome, "auth.json")),
+    copyFileIfExists(path.join(sourceHome, "config.toml"), path.join(isolatedHome, "config.toml")),
+    copyFileIfExists(path.join(sourceHome, "version.json"), path.join(isolatedHome, "version.json")),
+    copyFileIfExists(path.join(sourceHome, ".codex-global-state.json"), path.join(isolatedHome, ".codex-global-state.json")),
   ]);
   return isolatedHome;
 };
@@ -330,22 +350,6 @@ const progressFromCodexJsonEvent = (
   return undefined;
 };
 
-const SANDBOX_BOOTSTRAP_FAILURE_PATTERNS = [
-  /bwrap:\s+Unknown option\s+--argv0/i,
-  /command not found:\s*bwrap/i,
-  /failed to execvp\s+bwrap/i,
-  /no such file or directory.*\bbwrap\b/i,
-] as const;
-
-const isSandboxBootstrapFailure = (value: unknown): boolean => {
-  const message = value instanceof CodexExecutionError
-    ? `${value.message}\n${value.result.stderr}\n${value.result.stdout}`
-    : value instanceof Error
-      ? value.message
-      : String(value ?? "");
-  return SANDBOX_BOOTSTRAP_FAILURE_PATTERNS.some((pattern) => pattern.test(message));
-};
-
 export class LocalCodexExecutor implements CodexExecutor {
   private readonly bin: string;
   private readonly timeoutMs: number;
@@ -371,17 +375,21 @@ export class LocalCodexExecutor implements CodexExecutor {
 
   async run(input: CodexRunInput, control?: CodexRunControl): Promise<CodexRunResult> {
     const initialSandboxMode = input.sandboxMode
-      ?? (input.mutationPolicy === "read_only_probe" ? "read-only" : "workspace-write");
+      ?? (input.mutationPolicy === "read_only_probe" ? "read-only" : undefined);
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
-    const childEnv = { ...this.env, ...input.env };
+    const mergedEnv = { ...this.env, ...input.env };
+    const childEnv = {
+      ...mergedEnv,
+      PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
+    };
     if (input.isolateCodexHome) {
-      isolatedCodexHome = await prepareIsolatedCodexHome(childEnv);
+      isolatedCodexHome = await prepareIsolatedCodexHome(childEnv, input.workspacePath);
       if (isolatedCodexHome) childEnv.CODEX_HOME = isolatedCodexHome;
     }
 
     try {
-      const execute = async (sandboxMode: NonNullable<CodexRunInput["sandboxMode"]>): Promise<CodexRunResult> => {
+      const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
         await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
         await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
         await fsp.mkdir(path.dirname(input.stdoutPath), { recursive: true });
@@ -402,8 +410,9 @@ export class LocalCodexExecutor implements CodexExecutor {
           `model_reasoning_effort=${JSON.stringify(input.reasoningEffort ?? "medium")}`,
           "--cd",
           input.workspacePath,
-          "--sandbox",
-          sandboxMode,
+          ...(sandboxMode
+            ? ["--sandbox", sandboxMode]
+            : ["--dangerously-bypass-approvals-and-sandbox"]),
           "--skip-git-repo-check",
           "--color",
           "never",
@@ -637,13 +646,6 @@ export class LocalCodexExecutor implements CodexExecutor {
         await stallLoop;
         await abortLoop;
         if (timedOut) {
-          if (prefersStructuredCompletion && (result.lastMessage?.trim() || result.stdout.trim())) {
-            return {
-              ...result,
-              exitCode: 0,
-              signal: null,
-            };
-          }
           const elapsed = Date.now() - startedAt;
           throw new Error(`codex exec timed out after ${elapsed}ms`);
         }
@@ -658,24 +660,12 @@ export class LocalCodexExecutor implements CodexExecutor {
         }
         if ((result.exitCode ?? 1) !== 0) {
           const summary = (result.stderr.trim() || result.stdout.trim() || `codex exited with ${result.exitCode}`).slice(0, 1_000);
-          throw new CodexExecutionError(summary, result, sandboxMode, mutationPolicy);
+          throw new CodexExecutionError(summary, result, sandboxMode ?? "danger-full-access", mutationPolicy);
         }
         return result;
       };
 
-      try {
-        return await execute(initialSandboxMode);
-      } catch (err) {
-        if (initialSandboxMode !== "danger-full-access" && isSandboxBootstrapFailure(err)) {
-          await fsp.appendFile(
-            input.stderrPath,
-            `[factory] codex sandbox bootstrap failed under ${initialSandboxMode}; retrying with danger-full-access\n`,
-            "utf-8",
-          ).catch(() => undefined);
-          return execute("danger-full-access");
-        }
-        throw err;
-      }
+      return await execute(initialSandboxMode);
     } finally {
       if (isolatedCodexHome) {
         await fsp.rm(isolatedCodexHome, { recursive: true, force: true }).catch(() => undefined);

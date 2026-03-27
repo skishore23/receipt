@@ -550,6 +550,175 @@ test("factory service: objective control jobs use a dedicated worker id so /fact
   const jobs = await queue.listJobs({ limit: 10 });
   expect(jobs[0]?.agentId).toBe("factory-control");
   expect(jobs[0]?.payload.kind).toBe("factory.objective.control");
+  expect(jobs[0]?.singletonMode).toBe("steer");
+});
+
+test("factory service: duplicate objective control enqueues steer onto the existing session job", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-steer");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Control steer",
+    prompt: "Collapse repeated control enqueues into one queued job.",
+    checks: ["git status --short"],
+  });
+
+  const initialControl = (await queue.listJobs({ limit: 10 }))
+    .find((job) => job.agentId === "factory-control");
+  expect(initialControl?.singletonMode).toBe("steer");
+
+  const internals = service as unknown as {
+    enqueueObjectiveControl(objectiveId: string, reason: "startup" | "admitted" | "reconcile"): Promise<void>;
+  };
+  await internals.enqueueObjectiveControl(created.objectiveId, "reconcile");
+
+  const controlJobs = (await queue.listJobs({ limit: 10 }))
+    .filter((job) => job.agentId === "factory-control");
+  expect(controlJobs).toHaveLength(1);
+  expect(controlJobs[0]?.id).toBe(initialControl?.id);
+
+  const commands = await queue.consumeCommands(initialControl!.id, ["steer"]);
+  expect(commands).toHaveLength(1);
+  expect(commands[0]?.payload).toMatchObject({
+    fromSessionKey: `factory:objective:${created.objectiveId}`,
+    fromEnqueue: true,
+    payload: {
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "reconcile",
+    },
+  });
+});
+
+test("factory service: steered objective control jobs are redriven when the queued job already exists", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-redrive");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const redrivenJobIds: string[] = [];
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+    redriveQueuedJob: async (job) => {
+      redrivenJobIds.push(job.id);
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Control redrive",
+    prompt: "Redrive the queued control job when later reconciles steer onto it.",
+    checks: ["git status --short"],
+  });
+
+  const initialControl = (await queue.listJobs({ limit: 10 }))
+    .find((job) => job.agentId === "factory-control");
+  expect(initialControl?.id).toBeTruthy();
+
+  const internals = service as unknown as {
+    enqueueObjectiveControl(objectiveId: string, reason: "startup" | "admitted" | "reconcile"): Promise<void>;
+  };
+  await internals.enqueueObjectiveControl(created.objectiveId, "reconcile");
+
+  expect(redrivenJobIds).toEqual([initialControl!.id]);
+});
+
+test("factory service: resumeObjectives cancels queued control jobs for blocked objectives", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-cleanup");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const redrivenJobIds: string[] = [];
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+    redriveQueuedJob: async (job) => {
+      redrivenJobIds.push(job.id);
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Blocked control cleanup",
+    prompt: "Cancel stale control jobs once the objective is already blocked.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    emitObjective(objectiveId: string, event: {
+      readonly type: "objective.blocked";
+      readonly objectiveId: string;
+      readonly reason: string;
+      readonly summary: string;
+      readonly blockedAt: number;
+    } | {
+      readonly type: "objective.slot.released";
+      readonly objectiveId: string;
+      readonly releasedAt: number;
+      readonly reason: string;
+    }): Promise<void>;
+  };
+  const blockedAt = Date.now();
+  await internals.emitObjective(created.objectiveId, {
+    type: "objective.blocked",
+    objectiveId: created.objectiveId,
+    reason: "blocked for cleanup test",
+    summary: "blocked for cleanup test",
+    blockedAt,
+  });
+  await internals.emitObjective(created.objectiveId, {
+    type: "objective.slot.released",
+    objectiveId: created.objectiveId,
+    releasedAt: blockedAt + 1,
+    reason: "slot released after objective entered blocked",
+  });
+
+  const duplicateA = await queue.enqueue({
+    agentId: "factory-control",
+    lane: "collect",
+    sessionKey: `factory:objective:${created.objectiveId}`,
+    singletonMode: "allow",
+    maxAttempts: 2,
+    payload: {
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "admitted",
+    },
+  });
+  const duplicateB = await queue.enqueue({
+    agentId: "factory-control",
+    lane: "collect",
+    sessionKey: `factory:objective:${created.objectiveId}`,
+    singletonMode: "allow",
+    maxAttempts: 2,
+    payload: {
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "reconcile",
+    },
+  });
+
+  await service.resumeObjectives();
+
+  expect((await queue.getJob(duplicateA.id))?.status).toBe("canceled");
+  expect((await queue.getJob(duplicateB.id))?.status).toBe("canceled");
+  expect(redrivenJobIds).toEqual([]);
 });
 
 test("factory service: dirty worktree objectives auto-pin the committed head and record a warning", async () => {
@@ -1156,46 +1325,6 @@ test("factory reducer: legacy objective profile snapshots are normalized during 
   expect(state.profile.objectivePolicy.defaultWorkerType).toBe("codex");
 });
 
-test("factory state normalization: legacy graph snapshots are upgraded to workflow state", () => {
-  const legacyState = {
-    ...initialFactoryState,
-    objectiveId: "objective_legacy_graph",
-    title: "Legacy graph objective",
-    workflow: undefined,
-    taskOrder: ["task_01"],
-    graph: {
-      status: "active",
-      activeNodeIds: ["task_01"],
-      order: ["task_01"],
-      nodes: {
-        task_01: {
-          nodeId: "task_01",
-          taskId: "task_01",
-          taskKind: "planned",
-          title: "Legacy task",
-          prompt: "Continue running the legacy task.",
-          workerType: "codex",
-          baseCommit: "abc1234",
-          dependsOn: [],
-          status: "running",
-          skillBundlePaths: [],
-          contextRefs: [],
-          artifactRefs: {},
-          createdAt: 1,
-          startedAt: 2,
-        },
-      },
-      updatedAt: 2,
-    },
-  } as unknown as FactoryState;
-
-  const normalized = normalizeFactoryState(legacyState);
-
-  expect(normalized.workflow.taskIds).toEqual(["task_01"]);
-  expect(normalized.workflow.activeTaskIds).toEqual(["task_01"]);
-  expect(normalized.workflow.tasksById.task_01?.status).toBe("running");
-});
-
 test("factory state normalization: sparse legacy candidate state backfills candidate order", () => {
   const next = reduceFactory({
     ...initialFactoryState,
@@ -1674,12 +1803,12 @@ test("factory chat items: automatic slice continuations render as live thread pr
   expect(continued && continued.kind === "system" ? continued.body : "").toContain("job_next");
   expect(items.some((item) => item.kind === "assistant")).toBe(false);
 });
-test("factory sidebar island: limits projects to the top five and shows view all when truncated", () => {
+test("factory sidebar island: limits previous sessions to the top five and shows view all when truncated", () => {
   const selectedObjective = {
     objectiveId: "objective_1",
-    title: "Project 1",
-    status: "queued",
-    phase: "queued",
+    title: "Session 1",
+    status: "completed",
+    phase: "completed",
     summary: "Summary 1",
     debugLink: "/debug",
     receiptsLink: "/receipts",
@@ -1691,13 +1820,13 @@ test("factory sidebar island: limits projects to the top five and shows view all
     profiles: [{ id: "generalist", label: "Generalist", selected: true }],
     objectives: Array.from({ length: 6 }, (_, index) => ({
       objectiveId: `objective_${index + 1}`,
-      title: `Project ${index + 1}`,
-      status: "queued",
-      phase: "queued",
+      title: `Session ${index + 1}`,
+      status: "completed",
+      phase: "completed",
       summary: `Summary ${index + 1}`,
       updatedAt: 100 + index,
       selected: index === 0,
-      slotState: "queued",
+      slotState: "idle",
       activeTaskCount: 0,
       readyTaskCount: 0,
       taskCount: 1,
@@ -1705,14 +1834,17 @@ test("factory sidebar island: limits projects to the top five and shows view all
     jobs: [],
   }, selectedObjective);
 
-  expect(markup).toMatch(/Project 1/);
-  expect(markup).toMatch(/Project 5/);
-  expect(markup).not.toMatch(/Project 6/);
+  expect(markup).toMatch(/Session 1/);
+  expect(markup).toMatch(/Session 5/);
+  expect(markup).not.toMatch(/Session 6/);
+  expect(markup).toMatch(/Previous Sessions/);
   expect(markup).toMatch(/View all/);
+  expect(markup).toContain('href="/factory?profile=generalist&thread=objective_1&all=1"');
+  expect(markup).not.toContain('hx-get="/factory/island/sidebar');
   expect(markup).toMatch(/See other threads/);
   expect(markup).not.toMatch(/Jobs/);
 });
-test("factory sidebar island: blank chat treats old objectives as recent threads instead of active context", () => {
+test("factory sidebar island: blank chat keeps running objectives visible globally", () => {
   const markup = factorySidebarIsland({
     activeProfileId: "generalist",
     activeProfileLabel: "Generalist",
@@ -1739,7 +1871,7 @@ test("factory sidebar island: blank chat treats old objectives as recent threads
     selectedObjective: undefined,
   });
 
-  expect(markup).toMatch(/Recent/);
+  expect(markup).toMatch(/Running/);
   expect(markup).toMatch(/Profile-driven Factory UI/);
 });
 
@@ -1789,7 +1921,30 @@ test("factory sidebar island: objective cards and selected metrics show token to
   expect(markup).toContain("Surface the Codex token total.");
   expect(markup).toContain("1 active / 0 ready / 3 total");
   expect(markup).toContain("See other threads");
-  expect(markup).toContain("?profile=generalist&all=1");
+  expect(markup).not.toContain(">Debug<");
+});
+
+test("factory inspector island: token summary stays visible when total is zero", () => {
+  const markup = factoryInspectorIsland({
+    activeProfileId: "generalist",
+    objectiveId: "objective_zero_tokens",
+    panel: "overview",
+    jobs: [],
+    selectedObjective: {
+      objectiveId: "objective_zero_tokens",
+      title: "Zero-token objective",
+      status: "completed",
+      phase: "completed",
+      summary: "No candidate tokens were recorded.",
+      debugLink: "/debug",
+      receiptsLink: "/receipts",
+      tokensUsed: 0,
+    },
+  });
+
+  expect(markup).toContain("Codex Token Usage");
+  expect(markup).toMatch(/Codex Token Usage[\s\S]*>0</);
+  expect(markup).toContain('href="/factory?profile=generalist&thread=objective_zero_tokens&panel=receipts"');
 });
 
 test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () => {
@@ -1898,6 +2053,8 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
     },
   });
   const inspectorMarkup = factoryInspectorIsland({
+    activeProfileId: "generalist",
+    objectiveId: "objective_demo",
     panel: "execution",
     jobs: [],
     selectedObjective: {
@@ -1908,17 +2065,17 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
       summary: "Demo summary",
       debugLink: "/debug",
       receiptsLink: "/receipts",
+      tokensUsed: 321,
     },
     tasks: taskCards,
   });
 
-  expect(markup).toMatch(/id="factory-chat"[^>]+sse:agent-refresh throttle:180ms/);
-  expect(markup).toMatch(/id="factory-sidebar"[^>]+sse:factory-refresh throttle:450ms[^"]+sse:job-refresh throttle:450ms/);
-  expect(markup).toMatch(/id="factory-inspector-tabs"[^>]+sse:factory-refresh throttle:900ms[^"]+sse:job-refresh throttle:900ms/);
-  expect(markup).toMatch(/id="factory-inspector-panel"[^>]+sse:factory-refresh throttle:450ms[^"]+sse:job-refresh throttle:450ms/);
-  expect(markup).not.toMatch(/id="factory-sidebar"[^>]+sse:agent-refresh/);
-  expect(markup).not.toMatch(/id="factory-inspector-tabs"[^>]+sse:agent-refresh/);
-  expect(markup).not.toMatch(/id="factory-inspector-panel"[^>]+sse:agent-refresh/);
+  expect(markup).not.toContain("sse:agent-refresh");
+  expect(markup).not.toContain("sse:factory-refresh");
+  expect(markup).not.toContain("sse:job-refresh");
+  expect(markup).not.toContain("htmx-ext-sse");
+  expect(markup).toContain('id="factory-chat-streaming"');
+  expect(markup).toContain('id="factory-chat-optimistic"');
   expect(markup).not.toMatch(/data-prompt-fill/);
   expect(markup).not.toMatch(/\/ Commands/);
   expect(markup).toContain("data-composer-commands='");
@@ -1934,6 +2091,13 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
   expect(markup).toContain("Tasks");
   expect(markup).toContain("Validate cost-driver inventory");
   expect(markup).toContain("Waiting on Validate cost-driver inventory");
+  expect(inspectorMarkup).toContain('href="/factory?profile=generalist&thread=objective_demo&panel=overview"');
+  expect(inspectorMarkup).toContain('href="/factory?profile=generalist&thread=objective_demo&panel=analysis"');
+  expect(inspectorMarkup).toContain('href="/factory?profile=generalist&thread=objective_demo&panel=execution"');
+  expect(inspectorMarkup).toContain('href="/factory?profile=generalist&thread=objective_demo&panel=receipts"');
+  expect(inspectorMarkup).not.toContain('hx-get="/factory/island/inspector');
+  expect(inspectorMarkup).toContain("Codex Token Usage");
+  expect(inspectorMarkup).not.toContain(">Debug<");
   expect(inspectorMarkup).toContain("Validate cost-driver inventory");
   expect(inspectorMarkup).toContain("Synthesize consumption insights and recommendations");
 });
@@ -2273,6 +2437,206 @@ test("factory route: job-only events subscribe to the selected job without falli
   expect(response.status).toBe(200);
   expect(subscriptions.some((item) => item.topic === "jobs" && item.stream === "job_queue_01")).toBe(true);
   expect(subscriptions.some((item) => item.topic === "agent")).toBe(false);
+  expect(subscriptions).toContainEqual({ topic: "factory", stream: undefined });
+});
+
+test("factory route: scoped sidebar still shows unrelated running objectives", async () => {
+  const selected = {
+    ...makeStubObjectiveDetail("objective_selected"),
+    title: "Selected thread",
+    updatedAt: 20,
+    profile: {
+      rootProfileId: "generalist",
+      rootProfileLabel: "Generalist",
+    },
+  };
+  const unrelatedRunning = {
+    ...makeStubObjectiveDetail("objective_other"),
+    title: "Other running thread",
+    updatedAt: 30,
+    profile: {
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  };
+  const previousSession = {
+    ...makeStubObjectiveDetail("objective_done"),
+    title: "Completed session",
+    status: "completed",
+    phase: "completed",
+    updatedAt: 10,
+    profile: {
+      rootProfileId: "generalist",
+      rootProfileLabel: "Generalist",
+    },
+  };
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [unrelatedRunning, selected, previousSession] as never,
+      getObjective: async (objectiveId: string) => {
+        if (objectiveId === "objective_selected") return selected;
+        if (objectiveId === "objective_other") return unrelatedRunning;
+        return previousSession;
+      },
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/island/sidebar?profile=generalist&chat=chat_demo&thread=objective_selected");
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  expect(body).toContain("Other running thread");
+  expect(body).toContain("Infrastructure");
+  expect(body).toContain("Completed session");
+  expect(body).toContain("Previous Sessions");
+});
+
+test("factory route: explicit sidebar refresh keeps the selected objective even when the list omits it", async () => {
+  const selected = {
+    ...makeRunningWorkbenchObjectiveDetail("objective_live"),
+    title: "Selected infrastructure thread",
+    profile: {
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const selectedState = {
+    ...makeStubObjectiveState(selected),
+    profile: {
+      ...makeStubObjectiveState(selected).profile,
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as FactoryState;
+  const unrelated = {
+    ...makeStubObjectiveDetail("objective_other"),
+    title: "Other thread",
+    profile: {
+      rootProfileId: "generalist",
+      rootProfileLabel: "Generalist",
+    },
+  };
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [unrelated] as never,
+      getObjective: async () => selected,
+      getObjectiveState: async () => selectedState,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/island/sidebar?profile=generalist&chat=chat_stale&thread=objective_live");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("Selected infrastructure thread");
+  expect(body).toContain("Infrastructure");
+  expect(body).toContain('href="?profile=infrastructure&thread=objective_live"');
+  expect(body).not.toContain("chat=chat_stale");
+});
+
+test("factory route: stale chat on an explicit thread falls back to the objective stream transcript", async () => {
+  const objectiveId = "objective_demo";
+  const objective = {
+    ...makeStubObjectiveDetail(objectiveId),
+    title: "Inventory buckets",
+    profile: {
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveState = {
+    ...makeStubObjectiveState(objective),
+    profile: {
+      ...makeStubObjectiveState(objective).profile,
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as FactoryState;
+  const objectiveStream = factoryChatStream(process.cwd(), "infrastructure", objectiveId);
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [objective as never],
+      getObjective: async () => objective,
+      getObjectiveState: async () => objectiveState,
+    },
+    agentEvents: {
+      [objectiveStream]: [{
+        type: "problem.set",
+        runId: "run_objective",
+        problem: "Check the objective stream transcript.",
+      }],
+      [agentRunStream(objectiveStream, "run_objective")]: [
+        {
+          type: "problem.set",
+          runId: "run_objective",
+          problem: "Check the objective stream transcript.",
+        },
+        {
+          type: "tool.called",
+          runId: "run_objective",
+          iteration: 1,
+          tool: "factory.status",
+          input: { objectiveId },
+          summary: "Objective still executing.",
+          durationMs: 1_000,
+        },
+        {
+          type: "tool.observed",
+          runId: "run_objective",
+          iteration: 1,
+          tool: "factory.status",
+          truncated: false,
+          output: JSON.stringify({
+            worker: "factory",
+            action: "status",
+            objectiveId,
+            status: "executing",
+            summary: "Objective still executing.",
+          }),
+        },
+      ],
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_stale&thread=objective_demo");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("Objective still executing.");
+  expect(body).toContain('data-chat-id=""');
+  expect(body).toContain("Infrastructure");
+});
+
+test("factory route: explicit inspector tabs resolve the objective profile and drop stale chat", async () => {
+  const objective = {
+    ...makeRunningWorkbenchObjectiveDetail("objective_live"),
+    profile: {
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveState = {
+    ...makeStubObjectiveState(objective),
+    profile: {
+      ...makeStubObjectiveState(objective).profile,
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+  } as FactoryState;
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [objective as never],
+      getObjective: async () => objective,
+      getObjectiveState: async () => objectiveState,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/island/inspector/tabs?profile=generalist&chat=chat_stale&thread=objective_live&panel=execution");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain('href="/factory?profile=infrastructure&thread=objective_live&panel=overview"');
+  expect(body).toContain('href="/factory?profile=infrastructure&thread=objective_live&panel=execution"');
+  expect(body).not.toContain("chat=chat_stale");
 });
 
 test("factory route: run-scoped chat events subscribe to related child jobs only", async () => {
@@ -3014,9 +3378,9 @@ test("factory route: new chat creates an isolated chat session", async () => {
   expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+$/);
 });
 
-test("factory route: blank composer submissions create a session-bound objective and queued run", async () => {
+test("factory route: plain prompts queue a saved chat run without creating an objective", async () => {
   let queuedInput: Record<string, unknown> | undefined;
-  let createdInput: Record<string, unknown> | undefined;
+  let createObjectiveCalled = false;
   const app = createRouteTestApp({
     onEnqueue: async (input) => {
       queuedInput = input;
@@ -3034,9 +3398,9 @@ test("factory route: blank composer submissions create a session-bound objective
       } as QueueJob;
     },
     service: {
-      createObjective: async (input: Record<string, unknown>) => {
-        createdInput = input;
-        return makeStubObjectiveDetail("objective_created", "job_created");
+      createObjective: async () => {
+        createObjectiveCalled = true;
+        throw new Error("unexpected objective creation");
       },
     },
   });
@@ -3052,24 +3416,25 @@ test("factory route: blank composer submissions create a session-bound objective
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+&thread=objective_created&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_blank$/);
-  expect(createdInput).toMatchObject({
-    title: "Start fresh",
-    prompt: "Start fresh.",
-    profileId: "generalist",
-    startImmediately: true,
-  });
+  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+$/);
+  expect(response.headers.get("location")).not.toContain("thread=");
+  expect(createObjectiveCalled).toBe(false);
   expect(queuedInput).toMatchObject({
     agentId: "factory",
     lane: "chat",
     singletonMode: "allow",
   });
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
+    kind: "factory.run",
+    profileId: "generalist",
+    problem: "Start fresh.",
+  });
   expect((queuedInput?.payload as Record<string, unknown> | undefined)?.chatId).toMatch(/^chat_[a-z0-9]+_[a-z0-9]+$/);
-  expect((queuedInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBe("objective_created");
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
 });
-test("factory route: composer accepts UI chat submissions and redirects into queued run context", async () => {
+test("factory route: composer accepts UI chat submissions and returns a chat-centric shell location", async () => {
   let queuedInput: Record<string, unknown> | undefined;
-  let createdInput: Record<string, unknown> | undefined;
+  let createObjectiveCalled = false;
   const app = createRouteTestApp({
     onEnqueue: async (input) => {
       queuedInput = input;
@@ -3087,9 +3452,9 @@ test("factory route: composer accepts UI chat submissions and redirects into que
       } as QueueJob;
     },
     service: {
-      createObjective: async (input: Record<string, unknown>) => {
-        createdInput = input;
-        return makeStubObjectiveDetail("objective_created", "job_created");
+      createObjective: async () => {
+        createObjectiveCalled = true;
+        throw new Error("unexpected objective creation");
       },
     },
   });
@@ -3105,13 +3470,8 @@ test("factory route: composer accepts UI chat submissions and redirects into que
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_demo&thread=objective_created&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_01$/);
-  expect(createdInput).toMatchObject({
-    title: "Check the repo and tell me what happens next",
-    prompt: "Check the repo and tell me what happens next.",
-    profileId: "generalist",
-    startImmediately: true,
-  });
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&chat=chat_demo");
+  expect(createObjectiveCalled).toBe(false);
   expect(queuedInput).toMatchObject({
     agentId: "factory",
     lane: "chat",
@@ -3121,18 +3481,85 @@ test("factory route: composer accepts UI chat submissions and redirects into que
     kind: "factory.run",
     profileId: "generalist",
     chatId: "chat_demo",
-    objectiveId: "objective_created",
     problem: "Check the repo and tell me what happens next.",
   });
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
 });
 
-test("factory route: software diagnostic prompts create investigation objectives", async () => {
-  let createdInput: Record<string, unknown> | undefined;
+test("factory route: json compose responses include live scope handoff metadata", async () => {
+  let queuedInput: Record<string, unknown> | undefined;
   const app = createRouteTestApp({
+    onEnqueue: async (input) => {
+      queuedInput = input;
+      return {
+        id: "job_chat_json",
+        agentId: "factory",
+        payload: (input.payload as Record<string, unknown> | undefined) ?? {},
+        lane: "chat",
+        status: "queued",
+        attempt: 1,
+        maxAttempts: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        commands: [],
+      } as QueueJob;
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "accept": "application/json",
+    },
+    body: new URLSearchParams({
+      prompt: "List the current jobs.",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(200);
+  const body = await response.json() as {
+    readonly location?: string;
+    readonly live?: {
+      readonly profileId?: string;
+      readonly chatId?: string;
+      readonly objectiveId?: string;
+      readonly runId?: string;
+      readonly jobId?: string;
+    };
+  };
+  expect(body.location).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+$/);
+  expect(body.live).toMatchObject({
+    profileId: "generalist",
+    jobId: "job_chat_json",
+  });
+  expect(body.live?.chatId).toMatch(/^chat_[a-z0-9]+_[a-z0-9]+$/);
+  expect(body.live?.runId).toBe((queuedInput?.payload as Record<string, unknown> | undefined)?.runId);
+});
+
+test("factory route: software diagnostic prompts stay in chat until explicitly dispatched", async () => {
+  let queuedInput: Record<string, unknown> | undefined;
+  let createObjectiveCalled = false;
+  const app = createRouteTestApp({
+    onEnqueue: async (input) => {
+      queuedInput = input;
+      return {
+        id: "job_chat_diag",
+        agentId: "factory",
+        payload: (input.payload as Record<string, unknown> | undefined) ?? {},
+        lane: "chat",
+        status: "queued",
+        attempt: 1,
+        maxAttempts: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        commands: [],
+      } as QueueJob;
+    },
     service: {
-      createObjective: async (input: Record<string, unknown>) => {
-        createdInput = input;
-        return makeStubObjectiveDetail("objective_diag", "job_diag");
+      createObjective: async () => {
+        createObjectiveCalled = true;
+        throw new Error("unexpected objective creation");
       },
     },
   });
@@ -3148,27 +3575,25 @@ test("factory route: software diagnostic prompts create investigation objectives
   });
 
   expect(response.status).toBe(303);
-  expect(createdInput).toMatchObject({
-    title: "Investigate: why is build failing",
-    objectiveMode: "investigation",
+  expect(response.headers.get("location")).toBe("/factory?profile=software&chat=chat_software");
+  expect(createObjectiveCalled).toBe(false);
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
+    kind: "factory.run",
     profileId: "software",
-    startImmediately: true,
+    chatId: "chat_software",
+    problem: "why is build failing",
   });
-  expect(createdInput?.prompt).toBe([
-    "why is build failing",
-    "",
-    "Treat this as an investigation request. Determine the concrete root cause from evidence before proposing or applying fixes.",
-  ].join("\n"));
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
 });
 
-test("factory route: aws inventory prompts hand off new objectives to the infrastructure profile", async () => {
-  let createdInput: Record<string, unknown> | undefined;
+test("factory route: aws inventory prompts can switch profiles without auto-creating objectives", async () => {
   let queuedInput: Record<string, unknown> | undefined;
+  let createObjectiveCalled = false;
   const app = createRouteTestApp({
     service: {
-      createObjective: async (input: Record<string, unknown>) => {
-        createdInput = input;
-        return makeStubObjectiveDetail("objective_ec2", "job_ec2");
+      createObjective: async () => {
+        createObjectiveCalled = true;
+        throw new Error("unexpected objective creation");
       },
     },
     onEnqueue: async (input) => {
@@ -3199,20 +3624,15 @@ test("factory route: aws inventory prompts hand off new objectives to the infras
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=infrastructure&chat=chat_demo&thread=objective_ec2&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_ec2$/);
-  expect(createdInput).toMatchObject({
-    title: "show me ec2 list",
-    prompt: "show me ec2 list",
-    profileId: "infrastructure",
-    startImmediately: true,
-  });
+  expect(response.headers.get("location")).toBe("/factory?profile=infrastructure&chat=chat_demo");
+  expect(createObjectiveCalled).toBe(false);
   expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
     kind: "factory.run",
     profileId: "infrastructure",
     chatId: "chat_demo",
-    objectiveId: "objective_ec2",
     problem: "show me ec2 list",
   });
+  expect((queuedInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
 });
 
 test("factory route: follow-up composer submissions stop pinning the URL to a completed thread", async () => {
@@ -3259,7 +3679,7 @@ test("factory route: follow-up composer submissions stop pinning the URL to a co
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_demo&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_followup$/);
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&chat=chat_demo");
   expect(response.headers.get("location")).not.toContain("thread=objective_done");
   expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
     kind: "factory.run",
@@ -3329,7 +3749,7 @@ test("factory route: composer recovers the bound objective from chat session rec
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_demo&thread=objective_bound&run=run_[a-z0-9]+_[a-z0-9]+&job=job_chat_bound$/);
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&chat=chat_demo&thread=objective_bound");
   expect(queuedInput).toMatchObject({
     agentId: "factory",
     lane: "chat",
@@ -3340,6 +3760,55 @@ test("factory route: composer recovers the bound objective from chat session rec
     objectiveId: "objective_bound",
     problem: "Keep this thread moving.",
   });
+});
+
+test("factory route: conversational prompts queue an unbound chat run instead of creating a tracked objective", async () => {
+  let enqueueInput: Record<string, unknown> | undefined;
+  let createObjectiveCalled = false;
+  const app = createRouteTestApp({
+    onEnqueue: async (input) => {
+      enqueueInput = input;
+      return {
+        id: "job_chat_smalltalk",
+        agentId: "factory",
+        payload: (input.payload as Record<string, unknown> | undefined) ?? {},
+        lane: "chat",
+        status: "queued",
+        attempt: 1,
+        maxAttempts: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        commands: [],
+      } as QueueJob;
+    },
+    service: {
+      createObjective: async () => {
+        createObjectiveCalled = true;
+        throw new Error("unexpected objective creation");
+      },
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      prompt: "How are you?",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(303);
+  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+$/);
+  expect(response.headers.get("location")).not.toContain("thread=");
+  expect(createObjectiveCalled).toBe(false);
+  expect((enqueueInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
+    kind: "factory.run",
+    profileId: "generalist",
+    problem: "How are you?",
+  });
+  expect((enqueueInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
 });
 
 test("factory route: /new starts a fresh chat thread instead of reusing the current one", async () => {
@@ -3397,11 +3866,78 @@ test("factory route: composer slash commands mutate the selected objective", asy
   });
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toBe("/factory?profile=generalist&thread=objective_demo&run=run_01&job=job_01");
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&thread=objective_demo");
   expect(reacted).toEqual({
     objectiveId: "objective_demo",
     message: "Keep receipts concise.",
   });
+});
+
+test("factory route: conversational follow-ups detach from the selected objective thread", async () => {
+  let enqueueInput: Record<string, unknown> | undefined;
+  const app = createRouteTestApp({
+    onEnqueue: async (input) => {
+      enqueueInput = input;
+      return {
+        id: "job_chat_detached",
+        agentId: "factory",
+        payload: (input.payload as Record<string, unknown> | undefined) ?? {},
+        lane: "chat",
+        status: "queued",
+        attempt: 1,
+        maxAttempts: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        commands: [],
+      } as QueueJob;
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist&chat=chat_current&thread=objective_old&panel=overview&focusKind=task&focusId=task_01", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      prompt: "Who are you?",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(303);
+  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+&panel=overview$/);
+  expect(response.headers.get("location")).not.toContain("thread=objective_old");
+  expect(response.headers.get("location")).not.toContain("focusKind=task");
+  expect((enqueueInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
+    kind: "factory.run",
+    profileId: "generalist",
+    problem: "Who are you?",
+  });
+  expect((enqueueInput?.payload as Record<string, unknown> | undefined)?.objectiveId).toBeUndefined();
+  expect((enqueueInput?.payload as Record<string, unknown> | undefined)?.chatId).not.toBe("chat_current");
+});
+
+test("factory route: /analyze redirects to the current thread analysis panel without queueing a run", async () => {
+  let enqueueCalled = false;
+  const app = createRouteTestApp({
+    onEnqueue: async () => {
+      enqueueCalled = true;
+      throw new Error("unexpected enqueue");
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist&thread=objective_demo&run=run_01&job=job_01", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      prompt: "/analyze",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(303);
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&thread=objective_demo&panel=analysis");
+  expect(enqueueCalled).toBe(false);
 });
 
 test("factory route: slash command aborts the active job via the composer submit flow", async () => {

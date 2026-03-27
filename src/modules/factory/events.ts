@@ -14,6 +14,7 @@ import type {
   FactoryRebracketRecord,
   FactoryTaskRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskResultOutcome,
   FactoryWorkerType,
 } from "./types";
 
@@ -162,6 +163,7 @@ export type FactoryEvent =
       readonly objectiveId: string;
       readonly taskId: string;
       readonly candidateId: string;
+      readonly outcome: FactoryTaskResultOutcome;
       readonly summary: string;
       readonly handoff: string;
       readonly completion: FactoryTaskCompletionRecord;

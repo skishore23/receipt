@@ -152,7 +152,7 @@ export type FactoryObjectiveCard = {
   readonly latestDecision?: {
     readonly summary: string;
     readonly at: number;
-    readonly source: "orchestrator" | "fallback" | "runtime" | "system";
+    readonly source: "orchestrator" | "runtime" | "system";
     readonly selectedActionId?: string;
   };
   readonly nextAction?: string;
@@ -380,7 +380,7 @@ export type FactoryIntegrationPublishJobPayload = {
 export type FactoryObjectiveControlJobPayload = {
   readonly kind: "factory.objective.control";
   readonly objectiveId: string;
-  readonly reason: "startup" | "admitted";
+  readonly reason: "startup" | "admitted" | "reconcile";
 };
 
 export type FactoryObjectiveReceiptSummary = {

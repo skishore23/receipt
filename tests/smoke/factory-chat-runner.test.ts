@@ -592,6 +592,101 @@ test("factory chat runner: status.read tools expose codex logs, objective status
   expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain('Streaming live output.');
 });
 
+test("factory chat runner: finalizer rewrites premature completion text while a live objective is still running", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-objective-finalizer");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  const objectiveId = "objective_live_finalizer";
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.output"],
+  });
+
+  const actions = [
+    {
+      thought: "inspect the live objective output",
+      action: {
+        type: "tool",
+        name: "factory.output",
+        input: JSON.stringify({ objectiveId, taskId: "task_01" }),
+        text: null,
+      },
+    },
+    {
+      thought: "incorrectly claim success",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Everything is already complete and healthy.",
+      },
+    },
+  ];
+
+  const service = createFactoryServiceStub({
+    getObjective: async () => makeSupervisorObjectiveDetail({
+      objectiveId,
+      objectiveMode: "investigation",
+      latestSummary: "Live evidence collection is still running.",
+      tasks: [{
+        taskId: "task_01",
+        title: "Collect live AWS evidence",
+        prompt: "Collect live AWS evidence",
+        status: "running",
+        workerType: "infra",
+        dependsOn: [],
+        candidateId: "candidate_01",
+      }],
+    }),
+    getObjectiveLiveOutput: async () => ({
+      objectiveId,
+      focusKind: "task",
+      focusId: "task_01",
+      title: "Collect live AWS evidence",
+      status: "running",
+      active: true,
+      summary: "Streaming live output.",
+      stdoutTail: "aws helper is still collecting evidence",
+    }),
+  });
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_objective_live_finalizer",
+    problem: "Monitor the live investigation.",
+    objectiveId,
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: service as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Work is still running in this chat.");
+  expect(result.finalResponse).toContain("Objective demo is active");
+  expect(result.finalResponse).toContain("Live evidence collection is still running.");
+  expect(result.finalResponse).not.toContain("already complete and healthy");
+});
+
 test.skip("factory chat runner: active supervisor only monitors healthy objective-backed codex work", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-healthy");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -1579,6 +1674,116 @@ test.skip("factory chat runner: blocking monitor polls do not consume discovery 
   expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain('"waitedMs"');
 });
 
+test("factory chat runner: first factory.output wait is short before later waits use the full budget", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-live-wait");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  const objectiveId = "objective_live_wait";
+  const taskId = "task_live_wait";
+  let firstOutputSnapshotAt: number | undefined;
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+  });
+
+  const actions = [
+    {
+      thought: "surface the first live snapshot quickly",
+      action: {
+        type: "tool",
+        name: "factory.output",
+        input: JSON.stringify({ objectiveId, taskId, waitForChangeMs: 500 }),
+        text: null,
+      },
+    },
+    {
+      thought: "now wait for the task to finish",
+      action: {
+        type: "tool",
+        name: "factory.output",
+        input: JSON.stringify({ objectiveId, taskId, waitForChangeMs: 500 }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Surfaced a quick live snapshot before waiting for completion.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_live_wait_budget",
+    problem: "Watch the running task.",
+    profileId: "software",
+    objectiveId,
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    dataDir,
+    factoryService: createFactoryServiceStub({
+      getObjectiveLiveOutput: async () => {
+        firstOutputSnapshotAt = firstOutputSnapshotAt ?? Date.now();
+        const done = Date.now() - firstOutputSnapshotAt >= 350;
+        return {
+          objectiveId,
+          focusKind: "task",
+          focusId: taskId,
+          title: "Live wait demo",
+          status: done ? "completed" : "running",
+          active: !done,
+          summary: done ? "Captured the completed task output." : "Still waiting on the running task.",
+          taskId,
+          candidateId: "candidate_live_wait",
+          jobId: "job_live_wait",
+          lastMessage: done ? "Completed task output is ready." : "Waiting for the task to finish.",
+          stdoutTail: done ? "done" : "waiting",
+        };
+      },
+    }) as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_live_wait_budget"));
+  const observations = chain
+    .filter((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "tool.observed" }> } =>
+      receipt.body.type === "tool.observed" && receipt.body.tool === "factory.output"
+    )
+    .map((receipt) => JSON.parse(receipt.body.output) as { waitedMs?: number; changed?: boolean; status?: string });
+
+  expect(observations).toHaveLength(2);
+  expect(observations[0]?.waitedMs ?? 0).toBeGreaterThan(0);
+  expect(observations[0]?.waitedMs ?? 0).toBeLessThan(250);
+  expect(observations[0]?.changed).toBe(false);
+  expect(observations[1]?.waitedMs ?? 0).toBeGreaterThan(observations[0]?.waitedMs ?? 0);
+  expect(observations[1]?.changed).toBe(true);
+  expect(observations[1]?.status).toBe("completed");
+});
+
 test.skip("factory chat runner: terminal-objective reads do not consume discovery budget", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-terminal-read-budget");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -1663,6 +1868,11 @@ test.skip("factory chat runner: terminal-objective reads do not consume discover
     queue,
     dataDir,
     factoryService: createFactoryServiceStub({
+      inferObjectiveLiveOutputFocus: async () => ({
+        focusKind: "task",
+        focusId: "task_01",
+        inferredBy: "single_task",
+      }),
       getObjective: async (objectiveId: string) => ({
         objectiveId,
         title: "Completed objective",
@@ -1772,6 +1982,11 @@ test("factory chat runner: factory.output infers the single task from objectiveI
     queue,
     dataDir,
     factoryService: createFactoryServiceStub({
+      inferObjectiveLiveOutputFocus: async () => ({
+        focusKind: "task",
+        focusId: "task_01",
+        inferredBy: "single_task",
+      }),
       getObjective: async (objectiveId: string) => ({
         objectiveId,
         title: "Completed objective",
@@ -1913,7 +2128,7 @@ test.skip("factory chat runner: software profile rejects follow-up polling while
   expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Profile child work is already running");
 });
 
-test.skip("factory chat runner: finalizer rewrites premature software success text while a codex child is still active", async () => {
+test("factory chat runner: finalizer rewrites premature software success text while a codex child is still active", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-child-finalizer");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");

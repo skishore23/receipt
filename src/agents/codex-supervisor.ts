@@ -1,7 +1,4 @@
-import path from "node:path";
-
 import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
-import { readRepoStatus } from "../lib/repo-status";
 import type { FactoryObjectiveInput, FactoryService } from "../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../services/factory-codex-artifacts";
 import { summarizeFactoryObjective } from "../views/factory/objective-presenters";
@@ -11,8 +8,30 @@ import {
   type AgentFinalizer,
   type AgentRunInput,
   type AgentRunResult,
-  type AgentToolExecutor,
 } from "./agent";
+import {
+  createCapabilitySpec,
+  codexLogsCapability,
+  codexRunCapability,
+  codexStatusCapability,
+  factoryDispatchCapability,
+  factoryOutputCapability,
+  factoryStatusCapability,
+  jobsListCapability,
+  repoStatusCapability,
+  type AgentToolExecutor,
+} from "./capabilities";
+import {
+  clampWaitMs,
+  combineFinalizers,
+  createLiveFactoryFinalizer,
+  createRepoStatusTool,
+  deriveObjectiveTitle,
+  effectiveFactoryLiveWaitMs,
+  isActiveJobStatus,
+  waitForSnapshotChange,
+  type FactoryLiveWaitState,
+} from "./orchestration-utils";
 
 export const CODEX_SUPERVISOR_WORKFLOW_ID = "agent-codex-supervisor-v1";
 export const CODEX_SUPERVISOR_WORKFLOW_VERSION = "1.0.0";
@@ -56,59 +75,8 @@ const asStringList = (value: unknown): ReadonlyArray<string> =>
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
     : [];
 
-const clip = (value: string, max = 220): string =>
-  value.length <= max ? value : `${value.slice(0, max - 3)}...`;
-
-const delay = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
-const clampWaitMs = (value: unknown, max = 20_000): number =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.max(0, Math.min(Math.floor(value), max))
-    : 0;
-
-const waitForSnapshotChange = async <T>(
-  initial: T,
-  waitMs: number,
-  snapshot: () => Promise<T>,
-): Promise<{ readonly value: T; readonly waitedMs: number; readonly changed: boolean }> => {
-  if (waitMs <= 0) return { value: initial, waitedMs: 0, changed: false };
-  const startedAt = Date.now();
-  const initialFingerprint = JSON.stringify(initial);
-  let current = initial;
-  while (Date.now() - startedAt < waitMs) {
-    const remaining = waitMs - (Date.now() - startedAt);
-    await delay(Math.min(1_000, Math.max(50, remaining)));
-    current = await snapshot();
-    if (JSON.stringify(current) !== initialFingerprint) {
-      return {
-        value: current,
-        waitedMs: Date.now() - startedAt,
-        changed: true,
-      };
-    }
-  }
-  return {
-    value: current,
-    waitedMs: Date.now() - startedAt,
-    changed: false,
-  };
-};
-
-const deriveObjectiveTitle = (prompt: string): string => {
-  const compact = prompt.replace(/\s+/g, " ").trim();
-  if (!compact) return "Factory objective";
-  const sentence = compact.split(/[.!?]/)[0] ?? compact;
-  return sentence.slice(0, 96).trim() || "Factory objective";
-};
-
 const unique = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
   [...new Set(values.filter((value) => value.trim().length > 0))];
-
-const isActiveJobStatus = (status: string | undefined): boolean =>
-  status === "queued" || status === "leased" || status === "running";
 
 const stableCodexSessionKey = (supervisorSessionId: string): string =>
   `codex:${supervisorSessionId}`;
@@ -370,21 +338,6 @@ const createJobsListTool = (input: {
     };
   };
 
-const createRepoStatusTool = (input: {
-  readonly workspaceRoot: string;
-}): AgentToolExecutor =>
-  async () => {
-    const status = await readRepoStatus(path.resolve(input.workspaceRoot));
-    return {
-      output: JSON.stringify({
-        worker: "repo",
-        action: "status",
-        ...status,
-      }, null, 2),
-      summary: `${status.branch}@${status.baseHash.slice(0, 8)} ${status.dirty ? `dirty (${status.changedCount})` : "clean"}`,
-    };
-  };
-
 const latestObjectiveByRun = new Map<string, string>();
 
 const createFactoryDispatchTool = (input: {
@@ -395,29 +348,19 @@ const createFactoryDispatchTool = (input: {
     const objectiveId = asString(toolInput.objectiveId);
     const action = asString(toolInput.action) ?? (objectiveId ? "react" : "create");
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
-    let reused = false;
     if (action === "create") {
       const prompt = asString(toolInput.prompt);
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
-      const existingObjectiveId = latestObjectiveByRun.get(input.runId);
-      const existing = existingObjectiveId
-        ? await input.factoryService.getObjective(existingObjectiveId).catch(() => undefined)
-        : undefined;
-      if (existing && !existing.archivedAt && existing.status !== "completed") {
-        detail = existing;
-        reused = true;
-      } else {
-        const payload: FactoryObjectiveInput = {
-          title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
-          prompt,
-          baseHash: asString(toolInput.baseHash),
-          checks: asStringList(toolInput.checks),
-          channel: asString(toolInput.channel),
-          profileId: asString(toolInput.profileId),
-          startImmediately: true,
-        };
-        detail = await input.factoryService.createObjective(payload);
-      }
+      const payload: FactoryObjectiveInput = {
+        title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
+        prompt,
+        baseHash: asString(toolInput.baseHash),
+        checks: asStringList(toolInput.checks),
+        channel: asString(toolInput.channel),
+        profileId: asString(toolInput.profileId),
+        startImmediately: true,
+      };
+      detail = await input.factoryService.createObjective(payload);
     } else if (action === "react") {
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
       await input.factoryService.reactObjective(objectiveId);
@@ -447,7 +390,7 @@ const createFactoryDispatchTool = (input: {
       output: JSON.stringify({
         worker: "factory",
         action,
-        reused,
+        reused: false,
         ...summary,
       }, null, 2),
       summary: summary.summary,
@@ -456,11 +399,12 @@ const createFactoryDispatchTool = (input: {
 
 const createFactoryStatusTool = (input: {
   readonly factoryService: FactoryService;
+  readonly liveWaitState: FactoryLiveWaitState;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId);
     if (!objectiveId) throw new Error("factory.status requires objectiveId");
-    const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
+    const requestedWaitMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildStatus = async (): Promise<Record<string, unknown>> => {
       const [detail, debug] = await Promise.all([
         input.factoryService.getObjective(objectiveId),
@@ -482,17 +426,20 @@ const createFactoryStatusTool = (input: {
       };
     };
     const initial = await buildStatus();
-    const waited = waitForChangeMs > 0 && (
+    const live = (
       asString(initial.status) === "queued"
       || asString(initial.status) === "active"
       || asString(initial.status) === "executing"
       || (Array.isArray(initial.activeJobs) && initial.activeJobs.length > 0)
-    )
+    );
+    const waitForChangeMs = effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
+    const waited = waitForChangeMs > 0 && live
       ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus)
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? payload.title ?? objectiveId)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
@@ -502,6 +449,7 @@ const createFactoryStatusTool = (input: {
 
 const createFactoryOutputTool = (input: {
   readonly factoryService: FactoryService;
+  readonly liveWaitState: FactoryLiveWaitState;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId);
@@ -527,31 +475,29 @@ const createFactoryOutputTool = (input: {
     } else if (requestedFocusId) {
       throw new Error("factory.output requires focusKind when focusId is provided");
     } else {
-      const detail = await input.factoryService.getObjective(objectiveId);
-      const taskIds = Array.isArray(detail.tasks)
-        ? detail.tasks
-          .map((task) => asString((task as Record<string, unknown>).taskId))
-          .filter((value): value is string => Boolean(value))
-        : [];
-      if (taskIds.length !== 1) {
-        throw new Error("factory.output requires focusKind/focusId, taskId/jobId, or an objective with exactly one task");
+      const inferredFocus = await input.factoryService.inferObjectiveLiveOutputFocus(objectiveId);
+      if (!inferredFocus) {
+        throw new Error("factory.output requires focusKind/focusId, taskId/jobId, or an objective with exactly one active/nonterminal task (or exactly one task total)");
       }
-      focusKind = "task";
-      focusId = taskIds[0]!;
+      focusKind = inferredFocus.focusKind;
+      focusId = inferredFocus.focusId;
     }
-    const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
+    const requestedWaitMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildOutput = async (): Promise<Record<string, unknown>> => ({
       worker: "factory",
       action: "output",
       ...await input.factoryService.getObjectiveLiveOutput(objectiveId, focusKind, focusId),
     });
     const initial = await buildOutput();
-    const waited = waitForChangeMs > 0 && initial.active === true
+    const live = initial.active === true;
+    const waitForChangeMs = effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
+    const waited = waitForChangeMs > 0 && live
       ? await waitForSnapshotChange(initial, waitForChangeMs, buildOutput)
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? `${focusKind} ${focusId}: ${String(payload.status ?? "unknown")}`)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
@@ -578,31 +524,83 @@ const createActiveCodexChildFinalizer = (input: {
     };
   };
 
-const combineFinalizers = (
-  first: AgentFinalizer,
-  second?: AgentRunInput["finalizer"],
-): AgentFinalizer =>
-  async (input) => {
-    const firstResult = await first(input);
-    if (!firstResult.accept || !second) return firstResult;
-    const secondResult = await second(input);
-    return {
-      accept: secondResult.accept,
-      text: secondResult.text ?? firstResult.text,
-      note: secondResult.note ?? firstResult.note,
-    };
-  };
-
 export const runCodexSupervisor = async (input: CodexSupervisorRunInput): Promise<AgentRunResult> => {
   const supervisorSessionId = asString(input.supervisorSessionId) ?? input.runId;
+  const getCurrentObjectiveId = (): string | undefined => latestObjectiveByRun.get(input.runId);
+  const factoryLiveWaitState: FactoryLiveWaitState = { surfaced: false };
+  const dataDir = input.dataDir;
+  const factoryService = input.factoryService;
   const dynamicToolAllowlist = CODEX_SUPERVISOR_TOOL_ALLOWLIST.filter((name) =>
-    (name !== "codex.logs" || Boolean(input.dataDir))
-    && (!name.startsWith("factory.") || Boolean(input.factoryService))
+    (name !== "codex.logs" || Boolean(dataDir))
+    && (!name.startsWith("factory.") || Boolean(factoryService))
   );
   const toolAllowlist = unique([
     ...dynamicToolAllowlist,
     ...(input.toolAllowlist ?? []),
   ]).filter((name) => !DIRECT_WORKSPACE_TOOLS.has(name));
+  const jobsListTool = createJobsListTool({
+    queue: input.queue,
+    runId: input.runId,
+    stream: input.stream,
+    supervisorSessionId,
+  });
+  const repoStatusTool = createRepoStatusTool(input.workspaceRoot);
+  const codexStatusTool = createCodexStatusTool({
+    queue: input.queue,
+    runId: input.runId,
+    stream: input.stream,
+    supervisorSessionId,
+    dataDir,
+  });
+  const codexRunTool = createCodexRunTool({
+    queue: input.queue,
+    runId: input.runId,
+    stream: input.stream,
+    supervisorSessionId,
+    dataDir,
+  });
+  const codexLogsTool = dataDir
+    ? createCodexLogsTool({
+      queue: input.queue,
+      runId: input.runId,
+      stream: input.stream,
+      supervisorSessionId,
+      dataDir,
+    })
+    : undefined;
+  const factoryDispatchTool = factoryService
+    ? createFactoryDispatchTool({
+      factoryService,
+      runId: input.runId,
+    })
+    : undefined;
+  const factoryStatusTool = factoryService
+    ? createFactoryStatusTool({
+      factoryService,
+      liveWaitState: factoryLiveWaitState,
+    })
+    : undefined;
+  const factoryOutputTool = factoryService
+    ? createFactoryOutputTool({
+      factoryService,
+      liveWaitState: factoryLiveWaitState,
+    })
+    : undefined;
+  const capabilities = [
+    createCapabilitySpec(jobsListCapability, jobsListTool),
+    createCapabilitySpec(repoStatusCapability, repoStatusTool),
+    createCapabilitySpec(codexStatusCapability, codexStatusTool),
+    createCapabilitySpec(codexRunCapability, codexRunTool),
+    ...(codexLogsTool ? [
+      createCapabilitySpec(codexLogsCapability, codexLogsTool),
+    ] : []),
+    ...(factoryDispatchTool && factoryStatusTool && factoryOutputTool ? [
+      createCapabilitySpec(factoryDispatchCapability, factoryDispatchTool),
+      createCapabilitySpec(factoryStatusCapability, factoryStatusTool),
+      createCapabilitySpec(factoryOutputCapability, factoryOutputTool),
+    ] : []),
+    ...(input.capabilities ?? []),
+  ];
 
   return runAgent({
     ...input,
@@ -615,76 +613,41 @@ export const runCodexSupervisor = async (input: CodexSupervisorRunInput): Promis
       codeAccess: "codex_only",
       supervisorSessionId,
     },
-    extraToolSpecs: {
-      "jobs.list": "{\"limit\"?: number, \"status\"?: string, \"includeCompleted\"?: boolean} — List child jobs launched by this agent session.",
-      "repo.status": "{} — Read control-plane git state for the current workspace: HEAD baseHash, branch, dirty/clean state, and a bounded git status --porcelain summary. Use this when Factory needs baseHash for a dirty source tree.",
-      ...(input.dataDir ? {
-        "codex.logs": "{\"jobId\"?: string} — Inspect Codex child logs and artifact paths for this agent session. Without jobId, use the latest Codex child.",
-      } : {}),
-      "codex.status": "{\"jobId\"?: string, \"limit\"?: number, \"includeCompleted\"?: boolean, \"waitForChangeMs\"?: number} — Inspect Codex child jobs for this agent session. With waitForChangeMs, block briefly until state or logs change.",
-      "codex.run": "{\"prompt\": string, \"timeoutMs\"?: number} — Queue one read-only Codex child probe for repo inspection or evidence-gathering. If a Codex child is already queued/running for this session, reuse it instead of spawning another. Use factory.dispatch for code changes.",
-      ...(input.factoryService ? {
-        "factory.dispatch": "{\"action\"?: \"create\"|\"react\"|\"promote\"|\"cancel\"|\"cleanup\"|\"archive\", \"objectiveId\"?: string, \"prompt\"?: string, \"title\"?: string, \"baseHash\"?: string, \"checks\"?: string[], \"channel\"?: string, \"profileId\"?: string, \"reason\"?: string} — Create or operate on a tracked Factory objective. Use this when the work should run in objective-managed worktrees.",
-        "factory.status": "{\"objectiveId\": string, \"waitForChangeMs\"?: number} — Inspect objective status, active jobs, recent receipts, and task/integration worktrees. With waitForChangeMs, block briefly until the objective changes.",
-        "factory.output": "{\"objectiveId\": string, \"focusKind\"?: \"task\"|\"job\", \"focusId\"?: string, \"taskId\"?: string, \"jobId\"?: string, \"waitForChangeMs\"?: number} — Inspect live output and log tails for an objective task or job. `taskId`/`jobId` are shorthands, and if the objective has exactly one task the focus can be inferred automatically.",
-      } : {}),
-      ...(input.extraToolSpecs ?? {}),
-    },
-    extraTools: {
-      ...input.extraTools,
-      "jobs.list": createJobsListTool({
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        supervisorSessionId,
+    capabilities,
+    finalizer: combineFinalizers(
+      createLiveFactoryFinalizer({
+        factoryService,
+        getCurrentObjectiveId,
+        liveWaitState: factoryLiveWaitState,
+        describeActiveChild: async () => {
+          const jobs = await listSupervisorJobs(input.queue, {
+            runId: input.runId,
+            stream: input.stream,
+            supervisorSessionId,
+          });
+          const activeChild = jobs
+            .filter((job) => job.agentId === "codex" && isActiveJobStatus(job.status))
+            .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+          if (!activeChild) return undefined;
+          const snapshot = await codexJobSnapshot(activeChild, dataDir);
+          return {
+            jobId: activeChild.id,
+            detail: asString(snapshot.lastMessage)
+              ?? asString(snapshot.stderrTail)
+              ?? asString(snapshot.stdoutTail)
+              ?? asString(snapshot.summary),
+          };
+        },
       }),
-      "repo.status": createRepoStatusTool({
-        workspaceRoot: input.workspaceRoot,
-      }),
-      "codex.status": createCodexStatusTool({
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        supervisorSessionId,
-        dataDir: input.dataDir,
-      }),
-      "codex.run": createCodexRunTool({
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        supervisorSessionId,
-        dataDir: input.dataDir,
-      }),
-      ...(input.dataDir ? {
-        "codex.logs": createCodexLogsTool({
+      combineFinalizers(
+        createActiveCodexChildFinalizer({
           queue: input.queue,
           runId: input.runId,
           stream: input.stream,
           supervisorSessionId,
-          dataDir: input.dataDir,
         }),
-      } : {}),
-      ...(input.factoryService ? {
-        "factory.dispatch": createFactoryDispatchTool({
-          factoryService: input.factoryService,
-          runId: input.runId,
-        }),
-        "factory.status": createFactoryStatusTool({
-          factoryService: input.factoryService,
-        }),
-        "factory.output": createFactoryOutputTool({
-          factoryService: input.factoryService,
-        }),
-      } : {}),
-    },
-    finalizer: combineFinalizers(
-      createActiveCodexChildFinalizer({
-        queue: input.queue,
-        runId: input.runId,
-        stream: input.stream,
-        supervisorSessionId,
-      }),
-      input.finalizer,
+        input.finalizer,
+      ),
     ),
   });
 };

@@ -1,9 +1,11 @@
 # Factory Codex Upgrade Plan
 
-Status: Proposed implementation plan  
+Status: Partially implemented; retained as an upgrade/history note  
 Audience: Engineering  
 Decision date: 2026-03-25  
 Scope: Reliability, observability, execution isolation, and operator UX for long-running Factory and Codex work
+
+Note: As of 2026-03-26, the broad AWS `danger-full-access` default and the executor's sandbox bootstrap auto-escalation have been removed. Some "current behavior" bullets below describe the pre-change system and remain as historical context for the rest of the plan.
 
 ## Why This Plan Exists
 

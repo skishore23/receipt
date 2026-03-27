@@ -12,9 +12,13 @@ export type FactoryChatProfileNav = {
 
 export type FactoryChatObjectiveNav = {
   readonly objectiveId: string;
+  readonly profileId?: string;
+  readonly profileLabel?: string;
   readonly title: string;
   readonly status: string;
   readonly phase: string;
+  readonly blockedReason?: string;
+  readonly blockedExplanation?: string;
   readonly summary?: string;
   readonly updatedAt?: number;
   readonly selected: boolean;
@@ -197,6 +201,8 @@ export type FactoryChatIslandModel = {
   readonly chatId?: string;
   readonly objectiveId?: string;
   readonly runId?: string;
+  readonly knownRunIds?: ReadonlyArray<string>;
+  readonly terminalRunIds?: ReadonlyArray<string>;
   readonly jobId?: string;
   readonly panel?: FactoryInspectorPanel;
   readonly focusKind?: "task" | "job";
@@ -217,12 +223,13 @@ export type FactoryNavModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
   readonly chatId?: string;
+  readonly panel?: FactoryInspectorPanel;
   readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
   readonly objectives: ReadonlyArray<FactoryChatObjectiveNav>;
   readonly showAll?: boolean;
 };
 
-export type FactoryInspectorPanel = "overview" | "analysis" | "execution" | "live" | "receipts" | "debug";
+export type FactoryInspectorPanel = "overview" | "analysis" | "execution" | "live" | "receipts";
 
 export type FactoryInspectorRouteModel = {
   readonly panel: FactoryInspectorPanel;

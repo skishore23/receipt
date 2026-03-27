@@ -15,6 +15,19 @@ cd "${RECEIPT_WORKDIR}"
 export HOME CODEX_HOME DATA_DIR RECEIPT_DATA_DIR="${RECEIPT_DATA_DIR:-${DATA_DIR}}"
 export PATH="${RECEIPT_WORKDIR}/.receipt/bin:${RECEIPT_WORKDIR}/node_modules/.bin:${PATH}"
 
+if ! command -v resonate >/dev/null 2>&1; then
+  echo "[entrypoint] missing Resonate CLI on PATH; the Docker image must include the resonate binary" >&2
+  exit 1
+fi
+
+if ! resonate serve --help >/dev/null 2>&1; then
+  echo "[entrypoint] Resonate CLI is installed but unusable" >&2
+  exit 1
+fi
+
+echo "[entrypoint] using Resonate CLI at $(command -v resonate)"
+echo "[entrypoint] debug snapshot command: receipt-debug-env"
+
 mkdir -p \
   "$(dirname "${RESONATE_SQLITE_PATH}")" \
   "${DATA_DIR}" \

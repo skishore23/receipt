@@ -9,6 +9,7 @@ import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import type { DelegationTools } from "../../src/adapters/delegation";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
 import { runAgent, type AgentRunInput } from "../../src/agents/agent";
+import { capabilityDefinition, createCapabilitySpec, capabilityInput } from "../../src/agents/capabilities";
 import { createRuntime } from "@receipt/core/runtime";
 import type { AgentCmd, AgentEvent, AgentState } from "../../src/modules/agent";
 import { decide as decideAgent, reduce as reduceAgent, initial as initialAgent } from "../../src/modules/agent";
@@ -282,16 +283,20 @@ test("agent does not exhaust its iteration budget while only waiting on delegate
     memoryTools,
     delegationTools,
     workspaceRoot,
-    extraToolSpecs: {
-      "test.wait": "{} - Wait for delegated work to change.",
-    },
-    extraTools: {
-      "test.wait": async () => ({
+    capabilities: [
+      createCapabilitySpec(
+        capabilityDefinition({
+          id: "test.wait",
+          description: "{} - Wait for delegated work to change.",
+          inputSchema: capabilityInput.empty,
+        }),
+        async () => ({
         output: JSON.stringify({ waitedMs: 20_000, changed: false }),
         summary: "delegated work still running",
         pauseBudget: true,
-      }),
-    },
+        }),
+      ),
+    ],
   });
 
   try {
