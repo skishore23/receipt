@@ -1,0 +1,55 @@
+# Deploys the app on EC2 after CI passes on main.
+#
+# Required GitHub repo secrets:
+#   EC2_HOST       — public hostname or IP (e.g. 13.50.13.0)
+#   EC2_USER       — SSH user (e.g. ec2-user)
+#   EC2_SSH_KEY    — full private key PEM (including BEGIN/END lines)
+#
+# Optional:
+#   EC2_APP_PATH   — repo directory on the server (default: /home/ec2-user/receipt)
+#   BUN_BIN        — path to bun on the server (default: /home/ec2-user/.bun/bin/bun)
+
+name: Deploy EC2
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 12m
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export GIT_TERMINAL_PROMPT=0
+            APP="${{ secrets.EC2_APP_PATH }}"
+            APP="${APP:-/home/ec2-user/receipt}"
+            BUN="${{ secrets.BUN_BIN }}"
+            BUN="${BUN:-/home/ec2-user/.bun/bin/bun}"
+            cd "$APP"
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+            "$BUN" install --frozen-lockfile
+            "$BUN" run build
+            sudo /usr/bin/systemctl restart receipt
