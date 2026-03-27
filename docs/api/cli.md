@@ -286,9 +286,9 @@ receipt factory codex-probe --mode both --reply status-ok
 
 | Failure | Command to run | Then |
 | --- | --- | --- |
-| `gh` not found | `brew install gh` (or your package manager) | rerun `receipt start` |
+| `gh` not found | macOS: `brew install gh`<br/>Linux/Windows: install from [https://cli.github.com/](https://cli.github.com/) | rerun `receipt start` |
 | GitHub auth missing | use guided login in setup, or `gh auth login --hostname github.com --web` | rerun `receipt start` |
-| `aws` not found | `brew install awscli` (or your package manager) | rerun `receipt start` |
+| `aws` not found | macOS: `brew install awscli`<br/>Linux/Windows: install from [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | rerun `receipt start` |
 | AWS auth missing | use guided setup in CLI, or `aws configure sso` then `aws sso login --profile <profile>` | rerun `receipt start` |
 | OpenAI key invalid | provide a valid API key when prompted | retry inside setup |
 

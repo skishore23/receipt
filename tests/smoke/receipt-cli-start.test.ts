@@ -25,6 +25,16 @@ test("receipt start parsers: extracts GitHub users from text fallback", () => {
   expect(users.includes("octocat")).toBe(true);
 });
 
+test("receipt start parsers: extracts GitHub users from Windows text fallback", () => {
+  const raw = [
+    "github.com",
+    "  ✓ Logged in to github.com account octocat (C:\\Users\\me\\AppData\\Roaming\\GitHub CLI\\hosts.yml)",
+    "  - Active account: monalisa",
+  ].join("\n");
+  const users = __receiptCliStartTestables.extractGithubAccountsFromText(raw);
+  expect(users.includes("octocat")).toBe(true);
+});
+
 test("receipt start parsers: matches AWS identities including profile", () => {
   const matched = __receiptCliStartTestables.sameAwsIdentity(
     { accountId: "111111111111", arn: "arn:aws:iam::111111111111:user/dev", profile: "dev" },

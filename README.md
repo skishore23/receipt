@@ -56,9 +56,9 @@ receipt start
 
 | Check failed | What to run | Retry path |
 | --- | --- | --- |
-| `gh` missing | `brew install gh` (or your package manager) | Re-run `receipt start` |
+| `gh` missing | macOS: `brew install gh`<br/>Linux/Windows: install from [https://cli.github.com/](https://cli.github.com/) | Re-run `receipt start` |
 | GitHub auth missing | Use guided login in setup, or run `gh auth login --hostname github.com --web` | Re-run `receipt start` |
-| `aws` missing | `brew install awscli` (or your package manager) | Re-run `receipt start` |
+| `aws` missing | macOS: `brew install awscli`<br/>Linux/Windows: install from [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | Re-run `receipt start` |
 | AWS auth missing | Use guided setup in CLI, or run `aws configure sso` then `aws sso login --profile <profile>` | Re-run `receipt start` |
 | OpenAI key invalid | Enter a valid key when prompted | Stay in setup prompt and retry |
 
@@ -176,6 +176,15 @@ In Receipt, rebracketing means dynamically changing merge parenthesization based
 bun run dev
 bun run test:smoke
 ```
+
+## Release verification commands
+
+Use these commands for different goals:
+
+- `bun run verify:release`: full project release confidence (runs the broader smoke lane).
+- `npm run verify:publish`: npm publish readiness for this CLI package (build + publish-safe smoke tests + pack smoke + `npm publish --dry-run`).
+
+If you are preparing an npm publish, prefer `npm run verify:publish`.
 
 ## Docker + Resonate
 

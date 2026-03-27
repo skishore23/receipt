@@ -68,10 +68,12 @@
     "pack:smoke": "node scripts/smoke-pack-install.mjs",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test --timeout 30000 ./tests/smoke",
+    "test:publish": "bun test --timeout 30000 ./tests/smoke/package-publish.test.ts ./tests/smoke/build.test.ts ./tests/smoke/cli.test.ts ./tests/smoke/receipt-cli-start.test.ts ./tests/smoke/receipt-cli-start-flow.test.ts",
     "test:perf": "bun test ./tests/perf",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
     "verify": "bun run build && bun run check:no-any && bun run test:smoke",
-    "verify:release": "npm run build:cli && bun run test:smoke && npm run pack:smoke && node scripts/check-changelog.mjs"
+    "verify:release": "npm run build:cli && bun run test:smoke && npm run pack:smoke && node scripts/check-changelog.mjs",
+    "verify:publish": "npm run build:cli && bun run test:publish && npm run pack:smoke && npm publish --dry-run"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",

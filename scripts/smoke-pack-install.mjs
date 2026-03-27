@@ -45,7 +45,8 @@ try {
   await fs.mkdir(installDir, { recursive: true });
   await run("npm", ["init", "-y"], installDir);
   await run("npm", ["install", path.join(rootDir, tarball)], installDir);
-  await run(path.join(installDir, "node_modules", ".bin", "receipt"), ["help"], installDir);
+  // Use npm exec so command resolution is platform-safe (.cmd on Windows).
+  await run("npm", ["exec", "--", "receipt", "help"], installDir);
   console.log("pack smoke passed");
 } finally {
   // Keep cleanup best-effort so failures still expose primary issue.

@@ -34,6 +34,20 @@ test("receipt start: missing gh fails when user stops retry", async () => {
   })).rejects.toThrow("gh is required");
 });
 
+test("receipt start: missing gh on linux prints docs install hint", async () => {
+  const runCommand = makeRunCommand({
+    [commandKey("gh", ["--version"])]: { ok: false, stdout: "", stderr: "not found" },
+  });
+  const logs: string[] = [];
+  await expect(__receiptCliStartTestables.ensureBinaryInstalled("gh", {
+    runCommand,
+    askRetry: async () => false,
+    log: (message) => logs.push(message),
+    platform: "linux",
+  })).rejects.toThrow("gh is required");
+  expect(logs.some((entry) => entry.includes("See install docs: https://cli.github.com/"))).toBe(true);
+});
+
 test("receipt start: missing aws fails when user stops retry", async () => {
   const runCommand = makeRunCommand({
     [commandKey("aws", ["--version"])]: { ok: false, stdout: "", stderr: "not found" },
@@ -44,6 +58,20 @@ test("receipt start: missing aws fails when user stops retry", async () => {
     log: () => undefined,
     platform: "darwin",
   })).rejects.toThrow("aws is required");
+});
+
+test("receipt start: missing aws on win32 prints docs install hint", async () => {
+  const runCommand = makeRunCommand({
+    [commandKey("aws", ["--version"])]: { ok: false, stdout: "", stderr: "not found" },
+  });
+  const logs: string[] = [];
+  await expect(__receiptCliStartTestables.ensureBinaryInstalled("aws", {
+    runCommand,
+    askRetry: async () => false,
+    log: (message) => logs.push(message),
+    platform: "win32",
+  })).rejects.toThrow("aws is required");
+  expect(logs.some((entry) => entry.includes("See install docs: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"))).toBe(true);
 });
 
 test("receipt start: unauthenticated github fails when user stops retry", async () => {
