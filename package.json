@@ -12,13 +12,13 @@
     "automation",
     "workflows"
   ],
-  "homepage": "https://github.com/skishore23/receipt",
+  "homepage": "https://github.com/Julian-Win-Stack/ki-s-startup",
   "bugs": {
-    "url": "https://github.com/skishore23/receipt/issues"
+    "url": "https://github.com/Julian-Win-Stack/ki-s-startup/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/skishore23/receipt.git"
+    "url": "https://github.com/Julian-Win-Stack/ki-s-startup.git"
   },
   "publishConfig": {
     "access": "public"
