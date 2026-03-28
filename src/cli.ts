@@ -202,8 +202,13 @@ const looksLikeDefineAgentSpec = (value: unknown): value is {
 const loadAgentDefault = async (agentId: string): Promise<unknown | undefined> => {
   const srcFile = path.join(ROOT, "src", "agents", `${agentId}.agent.ts`);
   if (fs.existsSync(srcFile)) {
-    const mod = await import(pathToFileURL(srcFile).href);
-    return mod.default;
+    try {
+      const mod = await import(pathToFileURL(srcFile).href);
+      return mod.default;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      throw err;
+    }
   }
 
   return undefined;
@@ -279,9 +284,12 @@ const commandNew = async (id: string, template: string): Promise<void> => {
       },
     })`;
 
-  const body = `import { defineAgent, receipt, action, assistant, human } from "../sdk/index";
+  const body = `const receipt = <T = unknown>() => ({} as T);
+const action = <T extends Record<string, unknown>>(id: string, config: T) => ({ id, kind: "action", ...config });
+const assistant = <T extends Record<string, unknown>>(id: string, config: T) => ({ id, kind: "assistant", ...config });
+const human = <T extends Record<string, unknown>>(id: string, config: T) => ({ id, kind: "human", ...config });
 
-export default defineAgent({
+export default {
   id: "${id}",
   version: "1.0.0",${receiptDecl}
 
@@ -295,7 +303,7 @@ export default defineAgent({
   ],
 
   goal: ({ view }) => Boolean((view as { done?: boolean }).done),
-});
+};
 `;
 
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
