@@ -4,6 +4,11 @@ All notable changes to this project should be documented in this file.
 
 The format is based on Keep a Changelog and this project uses Semantic Versioning.
 
+## [0.1.1] - 2026-03-28
+
+### Fixed
+- `receipt new --template basic` now generates a runtime-safe scaffold for public CLI usage.
+
 ## [0.1.0] - 2026-03-26
 
 ### Added
