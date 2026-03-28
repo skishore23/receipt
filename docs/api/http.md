@@ -12,10 +12,10 @@ Base URL: `http://localhost:8787` (or `PORT`).
 ## Core Server APIs
 
 ### GET /healthz
-- Purpose: Lightweight health probe for uptime checks.
+- Purpose: Return a lightweight runtime health snapshot for the current process.
 - Query params: none.
 - Body: none.
-- Success: `200` with a status payload.
+- Success: `200` with `{ ok, uptimeSec, dataDir, jobBackend, processRole, queue, codexBin, resonateUrl }`.
 - Errors: none expected.
 - Side effects: none.
 - Example:
