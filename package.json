@@ -2,7 +2,7 @@
   "name": "receipt-agent-cli",
   "private": false,
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Immutable, replayable chains for agent runs",
   "author": "Receipt contributors",
   "license": "MIT",
