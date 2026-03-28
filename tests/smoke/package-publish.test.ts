@@ -18,6 +18,9 @@ test("package metadata: publish-safe cli configuration", async () => {
     readonly bugs?: { readonly url?: string };
     readonly homepage?: string;
   };
+  const expectedRepoUrl = "https://github.com/Julian-Win-Stack/ki-s-startup.git";
+  const expectedHomepage = "https://github.com/Julian-Win-Stack/ki-s-startup";
+  const expectedBugsUrl = "https://github.com/Julian-Win-Stack/ki-s-startup/issues";
 
   expect(pkg.name).toBe("receipt-agent-cli");
   expect(pkg.private).toBe(false);
@@ -25,7 +28,7 @@ test("package metadata: publish-safe cli configuration", async () => {
   expect(pkg.engines?.node).toBe(">=20");
   expect(pkg.files?.includes("dist")).toBe(true);
   expect(pkg.scripts?.["pack:smoke"]).toBe("node scripts/smoke-pack-install.mjs");
-  expect(pkg.repository?.url).toBe("https://github.com/skishore23/receipt.git");
-  expect(pkg.homepage).toBe("https://github.com/skishore23/receipt");
-  expect(pkg.bugs?.url).toBe("https://github.com/skishore23/receipt/issues");
+  expect(pkg.repository?.url).toBe(expectedRepoUrl);
+  expect(pkg.homepage).toBe(expectedHomepage);
+  expect(pkg.bugs?.url).toBe(expectedBugsUrl);
 });
