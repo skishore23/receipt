@@ -634,13 +634,13 @@ const renderWorkbenchHeader = (
     </div>
     <div class="mt-1 max-w-[70ch] text-[12px] leading-5 text-muted-foreground"${tooltipAttr(workbenchSummary)}>${esc(workbenchSummaryPreview)}</div>
   </div>
-  <div class="flex flex-wrap items-end gap-3">
+  <div class="flex flex-wrap items-center gap-3">
     ${renderProfileSelect({
       id: "factory-workbench-profile-select",
       label: "Engineer",
       profiles: model.profiles,
     })}
-    <div class="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+    <div class="flex flex-wrap items-center gap-2 text-[12px] leading-none text-muted-foreground">
       ${model.workspace.selectedObjective?.tokensUsed !== undefined
         ? `<span class="inline-flex items-center gap-1 text-foreground"><span class="text-info">${iconTokens("h-3.5 w-3.5")}</span>${esc(model.workspace.selectedObjective.tokensUsed.toLocaleString())} tokens</span>`
         : ""}
