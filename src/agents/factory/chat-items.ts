@@ -2,6 +2,7 @@ import type { AgentEvent, AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
 import { displayLabel } from "../../views/ui";
+import type { FactoryChatContextMessage } from "./chat-context";
 
 import { buildDetail, compactJsonValue, jsonRecordToMarkdown, truncateInline, tryParseJson } from "./formatters";
 import {
@@ -506,6 +507,9 @@ export const buildChatItemsForRun = (
   runId: string,
   chain: AgentRunChain,
   jobsById: ReadonlyMap<string, QueueJob>,
+  options?: {
+    readonly conversation?: ReadonlyArray<FactoryChatContextMessage>;
+  },
 ): ReadonlyArray<FactoryChatItem> => {
   const items: FactoryChatItem[] = [];
   const projection = projectAgentRun(chain);
@@ -513,11 +517,13 @@ export const buildChatItemsForRun = (
   const firstTs = projection.firstTs;
   const problem = projection.problem;
   const hasObjectiveHandoff = chain.some((receipt) => receipt.body.type === "objective.handoff");
-  if (problem?.type === "problem.set" && !hasObjectiveHandoff) {
+  const conversation = options?.conversation ?? [];
+  const userMessage = conversation.find((message) => message.role === "user");
+  if ((userMessage || problem?.type === "problem.set") && !hasObjectiveHandoff) {
     items.push({
       key: `${runId}-user`,
       kind: "user",
-      body: problem.problem,
+      body: userMessage?.text ?? problem!.problem,
       meta: formatRunMeta(runId, state, firstTs),
     });
   }
@@ -628,6 +634,7 @@ export const buildChatItemsForRun = (
     item.kind === "work" && Boolean(item.card.objectiveId)
   )?.card;
   if (final?.type === "response.finalized") {
+    const assistantMessage = [...conversation].reverse().find((message) => message.role === "assistant");
     const structuredFinal = summarizeStructuredSupervisorFinal(final.content, jobsById, latestChildCard);
     if (structuredFinal) {
       items.push({
@@ -672,11 +679,12 @@ export const buildChatItemsForRun = (
         meta: state.statusNote ?? state.status,
       });
     } else {
-      const parsedFinal = tryParseJson(final.content);
+      const finalContent = assistantMessage?.text ?? final.content;
+      const parsedFinal = tryParseJson(finalContent);
       items.push({
         key: `${runId}-assistant-final`,
         kind: "assistant",
-        body: parsedFinal ? (jsonRecordToMarkdown(parsedFinal) ?? final.content) : final.content,
+        body: parsedFinal ? (jsonRecordToMarkdown(parsedFinal) ?? finalContent) : finalContent,
         meta: state.statusNote ?? state.status,
       });
     }

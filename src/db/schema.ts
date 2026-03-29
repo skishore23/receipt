@@ -124,6 +124,21 @@ export const objectiveProjection = sqliteTable("objective_projection", {
   index("objective_projection_slot_state_idx").on(table.slotState, table.updatedAt),
 ]);
 
+export const chatContextProjection = sqliteTable("chat_context_projection", {
+  stream: text("stream").primaryKey(),
+  chatId: text("chat_id").notNull(),
+  profileId: text("profile_id").notNull(),
+  updatedAt: integer("updated_at", { mode: "number" }).notNull(),
+  boundObjectiveId: text("bound_objective_id"),
+  latestRunId: text("latest_run_id"),
+  lastGlobalSeq: integer("last_global_seq").notNull(),
+  contextJson: text("context_json").notNull(),
+}, (table) => [
+  index("chat_context_projection_chat_idx").on(table.chatId, table.updatedAt),
+  index("chat_context_projection_profile_idx").on(table.profileId, table.updatedAt),
+  index("chat_context_projection_objective_idx").on(table.boundObjectiveId, table.updatedAt),
+]);
+
 export const memoryEntries = sqliteTable("memory_entries", {
   entryId: text("entry_id").primaryKey(),
   scope: text("scope").notNull(),

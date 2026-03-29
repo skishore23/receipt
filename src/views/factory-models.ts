@@ -2,6 +2,7 @@ import type { ObjectiveAnalysis } from "../factory-cli/analyze";
 import type { FactoryState } from "../modules/factory";
 import type { FactoryBoardProjection, FactoryObjectiveDetail } from "../services/factory-types";
 import type { FactoryWorkbenchModel } from "./factory-workbench";
+import type { FactoryChatContextProjection } from "../agents/factory/chat-context";
 
 export type FactoryViewMode = "default" | "mission-control";
 
@@ -225,6 +226,7 @@ export type FactoryChatIslandModel = {
   readonly liveChildren?: ReadonlyArray<FactoryLiveChildCard>;
   readonly activeRun?: FactoryLiveRunCard;
   readonly workbench?: FactoryWorkbenchModel;
+  readonly chatContext?: FactoryChatContextProjection;
   readonly items: ReadonlyArray<FactoryChatItem>;
 };
 
@@ -262,6 +264,7 @@ export type FactoryInspectorModel = FactoryInspectorRouteModel & {
   readonly liveChildren?: ReadonlyArray<FactoryLiveChildCard>;
   readonly activeRun?: FactoryLiveRunCard;
   readonly workbench?: FactoryWorkbenchModel;
+  readonly chatContext?: FactoryChatContextProjection;
   readonly jobs: ReadonlyArray<FactoryChatJobNav>;
   readonly analysis?: ObjectiveAnalysis;
   readonly receipts?: FactoryObjectiveDetail["recentReceipts"];

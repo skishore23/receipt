@@ -2,6 +2,12 @@ import { createRuntime, type Runtime } from "@receipt/core/runtime";
 
 import { getProjectionOffset, getReceiptDb, latestGlobalSeq, listChangedStreams, listStreamsByPrefix, setProjectionOffset } from "./client";
 import { jsonParse, jsonParseOptional, jsonStringify } from "./json";
+import {
+  chatSessionStreamFromStream,
+  isFactoryChatSessionStream,
+  projectFactoryChatContextFromReceipts,
+  type FactoryChatContextProjection,
+} from "../agents/factory/chat-context";
 import type { MemoryCmd, MemoryEvent, MemoryState } from "../adapters/memory-tools";
 import type { JobCmd, JobCommandRecord, JobEvent, JobRecord, JobState } from "../modules/job";
 import { buildFactoryProjection } from "../modules/factory/selectors";
@@ -13,6 +19,7 @@ import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 
 export const JOB_PROJECTOR = "job_projection";
 export const OBJECTIVE_PROJECTOR = "objective_projection";
+export const CHAT_CONTEXT_PROJECTOR = "chat_context_projection";
 export const MEMORY_PROJECTOR = "memory_projection";
 
 const jobIdFromStream = (stream: string): string | undefined =>
@@ -22,6 +29,9 @@ const jobIdFromStream = (stream: string): string | undefined =>
 
 const scopeFromMemoryStream = (stream: string): string | undefined =>
   stream.startsWith("memory/") ? stream.slice("memory/".length) : undefined;
+
+const sessionStreamFromChangedStream = (stream: string): string | undefined =>
+  isFactoryChatSessionStream(stream) ? stream : chatSessionStreamFromStream(stream);
 
 export type StoredJobProjection = {
   readonly id: string;
@@ -430,6 +440,140 @@ export const readObjectiveStatesFromProjection = (
     ORDER BY created_at ASC, objective_id ASC
   `).all() as Array<{ readonly state_json: string }>;
   return rows.map((row) => jsonParse<FactoryState>(row.state_json, {} as FactoryState));
+};
+
+export const syncChatContextProjectionStream = async (
+  dataDir: string,
+  sessionStream: string,
+): Promise<FactoryChatContextProjection | undefined> => {
+  if (!isFactoryChatSessionStream(sessionStream)) return undefined;
+  const db = getReceiptDb(dataDir);
+  const rows = db.sqlite.query(`
+    SELECT
+      global_seq,
+      stream,
+      receipt_id,
+      ts,
+      hash,
+      event_type,
+      body_json
+    FROM receipts
+    WHERE stream = ? OR stream LIKE ?
+    ORDER BY global_seq ASC
+  `).all(sessionStream, `${sessionStream}/runs/%`) as Array<{
+    readonly global_seq: number;
+    readonly stream: string;
+    readonly receipt_id: string;
+    readonly ts: number;
+    readonly hash: string;
+    readonly event_type: string;
+    readonly body_json: string;
+  }>;
+  if (rows.length === 0) {
+    db.sqlite.query("DELETE FROM chat_context_projection WHERE stream = ?").run(sessionStream);
+    return undefined;
+  }
+  const projection = projectFactoryChatContextFromReceipts({
+    sessionStream,
+    receipts: rows.map((row) => ({
+      stream: row.stream,
+      ts: Number(row.ts),
+      hash: row.hash,
+      id: row.receipt_id,
+      eventType: row.event_type,
+      globalSeq: Number(row.global_seq),
+      body: jsonParse(row.body_json, {} as never),
+    })),
+    updatedAt: Date.now(),
+  });
+  if (!projection) {
+    db.sqlite.query("DELETE FROM chat_context_projection WHERE stream = ?").run(sessionStream);
+    return undefined;
+  }
+  db.sqlite.query(`
+    INSERT INTO chat_context_projection (
+      stream,
+      chat_id,
+      profile_id,
+      updated_at,
+      bound_objective_id,
+      latest_run_id,
+      last_global_seq,
+      context_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(stream) DO UPDATE SET
+      chat_id = excluded.chat_id,
+      profile_id = excluded.profile_id,
+      updated_at = excluded.updated_at,
+      bound_objective_id = excluded.bound_objective_id,
+      latest_run_id = excluded.latest_run_id,
+      last_global_seq = excluded.last_global_seq,
+      context_json = excluded.context_json
+  `).run(
+    sessionStream,
+    projection.chatId,
+    projection.profileId,
+    projection.updatedAt,
+    projection.bindings.objectiveId ?? null,
+    projection.bindings.latestRunId ?? null,
+    projection.source.lastGlobalSeq,
+    jsonStringify(projection),
+  );
+  return projection;
+};
+
+export const syncChangedChatContextProjections = async (
+  dataDir: string,
+): Promise<ReadonlyArray<string>> => {
+  const db = getReceiptDb(dataDir);
+  const lastOffset = getProjectionOffset(db, CHAT_CONTEXT_PROJECTOR);
+  const changed = listChangedStreams(db, { afterGlobalSeq: lastOffset, streamPrefix: "agents/factory/" });
+  const bootstrapStreams = changed.length === 0 && lastOffset === 0
+    ? listStreamsByPrefix(db, "agents/factory/").filter((stream) => isFactoryChatSessionStream(stream))
+    : [];
+  const streams = changed.length > 0
+    ? [...new Set(
+        changed
+          .map((entry) => sessionStreamFromChangedStream(entry.stream))
+          .filter((stream): stream is string => Boolean(stream)),
+      )]
+    : bootstrapStreams;
+  if (streams.length === 0) return [];
+  for (const stream of streams) {
+    await syncChatContextProjectionStream(dataDir, stream);
+  }
+  setProjectionOffset(db, CHAT_CONTEXT_PROJECTOR, latestGlobalSeq(db));
+  return streams;
+};
+
+export const readChatContextProjection = (
+  dataDir: string,
+  sessionStream: string,
+): FactoryChatContextProjection | undefined => {
+  const db = getReceiptDb(dataDir);
+  const row = db.sqlite.query(`
+    SELECT context_json
+    FROM chat_context_projection
+    WHERE stream = ?
+  `).get(sessionStream) as {
+    readonly context_json: string;
+  } | null;
+  return row ? jsonParse<FactoryChatContextProjection | undefined>(row.context_json, undefined) : undefined;
+};
+
+export const readChatContextProjectionVersion = (
+  dataDir: string,
+  sessionStream: string,
+): number | undefined => {
+  const db = getReceiptDb(dataDir);
+  const row = db.sqlite.query(`
+    SELECT last_global_seq
+    FROM chat_context_projection
+    WHERE stream = ?
+  `).get(sessionStream) as {
+    readonly last_global_seq: number;
+  } | null;
+  return row ? Number(row.last_global_seq) : undefined;
 };
 
 export const rebuildMemoryProjection = async (dataDir: string): Promise<void> => {

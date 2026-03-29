@@ -2583,7 +2583,7 @@ test("factory chat runner: startup binds the current objective to the chat sessi
   expect(bound && "reason" in bound ? bound.reason : "").toBe("startup");
 });
 
-test("factory chat runner: prompt layers repo, profile, objective, and factory memory", async () => {
+test("factory chat runner: prompt keeps profile memory separate from explicit objective/runtime imports", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-layered-memory");
   const repoRoot = await createGitRepo("receipt-factory-chat-layered-memory-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-layered-memory-profile-root");
@@ -2667,17 +2667,23 @@ test("factory chat runner: prompt layers repo, profile, objective, and factory m
   });
 
   expect(result.status).toBe("completed");
-  expect(capturedUserPrompt).toContain("Repo memory:\nrepo note");
+  expect(capturedUserPrompt).toContain("Imported context:");
   expect(capturedUserPrompt).toContain("Profile memory:\nprofile note");
-  expect(capturedUserPrompt).toContain("Objective memory:\nobjective note");
-  expect(capturedUserPrompt).toContain("Factory shared memory:\nfactory shared note");
-  expect(capturedUserPrompt).toContain("Factory objective memory:\nfactory objective note");
-  expect(capturedUserPrompt).toContain("Integration memory:\nintegration note");
-  expect(capturedUserPrompt).toContain("Factory worker memory:\nfactory worker note");
-  expect(capturedUserPrompt).toContain("Codex worker memory:\ncodex worker note");
-  expect(summarizeCalls).toContain(`factory/objectives/${objectiveId}`);
-  expect(summarizeCalls).toContain("factory/repo/shared");
-  expect(summarizeCalls).toContain(`repos/${repoKey}/subagents/factory`);
+  expect(capturedUserPrompt).toContain("Objective (bound):");
+  expect(capturedUserPrompt).toContain("Objective demo (objective_demo)");
+  expect(capturedUserPrompt).toContain("Runtime (bound):");
+  expect(capturedUserPrompt).toContain("Investigating the sidebar objective.");
+  expect(capturedUserPrompt).not.toContain("Repo memory:\nrepo note");
+  expect(capturedUserPrompt).not.toContain("Objective memory:\nobjective note");
+  expect(capturedUserPrompt).not.toContain("Factory shared memory:\nfactory shared note");
+  expect(capturedUserPrompt).not.toContain("Factory objective memory:\nfactory objective note");
+  expect(capturedUserPrompt).not.toContain("Integration memory:\nintegration note");
+  expect(capturedUserPrompt).not.toContain("Factory worker memory:\nfactory worker note");
+  expect(capturedUserPrompt).not.toContain("Codex worker memory:\ncodex worker note");
+  expect(summarizeCalls).toContain(`repos/${repoKey}/profiles/${profileId}`);
+  expect(summarizeCalls).not.toContain(`factory/objectives/${objectiveId}`);
+  expect(summarizeCalls).not.toContain("factory/repo/shared");
+  expect(summarizeCalls).not.toContain(`repos/${repoKey}/subagents/factory`);
 });
 
 test("factory chat runner: factory.dispatch create starts a new objective instead of reusing the bound thread objective", async () => {

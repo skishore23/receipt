@@ -234,6 +234,63 @@ const renderFocusedOutput = (model: FactoryInspectorModel, heading: string): str
   </div>`;
 };
 
+const renderChatContextDebug = (model: FactoryInspectorModel): string => {
+  const chatContext = model.chatContext;
+  if (!chatContext) return "";
+  const importSections = [
+    chatContext.imports.profileMemorySummary
+      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Profile Memory</div>
+          <div class="mt-1 text-[11px] leading-5 text-foreground">${esc(chatContext.imports.profileMemorySummary)}</div>
+        </div>`
+      : "",
+    chatContext.imports.objective
+      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Objective Import</div>
+          <div class="mt-1 text-[11px] leading-5 text-foreground">${esc([
+            chatContext.imports.objective.title || chatContext.imports.objective.objectiveId,
+            [chatContext.imports.objective.status, chatContext.imports.objective.phase].filter(Boolean).join(" · "),
+            chatContext.imports.objective.summary,
+          ].filter(Boolean).join("\n"))}</div>
+        </div>`
+      : "",
+    chatContext.imports.runtime
+      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Runtime Import</div>
+          <div class="mt-1 text-[11px] leading-5 text-foreground">${esc(chatContext.imports.runtime.summary)}</div>
+        </div>`
+      : "",
+  ].filter(Boolean).join("");
+  return `<details class="${softPanelClass} p-3">
+    <summary class="cursor-pointer list-none">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="${sectionLabelClass}">Chat Context</div>
+          <div class="mt-1 text-[11px] text-muted-foreground">${esc([
+            chatContext.source.sessionStream,
+            chatContext.bindings.objectiveId ? `objective ${chatContext.bindings.objectiveId}` : "unbound",
+            chatContext.style.responseStyle,
+          ].join(" · "))}</div>
+        </div>
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(String(chatContext.conversation.length))} msgs</div>
+      </div>
+    </summary>
+    <div class="mt-3 space-y-2">
+      ${importSections}
+      <div class="rounded-md border border-border bg-background px-2.5 py-2">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Source Refs</div>
+        <div class="mt-2 space-y-1">
+          ${chatContext.source.receiptRefs.slice(0, 10).map((ref) => `<div class="text-[10px] text-muted-foreground">
+            <code class="text-foreground">${esc(ref.stream)}</code>
+            <span> · ${esc(ref.eventType)}</span>
+            <span> · ${esc(ref.receiptHash.slice(0, 10))}</span>
+          </div>`).join("") || `<div class="text-[10px] text-muted-foreground">No source refs recorded.</div>`}
+        </div>
+      </div>
+    </div>
+  </details>`;
+};
+
 const renderOverviewPanel = (model: FactoryInspectorModel): string => {
   if (model.objectiveMissing) return renderMissingObjectivePanel(model);
   const obj = model.selectedObjective;
@@ -345,6 +402,8 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
         ${model.activeCodex.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto factory-scrollbar">${esc(model.activeCodex.stderrTail)}</pre>` : ''}
       </div>
     </div>` : ''}
+
+    ${renderChatContextDebug(model)}
   </div>`;
 };
 

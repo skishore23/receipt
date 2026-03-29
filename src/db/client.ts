@@ -102,6 +102,7 @@ export const clearReceiptDb = (db: ReceiptDb): void => {
     DELETE FROM job_pending_commands;
     DELETE FROM job_projection;
     DELETE FROM objective_projection;
+    DELETE FROM chat_context_projection;
     DELETE FROM memory_accesses;
     DELETE FROM memory_entries;
     DELETE FROM branches;
@@ -221,4 +222,3 @@ export const listChangesAfter = (
       eventType: row.eventType,
       changedAt: Number(row.changedAt),
     }));
-

@@ -52,6 +52,7 @@ import type {
   FactoryChatShellModel,
   FactoryChatJobNav,
   FactoryInspectorPanel,
+  FactoryLiveRunCard,
   FactorySelectedObjectiveCard,
   FactoryNavModel,
   FactoryInspectorModel,
@@ -88,6 +89,14 @@ import { parseOrder, parseLimit, parseInspectorDepth } from "../../framework/htt
 import type { FactoryLiveScopePayload } from "./client-contract";
 import { buildChatItemsForRun } from "./chat-items";
 import {
+  groupFactoryChatConversationByRunId,
+  projectFactoryChatContextFromReceipts,
+  withFactoryChatContextImports,
+  type FactoryChatContextImports,
+  type FactoryChatContextMessage,
+  type FactoryChatContextProjection,
+} from "./chat-context";
+import {
   buildChatLink,
   latestObjectiveIdFromJobs,
   latestObjectiveIdFromRunChains,
@@ -121,6 +130,12 @@ import {
   jobRunId,
   type AgentRunChain,
 } from "./shared";
+import {
+  readChatContextProjection,
+  readChatContextProjectionVersion,
+  syncChangedChatContextProjections,
+  syncChatContextProjectionStream,
+} from "../../db/projectors";
 
 const isInspectorPanel = (value: string | undefined): value is FactoryInspectorPanel =>
   value === "overview"
@@ -176,6 +191,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   });
   const agentRuntime = ctx.runtimes.agent as Runtime<AgentCmd, AgentEvent, AgentState>;
   const profileRoot = path.resolve(typeof helpers.profileRoot === "string" ? helpers.profileRoot : process.cwd());
+  const chatProjectionDataDir = typeof (service as { readonly dataDir?: unknown }).dataDir === "string"
+    ? (service as { readonly dataDir: string }).dataDir
+    : undefined;
 
   const wrap = async <T>(
     fn: () => Promise<T>,
@@ -435,7 +453,127 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const stream = factoryChatSessionStream(service.git.repoRoot, resolved.root.id, input.chatId);
     const chain = await agentRuntime.chain(stream);
     const head = chain.at(-1);
-    return head ? `${chain.length}:${head.hash}` : "0:";
+    if (chatProjectionDataDir) {
+      await syncChangedChatContextProjections(chatProjectionDataDir).catch(() => undefined);
+    }
+    const projectionVersion = chatProjectionDataDir
+      ? readChatContextProjectionVersion(chatProjectionDataDir, stream)
+      : undefined;
+    return projectionVersion !== undefined
+      ? `chat:${projectionVersion}`
+      : (head ? `${chain.length}:${head.hash}` : "0:");
+  };
+
+  const fallbackChatContextFromChain = (input: {
+    readonly sessionStream: string;
+    readonly chain: AgentRunChain;
+  }): FactoryChatContextProjection | undefined =>
+    projectFactoryChatContextFromReceipts({
+      sessionStream: input.sessionStream,
+      receipts: input.chain.map((receipt) => ({
+        stream: receipt.stream,
+        ts: receipt.ts,
+        hash: receipt.hash,
+        id: receipt.id,
+        eventType: receipt.body.type,
+        body: receipt.body,
+      })),
+    });
+
+  const loadChatContextProjectionForSession = async (input: {
+    readonly sessionStream: string;
+    readonly fallbackChain?: AgentRunChain;
+  }): Promise<FactoryChatContextProjection | undefined> => {
+    if (chatProjectionDataDir) {
+      await syncChatContextProjectionStream(chatProjectionDataDir, input.sessionStream).catch(() => undefined);
+    }
+    return (chatProjectionDataDir
+      ? readChatContextProjection(chatProjectionDataDir, input.sessionStream)
+      : undefined)
+      ?? (input.fallbackChain ? fallbackChatContextFromChain({
+        sessionStream: input.sessionStream,
+        chain: input.fallbackChain,
+      }) : undefined);
+  };
+
+  const latestRuntimeImportSummary = (input: {
+    readonly workbench?: FactoryChatIslandModel["workbench"];
+    readonly objectiveId?: string;
+    readonly activeCodex?: FactoryInspectorModel["activeCodex"];
+    readonly liveChildren?: FactoryInspectorModel["liveChildren"];
+  }): FactoryChatContextImports["runtime"] => {
+    const focus = input.workbench?.focus;
+    if (focus) {
+      return {
+        summary: focus.summary || `${focus.title} is ${focus.status}.`,
+        importedBecause: "requested",
+        objectiveId: input.objectiveId,
+        focusKind: focus.focusKind,
+        focusId: focus.focusId,
+        active: focus.active === true || focus.status === "running" || focus.status === "queued",
+      };
+    }
+    if (input.activeCodex) {
+      return {
+        summary: input.activeCodex.latestNote ?? input.activeCodex.summary,
+        importedBecause: "requested",
+        objectiveId: input.objectiveId,
+        focusKind: "job",
+        focusId: input.activeCodex.jobId,
+        active: input.activeCodex.running,
+      };
+    }
+    const liveChild = input.liveChildren?.[0];
+    if (!liveChild) return undefined;
+    return {
+      summary: liveChild.latestNote ?? liveChild.summary,
+      importedBecause: "requested",
+      focusKind: "job",
+      focusId: liveChild.jobId,
+      active: liveChild.running,
+    };
+  };
+
+  const withChatContextViewImports = (
+    chatContext: FactoryChatContextProjection | undefined,
+    input: {
+      readonly selectedObjective?: FactorySelectedObjectiveCard;
+      readonly workbench?: FactoryChatIslandModel["workbench"];
+      readonly activeCodex?: FactoryInspectorModel["activeCodex"];
+      readonly liveChildren?: FactoryInspectorModel["liveChildren"];
+    },
+  ): FactoryChatContextProjection | undefined => {
+    if (!chatContext) return undefined;
+    const imports: FactoryChatContextImports = {
+      ...(input.selectedObjective ? {
+        objective: {
+          objectiveId: input.selectedObjective.objectiveId,
+          title: input.selectedObjective.title,
+          status: input.selectedObjective.status,
+          phase: input.selectedObjective.phase,
+          summary: input.selectedObjective.blockedReason
+            ?? input.selectedObjective.nextAction
+            ?? input.selectedObjective.latestDecisionSummary
+            ?? input.selectedObjective.summary
+            ?? `${input.selectedObjective.title} is ${input.selectedObjective.status}.`,
+          importedBecause: "requested" as const,
+        },
+      } : {}),
+      ...((() => latestRuntimeImportSummary({
+        workbench: input.workbench,
+        objectiveId: input.selectedObjective?.objectiveId,
+        activeCodex: input.activeCodex,
+        liveChildren: input.liveChildren,
+      }))() ? {
+        runtime: latestRuntimeImportSummary({
+          workbench: input.workbench,
+          objectiveId: input.selectedObjective?.objectiveId,
+          activeCodex: input.activeCodex,
+          liveChildren: input.liveChildren,
+        }),
+      } : {}),
+    };
+    return withFactoryChatContextImports(chatContext, imports);
   };
 
   type ObjectiveHandoffView = {
@@ -711,9 +849,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     profileId: string | undefined,
   ): boolean => {
     if (!objective || !profileId) return false;
-    const objectiveProfileId = "profileId" in objective
-      ? objective.profileId
-      : objective.profile.rootProfileId;
+    const objectiveProfileId = "profile" in objective
+      ? objective.profile.rootProfileId
+      : objective.profileId;
     return objectiveProfileId === profileId;
   };
 
@@ -746,6 +884,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     }
     if (!input.chatId) return undefined;
     const stream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
+    const projected = await loadChatContextProjectionForSession({ sessionStream: stream });
+    const projectedObjectiveId = normalizeKnownObjectiveId(projected?.bindings.objectiveId, liveObjectives);
+    if (projectedObjectiveId) return projectedObjectiveId;
+    if (!projectedObjectiveId && input.allowExplicitFallback && projected?.bindings.objectiveId) {
+      return projected.bindings.objectiveId;
+    }
     const indexChain = await agentRuntime.chain(stream);
     const runIds = collectRunIds(indexChain);
     const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))));
@@ -791,6 +935,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     };
     let initialSessionStream: string | undefined;
     let initialIndexChain: Awaited<ReturnType<typeof agentRuntime.chain>> = [];
+    let initialChatContext: FactoryChatContextProjection | undefined;
     let jobs: ReadonlyArray<QueueJob> = [];
     let chatMatchesExplicitObjective = false;
 
@@ -799,14 +944,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     } else if (input.chatId) {
       initialSessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
       initialIndexChain = await agentRuntime.chain(initialSessionStream);
+      initialChatContext = await loadChatContextProjectionForSession({
+        sessionStream: initialSessionStream,
+        fallbackChain: initialIndexChain,
+      });
       const initialRunIds = collectRunIds(initialIndexChain);
       if (initialRunIds.length > 0) {
         jobs = await loadRecentJobs();
         if (explicitObjectiveId) {
-          const initialRunChains = await Promise.all(
-            initialRunIds.map((runId) => agentRuntime.chain(agentRunStream(initialSessionStream!, runId))),
-          );
-          const discoveredObjectiveId = latestObjectiveIdFromRunChains(initialRunChains)
+          const discoveredObjectiveId = initialChatContext?.bindings.objectiveId
+            ?? latestObjectiveIdFromRunChains(await Promise.all(
+              initialRunIds.map((runId) => agentRuntime.chain(agentRunStream(initialSessionStream!, runId))),
+            ))
             ?? latestObjectiveIdFromJobs(jobs, initialSessionStream, input.chatId);
           chatMatchesExplicitObjective = discoveredObjectiveId === explicitObjectiveId;
         }
@@ -851,6 +1000,22 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         chatId: input.chatId,
         objective: selectedObjective,
       });
+      const sessionChatContext = input.chatId
+        ? withChatContextViewImports(
+            await loadChatContextProjectionForSession({
+              sessionStream: factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId),
+              fallbackChain: initialSessionStream === factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
+                ? initialIndexChain
+                : await agentRuntime.chain(factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)),
+            }),
+            {
+              selectedObjective,
+              workbench: undefined,
+              activeCodex: undefined,
+              liveChildren: undefined,
+            },
+          )
+        : undefined;
       const stream = resolveChatViewStream({
         repoRoot,
         profileId: effectiveProfile.id,
@@ -861,8 +1026,14 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       const allRunIds = collectRunIds(indexChain);
       const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
       const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
+      const conversationByRunId = groupFactoryChatConversationByRunId(sessionChatContext?.conversation);
       const runChains = await Promise.all(runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])));
-      const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(runIds[index]!, runChain, jobsById));
+      const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(
+        runIds[index]!,
+        runChain,
+        jobsById,
+        { conversation: conversationByRunId.get(runIds[index]!) },
+      ));
       const activeRunId = runIds.at(-1) ?? input.runId;
       const initialWorkbench = detail
         ? buildFactoryWorkbench({
@@ -935,6 +1106,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       const liveChildren = stream
         ? buildLiveChildCards(relevantObjectiveJobs, stream, explicitObjectiveId)
         : [];
+      const hydratedChatContext = withChatContextViewImports(sessionChatContext, {
+        selectedObjective,
+        workbench,
+        activeCodex,
+        liveChildren,
+      });
       const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
       const activeRun = activeRunIndex >= 0
         ? summarizeActiveRunCard({
@@ -972,6 +1149,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         liveChildren,
         activeRun,
         workbench,
+        chatContext: hydratedChatContext,
         items: chatItems,
       };
       const navModel: FactoryNavModel = {
@@ -997,6 +1175,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         liveChildren,
         activeRun,
         workbench,
+        chatContext: hydratedChatContext,
         jobs: relevantJobs,
         tasks: detail?.tasks,
       };
@@ -1066,6 +1245,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         ? initialIndexChain
         : await agentRuntime.chain(stream)
       : [];
+    const sessionChatContext = input.chatId && initialSessionStream
+      ? await loadChatContextProjectionForSession({
+          sessionStream: initialSessionStream,
+          fallbackChain: indexChain,
+        })
+      : undefined;
 
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
@@ -1073,7 +1258,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const activeRunId = runIds.at(-1) ?? input.runId;
     const runChains = await Promise.all(runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])));
     const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
-    const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(runIds[index]!, runChain, jobsById));
+    const conversationByRunId = groupFactoryChatConversationByRunId(sessionChatContext?.conversation);
+    const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(
+      runIds[index]!,
+      runChain,
+      jobsById,
+      { conversation: conversationByRunId.get(runIds[index]!) },
+    ));
     const activeProfileOverview = describeProfileMarkdown(resolved.root);
     const baseQueueJobs = stream
       ? jobs.filter((job) => isRelevantShellJob(job, stream, resolvedObjectiveId))
@@ -1170,6 +1361,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const inspectorPanel = input.panel ?? (workbench?.hasActiveExecution ? "live" : "overview");
     const resolvedFocusKind = workbench?.focus?.focusKind;
     const resolvedFocusId = workbench?.focus?.focusId;
+    const hydratedChatContext = withChatContextViewImports(sessionChatContext, {
+      selectedObjective: selectedObjectiveCard,
+      workbench,
+      activeCodex,
+      liveChildren,
+    });
     const profileNav = buildProfileNav({
       profiles,
       selectedProfileId: resolved.root.id,
@@ -1214,6 +1411,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       liveChildren,
       activeRun,
       workbench,
+      chatContext: hydratedChatContext,
       items: chatItems,
     };
     const navModel: FactoryNavModel = {
@@ -1241,6 +1439,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       liveChildren,
       activeRun,
       workbench,
+      chatContext: hydratedChatContext,
       jobs: relevantJobs,
       tasks: selectedObjective?.tasks,
       analysis: inspectorPanel === "analysis" && resolvedObjectiveId
@@ -1520,7 +1719,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeProfileResponsibilities: activeProfileOverview.responsibilities,
       activeProfileSummary: activeProfileOverview.summary,
       activeProfileSections: activeProfileOverview.sections,
-      activeProfileTools: input.resolvedProfile.toolAllowlist,
       items: [],
     };
     const navModel: FactoryNavModel = {
@@ -1650,6 +1848,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const buildExplicitInspectorModel = async (input: {
     readonly mode?: FactoryViewMode;
     readonly profileId?: string;
+    readonly chatId?: string;
     readonly objectiveId: string;
     readonly runId?: string;
     readonly jobId?: string;
@@ -1674,6 +1873,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       recentJobs,
       selectedJob,
     } = explicitContext;
+    const sessionStream = input.chatId
+      ? factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
+      : undefined;
+    const explicitChatContext = sessionStream
+      ? await loadChatContextProjectionForSession({
+          sessionStream,
+          fallbackChain: await agentRuntime.chain(sessionStream),
+        })
+      : undefined;
 
     if (!selectedObjective && (panel === "overview" || panel === "receipts")) {
       return buildMissingInspectorModel({
@@ -1703,6 +1911,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         liveChildren: [],
         activeRun: undefined,
         workbench: undefined,
+        chatContext: withChatContextViewImports(explicitChatContext, {
+          selectedObjective,
+          workbench: undefined,
+          activeCodex: undefined,
+          liveChildren: [],
+        }),
         jobs: [],
         tasks: undefined,
         debugInfo: maybeState,
@@ -1724,6 +1938,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         liveChildren: [],
         activeRun: undefined,
         workbench: undefined,
+        chatContext: withChatContextViewImports(explicitChatContext, {
+          selectedObjective,
+          workbench: undefined,
+          activeCodex: undefined,
+          liveChildren: [],
+        }),
         jobs: [],
         tasks: undefined,
         receipts: await service.listObjectiveReceipts(objectiveId, 100).catch(() => undefined),
@@ -1784,6 +2004,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
       liveOutput,
     });
+    const activeCodex = buildActiveCodexCard(recentJobs);
+    const explicitHydratedChatContext = withChatContextViewImports(explicitChatContext, {
+      selectedObjective,
+      workbench,
+      activeCodex,
+      liveChildren: [],
+    });
     return {
       mode: input.mode,
       panel,
@@ -1794,10 +2021,11 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       focusKind: workbench?.focus?.focusKind,
       focusId: workbench?.focus?.focusId,
       selectedObjective,
-      activeCodex: buildActiveCodexCard(recentJobs),
+      activeCodex,
       liveChildren: [],
       activeRun: undefined,
       workbench,
+      chatContext: explicitHydratedChatContext,
       jobs: relevantJobs,
       tasks: detail.tasks,
       analysis: panel === "analysis"
@@ -1920,6 +2148,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       job: selectedJob,
     });
     const indexChain = stream ? await agentRuntime.chain(stream) : [];
+    const sessionChatContext = input.chatId
+      ? await loadChatContextProjectionForSession({
+          sessionStream: factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId),
+          fallbackChain: indexChain,
+        })
+      : undefined;
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
     const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
@@ -2024,6 +2258,12 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       liveOutput,
     });
     const panel = input.panel ?? (workbench?.hasActiveExecution ? "live" : "overview");
+    const hydratedChatContext = withChatContextViewImports(sessionChatContext, {
+      selectedObjective: selectedObjective ? toFactorySelectedObjectiveCard(selectedObjective) : undefined,
+      workbench,
+      activeCodex,
+      liveChildren,
+    });
     return {
       mode: input.mode,
       panel,
@@ -2039,6 +2279,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       liveChildren,
       activeRun,
       workbench,
+      chatContext: hydratedChatContext,
       jobs: relevantJobs,
       tasks: selectedObjective?.tasks,
     };
@@ -3343,11 +3584,11 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           ? new Response(null, {
               status: 303,
               headers: {
-                Location: result.redirect,
+                Location: result.redirect ?? "/factory",
                 "Cache-Control": "no-store",
               },
             })
-          : "routeContext" in result
+          : "routeContext" in result && result.routeContext
           ? html(factoryWorkbenchScaffold(result.routeContext))
           : html(factoryWorkbenchShell(result.model))
       ));

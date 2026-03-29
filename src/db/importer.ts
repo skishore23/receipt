@@ -2,7 +2,7 @@ import type { Receipt } from "@receipt/core/types";
 
 import { clearReceiptDb, getReceiptDb, hasLegacyJsonlData } from "./client";
 import { jsonStringify, jsonStringifyOptional } from "./json";
-import { rebuildMemoryProjection, syncChangedJobProjections, syncChangedObjectiveProjections } from "./projectors";
+import { rebuildMemoryProjection, syncChangedChatContextProjections, syncChangedJobProjections, syncChangedObjectiveProjections } from "./projectors";
 import { createStreamLocator, jsonlStore as legacyJsonlStore } from "../adapters/legacy-jsonl";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
@@ -140,6 +140,7 @@ export const importLegacyJsonlToSqlite = async (input: {
       initialFactoryState,
     );
     await syncChangedObjectiveProjections(input.dataDir, factoryRuntime);
+    await syncChangedChatContextProjections(input.dataDir);
     await rebuildMemoryProjection(input.dataDir);
   } finally {
     if (input.dbPath?.trim()) {

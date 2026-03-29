@@ -46,7 +46,7 @@ import {
   resolveFactoryChatProfile,
   type FactoryChatResolvedProfile,
 } from "../services/factory-chat-profiles";
-import type { CodexExecutor, CodexRunControl } from "../adapters/codex-executor";
+import type { CodexExecutor, CodexRunControl, CodexRunInput } from "../adapters/codex-executor";
 import type { MemoryTools } from "../adapters/memory-tools";
 import {
   factoryChatCodexArtifactPaths,
@@ -65,6 +65,18 @@ import {
   waitForSnapshotChange,
   type FactoryLiveWaitState,
 } from "./orchestration-utils";
+import {
+  classifyFactoryResponseStyle,
+  renderFactoryChatContextImports,
+  renderFactoryChatConversationTranscript,
+  renderFactoryResponseStyleGuidance,
+  withFactoryChatContextImports,
+  type FactoryChatContextImports,
+  type FactoryChatContextProjection,
+} from "./factory/chat-context";
+import { readChatContextProjection, syncChatContextProjectionStream } from "../db/projectors";
+
+export { classifyFactoryResponseStyle, renderFactoryResponseStyleGuidance } from "./factory/chat-context";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,12 +93,6 @@ export const FACTORY_CHAT_DEFAULT_CONFIG: FactoryChatRunConfig = {
 };
 
 const FACTORY_CHAT_ITERATION_LADDER = [8, 12, 16, 24, 32, 40] as const;
-
-const FACTORY_CHAT_META_REFLECTION_RE =
-  /\b(?:do you think you did|did you do (?:good|well)|grade your performance|how did you do|self[- ]reflection|self[- ]reflect|reflect on (?:your|that)|what is off here|what feels off|why (?:is|was) (?:this|that|it) (?:off|robotic|unnatural|procedural)|missing soul|sound(?:ing)? (?:more )?(?:human|natural)|too (?:robotic|procedural)|answered? (?:like|as) (?:a )?(?:human|person)|why did that sound)\b/i;
-
-const FACTORY_CHAT_WORKLIKE_SIGNAL_RE =
-  /\b(?:fix|implement|change|update|edit|refactor|debug|investigate|inspect|analyze|review|check|build|test|file|code|repo|branch|commit|diff|task|objective|thread|deploy|aws|ec2|s3|lambda|bug|error|failure|ci|pr|inventory|bucket|buckets|running jobs|cost spike)\b/i;
 
 export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "llmStructured"> & {
   readonly config: FactoryChatRunConfig;
@@ -107,30 +113,6 @@ export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "ll
   readonly continuationDepth?: number;
 };
 
-export const classifyFactoryResponseStyle = (problem: string): "conversational" | "work" => {
-  const compact = problem.replace(/\s+/g, " ").trim();
-  if (!compact) return "work";
-  if (FACTORY_CHAT_META_REFLECTION_RE.test(compact)) return "conversational";
-  if (compact.length <= 140 && !FACTORY_CHAT_WORKLIKE_SIGNAL_RE.test(compact)) return "conversational";
-  return "work";
-};
-
-export const renderFactoryResponseStyleGuidance = (problem: string): string => {
-  if (classifyFactoryResponseStyle(problem) === "conversational") {
-    return [
-      "- This turn is conversational or meta. Answer like a human engineer talking to another person.",
-      "- Prefer short natural prose. Use first person for self-reflection.",
-      "- Do not use headings, scorecards, grades, verdict labels, or rubric language unless the user explicitly asked for that format.",
-      "- Do not turn the reply into operator-handoff analysis, workflow briefing, or report scaffolding.",
-    ].join("\n");
-  }
-  return [
-    "- This turn is work-focused. Use structure only when it genuinely helps the operator.",
-    "- Keep the answer direct and specific; do not default to a report template if a short paragraph would do.",
-    "- Mention workflow mechanics only when they materially affect the next step or the freshness of the answer.",
-  ].join("\n");
-};
-
 const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Goal:",
   "{{problem}}",
@@ -138,11 +120,14 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Iteration: {{iteration}} / {{maxIterations}}",
   "Workspace: {{workspace}}",
   "",
-  "Recent transcript:",
+  "Recent conversation:",
   "{{transcript}}",
   "",
   "Current situation:",
   "{{situation}}",
+  "",
+  "Imported context:",
+  "{{context_imports}}",
   "",
   "Memory summary:",
   "{{memory}}",
@@ -158,7 +143,7 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "",
   "Orchestration rules:",
   "- Profiles are orchestration-only. Do not claim this chat edited code directly.",
-  "- Treat chat sessions as transport only. A new chatId does not reset repo, profile, objective, or worker memory.",
+  "- Treat chat sessions as their own conversational context. Only use objective or runtime state when it is explicitly imported or bound.",
   "- When the selected objective is blocked, first explain the handoff in plain language: what the objective established, what is still missing, and whether the next step belongs in Chat or in tracked objective work.",
   "- Use `codex.run` only for lightweight read-only inspection or evidence-gathering in the current repo.",
   "- If a Codex probe is already queued or running for this chat context, reuse it instead of spawning another one.",
@@ -252,13 +237,6 @@ const objectiveMemoryScope = (repoKey: string, profileId: string, objectiveId: s
   `${profileMemoryScope(repoKey, profileId)}/objectives/${objectiveId}`;
 const workerMemoryScope = (repoKey: string, worker: string): string => `repos/${repoKey}/subagents/${worker}`;
 
-type FactoryChatMemorySection = {
-  readonly label: string;
-  readonly scope: string;
-  readonly maxChars: number;
-  readonly summary?: string;
-};
-
 const toolSummary = (worker: string, status: string, summary: string): string =>
   `${worker} ${status}: ${summary}`;
 
@@ -300,99 +278,126 @@ const summarizeMemoryScope = async (
   }
 };
 
-const renderLayeredMemorySummary = async (input: {
+const resolveProfileMemorySummary = async (input: {
   readonly memoryTools: MemoryTools;
   readonly repoKey: string;
   readonly profileId: string;
-  readonly objectiveId?: string;
   readonly primaryScope: string;
   readonly primarySummary: string;
   readonly query: string;
   readonly runId: string;
   readonly iteration: number;
-}): Promise<string> => {
-  const repoScope = repoMemoryScope(input.repoKey);
+}): Promise<string | undefined> => {
   const profileScope = profileMemoryScope(input.repoKey, input.profileId);
-  const currentObjectiveScope = input.objectiveId
-    ? objectiveMemoryScope(input.repoKey, input.profileId, input.objectiveId)
-    : undefined;
-  const factoryObjectiveScope = input.objectiveId
-    ? `factory/objectives/${input.objectiveId}`
-    : undefined;
-  const integrationScope = input.objectiveId
-    ? `factory/objectives/${input.objectiveId}/integration`
-    : undefined;
-  const sections: FactoryChatMemorySection[] = [
-    {
-      label: "Repo memory",
-      scope: repoScope,
-      maxChars: 220,
-      summary: input.primaryScope === repoScope ? input.primarySummary : undefined,
-    },
-    {
-      label: "Profile memory",
-      scope: profileScope,
-      maxChars: 240,
-      summary: input.primaryScope === profileScope ? input.primarySummary : undefined,
-    },
-    ...(currentObjectiveScope ? [{
-      label: "Objective memory",
-      scope: currentObjectiveScope,
-      maxChars: 280,
-      summary: input.primaryScope === currentObjectiveScope ? input.primarySummary : undefined,
-    }] : []),
-    {
-      label: "Factory shared memory",
-      scope: "factory/repo/shared",
-      maxChars: 220,
-    },
-    ...(factoryObjectiveScope ? [{
-      label: "Factory objective memory",
-      scope: factoryObjectiveScope,
-      maxChars: 260,
-    }] : []),
-    ...(integrationScope ? [{
-      label: "Integration memory",
-      scope: integrationScope,
-      maxChars: 220,
-    }] : []),
-    {
-      label: "Factory worker memory",
-      scope: workerMemoryScope(input.repoKey, "factory"),
-      maxChars: 180,
-    },
-    {
-      label: "Codex worker memory",
-      scope: workerMemoryScope(input.repoKey, "codex"),
-      maxChars: 180,
-    },
-  ];
+  return input.primaryScope === profileScope
+    ? input.primarySummary.trim() || undefined
+    : summarizeMemoryScope(input.memoryTools, {
+        scope: profileScope,
+        query: input.query,
+        maxChars: 320,
+        audit: {
+          actor: "factory-chat",
+          operation: "profile-memory",
+          runId: input.runId,
+          iteration: input.iteration,
+          label: "Profile memory",
+        },
+      });
+};
 
-  const seenScopes = new Set<string>();
-  const rendered: string[] = [];
-  const seenSummaries = new Set<string>();
-  for (const section of sections) {
-    if (seenScopes.has(section.scope)) continue;
-    seenScopes.add(section.scope);
-    const summary = (section.summary ?? await summarizeMemoryScope(input.memoryTools, {
-      scope: section.scope,
-      query: input.query,
-      maxChars: section.maxChars,
-      audit: {
-        actor: "factory-chat",
-        operation: "layered-memory",
-        runId: input.runId,
-        iteration: input.iteration,
-        label: section.label,
-      },
-    }))?.trim();
-    if (!summary) continue;
-    const dedupeKey = summary.toLowerCase();
-    if (seenSummaries.has(dedupeKey)) continue;
-    seenSummaries.add(dedupeKey);
-    rendered.push(`${section.label}:\n${summary}`);
+const loadProjectedChatContext = async (input: {
+  readonly dataDir?: string;
+  readonly sessionStream: string;
+}): Promise<FactoryChatContextProjection | undefined> => {
+  if (!input.dataDir) return undefined;
+  await syncChatContextProjectionStream(input.dataDir, input.sessionStream);
+  return readChatContextProjection(input.dataDir, input.sessionStream);
+};
+
+const buildFactoryChatContextImports = async (input: {
+  readonly memoryTools: MemoryTools;
+  readonly repoKey: string;
+  readonly profileId: string;
+  readonly primaryScope: string;
+  readonly primarySummary: string;
+  readonly query: string;
+  readonly runId: string;
+  readonly iteration: number;
+  readonly objectiveId?: string;
+  readonly queue: JsonlQueue;
+  readonly stream: string;
+  readonly factoryService: FactoryService;
+}): Promise<FactoryChatContextImports> => {
+  const profileMemorySummary = await resolveProfileMemorySummary({
+    memoryTools: input.memoryTools,
+    repoKey: input.repoKey,
+    profileId: input.profileId,
+    primaryScope: input.primaryScope,
+    primarySummary: input.primarySummary,
+    query: input.query,
+    runId: input.runId,
+    iteration: input.iteration,
+  });
+  const baseImports: FactoryChatContextImports = {
+    ...(profileMemorySummary ? { profileMemorySummary } : {}),
+  };
+  if (input.objectiveId) {
+    try {
+      const [detail, debug] = await Promise.all([
+        input.factoryService.getObjective(input.objectiveId),
+        input.factoryService.getObjectiveDebug(input.objectiveId).catch(() => undefined),
+      ]);
+      const activeJobs = debug?.activeJobs ?? [];
+      return {
+        ...baseImports,
+        objective: {
+          objectiveId: detail.objectiveId,
+          title: detail.title,
+          status: detail.status,
+          phase: detail.phase,
+          summary: detail.blockedExplanation?.summary
+            ?? detail.latestDecision?.summary
+            ?? detail.latestSummary
+            ?? detail.nextAction
+            ?? `${detail.title} is ${detail.status}.`,
+          importedBecause: "bound",
+        },
+        runtime: {
+          summary: activeJobs.length > 0
+            ? `${activeJobs.length} active job${activeJobs.length === 1 ? "" : "s"}: ${activeJobs.slice(0, 3).map((job) => `${job.id} ${job.agentId} ${job.status}`).join(", ")}`
+            : detail.latestSummary
+              ?? detail.nextAction
+              ?? `${detail.title} is ${detail.status}.`,
+          objectiveId: detail.objectiveId,
+          active: activeJobs.length > 0,
+          importedBecause: "bound",
+        },
+      };
+    } catch {
+      return baseImports;
+    }
   }
-  return rendered.join("\n\n") || "(empty)";
+  const activeChildren = (await listChildJobsForRun(input.queue, input.runId))
+    .filter((job) => isActiveJobStatus(job.status))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+  const activeChild = activeChildren[0];
+  if (activeChild) {
+    return {
+      ...baseImports,
+      runtime: {
+      summary: summarizeChildProgress({
+        lastMessage: asString(asRecord(activeChild.result)?.lastMessage),
+        stderrTail: asString(asRecord(activeChild.result)?.stderrTail),
+        stdoutTail: asString(asRecord(activeChild.result)?.stdoutTail),
+      }),
+      active: true,
+      importedBecause: "live_work",
+      focusKind: "job",
+      focusId: activeChild.id,
+      },
+    };
+  }
+  return baseImports;
 };
 
 type GitChangedFileEntry = {
@@ -1628,29 +1633,59 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         resolvedProfileHash: resolvedProfile.resolvedHash,
         stream: resolvedStream,
       },
-      promptContextBuilder: async (promptInput) => ({
-        memory: await renderLayeredMemorySummary({
+      promptContextBuilder: async (promptInput) => {
+        const projectedContext = await loadProjectedChatContext({
+          dataDir: input.dataDir,
+          sessionStream: resolvedStream,
+        });
+        const responseStyle = projectedContext?.style.responseStyle
+          ?? classifyFactoryResponseStyle(promptInput.problem);
+        const imports = await buildFactoryChatContextImports({
           memoryTools: input.memoryTools,
           repoKey,
           profileId: resolvedProfile.root.id,
-          objectiveId: getCurrentObjectiveId(),
           primaryScope: resolvedMemoryScope,
           primarySummary: promptInput.memorySummary,
           query: promptInput.problem,
           runId: input.runId,
           iteration: promptInput.iteration,
-        }),
-        response_style: renderFactoryResponseStyleGuidance(promptInput.problem),
-        situation: await buildFactorySituation({
+          objectiveId: getCurrentObjectiveId(),
           queue: input.queue,
-          runId: input.runId,
-          stream: input.stream,
-          profile: resolvedProfile,
-          getCurrentObjectiveId,
+          stream: resolvedStream,
           factoryService: input.factoryService,
-          dataDir: input.dataDir,
-        }),
-      }),
+        });
+        const explicitImports: FactoryChatContextImports = {
+          ...(imports.profileMemorySummary ? { profileMemorySummary: imports.profileMemorySummary } : {}),
+          ...(getCurrentObjectiveId() || responseStyle === "work"
+            ? {
+                ...(imports.objective ? { objective: imports.objective } : {}),
+                ...(imports.runtime ? { runtime: imports.runtime } : {}),
+              }
+            : {}),
+        };
+        const chatContext = projectedContext
+          ? withFactoryChatContextImports(projectedContext, explicitImports)
+          : undefined;
+        return {
+          transcript: chatContext
+            ? renderFactoryChatConversationTranscript(chatContext.conversation)
+            : promptInput.transcript,
+          context_imports: renderFactoryChatContextImports(explicitImports),
+          memory: explicitImports.profileMemorySummary ?? "(empty)",
+          response_style: renderFactoryResponseStyleGuidance(
+            chatContext?.style.responseStyle ?? responseStyle,
+          ),
+          situation: await buildFactorySituation({
+            queue: input.queue,
+            runId: input.runId,
+            stream: resolvedStream,
+            profile: resolvedProfile,
+            getCurrentObjectiveId,
+            factoryService: input.factoryService,
+            dataDir: input.dataDir,
+          }),
+        };
+      },
       capabilities,
       onIterationBudgetExhausted,
       finalizer: combineFinalizers(
@@ -1771,8 +1806,8 @@ export const runFactoryCodexJob = async (input: {
 
   let workspacePath = input.repoRoot;
   let workspaceCleanup: (() => Promise<void>) | undefined;
-  let sandboxMode = readOnly ? "read-only" : "workspace-write";
-  let mutationPolicy = readOnly ? "read_only_probe" : "workspace_edit";
+  let sandboxMode: CodexRunInput["sandboxMode"] = readOnly ? "read-only" : "workspace-write";
+  let mutationPolicy: NonNullable<CodexRunInput["mutationPolicy"]> = readOnly ? "read_only_probe" : "workspace_edit";
   let disableSandboxModeInference = false;
   let sandboxCompatibilityFallbackUsed = false;
   let initialChangedFileSnapshot = readOnly
