@@ -1331,16 +1331,42 @@ const hasDurableObjectiveHandoff = (
   items: ReadonlyArray<FactoryChatItem>,
 ): boolean => items.some((item) => item.key.includes("-objective-handoff-"));
 
+const durableObjectiveHandoffObjectiveId = (item: FactoryChatItem): string | undefined => {
+  if (item.kind !== "assistant") return undefined;
+  const match = item.key.match(/^run_objective_handoff_(.+)_[a-f0-9]{16}-objective-handoff-/);
+  return match?.[1];
+};
+
+const collapseDurableObjectiveHandoffs = (
+  items: ReadonlyArray<FactoryChatItem>,
+): ReadonlyArray<FactoryChatItem> => {
+  const latestIndexByObjectiveId = new Map<string, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const objectiveId = durableObjectiveHandoffObjectiveId(items[index]!);
+    if (!objectiveId) continue;
+    latestIndexByObjectiveId.set(objectiveId, index);
+  }
+  if (latestIndexByObjectiveId.size === 0) return items;
+  return items.filter((item, index) => {
+    const objectiveId = durableObjectiveHandoffObjectiveId(item);
+    if (!objectiveId) return true;
+    return latestIndexByObjectiveId.get(objectiveId) === index;
+  });
+};
+
 const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArray<FactoryChatItem> => {
   const thread = model.selectedThread;
-  if (hasDurableObjectiveHandoff(model.items)) return model.items;
+  const transcriptItems = hasDurableObjectiveHandoff(model.items)
+    ? collapseDurableObjectiveHandoffs(model.items)
+    : model.items;
+  if (hasDurableObjectiveHandoff(transcriptItems)) return transcriptItems;
   const blockedHandoff = blockedObjectiveTranscriptItem(model);
-  if (model.items.length > 0) {
-    return blockedHandoff ? [...model.items, blockedHandoff] : model.items;
+  if (transcriptItems.length > 0) {
+    return blockedHandoff ? [...transcriptItems, blockedHandoff] : transcriptItems;
   }
   const summary = thread?.summary?.trim();
   if (blockedHandoff) return [blockedHandoff];
-  if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !summary) return model.items;
+  if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !summary) return transcriptItems;
   const detail = thread.nextAction?.trim();
   return [{
     key: `objective-summary-${thread.objectiveId}-${thread.status}`,

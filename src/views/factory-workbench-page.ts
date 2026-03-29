@@ -342,6 +342,40 @@ const resolveWorkbenchElapsedMinutes = (
   model: FactoryWorkbenchPageModel,
 ): number | undefined => model.workspace.workbench?.summary.elapsedMinutes;
 
+const renderWorkbenchHeaderContext = (
+  model: FactoryWorkbenchPageModel,
+): string => {
+  const objective = model.workspace.selectedObjective;
+  if (objective) {
+    const status = objective.displayState ?? titleCaseLabel(objective.phase || objective.status);
+    const taskSummary = typeof objective.taskCount === "number"
+      ? `${objective.activeTaskCount ?? 0}/${objective.taskCount} tasks`
+      : undefined;
+    return `<div class="hidden min-w-0 flex-1 items-center gap-3 lg:flex">
+      <div class="h-6 w-px shrink-0 bg-white/10"></div>
+      <div class="min-w-0">
+        <div class="text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground/70">Selected objective</div>
+        <div class="mt-1 flex min-w-0 items-center gap-2">
+          <span class="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground"${tooltipAttr(objective.title)}>${esc(objective.title)}</span>
+          ${status ? badge(status, displayStateTone(status)) : ""}
+          ${taskSummary ? `<span class="inline-flex shrink-0 items-center border border-white/8 bg-black/25 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">${esc(taskSummary)}</span>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }
+  const role = engineerPrimaryRole(model.chat)?.trim();
+  const presence = engineerPresence(model.chat);
+  const summary = role ?? presence;
+  if (!summary) return "";
+  return `<div class="hidden min-w-0 flex-1 items-center gap-3 lg:flex">
+    <div class="h-6 w-px shrink-0 bg-white/10"></div>
+    <div class="min-w-0">
+      <div class="text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground/70">Current role</div>
+      <div class="mt-1 truncate text-[12px] text-muted-foreground"${tooltipAttr(summary)}>${esc(summary)}</div>
+    </div>
+  </div>`;
+};
+
 const renderTooltipChip = (label: string, detail?: string): string => {
   const trimmed = detail?.trim();
   if (!trimmed) return "";
@@ -829,7 +863,7 @@ const renderInspectorTabLink = (
 ): string => {
   const href = routeHref(routeContext, { inspectorTab: tab });
   const active = (routeContext.inspectorTab ?? "overview") === tab;
-  const pad = compact ? "px-3 py-1.5 text-[11px]" : "px-3 py-2 text-[12px]";
+  const pad = compact ? "px-2.5 py-1 text-[10px]" : "px-3 py-2 text-[12px]";
   return `<a href="${esc(href)}" data-factory-href="${esc(href)}" ${active ? 'aria-current="page"' : ""} class="inline-flex items-center justify-center border font-semibold uppercase tracking-[0.14em] transition ${pad} ${active
     ? "border-primary/20 bg-primary/10 text-primary"
     : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"}">${esc(label)}</a>`;
@@ -1001,33 +1035,35 @@ export const factoryWorkbenchBlockIsland = (
 
 const renderWorkbenchHeader = (
   model: FactoryWorkbenchPageModel,
-  routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const tokenCount = model.workspace.workbench?.summary.tokensUsed ?? model.workspace.selectedObjective?.tokensUsed;
   const elapsedMinutes = resolveWorkbenchElapsedMinutes(model);
-  return `<div class="flex items-center gap-3">
-    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-white/8 bg-black/60 text-muted-foreground">
-      ${iconFactory("h-5 w-5")}
+  return `<div class="flex min-w-0 items-center gap-3">
+    <div class="flex min-w-0 items-center gap-3">
+      <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-white/8 bg-black/60 text-muted-foreground">
+        ${iconFactory("h-5 w-5")}
+      </div>
+      <div class="flex min-w-0 items-baseline gap-2">
+        <span class="text-lg font-extrabold uppercase tracking-[0.12em] text-foreground">Receipt</span>
+        <span class="shrink-0 text-[8px] font-medium uppercase tracking-[0.28em] text-muted-foreground/60">factory</span>
+      </div>
+      <div class="hidden h-6 w-px shrink-0 bg-white/10 sm:block"></div>
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-0 text-[11px] text-muted-foreground">
+        <span class="font-semibold uppercase tracking-[0.16em]">Engineer</span>
+        ${renderProfileSelect({
+          id: "factory-workbench-profile-select",
+          label: "Switch engineer",
+          profiles: model.profiles,
+          compact: true,
+          hideLabel: true,
+          wrapperClass: "inline-flex min-w-0 max-w-[12rem] flex-col",
+          minWidthClass: "min-w-[7rem]",
+          selectClass: "w-auto min-w-[7rem] appearance-none border border-border bg-transparent px-2.5 py-1.5 text-[13px] font-semibold leading-none text-foreground focus:border-primary/40 focus-visible:ring-1 focus-visible:ring-ring/30",
+        })}
+      </div>
     </div>
-    <div class="flex min-w-0 items-baseline gap-2">
-      <span class="text-lg font-extrabold uppercase tracking-[0.12em] text-foreground">Receipt</span>
-      <span class="shrink-0 text-[8px] font-medium uppercase tracking-[0.28em] text-muted-foreground/60">factory</span>
-    </div>
-    <div class="hidden h-6 w-px shrink-0 bg-white/10 sm:block"></div>
-    <div class="flex flex-wrap items-center gap-x-2 gap-y-0 text-[11px] text-muted-foreground">
-      <span class="font-semibold uppercase tracking-[0.16em]">Engineer</span>
-      ${renderProfileSelect({
-        id: "factory-workbench-profile-select",
-        label: "Switch engineer",
-        profiles: model.profiles,
-        compact: true,
-        hideLabel: true,
-        wrapperClass: "inline-flex min-w-0 max-w-[12rem] flex-col",
-        minWidthClass: "min-w-[7rem]",
-        selectClass: "w-auto min-w-[7rem] appearance-none border border-border bg-transparent px-2.5 py-1.5 text-[13px] font-semibold leading-none text-foreground focus:border-primary/40 focus-visible:ring-1 focus-visible:ring-ring/30",
-      })}
-    </div>
-    <div class="ml-auto flex flex-wrap items-center gap-2">
+    ${renderWorkbenchHeaderContext(model)}
+    <div class="ml-auto flex shrink-0 flex-wrap items-center gap-1.5">
       ${typeof tokenCount === "number"
         ? renderWorkbenchHeaderMetric({
           icon: iconTokens("h-3 w-3"),
@@ -1052,23 +1088,14 @@ const renderWorkbenchHeader = (
 export const factoryWorkbenchHeaderIsland = (
   model: FactoryWorkbenchPageModel,
 ): string => {
-  const routeContext: FactoryWorkbenchRouteContext = {
-    profileId: model.activeProfileId,
-    chatId: model.chatId,
-    objectiveId: model.objectiveId,
-    inspectorTab: model.inspectorTab,
-    detailTab: model.detailTab,
-    focusKind: model.focusKind,
-    focusId: model.focusId,
-    filter: model.filter,
-  };
-  return renderWorkbenchHeader(model, routeContext);
+  return renderWorkbenchHeader(model);
 };
 
 const renderWorkbenchChatHeader = (
   model: FactoryWorkbenchPageModel,
   activeRole?: string,
 ): string => {
+  const resolvedRole = activeRole?.trim();
   const routeContext: FactoryWorkbenchRouteContext = {
     profileId: model.activeProfileId,
     chatId: model.chatId,
@@ -1080,14 +1107,15 @@ const renderWorkbenchChatHeader = (
     filter: model.filter,
   };
   return `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
-    <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
-      <span class="text-base font-semibold text-foreground">${esc(model.activeProfileLabel)}</span>
-      ${activeRole ? `<span class="text-[11px] text-muted-foreground"${tooltipAttr(activeRole)}>${esc(truncate(activeRole, 32))}</span>` : ""}
+    <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      ${resolvedRole
+        ? `<span class="max-w-[16rem] truncate text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground"${tooltipAttr(resolvedRole)}>${esc(truncate(resolvedRole, 24))}</span>`
+        : `<span class="text-base font-semibold text-foreground">${esc(model.activeProfileLabel)}</span>`}
     </div>
-    <div class="flex flex-wrap items-center gap-2">
+    <div class="flex flex-wrap items-center gap-1.5">
       ${renderInspectorTabLink(routeContext, "overview", "Overview", true)}
       ${renderInspectorTabLink(routeContext, "chat", "Chat", true)}
-      <a href="/receipt" class="inline-flex items-center px-1 text-[11px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
+      <a href="/receipt" class="inline-flex items-center px-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition hover:text-foreground">Receipts</a>
     </div>
   </div>`;
 };
@@ -1116,7 +1144,7 @@ export const buildFactoryWorkbenchShellSnapshot = (
     workbenchHeaderPath: workbenchHeaderPath(routeContext),
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
-    workbenchHeaderHtml: renderWorkbenchHeader(model, routeContext),
+    workbenchHeaderHtml: renderWorkbenchHeader(model),
     chatHeaderHtml: renderWorkbenchChatHeader(model, activeRole),
     workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext),
     chatHtml: factoryWorkbenchChatIsland(model.chat, routeContext),

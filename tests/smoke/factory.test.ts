@@ -34,7 +34,7 @@ import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/f
 import { factoryChatSessionStream, factoryChatStream } from "../../src/services/factory-chat-profiles";
 import { factoryChatIsland, factoryChatShell, factorySidebarIsland } from "../../src/views/factory-chat";
 import { factoryInspectorIsland } from "../../src/views/factory-inspector";
-import { factoryWorkbenchHeaderIsland } from "../../src/views/factory-workbench-page";
+import { buildFactoryWorkbenchShellSnapshot, factoryWorkbenchHeaderIsland } from "../../src/views/factory-workbench-page";
 import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
 import type { FactoryWorkbenchPageModel } from "../../src/views/factory-models";
 import type { BranchStore, Receipt, Store } from "@receipt/core/types";
@@ -2969,6 +2969,37 @@ test("factory chat island: normalizes plain report scaffolding into markdown hea
   expect(markup).toContain("<li>cloudscore1</li>");
 });
 
+test("factory chat island: keeps only the latest durable handoff per objective in the transcript", () => {
+  const markup = factoryChatIsland({
+    activeProfileId: "infrastructure",
+    activeProfileLabel: "Infrastructure",
+    items: [
+      {
+        key: "run_objective_handoff_objective_ec2_1111111111111111-objective-handoff-hash-old",
+        kind: "assistant",
+        body: "Old completed handoff for EC2.",
+        meta: "Completed handoff",
+      },
+      {
+        key: "run_objective_handoff_objective_s3_2222222222222222-objective-handoff-hash-s3",
+        kind: "assistant",
+        body: "Completed handoff for S3.",
+        meta: "Completed handoff",
+      },
+      {
+        key: "run_objective_handoff_objective_ec2_3333333333333333-objective-handoff-hash-new",
+        kind: "assistant",
+        body: "New blocked handoff for EC2.",
+        meta: "Blocked handoff",
+      },
+    ],
+  });
+
+  expect(markup).not.toContain("Old completed handoff for EC2.");
+  expect(markup).toContain("Completed handoff for S3.");
+  expect(markup).toContain("New blocked handoff for EC2.");
+});
+
 test("factory chat island: promotes parenthetical headings, bolds list lead-ins, and uses the assistant response card", () => {
   const markup = factoryChatIsland({
     activeProfileId: "infrastructure",
@@ -3670,6 +3701,17 @@ test("factory workbench header renders the engineer profile as a borderless inli
       detailTab: "action",
       filter: "objective.running",
       filters: [],
+      selectedObjective: {
+        objectiveId: "objective_demo",
+        title: "Rebalance workbench header",
+        status: "executing",
+        phase: "executing",
+        displayState: "Running",
+        debugLink: "/factory/debug/objective_demo",
+        receiptsLink: "/receipt?stream=factory/objectives/objective_demo",
+        activeTaskCount: 2,
+        taskCount: 5,
+      },
       board: {
         objectives: [],
         sections: {
@@ -3686,6 +3728,7 @@ test("factory workbench header renders the engineer profile as a borderless inli
     chat: {
       activeProfileId: "software",
       activeProfileLabel: "Software",
+      activeProfilePrimaryRole: "Software engineer",
       items: [],
     },
   } as FactoryWorkbenchPageModel);
@@ -3693,7 +3736,50 @@ test("factory workbench header renders the engineer profile as a borderless inli
   expect(markup).toContain('data-factory-profile-select="true"');
   expect(markup).toContain("appearance-none");
   expect(markup).toContain("border border-border bg-transparent");
+  expect(markup).toContain("Selected objective");
+  expect(markup).toContain("Rebalance workbench header");
+  expect(markup).toContain("2/5 tasks");
+  expect(markup).toContain("Running");
   expect(markup).not.toContain('<div class="text-[15px] font-semibold leading-none text-foreground">Software</div>');
+});
+
+test("factory workbench chat header hides the duplicate profile label when a role is available", () => {
+  const snapshot = buildFactoryWorkbenchShellSnapshot({
+    activeProfileId: "infrastructure",
+    activeProfileLabel: "Infrastructure",
+    chatId: "chat_demo",
+    detailTab: "action",
+    filter: "objective.running",
+    profiles: [],
+    workspace: {
+      activeProfileId: "infrastructure",
+      activeProfileLabel: "Infrastructure",
+      detailTab: "action",
+      filter: "objective.running",
+      filters: [],
+      board: {
+        objectives: [],
+        sections: {
+          needs_attention: [],
+          active: [],
+          queued: [],
+          completed: [],
+        },
+      },
+      activeObjectives: [],
+      pastObjectives: [],
+      blocks: [],
+    },
+    chat: {
+      activeProfileId: "infrastructure",
+      activeProfileLabel: "Infrastructure",
+      activeProfilePrimaryRole: "Infrastructure engineer",
+      items: [],
+    },
+  } as FactoryWorkbenchPageModel);
+
+  expect(snapshot.chatHeaderHtml).toContain("Infrastructure engineer");
+  expect(snapshot.chatHeaderHtml).not.toContain(">Infrastructure<");
 });
 
 test("factory route: blocked objective workbench surfaces react guidance near recent activity and the composer", async () => {
