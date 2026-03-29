@@ -13,19 +13,36 @@ Inspect these first:
 
 1. `src/views/factory-chat.ts`
 2. `src/client/factory-client/chat.ts`
-3. `src/agents/factory/route.ts`
-4. `src/server.ts`
-5. `tests/smoke/factory-client.test.ts`
-6. `tests/smoke/factory.test.ts`
-7. `tests/smoke/build.test.ts`
+3. `src/views/factory-workbench-page.ts`
+4. `src/client/factory-client/workbench.ts`
+5. `src/agents/factory/route.ts`
+6. `src/server.ts`
+7. `tests/smoke/factory-client.test.ts`
+8. `tests/smoke/factory.test.ts`
+9. `tests/smoke/build.test.ts`
 
 ## Live Contract
 
 - The live shell root is `#factory-live-root`.
 - The browser connects with HTMX SSE through `hx-ext="sse"` and `sse-connect="/factory/events..."`.
-- Chat refresh is declarative on `#factory-chat` through `hx-trigger="sse:agent-refresh ..., sse:job-refresh ..., sse:factory-refresh ..."`.
-- Sidebar and inspector refresh through `sse:job-refresh`, `sse:factory-refresh`, and `factory:scope-changed from:body`.
-- `factory-refresh` should be objective-scoped on the server whenever the current route can resolve an objective id.
+- Chat refresh is declarative on `#factory-chat` through `hx-trigger="sse:agent-refresh ..., sse:job-refresh ..., sse:objective-runtime-refresh ..."`.
+- Sidebar and inspector are projection-driven:
+  - `profile-board-refresh` for board/list membership and count surfaces
+  - `objective-runtime-refresh` for selected objective detail and runtime surfaces
+  - `factory:scope-changed from:body` only for local route rebinding
+- Workbench background is not a single coarse island anymore. Treat the header and each block (`summary`, `objectives`, `activity`, `history`) as separate server-rendered islands with explicit projection dependencies.
+- `factory-refresh` remains a compatibility fallback, not the primary contract for new work.
+
+## Projection Rules
+
+- Push invalidation from synced server projections, not raw receipts.
+- Every live island must declare which projection it depends on before wiring refresh behavior.
+- Use the existing projection topics first:
+  - `profile-board`
+  - `objective-runtime`
+- Publish projection refreshes only after the related server-side projection/cache has been synced and invalidated.
+- Do not bind new sidebar/workbench list/count surfaces directly to broad `factory-refresh` or global `job-refresh` topics when a narrower projection topic exists.
+- Prefer smaller islands over refreshing an entire pane when only one projection-backed section changed.
 
 ## SSE Events
 
@@ -38,9 +55,11 @@ Inspect these first:
 ## Change Rules
 
 - Do not reintroduce a manual `EventSource` loop or client-owned refresh queue in `src/client/factory-client/chat.ts`.
+- In `src/client/factory-client/workbench.ts`, keep the full-pane refresh path only as a fallback for navigation or recovery. Projection events should target the smallest matching island set first.
 - When shell navigation changes the route scope, update the live-root attributes, then re-run `window.htmx.process(...)` on the current live root.
 - Keep the optimistic pending transcript separate from the streaming token surface.
 - Preserve mission-control keyboard behavior and bottom-stick scrolling.
+- When adding a new live section, add a route-scoped island endpoint for that section instead of teaching the browser how to recompute server projections.
 
 ## Validation
 
@@ -49,12 +68,14 @@ Check these before declaring the change done:
 - `tests/smoke/factory-client.test.ts`
   - token append and reset behavior
   - scope rebinding after chat/objective discovery
+  - projection-scoped workbench block refreshes
   - inline shell hydration
   - mission-control live updates
 - `tests/smoke/factory.test.ts`
   - `/factory/events` objective scoping
+  - projection-scoped `/factory/background/events` subscriptions
   - runner reset emission
-  - shell markup includes HTMX SSE hooks
+  - shell markup includes projection-scoped island hooks
 - `tests/smoke/build.test.ts`
   - `dist/assets/htmx-ext-sse.js` exists
 
