@@ -152,3 +152,43 @@ test("framework sse: global factory subscription receives objective-specific pub
   abort.abort();
   await streamReader.cancel();
 });
+
+test("framework sse: profile-board topics publish profile-scoped refresh events", async () => {
+  const hub = new SseHub();
+  const abort = new AbortController();
+  const response = hub.subscribe("profile-board", "generalist", abort.signal);
+  const reader = response.body?.getReader();
+  expect(reader).toBeTruthy();
+  const streamReader = reader!;
+
+  const init = await readChunk(streamReader);
+  expect(init).toMatch(/event: profile-board-refresh/);
+
+  hub.publish("profile-board", "generalist");
+  const published = await readChunk(streamReader);
+  expect(published).toMatch(/event: profile-board-refresh/);
+  expect(published).toMatch(/data: \d+/);
+
+  abort.abort();
+  await streamReader.cancel();
+});
+
+test("framework sse: global objective-runtime subscription receives scoped publishes", async () => {
+  const hub = new SseHub();
+  const abort = new AbortController();
+  const response = hub.subscribe("objective-runtime", undefined, abort.signal);
+  const reader = response.body?.getReader();
+  expect(reader).toBeTruthy();
+  const streamReader = reader!;
+
+  const init = await readChunk(streamReader);
+  expect(init).toMatch(/event: objective-runtime-refresh/);
+
+  hub.publish("objective-runtime", "objective_demo");
+  const published = await readChunk(streamReader);
+  expect(published).toMatch(/event: objective-runtime-refresh/);
+  expect(published).toMatch(/data: \d+/);
+
+  abort.abort();
+  await streamReader.cancel();
+});

@@ -17,6 +17,7 @@ import {
   iconProject,
   iconPullRequest,
   iconQueue,
+  iconReceipt,
   iconRun,
   iconStatus,
   iconTask,
@@ -1545,7 +1546,17 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
     : "";
   return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     <div class="border-b border-border pb-3">
-      <a class="text-[11px] font-medium text-muted-foreground transition hover:text-foreground" href="/receipt">receipt / factory</a>
+      <a
+        class="inline-flex items-center gap-2 rounded-xl px-1 py-0.5 text-base font-semibold tracking-[-0.01em] text-foreground transition hover:text-primary md:text-[1.05rem]"
+        href="/receipt"
+        aria-label="Receipt home"
+        title="Receipt home"
+      >
+        <span aria-hidden="true" class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background/80 text-primary shadow-sm md:h-7 md:w-7">
+          ${iconReceipt("h-3.5 w-3.5")}
+        </span>
+        <span class="leading-none">Receipt</span>
+      </a>
       <div class="mt-2 flex flex-wrap gap-4">
         ${profileLinks}
       </div>

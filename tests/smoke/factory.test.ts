@@ -2248,10 +2248,11 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
   expect(markup).toContain('hx-ext="sse"');
   expect(markup).toContain('sse-connect="/factory/events?profile=generalist&amp;thread=objective_demo"');
   expect(markup).toContain("sse:agent-refresh throttle:180ms");
+  expect(markup).toContain("sse:objective-runtime-refresh throttle:180ms");
   expect(markup).toContain("sse:factory-refresh throttle:180ms");
   expect(markup).toContain("sse:job-refresh throttle:180ms");
-  expect(markup).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180,sse:factory-refresh@180,body:factory:chat-refresh"');
-  expect(markup).toContain('data-refresh-on="sse:job-refresh@450,sse:factory-refresh@450,body:factory:scope-changed"');
+  expect(markup).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180,sse:objective-runtime-refresh@180,sse:factory-refresh@180,body:factory:chat-refresh"');
+  expect(markup).toContain('data-refresh-on="sse:profile-board-refresh@450,sse:objective-runtime-refresh@450,sse:factory-refresh@450,body:factory:scope-changed"');
   expect(markup).toContain("/assets/htmx-ext-sse.js");
   expect(markup).toContain('id="factory-chat-streaming"');
   expect(markup).toContain('id="factory-chat-streaming-content"');
@@ -4029,7 +4030,10 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body).not.toContain("Responsibilities");
   expect(body).not.toContain("max-w-[1680px]");
   expect(body.match(/data-factory-profile-select="true"/g)?.length ?? 0).toBe(1);
-  expect(body).toContain('data-refresh-on="sse:job-refresh@350,sse:factory-refresh@350,body:factory:workbench-refresh,body:factory:scope-changed"');
+  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@300,sse:objective-runtime-refresh@300,body:factory:workbench-refresh,body:factory:scope-changed"');
+  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@320,sse:objective-runtime-refresh@320,body:factory:workbench-refresh,body:factory:scope-changed"');
+  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@320,body:factory:workbench-refresh,body:factory:scope-changed"');
+  expect(body).toContain('data-refresh-on="sse:objective-runtime-refresh@320,body:factory:workbench-refresh,body:factory:scope-changed"');
   expect(body).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180,body:factory:chat-refresh"');
   expect(body).toContain('href="/factory?profile=generalist&chat=chat_demo&objective=objective_done"');
   expect(body).not.toContain("thread=objective_done");
@@ -4076,12 +4080,14 @@ test("factory workbench route: chat events stay scoped to the chat session when 
   expect(response.status).toBe(200);
   expect(subscriptions).toEqual([
     { topic: "agent", stream: sessionStream },
+    { topic: "profile-board", stream: "generalist" },
   ]);
   expect(subscriptions.some((subscription) => subscription.topic === "factory")).toBe(false);
+  expect(subscriptions.some((subscription) => subscription.topic === "objective-runtime")).toBe(false);
   expect(subscriptions.some((subscription) => subscription.topic === "jobs")).toBe(false);
 });
 
-test("factory workbench route: background events subscribe to visible objectives and the selected objective jobs", async () => {
+test("factory workbench route: background events subscribe to profile-board and selected objective runtime projections", async () => {
   let subscriptions: ReadonlyArray<{ readonly topic: string; readonly stream?: string }> = [];
   const activeObjective = makeRunningWorkbenchObjectiveDetail("objective_live");
   const pastObjective = {
@@ -4121,13 +4127,10 @@ test("factory workbench route: background events subscribe to visible objectives
   const response = await app.request("http://receipt.test/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_live");
 
   expect(response.status).toBe(200);
-  expect(subscriptions).toEqual(expect.arrayContaining([
-    { topic: "factory", stream: undefined },
-    { topic: "jobs", stream: undefined },
-    { topic: "factory", stream: "objective_live" },
-    { topic: "factory", stream: "objective_done" },
-    { topic: "jobs", stream: "job_task_01" },
-  ]));
+  expect(subscriptions).toEqual([
+    { topic: "profile-board", stream: "generalist" },
+    { topic: "objective-runtime", stream: "objective_live" },
+  ]);
 });
 
 if (false) {
