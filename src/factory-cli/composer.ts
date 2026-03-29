@@ -3,9 +3,6 @@ export type ComposerCommand =
       readonly type: "help";
     }
   | {
-      readonly type: "analyze";
-    }
-  | {
       readonly type: "new";
       readonly prompt: string;
       readonly title?: string;
@@ -218,9 +215,15 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
       return { ok: true, command: { type: "help" } };
     case "analyze":
       if (!selectedObjectiveId) {
-        return { ok: false, error: "Select an objective before opening its analysis." };
+        return { ok: false, error: "Select an objective before analyzing it." };
       }
-      return { ok: true, command: { type: "analyze" } };
+      return {
+        ok: true,
+        command: {
+          type: "react",
+          message: payload ? `Analyze: ${payload}` : "Please analyze the current objective state, review the plan, and provide recommendations.",
+        },
+      };
     case "new":
     case "obj":
       if (!payload) {

@@ -108,6 +108,14 @@ export type FactoryEvent =
       readonly integratedAt: number;
     }
   | {
+      readonly type: "task.noop_completed";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly summary: string;
+      readonly completedAt: number;
+    }
+  | {
       readonly type: "task.blocked";
       readonly objectiveId: string;
       readonly taskId: string;

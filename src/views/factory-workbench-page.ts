@@ -8,6 +8,7 @@ import {
   ghostButtonClass,
   iconClock,
   iconFactory,
+  iconSpark,
   iconTokens,
   iconWorker,
   liveIslandAttrs,
@@ -21,14 +22,21 @@ import {
   renderFactoryTranscriptSection,
 } from "./factory-chat";
 import { renderFactoryRunSteps } from "./factory-live-steps";
+import {
+  displayStateTone,
+} from "./factory/supervision";
 import { COMPOSER_COMMANDS } from "../factory-cli/composer";
+import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "./factory-models";
 import type {
   FactoryChatIslandModel,
   FactoryChatProfileNav,
   FactoryChatObjectiveNav,
+  FactoryInspectorTab,
+  FactoryLifecycleStepModel,
   FactorySelectedObjectiveCard,
   FactoryWorkbenchActivitySectionModel,
   FactoryWorkbenchBlockModel,
+  FactoryWorkbenchDetailTab,
   FactoryWorkbenchFilterKey,
   FactoryWorkbenchObjectiveListSectionModel,
   FactoryWorkbenchPageModel,
@@ -41,6 +49,8 @@ export type FactoryWorkbenchRouteContext = {
   readonly profileId: string;
   readonly chatId: string;
   readonly objectiveId?: string;
+  readonly inspectorTab?: FactoryInspectorTab;
+  readonly detailTab?: FactoryWorkbenchDetailTab;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter: FactoryWorkbenchFilterKey;
@@ -48,6 +58,7 @@ export type FactoryWorkbenchRouteContext = {
 
 export type FactoryWorkbenchShellSnapshot = {
   readonly pageTitle: string;
+  readonly routeKey: string;
   readonly route: FactoryWorkbenchRouteContext;
   readonly location?: string;
   readonly backgroundEventsPath: string;
@@ -69,19 +80,11 @@ type WorkbenchProjection = "profile-board" | "objective-runtime";
 const workbenchChatRefreshOn = [
   { event: "agent-refresh", throttleMs: 180 },
   { event: "job-refresh", throttleMs: 180 },
-  { kind: "body", event: "factory:chat-refresh" },
 ] as const;
-const workbenchBackgroundRefreshOn = [
-  { event: "profile-board-refresh", throttleMs: 350 },
-  { event: "objective-runtime-refresh", throttleMs: 350 },
-  { kind: "body", event: "factory:workbench-refresh" },
-  { kind: "body", event: "factory:scope-changed" },
-] as const;
+const workbenchBackgroundRefreshOn = [] as const;
 const workbenchHeaderRefreshOn = [
   { event: "profile-board-refresh", throttleMs: 300 },
   { event: "objective-runtime-refresh", throttleMs: 300 },
-  { kind: "body", event: "factory:workbench-refresh" },
-  { kind: "body", event: "factory:scope-changed" },
 ] as const;
 
 const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map((command) => ({
@@ -97,7 +100,9 @@ const workbenchQueryParams = (input: FactoryWorkbenchRouteContext): URLSearchPar
   params.set("profile", input.profileId);
   params.set("chat", input.chatId);
   if (input.objectiveId) params.set("objective", input.objectiveId);
-  if (input.filter !== "all") params.set("filter", input.filter);
+  if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
+  if (input.detailTab && input.detailTab !== "action") params.set("detailTab", input.detailTab);
+  if (input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
   if (input.focusKind && input.focusId) {
     params.set("focusKind", input.focusKind);
     params.set("focusId", input.focusId);
@@ -115,7 +120,7 @@ const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "profileId" | 
   `/factory/chat/events${workbenchQuery({
     profileId: input.profileId,
     chatId: input.chatId,
-    filter: "all",
+    filter: DEFAULT_FACTORY_WORKBENCH_FILTER,
   })}`;
 
 const backgroundEventsPath = (input: FactoryWorkbenchRouteContext): string =>
@@ -178,6 +183,8 @@ const workbenchBlockProjections = (
     case "objectives":
     case "history":
       return ["profile-board"];
+    case "selected-overflow":
+      return ["profile-board"];
     case "activity":
       return ["objective-runtime"];
     case "summary":
@@ -193,8 +200,6 @@ const workbenchBlockRefreshOn = (
     event: workbenchProjectionEvent(projection),
     throttleMs: 320,
   })),
-  { kind: "body" as const, event: "factory:workbench-refresh" },
-  { kind: "body" as const, event: "factory:scope-changed" },
 ] as const;
 
 const workbenchComposerPlaceholder = (objectiveId?: string): string => objectiveId
@@ -286,17 +291,61 @@ const filterHref = (
   filter,
 })}`;
 
-const profileSelectClass = "min-h-[2.5rem] min-w-[12rem] rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground outline-none transition focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30";
+const routeHref = (
+  input: FactoryWorkbenchRouteContext,
+  overrides: Partial<FactoryWorkbenchRouteContext>,
+): string => `/factory${workbenchQuery({
+  ...input,
+  ...overrides,
+})}`;
+
+const profileSelectClass = "min-h-[2.5rem] min-w-[12rem]  border border-border bg-background px-3 py-2 text-sm font-medium text-foreground outline-none transition focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30";
 
 const tooltipAttr = (value?: string): string => {
   const trimmed = value?.trim();
   return trimmed ? ` title="${esc(trimmed)}"` : "";
 };
 
+const formatElapsedMinutes = (minutes: number): string => {
+  const wholeMinutes = Math.max(0, Math.floor(minutes));
+  if (wholeMinutes < 60) return `${wholeMinutes}m`;
+  const hours = Math.floor(wholeMinutes / 60);
+  const remainderMinutes = wholeMinutes % 60;
+  return remainderMinutes > 0
+    ? `${hours}h ${remainderMinutes}m`
+    : `${hours}h`;
+};
+
+const titleCaseLabel = (value?: string): string => {
+  const label = displayLabel(value);
+  if (!label) return "";
+  return label
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+};
+
+const renderWorkbenchHeaderMetric = (input: {
+  readonly icon: string;
+  readonly label: string;
+  readonly value: string;
+  readonly tooltip?: string;
+  readonly iconClass?: string;
+}): string => `<div class="inline-flex items-center gap-1.5 border border-white/8 bg-black/35 px-2 py-1 text-[11px] text-muted-foreground"${tooltipAttr(input.tooltip)}>
+  <span class="${esc(input.iconClass ?? "text-muted-foreground")}">${input.icon}</span>
+  <span class="font-medium uppercase tracking-[0.12em]">${esc(input.label)}</span>
+  <span class="font-semibold text-foreground">${esc(input.value)}</span>
+</div>`;
+
+const resolveWorkbenchElapsedMinutes = (
+  model: FactoryWorkbenchPageModel,
+): number | undefined => model.workspace.workbench?.summary.elapsedMinutes;
+
 const renderTooltipChip = (label: string, detail?: string): string => {
   const trimmed = detail?.trim();
   if (!trimmed) return "";
-  return `<span class="inline-flex items-center rounded-full border border-border px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground"${tooltipAttr(trimmed)}>${esc(label)}</span>`;
+  return `<span class="inline-flex items-center  border border-border px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground"${tooltipAttr(trimmed)}>${esc(label)}</span>`;
 };
 
 const renderProfileSelect = (input: {
@@ -304,11 +353,18 @@ const renderProfileSelect = (input: {
   readonly label: string;
   readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
   readonly compact?: boolean;
+  readonly hideLabel?: boolean;
+  readonly wrapperClass?: string;
+  readonly minWidthClass?: string;
+  readonly selectClass?: string;
 }): string => {
   if (input.profiles.length === 0) return "";
-  return `<label class="flex min-w-[14rem] flex-col gap-1.5">
-    <span class="text-[12px] font-medium text-muted-foreground">${esc(input.label)}</span>
-    <select id="${esc(input.id)}" data-factory-profile-select="true" class="${profileSelectClass} ${input.compact ? "min-h-[2.5rem]" : ""}">
+  const wrapperClass = input.wrapperClass ?? "flex min-w-[14rem] flex-col gap-1.5";
+  const minWidthClass = input.minWidthClass ?? "min-w-[12rem]";
+  const selectClass = input.selectClass ?? `${profileSelectClass} ${input.compact ? "min-h-[2.5rem]" : ""}`;
+  return `<label class="${esc(wrapperClass)}">
+    <span class="${input.hideLabel ? "sr-only" : "text-[12px] font-medium text-muted-foreground"}">${esc(input.label)}</span>
+    <select id="${esc(input.id)}" data-factory-profile-select="true" class="${esc(`${selectClass} ${minWidthClass}`.trim())}">
       ${input.profiles.map((profile) => `<option value="${esc(profile.href)}"${profile.selected ? " selected" : ""}>${esc(profile.label)}</option>`).join("")}
     </select>
   </label>`;
@@ -357,155 +413,308 @@ const renderEngineerCard = (model: FactoryChatIslandModel): string => {
   </section>`;
 };
 
-const renderWorkbenchLiveStatus = (model: FactoryChatIslandModel): string => {
-  const latestStep = model.activeRun?.steps?.at(-1);
-  const activeChild = model.activeCodex
-    ?? (model.liveChildren ?? []).find((child) =>
-      child.status === "queued" || child.status === "leased" || child.status === "running"
-    )
-    ?? model.liveChildren?.[0];
-  const status = model.activeRun?.status ?? activeChild?.status;
-  const summarySource = model.activeRun?.summary
-    ?? activeChild?.latestNote
-    ?? activeChild?.summary
-    ?? latestStep?.summary;
-  if (!status && !summarySource && !latestStep) return "";
-  const summary = truncate(summarySource ?? `${model.activeProfileLabel} is working on this conversation.`, 180);
-  const latestStepSummary = latestStep ? truncate(latestStep.summary, 150) : undefined;
-  const childSummary = activeChild
-    ? truncate(activeChild.latestNote ?? activeChild.summary ?? activeChild.task ?? "Worker is processing the request.", 150)
-    : undefined;
-  return `<section class="rounded-xl border border-border bg-card/90 px-3 py-3 shadow-sm">
-    <div class="flex items-start justify-between gap-3">
-      <div class="min-w-0 flex-1">
-        <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">Live status</div>
-        <div class="mt-1 text-sm font-semibold text-foreground">${esc(displayLabel(status) || "Working")}</div>
-        <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(summary)}</div>
-      </div>
-      ${badge(displayLabel(status) || "Live", toneForValue(status))}
-    </div>
-    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-      ${model.activeRun?.updatedAt ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(formatTs(model.activeRun.updatedAt))}</span>` : ""}
-      ${typeof activeChild?.tokensUsed === "number" ? `<span class="inline-flex items-center gap-1">${iconTokens("h-3 w-3")} ${esc(activeChild.tokensUsed.toLocaleString())}</span>` : ""}
-    </div>
-    ${latestStep
-      ? `<div class="mt-3 rounded-lg border border-border bg-background/60 px-3 py-2">
-        <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Now</div>
-        <div class="mt-1 text-xs font-semibold text-foreground">${esc(latestStep.label)}</div>
-        ${latestStepSummary ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(latestStepSummary)}</div>` : ""}
-      </div>`
-      : ""}
-    ${activeChild && childSummary
-      ? `<div class="mt-2 rounded-lg border border-border bg-background/60 px-3 py-2">
-        <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-          ${iconFactory("h-3.5 w-3.5")}
-          <span>${esc(displayLabel(model.activeCodex ? "codex" : activeChild.worker || activeChild.agentId) || "Worker")}</span>
-          ${badge(displayLabel(activeChild.status), toneForValue(activeChild.status))}
-        </div>
-        <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(childSummary)}</div>
-      </div>`
-      : ""}
-  </section>`;
-};
-
 const renderFilterPill = (
   routeContext: FactoryWorkbenchRouteContext,
   filter: FactoryWorkbenchWorkspaceModel["filters"][number],
-): string => `<a href="${filterHref(routeContext, filter.key)}" class="inline-flex items-center gap-2 border-b-2 px-0 py-1.5 text-sm font-medium transition ${filter.selected
+): string => `<a href="${filterHref(routeContext, filter.key)}" class="inline-flex items-center border-b-2 px-0 py-1.5 text-sm font-medium transition ${filter.selected
   ? "border-primary text-foreground"
-  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}">
-  <span>${esc(filter.label)}</span>
-  <span class="text-[11px] text-muted-foreground">${esc(String(filter.count))}</span>
-</a>`;
+  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}">${esc(filter.label)}</a>`;
 
 const renderObjectiveCard = (
   routeContext: FactoryWorkbenchRouteContext,
   objective: FactoryChatObjectiveNav,
-): string => `<a href="${objectiveHref(routeContext, objective.objectiveId, undefined, objective.profileId)}" class="block border-l-2 px-4 py-3 transition ${objective.selected
-  ? "border-primary bg-muted/35"
-  : "border-transparent bg-background hover:bg-accent/45"}">
-  <div class="flex items-start gap-3">
-    <div class="pt-1">${statusDot(toneForValue(objective.blockedReason ? "blocked" : (objective.phase || objective.status)))}</div>
-    <div class="min-w-0 flex-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <div class="min-w-0 truncate text-sm font-semibold text-foreground">${esc(objective.title)}</div>
-        ${badge(displayLabel(objective.phase || objective.status) || "Idle", toneForValue(objective.phase || objective.status))}
-      </div>
-      <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(objective.summary ?? objective.blockedReason ?? "Objective activity will appear here.")}</div>
-      <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
-        <span>${esc(objective.objectiveId)}</span>
-        <span>${esc(`${objective.activeTaskCount ?? 0}/${objective.taskCount ?? 0} tasks`)}</span>
-        ${objective.updatedAt ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(formatTs(objective.updatedAt))}</span>` : ""}
+): string => {
+  const summary = truncate(
+    objective.summary ?? objective.blockedReason ?? "Objective activity will appear here.",
+    objective.selected ? 180 : 120,
+  );
+  return `<a href="${objectiveHref(routeContext, objective.objectiveId, undefined, objective.profileId)}" class="block border-l-2 px-3 py-3 transition ${objective.selected
+    ? "border-primary bg-muted/35"
+    : "border-transparent bg-background hover:bg-accent/45"}">
+    <div class="flex items-start gap-3">
+      <div class="pt-1">${statusDot(toneForValue(objective.blockedReason ? "blocked" : (objective.phase || objective.status)))}</div>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="min-w-0 truncate text-sm font-semibold text-foreground"${tooltipAttr(objective.title)}>${esc(truncate(objective.title, 72))}</div>
+          ${badge(titleCaseLabel(objective.phase || objective.status) || "Idle", toneForValue(objective.phase || objective.status))}
+        </div>
+        <div class="mt-1 text-[13px] leading-5 text-muted-foreground [overflow-wrap:anywhere]">${esc(summary)}</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          <span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1"${tooltipAttr(objective.objectiveId)}>${esc(truncate(objective.objectiveId, 26))}</span>
+          <span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1">${esc(`${objective.activeTaskCount ?? 0}/${objective.taskCount ?? 0} tasks`)}</span>
+          ${objective.updatedAt ? `<span class="inline-flex items-center gap-1 border border-border bg-muted/25 px-2 py-1">${iconClock("h-3 w-3")} ${esc(formatTs(objective.updatedAt))}</span>` : ""}
+        </div>
       </div>
     </div>
-  </div>
-</a>`;
+  </a>`;
+};
 
-const renderSummarySection = (section: FactoryWorkbenchSummarySectionModel): string => {
-  const statsRow = section.stats.length > 0
-    ? `<div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      ${section.stats.map((stat) => statPill(stat.label, stat.value)).join("")}
-    </div>`
-    : "";
-  if (section.empty) {
-    return `<section class="border-b border-border pb-5">
-      <div class="text-sm font-semibold text-foreground">${esc(section.title)}</div>
-      <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
-      ${statsRow}
-      <div class="mt-5 border-l-2 border-border pl-4">
-        <div class="flex items-center gap-2 text-sm font-medium text-foreground">${iconFactory("h-4 w-4")} No objective selected.</div>
-        <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
-        <div class="mt-1 text-[12px] leading-5 text-muted-foreground">Use chat to create a new objective with <code>/obj</code> or pick one from the queue below.</div>
+const workbenchPrimaryActionClass = "inline-flex items-center justify-center border border-primary/40 bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition hover:bg-primary/90";
+const workbenchSecondaryActionClass = `${ghostButtonClass} !px-3 !py-1.5 !text-[13px]`;
+
+const renderWorkbenchActionButton = (
+  routeContext: FactoryWorkbenchRouteContext,
+  action: NonNullable<FactorySelectedObjectiveCard["primaryAction"]>,
+): string => {
+  const focusHref = routeHref(routeContext, {
+    inspectorTab: "chat",
+    objectiveId: routeContext.objectiveId,
+  });
+  const className = action.tone === "danger"
+    ? `${dangerButtonClass} !px-3 !py-1.5 !text-[13px]`
+    : action.tone === "primary"
+      ? workbenchPrimaryActionClass
+      : workbenchSecondaryActionClass;
+  if (action.focusOnly) {
+    return `<a href="${esc(focusHref)}" data-factory-href="${esc(focusHref)}" class="${className}">${esc(action.label)}</a>`;
+  }
+  const command = action.command ?? "";
+  return `<button type="button" onclick="document.getElementById('factory-prompt').value = '${command}'; document.getElementById('factory-prompt').focus();" class="${className}">${esc(action.label)}</button>`;
+};
+
+const renderLifecycleStrip = (
+  objective?: FactoryWorkbenchSummarySectionModel["objective"],
+): string => {
+  if (!objective?.lifecycleSteps?.length) return "";
+  const stepTone = (state: FactoryLifecycleStepModel["state"]): string =>
+    state === "done"
+      ? "border-success/20 bg-success/10 text-success"
+      : state === "current"
+        ? "border-info/20 bg-info/10 text-info"
+        : state === "paused"
+          ? "border-warning/20 bg-warning/10 text-warning"
+          : "border-border bg-background text-muted-foreground";
+  const stepPrefix = (state: FactoryLifecycleStepModel["state"]): string =>
+    state === "done" ? "✓"
+      : state === "paused" ? "⏸"
+      : state === "current" ? "●"
+      : "○";
+  return `<section class="border border-border bg-muted/25 px-4 py-3">
+    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Lifecycle Strip</div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      ${objective.lifecycleSteps.map((step) => `<div class="inline-flex items-center gap-2 border px-2.5 py-1.5 text-[11px] font-medium ${stepTone(step.state)}">
+        <span>${stepPrefix(step.state)}</span>
+        <span>${esc(step.label)}</span>
+      </div>`).join("")}
+    </div>
+  </section>`;
+};
+
+const renderObjectiveEvidenceSnapshot = (
+  objective?: FactoryWorkbenchSummarySectionModel["objective"],
+): string => {
+  if (!objective?.evidenceStats?.length) return "";
+  return `<section class="border border-border bg-muted/25 px-4 py-3">
+    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Snapshot</div>
+    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+      ${objective.evidenceStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
+        <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
+      </div>`).join("")}
+    </div>
+  </section>`;
+};
+
+const renderSummarySection = (
+  section: FactoryWorkbenchSummarySectionModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
+  if (section.empty || !section.objective) {
+    return `<section class="border border-border bg-card px-5 py-5">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
+      <div class="mt-2 text-lg font-semibold text-foreground">No objective selected.</div>
+      <div class="mt-2 max-w-[68ch] text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
+      <div class="mt-4 border border-border bg-muted/25 px-4 py-3 text-sm leading-6 text-muted-foreground">
+        Use chat to create a new objective with <code>/obj</code> or select one from the queue below.
       </div>
     </section>`;
   }
-  return `<section class="border-b border-border pb-5">
+  const objective = section.objective;
+  const displayState = objective.displayState ?? titleCaseLabel(objective.status) ?? "Running";
+  const metrics = [
+    objective.profileLabel ? `Assignee: ${objective.profileLabel}` : undefined,
+    typeof objective.updatedAt === "number" ? `Updated ${formatTs(objective.updatedAt)}` : undefined,
+    section.tokenCount ? `${section.tokenCount} tokens` : undefined,
+  ].filter(Boolean).join(" · ");
+  const latestOutcome = objective.bottomLine
+    ?? objective.summary
+    ?? objective.latestDecisionSummary
+    ?? "No bottom line captured yet.";
+  const nextOperatorAction = objective.nextAction
+    ?? objective.primaryAction?.label
+    ?? "Ask engineer";
+  const actions = [
+    objective.primaryAction ? renderWorkbenchActionButton(routeContext, objective.primaryAction) : "",
+    ...(objective.secondaryActions ?? []).map((action) => renderWorkbenchActionButton(routeContext, action)),
+  ].filter(Boolean).join("");
+  const compactStats = section.stats.slice(0, 4);
+  return `<section class="space-y-4 border border-border bg-card px-5 py-5">
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div class="min-w-0 flex-1">
-        <div class="text-[11px] text-muted-foreground">${esc(section.title)}</div>
-        <div class="mt-1 text-sm font-semibold text-foreground">${esc(section.headline)}</div>
-        <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <div class="text-xl font-semibold text-foreground">${esc(objective.title)}</div>
+          ${badge(displayState, displayStateTone(displayState))}
+          ${typeof objective.severity === "number" ? `<span class="border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">P${esc(String(objective.severity))}</span>` : ""}
+        </div>
+        <div class="mt-2 text-sm text-muted-foreground">${esc(metrics || "Waiting for more objective telemetry.")}</div>
       </div>
-      ${section.tokenCount
-        ? `<div class="inline-flex items-center gap-2 text-[12px] font-medium text-foreground">
-          <span class="text-info">${iconTokens("h-4 w-4")}</span>
-          <span>Tokens ${esc(section.tokenCount)}</span>
-        </div>`
-        : ""}
+      ${actions ? `<div class="flex flex-wrap gap-2">${actions}</div>` : ""}
     </div>
-    ${statsRow}
+    ${renderLifecycleStrip(objective)}
+    <div class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
+      <div class="space-y-3">
+        <section class="border border-border bg-muted/25 px-4 py-3">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Outcome</div>
+        <div class="mt-2 text-sm leading-6 text-foreground">${esc(latestOutcome)}</div>
+        </section>
+        <section class="border border-border bg-muted/25 px-4 py-3">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Next Operator Action</div>
+        <div class="mt-2 text-sm leading-6 text-foreground">${esc(nextOperatorAction)}</div>
+        </section>
+        ${section.latestDecisionSummary ? `<section class="border border-border bg-muted/25 px-4 py-3">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Decision</div>
+          <div class="mt-2 text-sm leading-6 text-foreground">${esc(section.latestDecisionSummary)}</div>
+        </section>` : ""}
+      </div>
+      <aside class="border border-border bg-muted/25 px-4 py-3">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Metrics</div>
+        <div class="mt-3 grid gap-2">
+          ${compactStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
+            <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
+          </div>`).join("")}
+        </div>
+        ${section.focus ? `<div class="mt-4 border border-border bg-background px-3 py-3">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Live Focus</div>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <div class="text-sm font-semibold text-foreground">${esc(section.focus.title)}</div>
+            ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
+          </div>
+          <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.focus.summary)}</div>
+        </div>` : ""}
+      </aside>
+    </div>
   </section>`;
 };
 
 const renderObjectiveListSection = (
   section: FactoryWorkbenchObjectiveListSectionModel,
   routeContext: FactoryWorkbenchRouteContext,
-): string => `<section class="border-b border-border pb-4">
-  <div class="flex items-center justify-between gap-3 pb-2">
-    <div class="text-sm font-semibold text-foreground">${esc(section.title)}</div>
-    <div class="text-[12px] text-muted-foreground">${esc(String(section.count))}</div>
+): string => {
+  const pinned = section.key === "selected";
+  return `<section class="border border-border bg-card/70">
+  <div class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+    ${pinned ? `<div class="flex min-w-0 flex-1 items-start gap-3">
+      <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary ring-1 ring-primary/20">
+        ${iconSpark("h-4 w-4")}
+      </span>
+      <div class="min-w-0 flex-1 pt-0.5">
+        <div class="text-sm font-semibold text-foreground">${esc(section.title)}</div>
+        <div class="mt-1 text-[11px] leading-4 text-muted-foreground">Pinned while the queue filter hides this objective.</div>
+      </div>
+    </div>` : `<div class="min-w-0 flex-1">
+      <div class="text-sm font-semibold text-foreground">${esc(section.title)}</div>
+    </div>`}
+    <div class="shrink-0 text-[12px] text-muted-foreground">${esc(String(section.count))}</div>
   </div>
   ${section.items.length > 0
-    ? `<div class="divide-y divide-border border-y border-border">
+    ? `<div class="divide-y divide-border">
       ${section.items.map((objective) => renderObjectiveCard(routeContext, objective)).join("")}
     </div>`
-    : `<div class="py-3 text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`}
+    : `<div class="px-4 py-4 text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`}
 </section>`;
+};
+
+const timelineItemBorderClass = (
+  emphasis?: "accent" | "warning" | "danger" | "success" | "muted",
+): string => {
+  switch (emphasis) {
+    case "success":
+      return "border-success/30";
+    case "warning":
+      return "border-warning/30";
+    case "danger":
+      return "border-destructive/30";
+    case "accent":
+      return "border-primary/30";
+    default:
+      return "border-border";
+  }
+};
+
+const renderTimelineGroups = (
+  section: FactoryWorkbenchActivitySectionModel,
+): string => {
+  if (!section.timelineGroups?.length) {
+    return section.items.length > 0
+      ? `<div class="space-y-2">
+        ${section.items.map((entry) => `<div class="border border-border bg-background px-4 py-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-semibold text-foreground">${esc(entry.title)}</div>
+              <div class="mt-1 text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">${esc(entry.summary)}</div>
+            </div>
+            <div class="shrink-0 text-[11px] font-medium text-muted-foreground">${esc(entry.kind)}</div>
+          </div>
+          <div class="mt-2 flex items-start justify-between gap-2 text-[12px] text-muted-foreground">
+            <span class="min-w-0 flex-1 [overflow-wrap:anywhere]">${esc(entry.meta ?? "")}</span>
+            ${entry.at ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(formatTs(entry.at))}</span>` : ""}
+          </div>
+        </div>`).join("")}
+      </div>`
+      : `<div class="text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`;
+  }
+  return section.timelineGroups.map((group) => {
+    const content = `<div class="space-y-2">
+      ${group.items.map((item) => `<div class="border-l-2 ${timelineItemBorderClass(item.emphasis)} bg-background px-4 py-3">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-foreground">${esc(item.title)}</div>
+            <div class="mt-1 text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">${esc(item.summary)}</div>
+          </div>
+          ${item.at ? `<div class="shrink-0 text-[11px] text-muted-foreground">${esc(formatTs(item.at))}</div>` : ""}
+        </div>
+        ${item.meta ? `<div class="mt-2 text-[12px] text-muted-foreground [overflow-wrap:anywhere]">${esc(item.meta)}</div>` : ""}
+      </div>`).join("")}
+    </div>`;
+    if (group.collapsedByDefault) {
+      return `<details class="border border-border bg-muted/25 px-4 py-3">
+        <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(group.title)}</summary>
+        <div class="mt-3">${content}</div>
+      </details>`;
+    }
+    return `<section class="border border-border bg-muted/25 px-4 py-3">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(group.title)}</div>
+      <div class="mt-3">${content}</div>
+    </section>`;
+  }).join("");
+};
 
 const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): string => {
   const focusCard = section.focus
-    ? `<div class="border-l-2 border-primary pl-3">
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0 flex-1">
-          <div class="text-sm font-semibold text-foreground">${esc(section.focus.title)}</div>
-          <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.focus.summary)}</div>
+    ? `${(section.focus.stdoutTail || section.focus.stderrTail) ? `<div class="grid gap-3 ${section.focus.stdoutTail && section.focus.stderrTail ? "xl:grid-cols-2" : ""}">
+        ${section.focus.stdoutTail ? `<section class="border border-border bg-background">
+          <div class="flex items-center justify-between border-b border-border px-4 py-2">
+            <span class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Codex Log</span>
+            ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
+          </div>
+          <pre class="factory-scrollbar min-w-0 max-h-80 overflow-x-hidden overflow-y-auto whitespace-pre-wrap px-4 py-4 text-[12px] leading-6 text-foreground [overflow-wrap:anywhere]">${esc(section.focus.stdoutTail)}</pre>
+        </section>` : ""}
+        ${section.focus.stderrTail ? `<section class="border border-destructive/30 bg-destructive/5">
+          <div class="border-b border-destructive/20 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-destructive">Error Output</div>
+          <pre class="factory-scrollbar min-w-0 max-h-80 overflow-x-hidden overflow-y-auto whitespace-pre-wrap px-4 py-4 text-[12px] leading-6 text-foreground [overflow-wrap:anywhere]">${esc(section.focus.stderrTail)}</pre>
+        </section>` : ""}
+      </div>` : `<div class="border border-border bg-muted/25 px-4 py-3">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Current Execution</span>
+          ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
         </div>
-        ${badge(displayLabel(section.focus.status), toneForValue(section.focus.status))}
-      </div>
-      </div>`
+        <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(truncate(section.focus.summary, 120))}</div>
+      </div>`}`
     : "";
   const escalationCallout = section.callout
-    ? `<div class="rounded-lg border border-warning/25 bg-warning/10 px-3 py-2 text-xs leading-5 text-foreground">
+    ? `<div class="border border-warning/25 bg-warning/10 px-3 py-2 text-xs leading-5 text-foreground">
       ${esc(section.callout)}
     </div>`
     : "";
@@ -515,24 +724,7 @@ const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): s
         subtitle: "Recent orchestration and worker progress.",
       })
     : "";
-  const activitySection = section.items.length > 0
-    ? `<div class="divide-y divide-border border-y border-border">
-      ${section.items.map((entry, index) => `<div class="${index > 0 ? "border-t border-border " : ""}px-4 py-3">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-semibold text-foreground">${esc(entry.title)}</div>
-            <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(entry.summary)}</div>
-          </div>
-          <div class="shrink-0 text-[11px] font-medium text-muted-foreground">${esc(entry.kind)}</div>
-        </div>
-        <div class="mt-2 flex items-center justify-between gap-2 text-[12px] text-muted-foreground">
-          <span>${esc(entry.meta ?? "")}</span>
-          ${entry.at ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(formatTs(entry.at))}</span>` : ""}
-        </div>
-      </div>`).join("")}
-    </div>`
-    : `<div class="text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`;
-  return `<section class="border-b border-border pb-5">
+  return `<section class="border border-border bg-card px-5 py-5">
     <div class="flex items-center justify-between gap-3">
       <div class="text-sm font-semibold text-foreground">${esc(section.title)}</div>
       <div class="text-[12px] text-muted-foreground">${esc(String(section.count))}</div>
@@ -541,7 +733,7 @@ const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): s
       ${focusCard}
       ${escalationCallout}
       ${stepsSection}
-      ${activitySection}
+      ${renderTimelineGroups(section)}
     </div>
   </section>`;
 };
@@ -553,7 +745,7 @@ const renderBlock = (
   const rendered = block.sections.map((section) => {
     switch (section.shape) {
       case "summary":
-        return renderSummarySection(section);
+        return renderSummarySection(section, routeContext);
       case "activity-list":
         return renderActivitySection(section);
       case "objective-list":
@@ -562,7 +754,7 @@ const renderBlock = (
     }
   }).join("");
   if (block.layout === "split") {
-    return `<div class="grid gap-4 xl:grid-cols-[minmax(0,1.02fr)_minmax(300px,0.98fr)]">${rendered}</div>`;
+    return `<div class="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.02fr)_minmax(300px,0.98fr)]">${rendered}</div>`;
   }
   return rendered;
 };
@@ -572,7 +764,7 @@ const renderWorkbenchBlockIsland = (
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const projections = workbenchBlockProjections(block);
-  return `<div id="factory-workbench-block-${esc(block.key)}" data-workbench-projections="${esc(projections.join(" "))}" ${liveIslandAttrs({
+  return `<div id="factory-workbench-block-${esc(block.key)}" class="min-w-0" data-workbench-projections="${esc(projections.join(" "))}" ${liveIslandAttrs({
     path: workbenchBlockPath(routeContext, block.key),
     refreshOn: workbenchBlockRefreshOn(projections),
   })}>
@@ -580,35 +772,229 @@ const renderWorkbenchBlockIsland = (
   </div>`;
 };
 
+const renderWorkbenchFeedHeader = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => `<div class="shrink-0 border-b border-border bg-background/95 px-4 py-2.5">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Queue Monitor</span>
+      <span class="text-[11px] text-muted-foreground">Live profile-board feed</span>
+    </div>
+    <div class="mt-2 flex flex-wrap items-center gap-3">
+      ${workspace.filters.map((filter) => renderFilterPill(routeContext, filter)).join("")}
+    </div>
+  </div>`;
+
 export const factoryWorkbenchWorkspaceIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
-): string => `<div class="factory-scrollbar flex flex-col gap-4 pr-1 lg:h-full lg:min-h-0 lg:overflow-y-auto" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
-  ${workspace.blocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
-</div>`;
+): string => {
+  const showSummary = isSummaryVisible(workspace.filter);
+  const liveBlocks = workspace.blocks.filter((block) =>
+    (block.key === "summary" && showSummary)
+    || block.key === "activity"
+    || block.key === "selected-overflow",
+  );
+  const feedBlocks = workspace.blocks.filter((block) =>
+    block.key !== "summary" && block.key !== "activity" && block.key !== "selected-overflow",
+  );
+  const visibleBlocks = showSummary
+    ? workspace.blocks
+    : workspace.blocks.filter((block) => block.key !== "summary");
+  if (feedBlocks.length === 0) {
+    return `<div class="factory-scrollbar flex min-w-0 flex-col gap-6 overflow-x-hidden pr-1 lg:h-full lg:min-h-0 lg:overflow-y-auto" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
+      ${visibleBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
+    </div>`;
+  }
+  return `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)] lg:gap-5 lg:overflow-hidden" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
+    <section class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-6 overflow-x-hidden lg:overflow-y-auto lg:pr-1">
+      ${liveBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
+    </section>
+    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35">
+      ${renderWorkbenchFeedHeader(workspace, routeContext)}
+      <div class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5">
+        <div class="flex min-w-0 flex-col gap-6">
+          ${feedBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
+        </div>
+      </div>
+    </section>
+  </div>`;
+};
+
+const renderInspectorTabLink = (
+  routeContext: FactoryWorkbenchRouteContext,
+  tab: FactoryInspectorTab,
+  label: string,
+  compact?: boolean,
+): string => {
+  const href = routeHref(routeContext, { inspectorTab: tab });
+  const active = (routeContext.inspectorTab ?? "overview") === tab;
+  const pad = compact ? "px-3 py-1.5 text-[11px]" : "px-3 py-2 text-[12px]";
+  return `<a href="${esc(href)}" data-factory-href="${esc(href)}" ${active ? 'aria-current="page"' : ""} class="inline-flex items-center justify-center border font-semibold uppercase tracking-[0.14em] transition ${pad} ${active
+    ? "border-primary/20 bg-primary/10 text-primary"
+    : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"}">${esc(label)}</a>`;
+};
+
+const renderProfileListSection = (
+  title: string,
+  items: ReadonlyArray<string>,
+): string => items.length > 0
+  ? `<section class="border border-border bg-card px-4 py-4">
+    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(title)}</div>
+    <div class="mt-3 space-y-2">
+      ${items.map((item) => `<div class="border border-border bg-muted/25 px-3 py-2 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
+    </div>
+  </section>`
+  : "";
+
+const renderEmployeeProfilePanel = (
+  model: FactoryChatIslandModel,
+  options?: {
+    readonly sectionLimit?: number;
+    readonly includeTools?: boolean;
+  },
+): string => {
+  const roles = (model.activeProfileRoles ?? []).slice(0, 6);
+  const responsibilities = engineerResponsibilities(model).slice(0, 6);
+  const profileSections = (model.activeProfileSections ?? [])
+    .filter((section) => {
+      const normalized = section.title.trim().toLowerCase();
+      return normalized !== "roles" && normalized !== "responsibilities" && section.items.length > 0;
+    })
+    .slice(0, options?.sectionLimit ?? 3);
+  const tools = options?.includeTools
+    ? (model.activeProfileTools ?? []).slice(0, 8)
+    : [];
+  const profileIntro = [
+    model.activeProfileProfileSummary
+      ? `<div class="border border-border bg-muted/25 px-3 py-2.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">PROFILE.md</div>
+        <div class="mt-1 text-sm leading-6 text-foreground">${esc(model.activeProfileProfileSummary)}</div>
+      </div>`
+      : "",
+    model.activeProfileSoulSummary
+      ? `<div class="border border-border bg-muted/25 px-3 py-2.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">SOUL.md</div>
+        <div class="mt-1 text-sm leading-6 text-foreground">${esc(model.activeProfileSoulSummary)}</div>
+      </div>`
+      : "",
+  ].filter(Boolean).join("");
+  const toolsMarkup = tools.length > 0
+    ? `<div class="mt-4 flex flex-wrap gap-2">
+      ${tools.map((tool) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">${esc(tool)}</span>`).join("")}
+    </div>`
+    : "";
+  const cards = [
+    `<section class="border border-border bg-card px-4 py-4">
+      <div class="flex items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center border border-border bg-background text-primary">
+          ${iconWorker("h-4 w-4")}
+        </span>
+        <div class="min-w-0 flex-1">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Employee Profile</div>
+          <div class="mt-1 text-base font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
+          ${engineerPrimaryRole(model) ? `<div class="mt-1 text-sm text-muted-foreground">${esc(engineerPrimaryRole(model)!)}</div>` : ""}
+        </div>
+      </div>
+      ${roles.length > 0 ? `<div class="mt-4 flex flex-wrap gap-2">
+        ${roles.map((role) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">${esc(role)}</span>`).join("")}
+      </div>` : ""}
+      ${profileIntro ? `<div class="mt-4 space-y-3">${profileIntro}</div>` : ""}
+      ${toolsMarkup}
+    </section>`,
+    renderProfileListSection("Responsibilities", responsibilities),
+    ...profileSections.map((section) => renderProfileListSection(section.title, section.items.slice(0, 6))),
+  ].filter(Boolean);
+  return cards.length > 0
+    ? cards.join("")
+    : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
+      Profile and soul notes will appear here when available.
+    </section>`;
+};
+
+const renderEmployeeOverviewPanel = (
+  model: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
+  const objective = model.selectedThread;
+  const status = objective?.displayState ?? titleCaseLabel(objective?.status) ?? "Available";
+  const focusHref = routeHref(routeContext, { inspectorTab: "chat" });
+  const actions = objective
+    ? [
+      objective.primaryAction ? renderWorkbenchActionButton(routeContext, objective.primaryAction) : "",
+      ...(objective.secondaryActions ?? []).map((action) => renderWorkbenchActionButton(routeContext, action)),
+    ].filter(Boolean).join("")
+    : `<a href="${esc(focusHref)}" data-factory-href="${esc(focusHref)}" class="${workbenchPrimaryActionClass}">Message engineer</a>`;
+  const runtimeNote = model.activeRun || model.activeCodex || (model.liveChildren?.length ?? 0) > 0
+    ? `<div class="border border-border bg-muted/25 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
+      Runtime progress and Codex logs are pinned on the live board to the left.
+    </div>`
+    : "";
+  return `<div class="space-y-4">
+    ${objective ? `<section class="border border-border bg-card px-4 py-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Brief</div>
+          <div class="mt-2 text-sm font-semibold text-foreground">${esc(objective.title)}</div>
+        </div>
+        ${badge(status, displayStateTone(status))}
+      </div>
+      <div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Latest Outcome</div>
+        <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.bottomLine ?? objective.summary ?? "No bottom line yet.")}</div>
+      </div>
+      <div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Next Operator Action</div>
+        <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.nextAction ?? "Ask chat for the next step.")}</div>
+      </div>
+      ${objective.latestDecisionSummary ? `<div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Latest Decision</div>
+        <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.latestDecisionSummary)}</div>
+      </div>` : ""}
+      ${runtimeNote ? `<div class="mt-3">${runtimeNote}</div>` : ""}
+      <div class="mt-4 flex flex-wrap gap-2">${actions}</div>
+    </section>` : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
+      No objective is selected. Start in chat to discuss the work, or promote a concrete request into tracked execution.
+      <div class="mt-4">${actions}</div>
+    </section>`}
+    ${renderEmployeeProfilePanel(model, {
+      sectionLimit: 6,
+      includeTools: true,
+    })}
+  </div>`;
+};
 
 export const factoryWorkbenchChatIsland = (
   model: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
-): string => `<div class="flex min-h-0 flex-col gap-4" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
-  ${model.items.length === 0 ? renderEngineerCard(model) : ""}
-  ${renderWorkbenchLiveStatus(model)}
-  ${renderFactoryTranscriptSection(model, {
-    sectionLabel: "Chat",
-    objectiveHref: (objectiveId) => objectiveHref(routeContext, objectiveId),
-    emptyState: {
-      title: "Start a conversation.",
-      message: "Use chat to discuss work, ask Factory questions, or use /obj to create an objective directly.",
-      detail: "Objective links created from chat stay clickable and update the workbench without replacing the chat session.",
-    },
-  })}
-</div>`;
+): string => {
+  const inspectorTab = routeContext.inspectorTab ?? "overview";
+  const content = inspectorTab === "chat"
+    ? `${model.items.length === 0 ? renderEngineerCard(model) : ""}
+      ${renderFactoryTranscriptSection(model, {
+        sectionLabel: "Chat",
+        objectiveHref: (objectiveId) => objectiveHref(routeContext, objectiveId),
+        emptyState: {
+          title: "Start a conversation.",
+          message: "Use chat to discuss work, ask Factory questions, or use /obj to create an objective directly.",
+          detail: "Objective links created from chat stay clickable and update the workbench without replacing the chat session.",
+        },
+      })}`
+    : renderEmployeeOverviewPanel(model, routeContext);
+  return `<div class="flex min-h-0 flex-col gap-4" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
+    ${content}
+  </div>`;
+};
+
+const isSummaryVisible = (filter: FactoryWorkbenchFilterKey): boolean =>
+  filter === "objective.running";
 
 export const factoryWorkbenchBlockIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
   blockKey: FactoryWorkbenchBlockModel["key"],
 ): string => {
+  if (blockKey === "summary" && !isSummaryVisible(workspace.filter)) return "";
   const block = workspace.blocks.find((candidate) => candidate.key === blockKey);
   return block ? renderBlock(block, routeContext) : "";
 };
@@ -616,46 +1002,52 @@ export const factoryWorkbenchBlockIsland = (
 const renderWorkbenchHeader = (
   model: FactoryWorkbenchPageModel,
   routeContext: FactoryWorkbenchRouteContext,
-  workbenchSummaryPreview: string,
-  workbenchSummary: string,
-): string => `<div class="flex flex-wrap items-start justify-between gap-4">
-  <div class="min-w-0 flex-1">
-    <div class="inline-flex items-center gap-2.5">
-      <span class="inline-flex h-9 w-9 items-center justify-center border border-border bg-primary/10 text-primary">
-        ${iconFactory("h-4.5 w-4.5")}
-      </span>
-      <div class="min-w-0">
-        <div class="text-[11px] font-semibold uppercase tracking-[0.26em] text-primary">receipt</div>
-        <div class="mt-1 flex flex-wrap items-center gap-2">
-          <div class="text-[15px] font-semibold leading-none text-foreground">${esc(model.activeProfileLabel)}</div>
-          <div class="text-[12px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
-        </div>
-      </div>
+): string => {
+  const tokenCount = model.workspace.workbench?.summary.tokensUsed ?? model.workspace.selectedObjective?.tokensUsed;
+  const elapsedMinutes = resolveWorkbenchElapsedMinutes(model);
+  return `<div class="flex items-center gap-3">
+    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-white/8 bg-black/60 text-muted-foreground">
+      ${iconFactory("h-5 w-5")}
     </div>
-    <div class="mt-1 max-w-[70ch] text-[12px] leading-5 text-muted-foreground"${tooltipAttr(workbenchSummary)}>${esc(workbenchSummaryPreview)}</div>
-  </div>
-  <div class="flex flex-wrap items-center gap-3">
-    ${renderProfileSelect({
-      id: "factory-workbench-profile-select",
-      label: "Engineer",
-      profiles: model.profiles,
-    })}
-    <div class="flex flex-wrap items-center gap-2 text-[12px] leading-none text-muted-foreground">
-      ${model.workspace.selectedObjective?.tokensUsed !== undefined
-        ? `<span class="inline-flex items-center gap-1 text-foreground"><span class="text-info">${iconTokens("h-3.5 w-3.5")}</span>${esc(model.workspace.selectedObjective.tokensUsed.toLocaleString())} tokens</span>`
+    <div class="flex min-w-0 items-baseline gap-2">
+      <span class="text-lg font-extrabold uppercase tracking-[0.12em] text-foreground">Receipt</span>
+      <span class="shrink-0 text-[8px] font-medium uppercase tracking-[0.28em] text-muted-foreground/60">factory</span>
+    </div>
+    <div class="hidden h-6 w-px shrink-0 bg-white/10 sm:block"></div>
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-0 text-[11px] text-muted-foreground">
+      <span class="font-semibold uppercase tracking-[0.16em]">Engineer</span>
+      ${renderProfileSelect({
+        id: "factory-workbench-profile-select",
+        label: "Switch engineer",
+        profiles: model.profiles,
+        compact: true,
+        hideLabel: true,
+        wrapperClass: "inline-flex min-w-0 max-w-[12rem] flex-col",
+        minWidthClass: "min-w-[7rem]",
+        selectClass: "w-auto min-w-[7rem] appearance-none border border-border bg-transparent px-2.5 py-1.5 text-[13px] font-semibold leading-none text-foreground focus:border-primary/40 focus-visible:ring-1 focus-visible:ring-ring/30",
+      })}
+    </div>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      ${typeof tokenCount === "number"
+        ? renderWorkbenchHeaderMetric({
+          icon: iconTokens("h-3 w-3"),
+          iconClass: "text-info",
+          label: "Tokens",
+          value: tokenCount.toLocaleString(),
+          tooltip: `${tokenCount.toLocaleString()} tokens used`,
+        })
         : ""}
-      ${model.chatId
-        ? `<span class="inline-flex items-center gap-1"${tooltipAttr(`Conversation ${model.chatId}`)}>${iconWorker("h-3.5 w-3.5")} Session</span>`
+      ${typeof elapsedMinutes === "number"
+        ? renderWorkbenchHeaderMetric({
+          icon: iconClock("h-3 w-3"),
+          label: "Spent",
+          value: formatElapsedMinutes(elapsedMinutes),
+          tooltip: "Time spent on the selected objective",
+        })
         : ""}
     </div>
-  </div>
-</div>
-<div class="mt-3 flex flex-wrap items-center gap-2">
-  <div class="text-[11px] font-medium text-muted-foreground">Filters</div>
-  <div class="flex flex-wrap gap-4">
-    ${model.workspace.filters.map((filter) => renderFilterPill(routeContext, filter)).join("")}
-  </div>
-</div>`;
+  </div>`;
+};
 
 export const factoryWorkbenchHeaderIsland = (
   model: FactoryWorkbenchPageModel,
@@ -664,35 +1056,41 @@ export const factoryWorkbenchHeaderIsland = (
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: model.objectiveId,
+    inspectorTab: model.inspectorTab,
+    detailTab: model.detailTab,
     focusKind: model.focusKind,
     focusId: model.focusId,
     filter: model.filter,
   };
-  const activeRole = engineerPrimaryRole(model.chat);
-  const activePresence = engineerPresence(model.chat);
-  const workbenchSummary = activePresence
-    ?? activeRole
-    ?? "Profile-scoped objectives, recent activity, and receipts-backed progress.";
-  return renderWorkbenchHeader(model, routeContext, truncate(workbenchSummary, 120), workbenchSummary);
+  return renderWorkbenchHeader(model, routeContext);
 };
 
 const renderWorkbenchChatHeader = (
   model: FactoryWorkbenchPageModel,
   activeRole?: string,
-  activePresence?: string,
-): string => `<div class="flex items-start justify-between gap-3">
-  <div class="min-w-0">
-    <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">conversation</div>
-    <div class="mt-0.5 flex flex-wrap items-center gap-1.5">
-      <div class="text-[13px] font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
-      ${activeRole ? `<div class="text-[10px] text-muted-foreground"${tooltipAttr(activeRole)}>${esc(truncate(activeRole, 32))}</div>` : ""}
-      ${activePresence ? `<span class="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground"${tooltipAttr(activePresence)}>notes</span>` : ""}
+): string => {
+  const routeContext: FactoryWorkbenchRouteContext = {
+    profileId: model.activeProfileId,
+    chatId: model.chatId,
+    objectiveId: model.objectiveId,
+    inspectorTab: model.inspectorTab,
+    detailTab: model.detailTab,
+    focusKind: model.focusKind,
+    focusId: model.focusId,
+    filter: model.filter,
+  };
+  return `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+    <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+      <span class="text-base font-semibold text-foreground">${esc(model.activeProfileLabel)}</span>
+      ${activeRole ? `<span class="text-[11px] text-muted-foreground"${tooltipAttr(activeRole)}>${esc(truncate(activeRole, 32))}</span>` : ""}
     </div>
-  </div>
-  <div class="flex flex-wrap items-end justify-end gap-3">
-    <a href="/receipt" class="inline-flex items-center text-[12px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
-  </div>
-</div>`;
+    <div class="flex flex-wrap items-center gap-2">
+      ${renderInspectorTabLink(routeContext, "overview", "Overview", true)}
+      ${renderInspectorTabLink(routeContext, "chat", "Chat", true)}
+      <a href="/receipt" class="inline-flex items-center px-1 text-[11px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
+    </div>
+  </div>`;
+};
 
 export const buildFactoryWorkbenchShellSnapshot = (
   model: FactoryWorkbenchPageModel,
@@ -701,27 +1099,25 @@ export const buildFactoryWorkbenchShellSnapshot = (
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: model.objectiveId,
+    inspectorTab: model.inspectorTab,
+    detailTab: model.detailTab,
     focusKind: model.focusKind,
     focusId: model.focusId,
     filter: model.filter,
   };
   const pageQuery = workbenchQuery(routeContext);
   const activeRole = engineerPrimaryRole(model.chat);
-  const activePresence = engineerPresence(model.chat);
-  const workbenchSummary = activePresence
-    ?? activeRole
-    ?? "Profile-scoped objectives, recent activity, and receipts-backed progress.";
-  const workbenchSummaryPreview = truncate(workbenchSummary, 120);
   return {
     pageTitle: "Receipt Factory Workbench",
+    routeKey: `/factory${pageQuery}`,
     route: routeContext,
     backgroundEventsPath: backgroundEventsPath(routeContext),
     chatEventsPath: chatEventsPath(routeContext),
     workbenchHeaderPath: workbenchHeaderPath(routeContext),
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
-    workbenchHeaderHtml: renderWorkbenchHeader(model, routeContext, workbenchSummaryPreview, workbenchSummary),
-    chatHeaderHtml: renderWorkbenchChatHeader(model, activeRole, activePresence),
+    workbenchHeaderHtml: renderWorkbenchHeader(model, routeContext),
+    chatHeaderHtml: renderWorkbenchChatHeader(model, activeRole),
     workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext),
     chatHtml: factoryWorkbenchChatIsland(model.chat, routeContext),
     composeAction: `/factory/compose${pageQuery}`,
@@ -739,51 +1135,54 @@ const renderWorkbenchLoadingHeader = (routeContext: FactoryWorkbenchRouteContext
   const focusLabel = routeContext.focusKind && routeContext.focusId
     ? `${displayLabel(routeContext.focusKind)} ${truncate(routeContext.focusId, 20)}`
     : undefined;
-  return `<div class="flex flex-wrap items-start justify-between gap-4">
-    <div class="min-w-0 flex-1">
-      <div class="inline-flex items-center gap-2.5">
-        <span class="inline-flex h-9 w-9 items-center justify-center border border-border bg-primary/10 text-primary">
-          ${iconFactory("h-4.5 w-4.5")}
-        </span>
-        <div class="min-w-0">
-          <div class="text-[11px] font-semibold uppercase tracking-[0.26em] text-primary">receipt</div>
-          <div class="mt-1 flex flex-wrap items-center gap-2">
-            <div class="text-[15px] font-semibold leading-none text-foreground">${esc(profileLabel)}</div>
-            <div class="text-[12px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
-          </div>
-        </div>
-      </div>
-      <div class="mt-1 max-w-[70ch] text-[12px] leading-5 text-muted-foreground">Hydrating receipt-backed workbench projections after first paint.</div>
+  return `<div class="flex items-center gap-3">
+    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-white/8 bg-black/60 text-muted-foreground">
+      ${iconFactory("h-5 w-5")}
     </div>
-    <div class="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
-      <span class="inline-flex items-center gap-1">${iconWorker("h-3.5 w-3.5")} ${esc(chatLabel)}</span>
-      ${routeContext.objectiveId ? `<span class="inline-flex items-center gap-1">${iconFactory("h-3.5 w-3.5")} ${esc(truncate(routeContext.objectiveId, 24))}</span>` : ""}
-      ${focusLabel ? `<span class="inline-flex items-center gap-1">${iconClock("h-3.5 w-3.5")} ${esc(focusLabel)}</span>` : ""}
+    <div class="flex min-w-0 items-baseline gap-2">
+      <span class="text-lg font-extrabold uppercase tracking-[0.12em] text-foreground">Receipt</span>
+      <span class="shrink-0 text-[8px] font-medium uppercase tracking-[0.28em] text-muted-foreground/60">factory</span>
+    </div>
+    <div class="hidden h-6 w-px shrink-0 bg-white/10 sm:block"></div>
+    <div class="flex flex-wrap items-center gap-x-1.5 text-[10px] text-muted-foreground">
+      <span class="font-semibold text-foreground">${esc(profileLabel)}</span>
+      <span class="text-[12px]">${esc(chatLabel)}</span>
+      ${routeContext.objectiveId ? `<span class="inline-flex items-center gap-1">${iconFactory("h-3 w-3")} ${esc(truncate(routeContext.objectiveId, 24))}</span>` : ""}
+      ${focusLabel ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(focusLabel)}</span>` : ""}
     </div>
   </div>`;
 };
 
-const renderWorkbenchLoadingChatHeader = (routeContext: FactoryWorkbenchRouteContext): string => `<div class="flex items-start justify-between gap-3">
-  <div class="min-w-0">
-    <div class="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">conversation</div>
-    <div class="mt-1 flex flex-wrap items-center gap-2">
-      <div class="text-sm font-semibold text-foreground">${esc(displayLabel(routeContext.profileId) || "Factory")}</div>
-      <div class="text-[11px] text-muted-foreground">Loading chat projection...</div>
-    </div>
+const renderWorkbenchLoadingChatHeader = (routeContext: FactoryWorkbenchRouteContext): string => `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+  <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+    <span class="text-base font-semibold text-foreground">${esc(displayLabel(routeContext.profileId) || "Factory")}</span>
+    <span class="text-[11px] text-muted-foreground">Loading…</span>
   </div>
-  <div class="flex flex-wrap items-end justify-end gap-3">
-    <a href="/receipt" class="inline-flex items-center text-[12px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
-  </div>
+  <a href="/receipt" class="inline-flex items-center text-[11px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
 </div>`;
 
-const renderWorkbenchLoadingWorkspace = (): string => `<div class="factory-scrollbar flex flex-col gap-4 pr-1 lg:h-full lg:min-h-0 lg:overflow-y-auto">
-  <section class="border border-border bg-card px-5 py-5">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Loading</div>
-    <div class="mt-2 text-base font-semibold text-foreground">Preparing workspace projections.</div>
-    <div class="mt-2 max-w-[56ch] text-sm leading-6 text-muted-foreground">The shell is live. Objectives, job activity, and receipt aggregates are loading into their islands now.</div>
+const renderWorkbenchLoadingWorkspace = (): string => `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)] lg:gap-4 lg:overflow-hidden">
+  <section class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-4 overflow-x-hidden lg:overflow-y-auto lg:pr-1">
+    <section class="border border-border bg-card px-5 py-5">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Loading</div>
+      <div class="mt-2 text-base font-semibold text-foreground">Preparing realtime workspace projections.</div>
+      <div class="mt-2 max-w-[56ch] text-sm leading-6 text-muted-foreground">The live board is hydrating selected-objective state, execution logs, and receipt-backed activity.</div>
+    </section>
+    <section class="border border-border bg-card px-5 py-5 text-sm leading-6 text-muted-foreground">
+      Summary and execution surfaces will replace this placeholder as soon as the first snapshot arrives.
+    </section>
   </section>
-  <section class="border border-border bg-card px-5 py-5 text-sm leading-6 text-muted-foreground">
-    Pending statuses, objective lists, and recent activity will replace this placeholder when the snapshot arrives.
+  <section class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35">
+    <div class="shrink-0 border-b border-border bg-background/90 px-4 py-4">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Queue Monitor</div>
+      <div class="mt-1 text-base font-semibold text-foreground">Loading objective feed</div>
+      <div class="mt-1 text-[12px] leading-5 text-muted-foreground">Profile-board cards and completed history will stream into this compact column.</div>
+    </div>
+    <div class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-4">
+      <section class="border border-border bg-card px-5 py-5 text-sm leading-6 text-muted-foreground">
+        Pending objective lists and recent history will replace this placeholder when the snapshot arrives.
+      </section>
+    </div>
   </section>
 </div>`;
 
@@ -827,26 +1226,26 @@ export const factoryWorkbenchScaffold = (
 </head>
 <body data-factory-workbench data-workbench-shell-lazy="true" data-chat-id="${esc(routeContext.chatId)}" data-objective-id="${esc(routeContext.objectiveId ?? "")}" data-focus-kind="${esc(routeContext.focusKind ?? "")}" data-focus-id="${esc(routeContext.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
-    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px]">
-      <section class="flex min-h-0 flex-col bg-background lg:border-r lg:border-border">
-        <header id="factory-workbench-header" class="shrink-0 border-b border-border bg-background px-4 py-3">
-          ${renderWorkbenchLoadingHeader(routeContext)}
-        </header>
+    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
+      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border">
+        ${renderWorkbenchLoadingHeader(routeContext)}
+      </header>
+      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5">
+        ${renderWorkbenchLoadingChatHeader(routeContext)}
+      </div>
+      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:border-r lg:border-border">
         <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
-          <div id="factory-workbench-background-root" class="lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
-            <div id="factory-workbench-panel" class="lg:h-full">
+          <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
+            <div id="factory-workbench-panel" class="min-w-0 lg:h-full">
               ${renderWorkbenchLoadingWorkspace()}
             </div>
           </div>
         </div>
       </section>
-      <aside class="flex flex-col bg-background lg:min-h-0">
+      <aside class="flex min-w-0 flex-col bg-background lg:min-h-0">
         <div class="factory-workbench-chat-shell flex min-h-[42rem] flex-col overflow-hidden lg:h-full lg:min-h-0">
-          <div id="factory-workbench-chat-header" class="shrink-0 border-b border-border bg-background px-4 py-3">
-            ${renderWorkbenchLoadingChatHeader(routeContext)}
-          </div>
           <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
-            <section id="factory-workbench-chat-scroll" class="factory-scrollbar flex-1 overflow-y-auto px-4 py-4 lg:min-h-0">
+            <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
               <div id="factory-workbench-chat">
                 ${renderWorkbenchLoadingChat()}
               </div>
@@ -863,14 +1262,14 @@ export const factoryWorkbenchScaffold = (
                   ${scaffoldComposerActions}
                   <div class="relative">
                     <textarea id="factory-prompt" name="prompt" class="min-h-[120px] w-full resize-none border border-border bg-background px-3 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30" rows="3" placeholder="${esc(workbenchComposerPlaceholderForSelection({ objectiveId: routeContext.objectiveId }))}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                   </div>
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-xs leading-5 text-muted-foreground">${esc(scaffoldComposerHelper)}</div>
-                    <button id="factory-composer-submit" class="inline-flex items-center justify-center rounded-md border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
+                    <button id="factory-composer-submit" class="inline-flex items-center justify-center  border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
                   </div>
                 </div>
-                <div id="factory-composer-status" class="mt-3 hidden rounded-sm border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+                <div id="factory-composer-status" class="mt-3 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
             </section>
           </div>
@@ -909,28 +1308,28 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
   <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-factory-workbench data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
+<body data-factory-workbench data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
-    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px]">
-      <section class="flex min-h-0 flex-col bg-background lg:border-r lg:border-border">
-        <header id="factory-workbench-header" class="shrink-0 border-b border-border bg-background px-4 py-3" ${liveIslandAttrs(islandBindings.header)}>
-          ${shell.workbenchHeaderHtml}
-        </header>
+    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
+      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border" ${liveIslandAttrs(islandBindings.header)}>
+        ${shell.workbenchHeaderHtml}
+      </header>
+      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5">
+        ${shell.chatHeaderHtml}
+      </div>
+      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:border-r lg:border-border">
         <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
-          <div id="factory-workbench-background-root" class="lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
-            <div id="factory-workbench-panel" class="lg:h-full" ${liveIslandAttrs(islandBindings.background)}>
+          <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
+            <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${liveIslandAttrs(islandBindings.background)}>
               ${shell.workbenchHtml}
             </div>
           </div>
         </div>
       </section>
-      <aside class="flex flex-col bg-background lg:min-h-0">
+      <aside class="flex min-w-0 flex-col bg-background lg:min-h-0">
         <div class="factory-workbench-chat-shell flex min-h-[42rem] flex-col overflow-hidden lg:h-full lg:min-h-0">
-          <div id="factory-workbench-chat-header" class="shrink-0 border-b border-border bg-background px-4 py-3">
-            ${shell.chatHeaderHtml}
-          </div>
           <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
-            <section id="factory-workbench-chat-scroll" class="factory-scrollbar flex-1 overflow-y-auto px-4 py-4 lg:min-h-0">
+            <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
               <div id="factory-workbench-chat" ${liveIslandAttrs(islandBindings.chat)}>
                 ${shell.chatHtml}
               </div>
@@ -939,7 +1338,7 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
                 <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
               </div>
             </section>
-            <section class="shrink-0 border-t border-border bg-background px-4 py-4">
+            <section id="factory-workbench-composer-shell" class="shrink-0 border-t border-border bg-background px-4 py-4">
               <form id="factory-composer" action="${esc(shell.composeAction)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
                 <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="" />
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
@@ -947,14 +1346,14 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
                   ${composerActions}
                   <div class="relative">
                     <textarea id="factory-prompt" name="prompt" class="min-h-[120px] w-full resize-none border border-border bg-background px-3 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30" rows="3" placeholder="${esc(shell.composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                   </div>
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-xs leading-5 text-muted-foreground">${esc(composerHelper)}</div>
-                    <button id="factory-composer-submit" class="inline-flex items-center justify-center rounded-md border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
+                    <button id="factory-composer-submit" class="inline-flex items-center justify-center  border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
                   </div>
                 </div>
-                <div id="factory-composer-status" class="mt-3 hidden rounded-sm border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+                <div id="factory-composer-status" class="mt-3 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
             </section>
           </div>

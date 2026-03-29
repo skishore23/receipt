@@ -21,11 +21,11 @@ export const missionControlHotkeyClass = "inline-flex items-center gap-1 border 
 
 // ── Badge class constants ───────────────────────────────────────────────────
 
-export const badgeBaseClass = "inline-flex max-w-full shrink-0 items-center justify-center gap-1.5 rounded-sm border px-2 py-1 text-center text-[11px] font-medium whitespace-nowrap leading-4";
+export const badgeBaseClass = "inline-flex max-w-full shrink-0 items-center justify-center gap-1.5 border px-2 py-1 text-center text-[11px] font-medium whitespace-nowrap leading-4";
 
 // ── Button class constants ──────────────────────────────────────────────────
 
-export const buttonBaseClass = "inline-flex items-center justify-center rounded-md border px-3 py-2 text-sm font-medium transition";
+export const buttonBaseClass = "inline-flex items-center justify-center border px-3 py-2 text-sm font-medium transition";
 export const ghostButtonClass = `${buttonBaseClass} border-border bg-secondary text-secondary-foreground hover:bg-accent`;
 export const dangerButtonClass = `${buttonBaseClass} border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/20`;
 
@@ -104,7 +104,7 @@ export const statusDotToneClass = (tone: Tone): string => {
 };
 
 export const statusDot = (tone: Tone): string =>
-  `<span class="inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${statusDotToneClass(tone)}"></span>`;
+  `<span class="inline-flex h-2.5 w-2.5 shrink-0 ${statusDotToneClass(tone)}"></span>`;
 
 // ── Formatter functions ─────────────────────────────────────────────────────
 
@@ -326,10 +326,10 @@ export const renderJobActionCards = (
 ): string =>
   `<div class="grid gap-3">
     ${opts?.abortRequested
-      ? `<div class="rounded-xl border border-warning/20 bg-warning/10 px-4 py-3 text-sm leading-6 text-warning">Abort requested. Waiting for the worker to stop cleanly.</div>`
+      ? `<div class="border border-warning/20 bg-warning/10 px-4 py-3 text-sm leading-6 text-warning">Abort requested. Waiting for the worker to stop cleanly.</div>`
       : renderCliActionCard({
-          label: "Abort job",
-          description: "Request a clean stop from the CLI-first operator workflow.",
+          label: "Stop this job",
+          description: "Ask the worker to stop cleanly if you want to interrupt the current run.",
           command: `receipt factory abort-job ${jobId} --reason "abort requested"`,
           badgeClass: dangerButtonClass,
         })}

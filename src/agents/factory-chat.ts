@@ -1406,6 +1406,21 @@ export const normalizeFactoryChatConfig = (input: Partial<FactoryChatRunConfig>)
     ...input,
   });
 
+const resolveObjectiveIdFromSessionChain = async (
+  runtime: FactoryChatRunInput["runtime"],
+  sessionStream: string,
+): Promise<string | undefined> => {
+  const chain = await runtime.chain(sessionStream);
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const event = chain[i]?.body;
+    if (event?.type === "thread.bound") {
+      const objectiveId = asString(event.objectiveId);
+      if (objectiveId) return objectiveId;
+    }
+  }
+  return undefined;
+};
+
 export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentRunResult> => {
   const repoRoot = path.resolve(input.repoRoot);
   const profileRoot = path.resolve(input.profileRoot ?? repoRoot);
@@ -1421,14 +1436,18 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   const resolvedStream = resolvedChatId
     ? factoryChatSessionStream(repoRoot, resolvedProfile.root.id, resolvedChatId)
     : asString(input.stream) ?? factoryChatStream(repoRoot, resolvedProfile.root.id, input.objectiveId);
-  let currentObjectiveId = input.objectiveId;
+  const rebracketedObjectiveId = !input.objectiveId && resolvedChatId
+    ? await resolveObjectiveIdFromSessionChain(input.runtime, resolvedStream)
+    : undefined;
+  let currentObjectiveId = input.objectiveId ?? rebracketedObjectiveId;
   const getCurrentObjectiveId = (): string | undefined => currentObjectiveId;
   const setCurrentObjectiveId = (objectiveId: string | undefined): void => {
     currentObjectiveId = objectiveId;
   };
+  const effectiveObjectiveId = input.objectiveId ?? rebracketedObjectiveId;
   const resolvedMemoryScope = input.config.memoryScope === FACTORY_CHAT_DEFAULT_CONFIG.memoryScope
-    ? (input.objectiveId
-      ? objectiveMemoryScope(repoKey, resolvedProfile.root.id, input.objectiveId)
+    ? (effectiveObjectiveId
+      ? objectiveMemoryScope(repoKey, resolvedProfile.root.id, effectiveObjectiveId)
       : profileMemoryScope(repoKey, resolvedProfile.root.id))
     : input.config.memoryScope;
   const factoryLiveWaitState: FactoryLiveWaitState = { surfaced: false };
@@ -1531,10 +1550,16 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   ];
   const onIterationBudgetExhausted: NonNullable<AgentRunInput["onIterationBudgetExhausted"]> = async ({ runId, problem, config, progress }) => {
     if (isStuckProgress(progress)) return undefined;
+    const objectiveId = getCurrentObjectiveId();
+    if (objectiveId) {
+      const objective = await factoryService.getObjective(objectiveId).catch(() => undefined);
+      if (objective && !isTerminalObjectiveStatus(objective.status) && !objective.archivedAt && objective.status !== "blocked") {
+        return undefined;
+      }
+    }
     const nextMaxIterations = nextIterationBudget(config.maxIterations);
     if (nextMaxIterations === undefined) return undefined;
     const nextRunId = nextId("run");
-    const objectiveId = getCurrentObjectiveId();
     const nextConfig = normalizeFactoryChatConfig({
       ...input.config,
       maxIterations: nextMaxIterations,
@@ -1600,14 +1625,14 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
           profileId: resolvedProfile.root.id,
           reason: resolvedProfile.selectionReason,
         },
-        ...(input.objectiveId
+        ...(effectiveObjectiveId
           ? [{
               type: "thread.bound" as const,
               runId: input.runId,
               agentId: "orchestrator",
-              objectiveId: input.objectiveId,
+              objectiveId: effectiveObjectiveId,
               ...(resolvedChatId ? { chatId: resolvedChatId } : {}),
-              reason: "startup" as const,
+              reason: rebracketedObjectiveId ? "rebracketed" as const : "startup" as const,
             }]
           : []),
         {
@@ -1629,7 +1654,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         repoMemoryScope: repoMemoryScope(repoKey),
         profileMemoryScope: resolvedMemoryScope,
         profileId: resolvedProfile.root.id,
-        objectiveId: input.objectiveId,
+        objectiveId: effectiveObjectiveId,
         resolvedProfileHash: resolvedProfile.resolvedHash,
         stream: resolvedStream,
       },

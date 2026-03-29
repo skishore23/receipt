@@ -272,6 +272,7 @@ test("factory chat UI: chat items and inspector consume projected chat context",
   expect(items.find((item) => item.kind === "assistant" && item.body.includes("active engineer"))).toBeTruthy();
 
   const markup = factoryInspectorIsland({
+    mode: "mission-control",
     panel: "overview",
     activeProfileId: "generalist",
     chatId: "chat_demo",

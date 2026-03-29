@@ -482,6 +482,7 @@ The durable receipt family currently implemented in `src/modules/factory.ts` inc
 - `task.review.requested`
 - `task.approved`
 - `task.integrated`
+- `task.noop_completed`
 - `task.blocked`
 - `task.unblocked`
 - `task.superseded`
@@ -521,6 +522,7 @@ The reducer supports more receipts than the service currently emits.
 - `task.ready`
 - `task.dispatched`
 - `task.review.requested`
+- `task.noop_completed`
 - `task.integrated`
 - `task.blocked`
 - `candidate.created`
@@ -694,6 +696,7 @@ Result contract:
 Current handling:
 
 - `approved` produces `candidate.reviewed` with approved status
+- `approved` plus a clean delivery worktree and passing checks also emits `task.noop_completed`
 - `changes_requested` moves the task back to `ready`
 - `blocked` emits `task.blocked`
 - `partial` is preserved for investigation reports and treated as blocked for delivery tasks

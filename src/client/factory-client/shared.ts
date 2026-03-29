@@ -50,7 +50,7 @@ export const DEFAULT_COMMANDS: ReadonlyArray<FactoryCommand> = [];
 export const CHAT_REFRESH_DELAY_MS = 180;
 export const SIDEBAR_REFRESH_DELAY_MS = 450;
 export const INSPECTOR_REFRESH_DELAY_MS = 450;
-export const ASSISTANT_RESPONSE_CARD_CLASS = "overflow-hidden rounded-xl border border-border/80 bg-card/90 shadow-sm backdrop-blur-xl";
+export const ASSISTANT_RESPONSE_CARD_CLASS = "overflow-hidden  border border-border/80 bg-card/90 shadow-sm backdrop-blur-xl";
 export const ASSISTANT_RESPONSE_BODY_CLASS = "max-w-[72ch] px-5 py-4 sm:px-6 sm:py-5";
 
 export const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -75,7 +75,7 @@ export const parseCommands = (node: Element | null): ReadonlyArray<FactoryComman
       const usage = asString(command?.usage);
       const description = asString(command?.description);
       if (!name || !label || !usage || !description) return [];
-      const aliases = Array.isArray(command.aliases)
+      const aliases = command && Array.isArray(command.aliases)
         ? command.aliases.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
         : [];
       return [{

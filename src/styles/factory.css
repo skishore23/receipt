@@ -324,7 +324,7 @@
   }
 
   .factory-markdown table {
-    @apply my-4 rounded-lg border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
+    @apply my-4  border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
     display: block;
     width: max-content;
     min-width: 100%;
@@ -351,15 +351,15 @@
   }
 
   .factory-markdown blockquote {
-    @apply my-4 rounded-lg border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground;
+    @apply my-4  border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground;
   }
 
   .factory-markdown pre {
-    @apply my-4 overflow-x-auto rounded-lg border border-border bg-[#151311] p-4 text-[13px] leading-relaxed text-[#ECE7E1] font-mono shadow-sm;
+    @apply my-4 overflow-x-auto  border border-border bg-[#151311] p-4 text-[13px] leading-relaxed text-[#ECE7E1] font-mono shadow-sm;
   }
 
   .factory-markdown code {
-    @apply rounded-sm border border-border/60 bg-muted px-[0.34em] py-[0.16em] text-[0.84em] font-mono text-foreground;
+    @apply  border border-border/60 bg-muted px-[0.34em] py-[0.16em] text-[0.84em] font-mono text-foreground;
   }
 
   .factory-markdown pre code {

@@ -1,8 +1,8 @@
 # Receipt Architecture
 
-Receipt is event-native:
+Receipt is an event-native runtime and orchestration plane for long-lived agents and software objectives.
 
-**receipts are the source of truth; state, traces, queues, and merge decisions are derived from receipts**
+**receipts are the source of truth; state, traces, queues, and merge decisions are derived from receipts by folding the same receipts**
 
 ## 1. What Receipt is
 
@@ -13,6 +13,12 @@ Receipt is a framework for long-lived agent systems where:
 - actions/tools/assistants/humans emit receipts
 - control-plane decisions are receipts
 - replay reconstructs both domain state and control flow
+
+### What is "Factory"?
+**Factory** is the receipt-native control plane running on top of Receipt for software objectives on a repository. It provides the task DAG, worker dispatch, candidate review, integration, validation, and promotion. Each step is recorded as Factory receipts on streams under `factory/objectives/<objectiveId>`.
+- **Code Plane**: Git and worktrees remain the code plane.
+- **Orchestration Plane**: Receipt acts as the orchestration plane.
+- **No Hidden State**: The `FactoryService` orchestrates events but has no separate durable "service state". Everything is derived from the receipt streams.
 
 ## 2. Core public model
 

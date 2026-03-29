@@ -377,6 +377,8 @@ const objectiveEventSummary = (event: FactoryEvent): string => {
       return `${event.taskId} approved: ${truncateInline(event.summary)}`;
     case "task.integrated":
       return `${event.taskId} integrated: ${truncateInline(event.summary)}`;
+    case "task.noop_completed":
+      return `${event.taskId} noop-complete: ${truncateInline(event.summary)}`;
     case "task.blocked":
       return `${event.taskId} blocked: ${truncateInline(event.reason, 220)}`;
     case "task.unblocked":
@@ -450,7 +452,13 @@ const buildObjectiveSequence = (
       knownJobIds.add(event.jobId);
       maxObservedActiveTasks = Math.max(maxObservedActiveTasks, activeTasks.size);
     }
-    if (event.type === "task.blocked" || event.type === "task.approved" || event.type === "task.integrated" || event.type === "task.superseded") {
+    if (
+      event.type === "task.blocked"
+      || event.type === "task.approved"
+      || event.type === "task.integrated"
+      || event.type === "task.noop_completed"
+      || event.type === "task.superseded"
+    ) {
       activeTasks.delete(event.taskId);
     }
     return {

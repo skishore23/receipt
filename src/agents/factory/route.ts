@@ -35,7 +35,6 @@ import {
   factoryWorkbenchBlockIsland,
   factoryWorkbenchChatIsland,
   factoryWorkbenchHeaderIsland,
-  factoryWorkbenchScaffold,
   factoryWorkbenchShell,
   factoryWorkbenchWorkspaceIsland,
 } from "../../views/factory-workbench-page";
@@ -44,28 +43,30 @@ import {
   toFactoryStateSelectedObjectiveCard,
 } from "../../views/factory/objective-presenters";
 import { buildFactoryWorkbench } from "../../views/factory-workbench";
-import type {
-  FactoryChatIslandModel,
-  FactoryChatItem,
-  FactoryChatObjectiveNav,
-  FactoryChatProfileNav,
-  FactoryChatShellModel,
-  FactoryChatJobNav,
-  FactoryInspectorPanel,
-  FactoryLiveRunCard,
-  FactorySelectedObjectiveCard,
-  FactoryNavModel,
-  FactoryInspectorModel,
-  FactoryInspectorTabsModel,
-  FactoryViewMode,
-  FactoryWorkbenchActivitySectionModel,
-  FactoryWorkbenchBlockModel,
-  FactoryWorkbenchFilterKey,
-  FactoryWorkbenchFilterModel,
-  FactoryWorkbenchPageModel,
-  FactoryWorkbenchSectionModel,
-  FactoryWorkbenchStatModel,
-  FactoryWorkbenchWorkspaceModel,
+import {
+  DEFAULT_FACTORY_WORKBENCH_FILTER,
+  type FactoryChatIslandModel,
+  type FactoryChatItem,
+  type FactoryChatObjectiveNav,
+  type FactoryChatProfileNav,
+  type FactoryChatShellModel,
+  type FactoryChatJobNav,
+  type FactoryInspectorPanel,
+  type FactoryInspectorTab,
+  type FactoryLiveRunCard,
+  type FactorySelectedObjectiveCard,
+  type FactoryNavModel,
+  type FactoryInspectorModel,
+  type FactoryInspectorTabsModel,
+  type FactoryViewMode,
+  type FactoryWorkbenchBlockModel,
+  type FactoryWorkbenchDetailTab,
+  type FactoryWorkbenchFilterKey,
+  type FactoryWorkbenchFilterModel,
+  type FactoryWorkbenchPageModel,
+  type FactoryWorkbenchSectionModel,
+  type FactoryWorkbenchStatModel,
+  type FactoryWorkbenchWorkspaceModel,
 } from "../../views/factory-models";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import { readObjectiveAnalysis } from "../../factory-cli/analyze";
@@ -144,12 +145,14 @@ const isInspectorPanel = (value: string | undefined): value is FactoryInspectorP
   || value === "live"
   || value === "receipts";
 
+const isInspectorTab = (value: string | undefined): value is FactoryInspectorTab =>
+  value === "overview" || value === "chat" || value === "notes";
+
 const isFactoryViewMode = (value: string | undefined): value is FactoryViewMode =>
   value === "default" || value === "mission-control";
 
 const isWorkbenchFilterKey = (value: string | undefined): value is FactoryWorkbenchFilterKey =>
-  value === "all"
-  || value === "objective.running"
+  value === "objective.running"
   || value === "objective.needs_attention"
   || value === "objective.queued"
   || value === "objective.completed";
@@ -251,12 +254,39 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const requestedShowAll = (req: Request): boolean =>
     optionalTrimmedString(new URL(req.url).searchParams.get("all")) === "1";
 
+  const requestedInspectorTab = (req: Request): FactoryInspectorTab | undefined => {
+    const inspectorTab = optionalTrimmedString(new URL(req.url).searchParams.get("inspectorTab"));
+    return isInspectorTab(inspectorTab) ? inspectorTab : undefined;
+  };
+
+  const normalizedDefaultInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
+    value === "notes" ? "notes" : "overview";
+
+  const normalizedWorkbenchInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
+    value === "chat" ? "chat" : "overview";
+
   const requestedFocusKind = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("focusKind"));
 
   const requestedWorkbenchFilter = (req: Request): FactoryWorkbenchFilterKey => {
     const filter = optionalTrimmedString(new URL(req.url).searchParams.get("filter"));
-    return isWorkbenchFilterKey(filter) ? filter : "all";
+    if (filter === "all") return DEFAULT_FACTORY_WORKBENCH_FILTER;
+    return isWorkbenchFilterKey(filter) ? filter : DEFAULT_FACTORY_WORKBENCH_FILTER;
+  };
+
+  const requestedWorkbenchDetailTab = (req: Request): FactoryWorkbenchDetailTab | undefined => {
+    const detailTab = optionalTrimmedString(new URL(req.url).searchParams.get("detailTab"));
+    return detailTab === "review" || detailTab === "queue" || detailTab === "action"
+      ? detailTab
+      : undefined;
+  };
+
+  const normalizedWorkbenchDetailTab = (
+    value: FactoryWorkbenchDetailTab | undefined,
+    hasSelectedObjective: boolean,
+  ): FactoryWorkbenchDetailTab => {
+    if (value === "review" || value === "queue" || value === "action") return value;
+    return hasSelectedObjective ? "action" : "queue";
   };
 
   const normalizeFocusKind = (value: string | undefined): "task" | "job" | undefined =>
@@ -780,6 +810,85 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     };
   };
 
+  const buildWorkbenchSessionRuntime = async (input: {
+    readonly repoRoot: string;
+    readonly profileId: string;
+    readonly profileLabel: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly seedJobs?: ReadonlyArray<QueueJob>;
+    readonly mode?: FactoryViewMode;
+  }): Promise<{
+    readonly stream?: string;
+    readonly scopedJobs: ReadonlyArray<QueueJob>;
+    readonly runIds: ReadonlyArray<string>;
+    readonly runChains: ReadonlyArray<AgentRunChain>;
+    readonly activeRunId?: string;
+    readonly activeRun?: FactoryLiveRunCard;
+    readonly activeCodex?: FactoryInspectorModel["activeCodex"];
+    readonly liveChildren: ReadonlyArray<NonNullable<FactoryInspectorModel["liveChildren"]>[number]>;
+  }> => {
+    if (!input.chatId) {
+      const scopedJobs = [...(input.seedJobs ?? [])].sort(compareJobsByRecency).slice(0, 24);
+      return {
+        scopedJobs,
+        runIds: [],
+        runChains: [],
+        activeRunId: undefined,
+        activeRun: undefined,
+        activeCodex: buildActiveCodexCard(scopedJobs),
+        liveChildren: [],
+      };
+    }
+    const stream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
+    const indexChain = await agentRuntime.chain(stream);
+    const runIds = collectRunIds(indexChain);
+    const recentJobs = runIds.length > 0 ? await loadRecentJobs(80) : [];
+    const jobsById = new Map<string, QueueJob>();
+    for (const job of input.seedJobs ?? []) jobsById.set(job.id, job);
+    for (const job of recentJobs) jobsById.set(job.id, job);
+    const scopedJobs = [...jobsById.values()]
+      .filter((job) =>
+        asString(job.payload.chatId) === input.chatId
+        || isRelevantShellJob(job, stream, input.objectiveId))
+      .sort(compareJobsByRecency)
+      .slice(0, 24);
+    const runChains = await Promise.all(
+      runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))),
+    );
+    const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
+    const activeRunId = runIds.at(-1);
+    const activeRunLineageIds = activeRunId
+      ? collectRunLineageIds([activeRunId], runChainsById, scopedJobs)
+      : new Set<string>();
+    const activeRunJobs = activeRunLineageIds.size > 0
+      ? scopedJobs.filter((job) => jobMatchesRunIds(job, activeRunLineageIds))
+      : scopedJobs.filter((job) => jobMatchesRunIds(job, new Set([activeRunId].filter(Boolean) as string[])));
+    const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
+    const activeRun = activeRunIndex >= 0
+      ? summarizeActiveRunCard({
+          mode: input.mode,
+          runId: activeRunId!,
+          runChain: runChains[activeRunIndex]!,
+          relatedJobs: activeRunJobs,
+          profileLabel: input.profileLabel,
+          profileId: input.profileId,
+          chatId: input.chatId,
+          objectiveId: input.objectiveId,
+        })
+      : undefined;
+    return {
+      stream,
+      scopedJobs,
+      runIds,
+      runChains,
+      activeRunId,
+      activeRun,
+      activeCodex: buildActiveCodexCard(scopedJobs),
+      liveChildren: buildLiveChildCards(scopedJobs, stream, input.objectiveId),
+    };
+  };
+
   const mergeExplicitObjectiveIntoCards = (
     objectives: ReadonlyArray<FactoryObjectiveListItem>,
     detail: FactoryObjectiveDetailRecord | undefined,
@@ -913,6 +1022,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly showAll?: boolean;
@@ -1080,6 +1190,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: jobAnyRunId(job),
             jobId: job.id,
             panel: inspectorPanel,
+            inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
             focusKind: "job",
             focusId: job.id,
           }),
@@ -1093,6 +1204,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runId: activeRunId,
         jobId: input.jobId,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         focusKind: resolvedFocusKind,
         focusId: resolvedFocusId,
         objectiveProfileId: selectedObjective?.profileId,
@@ -1136,12 +1248,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         terminalRunIds: collectTerminalRunIds(runIds, runChains),
         jobId: input.jobId,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         focusKind: resolvedFocusKind,
         focusId: resolvedFocusId,
         activeProfilePrimaryRole: activeProfileOverview.primaryRole,
         activeProfileRoles: activeProfileOverview.roles,
         activeProfileResponsibilities: activeProfileOverview.responsibilities,
         activeProfileSummary: activeProfileOverview.summary,
+        activeProfileSoulSummary: activeProfileOverview.soulSummary,
+        activeProfileProfileSummary: activeProfileOverview.profileSummary,
         activeProfileSections: activeProfileOverview.sections,
         selectedThread: selectedObjective,
         jobs: relevantJobs,
@@ -1157,6 +1272,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         activeProfileId: effectiveProfile.id,
         activeProfileLabel: effectiveProfile.label,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         profiles: profileNav,
         objectives: objectiveNav,
         showAll: input.showAll,
@@ -1164,7 +1280,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       const inspectorModel: FactoryInspectorModel = {
         mode: input.mode,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
+        activeProfileLabel: effectiveProfile.label,
+        activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+        activeProfileSummary: activeProfileOverview.summary,
+        activeProfileSoulSummary: activeProfileOverview.soulSummary,
+        activeProfileProfileSummary: activeProfileOverview.profileSummary,
+        activeProfileResponsibilities: activeProfileOverview.responsibilities,
+        activeProfileSections: activeProfileOverview.sections,
         objectiveId: explicitObjectiveId,
         runId: activeRunId,
         jobId: input.jobId,
@@ -1187,6 +1311,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runId: activeRunId,
         jobId: input.jobId,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         focusKind: resolvedFocusKind,
         focusId: resolvedFocusId,
         chat: chatModel,
@@ -1202,6 +1327,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         profiles,
         chatId: input.chatId,
         panel: input.panel,
+        inspectorTab: input.inspectorTab,
         focusKind: input.focusKind,
         focusId: input.focusId,
         showAll: input.showAll,
@@ -1376,6 +1502,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: activeRunId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: resolvedFocusKind,
       focusId: resolvedFocusId,
       objectiveProfileId: selectedObjectiveCard?.profileId,
@@ -1397,12 +1524,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       terminalRunIds: collectTerminalRunIds(runIds, runChains),
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: resolvedFocusKind,
       focusId: resolvedFocusId,
       activeProfilePrimaryRole: activeProfileOverview.primaryRole,
       activeProfileRoles: activeProfileOverview.roles,
       activeProfileResponsibilities: activeProfileOverview.responsibilities,
       activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
       activeProfileSections: activeProfileOverview.sections,
       activeProfileTools: resolved.toolAllowlist,
       selectedThread: selectedObjectiveCard,
@@ -1420,6 +1550,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeProfileLabel: resolved.root.label,
       chatId: input.chatId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       profiles: profileNav,
       objectives: objectiveNav,
       showAll: input.showAll,
@@ -1427,7 +1558,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const inspectorModel: FactoryInspectorModel = {
       mode: input.mode,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       activeProfileId: resolved.root.id,
+      activeProfileLabel: resolved.root.label,
+      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+      activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
+      activeProfileResponsibilities: activeProfileOverview.responsibilities,
+      activeProfileSections: activeProfileOverview.sections,
       chatId: input.chatId,
       objectiveId: resolvedObjectiveId,
       runId: activeRunId,
@@ -1455,6 +1594,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: activeRunId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: resolvedFocusKind,
       focusId: resolvedFocusId,
       chat: chatModel,
@@ -1471,6 +1611,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly showAll?: boolean;
   }): Promise<{ readonly nav: FactoryNavModel; readonly selectedObjective?: FactorySelectedObjectiveCard }> => {
     await service.ensureBootstrap();
@@ -1492,6 +1633,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           activeProfileId: explicitContext.effectiveProfile.id,
           activeProfileLabel: explicitContext.effectiveProfile.label,
           panel: input.panel,
+          inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
           profiles: buildProfileNav({
             profiles: explicitContext.profiles,
             selectedProfileId: explicitContext.effectiveProfile.id,
@@ -1501,6 +1643,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             runId: input.runId,
             jobId: input.jobId,
             panel: input.panel,
+            inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
             objectiveProfileId: explicitContext.selectedObjective?.profileId,
           }),
           objectives: buildObjectiveNavCards(
@@ -1570,6 +1713,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: input.panel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       objectiveProfileId: selectedObjectiveCard?.profileId,
     });
     const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = buildObjectiveNavCards(
@@ -1584,6 +1728,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         activeProfileLabel: resolved.root.label,
         chatId: input.chatId,
         panel: input.panel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         profiles: profileNav,
         objectives: objectiveNav,
         showAll: input.showAll,
@@ -1595,16 +1740,32 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const buildMissingInspectorModel = (input: {
     readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
+    readonly activeProfileLabel?: string;
+    readonly activeProfilePrimaryRole?: string;
+    readonly activeProfileSummary?: string;
+    readonly activeProfileSoulSummary?: string;
+    readonly activeProfileProfileSummary?: string;
+    readonly activeProfileResponsibilities?: ReadonlyArray<string>;
+    readonly activeProfileSections?: ReturnType<typeof describeProfileMarkdown>["sections"];
     readonly objectiveId: string;
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): FactoryInspectorModel => ({
     mode: input.mode,
     panel: input.panel ?? "overview",
+    inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
     activeProfileId: input.activeProfileId,
+    activeProfileLabel: input.activeProfileLabel,
+    activeProfilePrimaryRole: input.activeProfilePrimaryRole,
+    activeProfileSummary: input.activeProfileSummary,
+    activeProfileSoulSummary: input.activeProfileSoulSummary,
+    activeProfileProfileSummary: input.activeProfileProfileSummary,
+    activeProfileResponsibilities: input.activeProfileResponsibilities,
+    activeProfileSections: input.activeProfileSections,
     objectiveId: input.objectiveId,
     runId: input.runId,
     jobId: input.jobId,
@@ -1628,6 +1789,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       readonly runId?: string;
       readonly jobId?: string;
       readonly panel?: FactoryInspectorPanel;
+      readonly inspectorTab?: FactoryInspectorTab;
       readonly focusKind?: "task" | "job";
       readonly focusId?: string;
       readonly objectiveProfileId?: string;
@@ -1646,6 +1808,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runId: preserveSelection ? input.runId : undefined,
         jobId: preserveSelection ? input.jobId : undefined,
         panel: preserveSelection ? input.panel : undefined,
+        inspectorTab: preserveSelection ? input.inspectorTab : undefined,
         focusKind: preserveSelection ? input.focusKind : undefined,
         focusId: preserveSelection ? input.focusId : undefined,
       }),
@@ -1657,16 +1820,32 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const buildUnselectedInspectorModel = (input: {
     readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
+    readonly activeProfileLabel?: string;
+    readonly activeProfilePrimaryRole?: string;
+    readonly activeProfileSummary?: string;
+    readonly activeProfileSoulSummary?: string;
+    readonly activeProfileProfileSummary?: string;
+    readonly activeProfileResponsibilities?: ReadonlyArray<string>;
+    readonly activeProfileSections?: ReturnType<typeof describeProfileMarkdown>["sections"];
     readonly chatId?: string;
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): FactoryInspectorModel => ({
     mode: input.mode,
     panel: input.panel ?? "overview",
+    inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
     activeProfileId: input.activeProfileId,
+    activeProfileLabel: input.activeProfileLabel,
+    activeProfilePrimaryRole: input.activeProfilePrimaryRole,
+    activeProfileSummary: input.activeProfileSummary,
+    activeProfileSoulSummary: input.activeProfileSoulSummary,
+    activeProfileProfileSummary: input.activeProfileProfileSummary,
+    activeProfileResponsibilities: input.activeProfileResponsibilities,
+    activeProfileSections: input.activeProfileSections,
     chatId: input.chatId,
     runId: input.runId,
     jobId: input.jobId,
@@ -1687,6 +1866,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly showAll?: boolean;
@@ -1701,6 +1881,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
     });
@@ -1712,12 +1893,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
       activeProfilePrimaryRole: activeProfileOverview.primaryRole,
       activeProfileRoles: activeProfileOverview.roles,
       activeProfileResponsibilities: activeProfileOverview.responsibilities,
       activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
       activeProfileSections: activeProfileOverview.sections,
       items: [],
     };
@@ -1727,6 +1911,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeProfileLabel: input.resolvedProfile.label,
       chatId: input.chatId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       profiles: profileNav,
       objectives: [],
       showAll: input.showAll,
@@ -1734,10 +1919,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const inspectorModel = buildUnselectedInspectorModel({
       mode: input.mode,
       activeProfileId: input.resolvedProfile.id,
+      activeProfileLabel: input.resolvedProfile.label,
+      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+      activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
+      activeProfileResponsibilities: activeProfileOverview.responsibilities,
+      activeProfileSections: activeProfileOverview.sections,
       chatId: input.chatId,
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
     });
@@ -1749,6 +1942,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
       chat: chatModel,
@@ -1766,6 +1960,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly showAll?: boolean;
@@ -1780,6 +1975,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
     });
@@ -1791,12 +1987,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
       activeProfilePrimaryRole: activeProfileOverview.primaryRole,
       activeProfileRoles: activeProfileOverview.roles,
       activeProfileResponsibilities: activeProfileOverview.responsibilities,
       activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
       activeProfileSections: activeProfileOverview.sections,
       items: [{
         key: `missing-objective-${input.objectiveId}`,
@@ -1811,6 +2010,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         activeProfileId: input.resolvedProfile.id,
         activeProfileLabel: input.resolvedProfile.label,
         panel: inspectorPanel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         profiles: profileNav,
         objectives: buildObjectiveNavCards(
           filterObjectivesByProfile(input.objectives, input.resolvedProfile.id),
@@ -1822,10 +2022,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     const inspectorModel = buildMissingInspectorModel({
       mode: input.mode,
       activeProfileId: input.resolvedProfile.id,
+      activeProfileLabel: input.resolvedProfile.label,
+      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+      activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
+      activeProfileResponsibilities: activeProfileOverview.responsibilities,
+      activeProfileSections: activeProfileOverview.sections,
       objectiveId: input.objectiveId,
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
     });
@@ -1837,6 +2045,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       runId: input.runId,
       jobId: input.jobId,
       panel: inspectorPanel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       focusKind: input.focusKind,
       focusId: input.focusId,
       chat: chatModel,
@@ -1853,6 +2062,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): Promise<FactoryInspectorModel> => {
@@ -1891,6 +2101,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runId: input.runId,
         jobId: input.jobId,
         panel,
+        inspectorTab: input.inspectorTab,
         focusKind: input.focusKind,
         focusId: input.focusId,
       });
@@ -1900,6 +2111,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       return {
         mode: input.mode,
         panel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
         objectiveId,
         runId: input.runId,
@@ -1927,6 +2139,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       return {
         mode: input.mode,
         panel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
         objectiveId,
         runId: input.runId,
@@ -2011,12 +2224,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeCodex,
       liveChildren: [],
     });
-    return {
-      mode: input.mode,
-      panel,
-      activeProfileId: effectiveProfile.id,
-      objectiveId,
-      runId: input.runId,
+      return {
+        mode: input.mode,
+        panel,
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
+        activeProfileId: effectiveProfile.id,
+        objectiveId,
+        runId: input.runId,
       jobId: input.jobId,
       focusKind: workbench?.focus?.focusKind,
       focusId: workbench?.focus?.focusId,
@@ -2042,6 +2256,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: string;
     readonly focusId?: string;
   }): Promise<FactoryInspectorTabsModel> => {
@@ -2056,6 +2271,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       return {
         mode: input.mode,
         panel: input.panel ?? "overview",
+        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: explicitContext.effectiveProfile.id,
         objectiveId: explicitObjectiveId,
         runId: input.runId,
@@ -2087,6 +2303,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       mode: input.mode,
       panel: input.panel ?? "overview",
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       activeProfileId: resolved.root.id,
       chatId: input.chatId,
       objectiveId: resolvedObjectiveId,
@@ -2105,6 +2322,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): Promise<FactoryInspectorModel> => {
@@ -2117,6 +2335,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runId: input.runId,
         jobId: input.jobId,
         panel: input.panel,
+        inspectorTab: input.inspectorTab,
         focusKind: input.focusKind,
         focusId: input.focusId,
       });
@@ -2267,6 +2486,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       mode: input.mode,
       panel,
+      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       activeProfileId: resolved.root.id,
       chatId: input.chatId,
       objectiveId: resolvedObjectiveId,
@@ -2293,6 +2513,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly showAll?: boolean;
@@ -2322,6 +2543,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly showAll?: boolean;
   }): Promise<{ readonly nav: FactoryNavModel; readonly selectedObjective?: FactorySelectedObjectiveCard }> => {
     const sessionVersion = await resolveSessionStreamVersion({
@@ -2349,6 +2571,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: string;
     readonly focusId?: string;
   }): Promise<FactoryInspectorTabsModel> => {
@@ -2377,6 +2600,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly runId?: string;
     readonly jobId?: string;
     readonly panel?: FactoryInspectorPanel;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): Promise<FactoryInspectorModel> => {
@@ -2407,6 +2631,29 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       return true;
     });
   };
+
+  const selectedObjectiveNavCard = (
+    objective: FactorySelectedObjectiveCard,
+  ): FactoryChatObjectiveNav => ({
+    objectiveId: objective.objectiveId,
+    profileId: objective.profileId,
+    profileLabel: objective.profileLabel,
+    title: objective.title,
+    status: objective.status,
+    phase: objective.phase,
+    displayState: objective.displayState,
+    blockedReason: objective.blockedReason,
+    blockedExplanation: objective.blockedExplanation,
+    summary: objective.bottomLine ?? objective.summary ?? objective.nextAction,
+    updatedAt: objective.updatedAt,
+    selected: true,
+    slotState: objective.slotState,
+    activeTaskCount: objective.activeTaskCount,
+    readyTaskCount: objective.readyTaskCount,
+    taskCount: objective.taskCount,
+    integrationStatus: objective.integrationStatus,
+    tokensUsed: objective.tokensUsed,
+  });
 
   const workbenchFilterCount = (
     board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
@@ -2439,8 +2686,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         return section === "queued";
       case "objective.completed":
         return section === "completed";
-      default:
-        return true;
     }
   };
 
@@ -2448,7 +2693,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
     selected: FactoryWorkbenchFilterKey,
   ): ReadonlyArray<FactoryWorkbenchFilterModel> => [
-    { key: "all", label: "All", count: workbenchFilterCount(board, "all"), selected: selected === "all" },
     { key: "objective.running", label: "In Progress", count: workbenchFilterCount(board, "objective.running"), selected: selected === "objective.running" },
     { key: "objective.needs_attention", label: "Blocked", count: workbenchFilterCount(board, "objective.needs_attention"), selected: selected === "objective.needs_attention" },
     { key: "objective.queued", label: "Queued", count: workbenchFilterCount(board, "objective.queued"), selected: selected === "objective.queued" },
@@ -2460,6 +2704,43 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly selectedObjective?: FactorySelectedObjectiveCard;
     readonly filter: FactoryWorkbenchFilterKey;
   }): ReadonlyArray<FactoryWorkbenchStatModel> => {
+    const objective = input.selectedObjective;
+    if (objective) {
+      const activeTaskCount = objective.activeTaskCount ?? 0;
+      const readyTaskCount = objective.readyTaskCount ?? 0;
+      const taskCount = objective.taskCount ?? activeTaskCount + readyTaskCount;
+      const sessions = objective.evidenceStats?.find((stat) => stat.key === "sessions")?.value
+        ?? String(activeTaskCount + readyTaskCount);
+      const tasks = objective.evidenceStats?.find((stat) => stat.key === "tasks")?.value
+        ?? `${activeTaskCount}/${taskCount}`;
+      const evidence = objective.evidenceStats?.find((stat) => stat.key === "evidence")?.value
+        ?? objective.evidenceStats?.find((stat) => stat.key === "artifacts")?.value
+        ?? "0";
+      const blockers = objective.evidenceStats?.find((stat) => stat.key === "blockers")?.value
+        ?? (objective.blockedReason ? "1" : "0");
+      return [
+        {
+          key: "tasks",
+          label: "Tasks",
+          value: tasks,
+        },
+        {
+          key: "sessions",
+          label: "Sessions",
+          value: sessions,
+        },
+        {
+          key: "evidence",
+          label: "Evidence",
+          value: evidence,
+        },
+        {
+          key: "blockers",
+          label: "Blockers",
+          value: blockers,
+        },
+      ];
+    }
     const filteredCount = workbenchFilterCount(input.board, input.filter);
     return [
       {
@@ -2480,9 +2761,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       {
         key: "tasks",
         label: "Selected Tasks",
-        value: input.selectedObjective
-          ? `${input.selectedObjective.activeTaskCount ?? 0}/${input.selectedObjective.taskCount ?? 0}`
-          : "0/0",
+        value: "0/0",
       },
     ];
   };
@@ -2496,6 +2775,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly pastObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
     readonly activeRun?: FactoryLiveRunCard;
     readonly workbench?: FactoryChatIslandModel["workbench"];
+    readonly detailTab: FactoryWorkbenchDetailTab;
     readonly filter: FactoryWorkbenchFilterKey;
   }): ReadonlyArray<FactoryWorkbenchBlockModel> => {
     const executionEscalationHint = (status?: string): string | undefined => {
@@ -2518,16 +2798,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       ?? selectedObjective?.blockedExplanation
       ?? selectedObjective?.summary
       ?? selectedObjective?.nextAction;
-    const liveSignal = staleFocusSummary
-      ? objectiveFallbackSummary ?? "Objective state changed. Review the latest receipts and queue status."
-      : focus?.summary
-      ?? focus?.lastMessage
-      ?? input.activeRun?.summary
-      ?? objectiveFallbackSummary
-      ?? "Choose an objective below or create one with /obj.";
-    const executionTelemetryHint = !staleFocusSummary && focus?.active
-      ? "Recent Activity shows live inner steps from the active task pass. The objective stays in progress until the task reports a result, blocks, or fails."
-      : undefined;
     const escalationHint = executionEscalationHint(focus?.status);
     const activityItems = (input.workbench?.activity ?? []).slice(0, 8).map((entry) => ({
       key: `${entry.kind}:${entry.at}:${entry.title}`,
@@ -2542,9 +2812,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       title: "Selected Objective",
       shape: "summary",
       empty: !selectedObjective,
+      eyebrow: selectedObjective?.displayState ? `State: ${selectedObjective.displayState}` : undefined,
       headline: selectedObjective?.title ?? "No objective selected.",
       message: selectedObjective
-        ? [liveSignal, executionTelemetryHint, escalationHint].filter(Boolean).join(" ")
+        ? selectedObjective.bottomLine
+          ?? selectedObjective.summary
+          ?? selectedObjective.nextAction
+          ?? "Review the selected objective, its lifecycle, and the latest evidence."
         : "Use chat to create a new objective or select one from the queue below.",
       tokenCount: typeof selectedObjective?.tokensUsed === "number"
         ? selectedObjective.tokensUsed.toLocaleString()
@@ -2554,11 +2828,26 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         selectedObjective,
         filter: input.filter,
       }),
+      objective: selectedObjective,
+      focus: focus
+        ? {
+            title: focus.title,
+            summary: focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
+            status: focus.status,
+            lastMessage: focus.lastMessage,
+            stdoutTail: focus.stdoutTail,
+            stderrTail: focus.stderrTail,
+          }
+        : undefined,
+      latestDecisionSummary: selectedObjective?.latestDecisionSummary,
+      latestDecisionAt: selectedObjective?.latestDecisionAt,
+      activityCount: selectedObjective?.timelineGroups?.reduce((sum, group) => sum + group.items.length, 0) ?? activityItems.length,
+      activityItems,
     };
-    const showBlocked = input.filter === "all" || input.filter === "objective.needs_attention";
-    const showRunning = input.filter === "all" || input.filter === "objective.running";
-    const showQueued = input.filter === "all" || input.filter === "objective.queued";
-    const showCompleted = input.filter === "all" || input.filter === "objective.completed";
+    const showBlocked = input.filter === "objective.needs_attention";
+    const showRunning = input.filter === "objective.running";
+    const showQueued = input.filter === "objective.queued";
+    const showCompleted = input.filter === "objective.completed";
 
     const objectiveSections: FactoryWorkbenchSectionModel[] = [
       ...(showBlocked ? [{
@@ -2592,14 +2881,30 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         items: input.queuedObjectives,
       }] : []),
     ];
-
-    const activitySection: FactoryWorkbenchActivitySectionModel = {
+    const selectedObjectiveSection = selectedObjective && ![
+      ...input.blockedObjectives,
+      ...input.runningObjectives,
+      ...input.queuedObjectives,
+      ...input.pastObjectives,
+    ].some((objective) => objective.objectiveId === selectedObjective.objectiveId)
+      ? {
+          key: "selected",
+          title: "Current selection",
+          shape: "objective-list" as const,
+          count: 1,
+          emptyMessage: "The selected objective will stay visible here when the current filter hides it.",
+          items: [selectedObjectiveNavCard(selectedObjective)],
+        }
+      : undefined;
+    const objectiveBlockSections = objectiveSections;
+    const activitySection: FactoryWorkbenchSectionModel = {
       key: "activity",
-      title: "Recent Activity",
+      title: focus || input.activeRun ? "Execution Log" : "Timeline",
       shape: "activity-list",
-      count: activityItems.length,
-      emptyMessage: "Recent receipts, supervisor decisions, and worker output will appear here.",
+      count: selectedObjective?.timelineGroups?.reduce((sum, group) => sum + group.items.length, 0) ?? activityItems.length,
+      emptyMessage: "Outcome, work performed, and raw receipts will appear here when the objective records evidence.",
       items: activityItems,
+      timelineGroups: selectedObjective?.timelineGroups,
       callout: escalationHint,
       focus: focus
         ? {
@@ -2608,6 +2913,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
               ? objectiveFallbackSummary ?? focus.summary ?? focus.lastMessage ?? "Objective state changed."
               : focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
             status: focus.status,
+            lastMessage: focus.lastMessage,
+            stdoutTail: focus.stdoutTail,
+            stderrTail: focus.stderrTail,
           }
         : undefined,
       run: input.activeRun,
@@ -2619,19 +2927,29 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       sections: [summarySection],
     }];
 
-    if (objectiveSections.length > 0) {
+    if ((selectedObjective?.timelineGroups?.length ?? 0) > 0 || focus || input.activeRun || activityItems.length > 0) {
       blocks.push({
-        key: "objectives",
+        key: "activity",
         layout: "full",
-        sections: objectiveSections,
+        sections: [activitySection],
       });
     }
 
-    blocks.push({
-      key: "activity",
-      layout: "full",
-      sections: [activitySection],
-    });
+    if (selectedObjectiveSection) {
+      blocks.push({
+        key: "selected-overflow",
+        layout: "full",
+        sections: [selectedObjectiveSection],
+      });
+    }
+
+    if (objectiveBlockSections.length > 0) {
+      blocks.push({
+        key: "objectives",
+        layout: "full",
+        sections: objectiveBlockSections,
+      });
+    }
 
     if (showCompleted) {
       blocks.push({
@@ -2655,7 +2973,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const buildWorkbenchWorkspaceModel = async (input: {
     readonly profileId?: string;
+    readonly chatId?: string;
     readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
@@ -2718,7 +3039,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
       liveOutput,
     });
-    const activeCodex = recentJobs.length > 0 ? buildActiveCodexCard(recentJobs) : undefined;
+    const sessionRuntime = await buildWorkbenchSessionRuntime({
+      repoRoot,
+      profileId: effectiveProfile.id,
+      profileLabel: effectiveProfile.label,
+      chatId: input.chatId,
+      objectiveId: resolvedObjectiveId,
+      seedJobs: recentJobs,
+    });
+    const activeCodex = sessionRuntime.activeCodex ?? (recentJobs.length > 0 ? buildActiveCodexCard(recentJobs) : undefined);
     const filters = workbenchFilterModels(board, input.filter);
     const blockedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "needs_attention")
@@ -2745,18 +3074,21 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         ? buildObjectiveNavCards(board.sections.completed, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
+    const detailTab = normalizedWorkbenchDetailTab(input.detailTab, Boolean(selectedObjective));
     return {
       activeProfileId: effectiveProfile.id,
       activeProfileLabel: effectiveProfile.label,
       objectiveId: resolvedObjectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      detailTab,
       focusKind: workbench?.focus?.focusKind,
       focusId: workbench?.focus?.focusId,
       filter: input.filter,
       filters,
       selectedObjective,
       activeCodex,
-      liveChildren: [],
-      activeRun: undefined,
+      liveChildren: sessionRuntime.liveChildren,
+      activeRun: sessionRuntime.activeRun,
       workbench,
       board,
       activeObjectives,
@@ -2768,8 +3100,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         runningObjectives,
         queuedObjectives,
         pastObjectives,
-        activeRun: undefined,
+        activeRun: sessionRuntime.activeRun,
         workbench,
+        detailTab,
         filter: input.filter,
       }),
     };
@@ -2778,6 +3111,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const buildWorkbenchChatModel = async (input: {
     readonly profileId: string;
     readonly chatId: string;
+    readonly inspectorTab?: FactoryInspectorTab;
     readonly selectedObjectiveId?: string;
   }): Promise<FactoryChatIslandModel> => {
     await service.ensureBootstrap();
@@ -2788,38 +3122,40 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       requestedId: input.profileId,
     });
     const activeProfileOverview = describeProfileMarkdown(resolved.root);
-    const stream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
-    const indexChain = await agentRuntime.chain(stream);
-    const runIds = collectRunIds(indexChain);
-    const jobs = runIds.length > 0 ? await loadRecentJobs(80) : [];
-    const scopedJobs = jobs
-      .filter((job) => asString(job.payload.chatId) === input.chatId || isRelevantShellJob(job, stream))
-      .slice(0, 24);
-    const jobsById = new Map(scopedJobs.map((job) => [job.id, job] as const));
-    const runChains = await Promise.all(
-      runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))),
-    );
-    const discoveredObjectiveId = latestObjectiveIdFromRunChains(runChains)
-      ?? latestObjectiveIdFromJobs(scopedJobs, stream, input.chatId);
+    const runtime = await buildWorkbenchSessionRuntime({
+      repoRoot,
+      profileId: resolved.root.id,
+      profileLabel: resolved.root.label,
+      chatId: input.chatId,
+      objectiveId: input.selectedObjectiveId,
+    });
+    const jobsById = new Map(runtime.scopedJobs.map((job) => [job.id, job] as const));
+    const discoveredObjectiveId = latestObjectiveIdFromRunChains(runtime.runChains)
+      ?? (runtime.stream
+        ? latestObjectiveIdFromJobs(runtime.scopedJobs, runtime.stream, input.chatId)
+        : undefined);
     return {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
       chatId: input.chatId,
       objectiveId: input.selectedObjectiveId ?? discoveredObjectiveId,
-      runId: runIds.at(-1),
-      knownRunIds: runIds,
-      terminalRunIds: collectTerminalRunIds(runIds, runChains),
+      runId: runtime.activeRunId,
+      knownRunIds: runtime.runIds,
+      terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       activeProfilePrimaryRole: activeProfileOverview.primaryRole,
       activeProfileRoles: activeProfileOverview.roles,
       activeProfileResponsibilities: activeProfileOverview.responsibilities,
       activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
       activeProfileSections: activeProfileOverview.sections,
       activeProfileTools: resolved.toolAllowlist,
-      activeCodex: buildActiveCodexCard(scopedJobs),
-      liveChildren: buildLiveChildCards(scopedJobs, stream, input.selectedObjectiveId ?? discoveredObjectiveId),
-      activeRun: undefined,
+      activeCodex: runtime.activeCodex,
+      liveChildren: runtime.liveChildren,
+      activeRun: runtime.activeRun,
       jobs: [],
-      items: runChains.flatMap((runChain, index) => buildChatItemsForRun(runIds[index]!, runChain, jobsById)),
+      items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
     };
   };
 
@@ -2827,13 +3163,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly profileId?: string;
     readonly chatId: string;
     readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
   }): Promise<FactoryWorkbenchPageModel> => {
     const workspace = await buildWorkbenchWorkspaceModel({
       profileId: input.profileId,
+      chatId: input.chatId,
       objectiveId: input.objectiveId,
+      inspectorTab: input.inspectorTab,
+      detailTab: input.detailTab,
       focusKind: input.focusKind,
       focusId: input.focusId,
       filter: input.filter,
@@ -2843,17 +3184,28 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       chatId: input.chatId,
       objective: workspace.selectedObjective,
     });
-    const [baseChat, profiles] = await Promise.all([
+    const [baseChat, inspector, profiles] = await Promise.all([
       buildWorkbenchChatModel({
         profileId: workspace.activeProfileId,
         chatId: input.chatId,
+        inspectorTab: input.inspectorTab,
         selectedObjectiveId: workspace.objectiveId,
+      }),
+      buildInspectorModelCached({
+        mode: "default",
+        profileId: workspace.activeProfileId,
+        chatId: input.chatId,
+        objectiveId: workspace.objectiveId,
+        inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+        focusKind: workspace.focusKind,
+        focusId: workspace.focusId,
       }),
       loadFactoryProfiles(),
     ]);
     const chat: FactoryChatIslandModel = {
       ...baseChat,
       objectiveId: workspace.objectiveId ?? baseChat.objectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       selectedThread: workspace.selectedObjective ?? baseChat.selectedThread,
       activeCodex: workspace.activeCodex ?? baseChat.activeCodex,
       liveChildren: workspace.liveChildren ?? baseChat.liveChildren,
@@ -2865,6 +3217,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       activeProfileLabel: workspace.activeProfileLabel,
       chatId: input.chatId,
       objectiveId: workspace.objectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      detailTab: workspace.detailTab,
       focusKind: workspace.focusKind,
       focusId: workspace.focusId,
       filter: workspace.filter,
@@ -2875,6 +3229,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: profile.id,
           chatId: input.chatId,
           objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
+          inspectorTab: workspace.selectedObjective?.profileId === profile.id
+            ? normalizedWorkbenchInspectorTab(input.inspectorTab)
+            : undefined,
+          detailTab: workspace.detailTab,
           focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
           focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
           filter: workspace.filter,
@@ -2884,6 +3242,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       })),
       workspace,
       chat,
+      inspector,
     };
   };
 
@@ -2891,6 +3250,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly profileId?: string;
     readonly chatId: string;
     readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
@@ -2916,6 +3277,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     readonly profileId: string;
     readonly chatId: string;
     readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter?: FactoryWorkbenchFilterKey;
@@ -2924,7 +3287,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     params.set("profile", input.profileId);
     params.set("chat", input.chatId);
     if (input.objectiveId) params.set("objective", input.objectiveId);
-    if (input.filter && input.filter !== "all") params.set("filter", input.filter);
+    if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
+    if (input.detailTab && input.detailTab !== "action") params.set("detailTab", input.detailTab);
+    if (input.filter && input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
     if (input.focusKind && input.focusId) {
       params.set("focusKind", input.focusKind);
       params.set("focusId", input.focusId);
@@ -3063,6 +3428,11 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
           const requestedChat = requestedChatId(c.req.raw) ?? makeFactoryChatId();
           const requestedObjective = requestedObjectiveId(c.req.raw);
+          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
+          const requestedDetail = normalizedWorkbenchDetailTab(
+            requestedWorkbenchDetailTab(c.req.raw),
+            Boolean(requestedObjective),
+          );
           const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
           const requestedFocusIdValue = requestedFocusId(c.req.raw);
           const requestedFilter = requestedWorkbenchFilter(c.req.raw);
@@ -3070,6 +3440,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileId: requestedProfile,
             chatId: requestedChat,
             objectiveId: requestedObjective,
+            inspectorTab: requestedInspector,
+            detailTab: requestedDetail,
             focusKind: requestedFocusKindValue,
             focusId: requestedFocusIdValue,
             filter: requestedFilter,
@@ -3079,6 +3451,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
               profileId: model.activeProfileId,
               chatId: requestedChat,
               objectiveId: model.objectiveId ?? requestedObjective,
+              inspectorTab: model.inspectorTab,
+              detailTab: model.detailTab,
               filter: model.filter,
               focusKind: model.focusKind,
               focusId: model.focusId,
@@ -3104,6 +3478,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const profileId = requestedProfileId(req) ?? "generalist";
           const chatId = requestedChatId(req) ?? makeFactoryChatId();
           const objectiveId = requestedObjectiveId(req);
+          const inspectorTab = normalizedWorkbenchInspectorTab(requestedInspectorTab(req));
+          const detailTab = normalizedWorkbenchDetailTab(requestedWorkbenchDetailTab(req), Boolean(objectiveId));
           const focusKind = normalizeFocusKind(requestedFocusKind(req));
           const focusId = requestedFocusId(req);
           const filter = requestedWorkbenchFilter(req);
@@ -3123,21 +3499,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId,
-                  filter,
-                  focusKind,
-                  focusId,
-                }), {
-                  chatId,
-                  objectiveId,
-                  focusKind,
-                  focusId,
-                });
-              case "analyze":
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before opening its analysis.");
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                   focusKind,
                   focusId,
@@ -3158,6 +3521,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: nextObjectiveId,
+                  inspectorTab,
+                  detailTab: "action",
                   filter,
                 }), {
                   chatId,
@@ -3182,6 +3547,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: created.objectiveId,
+                  inspectorTab,
+                  detailTab: "action",
                   filter,
                 }), {
                   chatId,
@@ -3196,6 +3563,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: detail.objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                 }), {
                   chatId,
@@ -3210,6 +3579,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: detail.objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                 }), {
                   chatId,
@@ -3224,6 +3595,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: detail.objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                 }), {
                   chatId,
@@ -3238,6 +3611,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: detail.objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                 }), {
                   chatId,
@@ -3252,6 +3627,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: detail.objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                 }), {
                   chatId,
@@ -3269,6 +3646,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                   profileId,
                   chatId,
                   objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
+                  inspectorTab,
+                  detailTab,
                   filter,
                   focusKind: "job",
                   focusId: queued.job.id,
@@ -3297,6 +3676,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
               problem: prompt,
               profileId: resolved.root.id,
               chatId,
+              ...(objectiveId ? { objectiveId } : {}),
             },
           });
           ctx.sse.publish("jobs", created.id);
@@ -3304,6 +3684,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileId,
             chatId,
             objectiveId,
+            inspectorTab,
+            detailTab,
             filter,
             focusKind,
             focusId,
@@ -3355,10 +3737,13 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       app.get("/factory/background/events", async (c) => wrap(
         async () => {
           const chatId = requestedChatId(c.req.raw) ?? makeFactoryChatId();
+          const inspectorTab = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
           const model = await buildWorkbenchPageModelCached({
             profileId: requestedProfileId(c.req.raw) ?? "generalist",
             chatId,
             objectiveId: requestedObjectiveId(c.req.raw),
+            inspectorTab,
+            detailTab: requestedWorkbenchDetailTab(c.req.raw),
             focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
             focusId: requestedFocusId(c.req.raw),
             filter: requestedWorkbenchFilter(c.req.raw),
@@ -3379,6 +3764,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
           chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
           objectiveId: requestedObjectiveId(c.req.raw),
+          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+          detailTab: requestedWorkbenchDetailTab(c.req.raw),
           focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
           focusId: requestedFocusId(c.req.raw),
           filter: requestedWorkbenchFilter(c.req.raw),
@@ -3392,6 +3779,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileId: requestedProfileId(c.req.raw) ?? "generalist",
             chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
             objectiveId: requestedObjectiveId(c.req.raw),
+            inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+            detailTab: requestedWorkbenchDetailTab(c.req.raw),
             focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
             focusId: requestedFocusId(c.req.raw),
             filter: requestedWorkbenchFilter(c.req.raw),
@@ -3406,6 +3795,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: model.activeProfileId,
           chatId: model.chatId,
           objectiveId: model.objectiveId,
+          inspectorTab: model.inspectorTab,
+          detailTab: model.detailTab,
           focusKind: model.focusKind,
           focusId: model.focusId,
           filter: model.filter,
@@ -3417,6 +3808,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
           chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
           objectiveId: requestedObjectiveId(c.req.raw),
+          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+          detailTab: requestedWorkbenchDetailTab(c.req.raw),
           focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
           focusId: requestedFocusId(c.req.raw),
           filter: requestedWorkbenchFilter(c.req.raw),
@@ -3425,6 +3818,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: model.activeProfileId,
           chatId: model.chatId,
           objectiveId: model.objectiveId,
+          inspectorTab: model.inspectorTab,
+          detailTab: model.detailTab,
           focusKind: model.focusKind,
           focusId: model.focusId,
           filter: model.filter,
@@ -3436,6 +3831,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
           chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
           objectiveId: requestedObjectiveId(c.req.raw),
+          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+          detailTab: requestedWorkbenchDetailTab(c.req.raw),
           focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
           focusId: requestedFocusId(c.req.raw),
           filter: requestedWorkbenchFilter(c.req.raw),
@@ -3444,6 +3841,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           profileId: model.activeProfileId,
           chatId: model.chatId,
           objectiveId: model.objectiveId,
+          inspectorTab: model.inspectorTab,
+          detailTab: model.detailTab,
           focusKind: model.focusKind,
           focusId: model.focusId,
           filter: model.filter,
@@ -3456,6 +3855,11 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const requestedChat = requestedChatId(c.req.raw) ?? makeFactoryChatId();
           const requestedObjective = requestedObjectiveId(c.req.raw);
           const requestedObjectiveAlias = requestedObjectiveAliasId(c.req.raw);
+          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
+          const requestedDetail = normalizedWorkbenchDetailTab(
+            requestedWorkbenchDetailTab(c.req.raw),
+            Boolean(requestedObjective),
+          );
           const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
           const requestedFocusIdValue = requestedFocusId(c.req.raw);
           const requestedFilter = requestedWorkbenchFilter(c.req.raw);
@@ -3463,6 +3867,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             profileId: requestedProfile,
             chatId: requestedChat,
             objectiveId: requestedObjective,
+            inspectorTab: requestedInspector,
+            detailTab: requestedDetail,
             focusKind: requestedFocusKindValue,
             focusId: requestedFocusIdValue,
             filter: requestedFilter,
@@ -3480,6 +3886,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             requestedFocusKindValue !== model.focusKind
             || requestedFocusIdValue !== model.focusId
           );
+          const shouldRedirectForInspector = requestedInspector !== model.inspectorTab;
+          const shouldRedirectForDetail = requestedDetail !== model.detailTab;
           const shouldRedirectForFilter = requestedFilter !== model.filter;
           const snapshot = buildFactoryWorkbenchShellSnapshot(model);
           return {
@@ -3487,6 +3895,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
               shouldRedirectForProfile
               || shouldRedirectForObjective
               || shouldRedirectForObjectiveAlias
+              || shouldRedirectForInspector
+              || shouldRedirectForDetail
               || shouldRedirectForFocus
               || shouldRedirectForFilter
             )
@@ -3496,6 +3906,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                     profileId: model.activeProfileId,
                     chatId: requestedChat,
                     objectiveId: model.objectiveId,
+                    inspectorTab: model.inspectorTab,
+                    detailTab: model.detailTab,
                     focusKind: model.focusKind,
                     focusId: model.focusId,
                     filter: model.filter,
@@ -3513,33 +3925,21 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const explicitChat = requestedChatId(c.req.raw);
           const requestedChat = explicitChat ?? makeFactoryChatId();
           const requestedObjective = requestedObjectiveId(c.req.raw);
+          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
+          const requestedDetail = normalizedWorkbenchDetailTab(
+            requestedWorkbenchDetailTab(c.req.raw),
+            Boolean(requestedObjective),
+          );
           const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
           const requestedFocusIdValue = requestedFocusId(c.req.raw);
           const requestedFilter = requestedWorkbenchFilter(c.req.raw);
-          const canDeferWorkbenchProjection = (
-            explicitChat === undefined
-            && !requestedObjective
-            && requestedFocusKindValue === undefined
-            && requestedFocusIdValue === undefined
-            && requestedFilter === "all"
-          );
-          if (canDeferWorkbenchProjection) {
-            return {
-              routeContext: {
-                profileId: requestedProfile,
-                chatId: requestedChat,
-                objectiveId: requestedObjective,
-                focusKind: requestedFocusKindValue,
-                focusId: requestedFocusIdValue,
-                filter: requestedFilter,
-              },
-            };
-          }
           const requestedObjectiveAlias = requestedObjectiveAliasId(c.req.raw);
           const model = await buildWorkbenchPageModelCached({
             profileId: requestedProfile,
             chatId: requestedChat,
             objectiveId: requestedObjective,
+            inspectorTab: requestedInspector,
+            detailTab: requestedDetail,
             focusKind: requestedFocusKindValue,
             focusId: requestedFocusIdValue,
             filter: requestedFilter,
@@ -3557,11 +3957,15 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             requestedFocusKindValue !== model.focusKind
             || requestedFocusIdValue !== model.focusId
           );
+          const shouldRedirectForInspector = requestedInspector !== model.inspectorTab;
+          const shouldRedirectForDetail = requestedDetail !== model.detailTab;
           const shouldRedirectForFilter = requestedFilter !== model.filter;
           if (
             shouldRedirectForProfile
             || shouldRedirectForObjective
             || shouldRedirectForObjectiveAlias
+            || shouldRedirectForInspector
+            || shouldRedirectForDetail
             || shouldRedirectForFocus
             || shouldRedirectForFilter
           ) {
@@ -3570,6 +3974,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                 profileId: model.activeProfileId,
                 chatId: requestedChat,
                 objectiveId: model.objectiveId,
+                inspectorTab: model.inspectorTab,
+                detailTab: model.detailTab,
                 focusKind: model.focusKind,
                 focusId: model.focusId,
                 filter: model.filter,
@@ -3588,8 +3994,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
                 "Cache-Control": "no-store",
               },
             })
-          : "routeContext" in result && result.routeContext
-          ? html(factoryWorkbenchScaffold(result.routeContext))
           : html(factoryWorkbenchShell(result.model))
       ));
 
@@ -3597,6 +4001,8 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         async () => buildWorkbenchLink({
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
           chatId: makeFactoryChatId(),
+          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+          detailTab: requestedWorkbenchDetailTab(c.req.raw) ?? "queue",
           filter: requestedWorkbenchFilter(c.req.raw),
         }),
         (location) => new Response(null, {

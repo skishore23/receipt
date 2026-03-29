@@ -247,6 +247,45 @@ test("hub git promotes disjoint worktree commits into a dirty source repo", asyn
   expect(status.changedFiles).toContain("LOCAL_NOTES.md");
 });
 
+test("hub git repairs orphaned worktree directories whose admin metadata was pruned", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-orphan-source");
+  const dataDir = await mkTmp("receipt-hub-git-orphan-data");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git orphan test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  const workspace = await hub.createWorkspace({
+    workspaceId: "orphaned-worktree",
+    agentId: "codex",
+  });
+  const adminDir = path.join(dataDir, "hub", "repo.git", "worktrees", workspace.workspaceId);
+  await fs.rm(adminDir, { recursive: true, force: true });
+
+  await expect(hub.worktreeStatus(workspace.path)).resolves.toEqual({ exists: false, dirty: false });
+
+  const restored = await hub.restoreWorkspace({
+    workspaceId: workspace.workspaceId,
+    branchName: workspace.branchName,
+    workspacePath: workspace.path,
+    baseHash: workspace.baseHash,
+  });
+
+  expect(restored.path).toBe(workspace.path);
+  await expect(git(restored.path, ["rev-parse", "--abbrev-ref", "HEAD"])).resolves.toBe(workspace.branchName);
+  await expect(hub.worktreeStatus(restored.path)).resolves.toMatchObject({
+    exists: true,
+    branch: workspace.branchName,
+  });
+});
+
 test("hub git still blocks promotion when dirty source changes overlap promoted files", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-overlap-source");
   const dataDir = await mkTmp("receipt-hub-git-overlap-data");

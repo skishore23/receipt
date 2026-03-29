@@ -1,0 +1,17 @@
+{
+  "id": "aws_ec2_compute_cost_spike",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["cost", "billing", "ec2", "cost-explorer", "daily", "spike", "investigation"],
+  "description": "Investigate EC2 Compute cost spikes using Cost Explorer daily granularity and dimension breakdowns.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile.",
+    "Uses Cost Explorer daily granularity for a 90-day lookback plus month-to-date."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --lookback-days 90 --output-dir .receipt/factory/evidence"
+  ]
+}

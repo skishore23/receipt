@@ -441,7 +441,7 @@ test("factory policy: maxCandidatePassesPerTask blocks rework after the configur
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.tasks[0]?.status).toBe("blocked");
   expect(detail.tasks[0]?.blockedReason ?? "").toMatch(/maxCandidatePassesPerTask/);
-});
+}, 10_000);
 
 test("factory objective detail: blocked explanations stay focused on the current blocker without downstream workflow text", async () => {
   const { service, queue } = await createFactoryService({

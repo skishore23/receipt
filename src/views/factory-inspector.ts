@@ -19,14 +19,17 @@ import {
   shortHash,
   softPanelClass,
   statPill,
+  truncate,
 } from "./ui";
 import { renderFactoryRunSteps } from "./factory-live-steps";
 import type {
   FactoryInspectorModel,
   FactoryInspectorRouteModel,
+  FactoryInspectorTab,
   FactoryInspectorTabsModel,
   FactoryViewMode,
 } from "./factory-models";
+import { buildEngineerPerspectiveOverview } from "./factory/supervision";
 
 const formatBytes = (bytes: number | undefined): string => {
   if (!Number.isFinite(bytes) || !bytes || bytes < 1024) return `${Math.max(0, Math.floor(bytes ?? 0))} B`;
@@ -41,14 +44,14 @@ const analysisSeverityClass = (severity: "high" | "medium" | "low"): string =>
       ? "border-warning/30 bg-warning/10 text-warning"
       : "border-info/30 bg-info/10 text-info";
 
-const renderTokenUsageHero = (tokensUsed: number): string => `<div class="rounded-2xl border border-info/25 bg-info/10 px-4 py-3">
+const renderTokenUsageHero = (tokensUsed: number): string => `<div class="border border-info/25 bg-info/10 px-4 py-3">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-info">Codex Token Usage</div>
       <div class="mt-2 text-2xl font-semibold leading-none tracking-tight text-foreground">${esc(tokensUsed.toLocaleString())}</div>
       <div class="mt-2 text-[11px] text-muted-foreground">Rolled up from recorded candidate executions</div>
     </div>
-    <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-info/20 bg-background/70 text-info">
+    <span class="flex h-11 w-11 shrink-0 items-center justify-center border border-info/20 bg-background/70 text-info">
       ${iconTokens("h-5 w-5")}
     </span>
   </div>
@@ -64,7 +67,8 @@ type FactoryInspectorIslandOptions = {
 };
 
 const inspectorQuery = (model: FactoryInspectorRouteModel, extra?: {
-  readonly panel?: FactoryInspectorRouteModel["panel"];
+  readonly panel?: FactoryInspectorRouteModel["panel"] | null;
+  readonly inspectorTab?: FactoryInspectorTab;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly jobId?: string;
@@ -76,11 +80,64 @@ const inspectorQuery = (model: FactoryInspectorRouteModel, extra?: {
   if (model.objectiveId) params.set("thread", model.objectiveId);
   if (model.runId) params.set("run", model.runId);
   if (extra?.jobId ?? model.jobId) params.set("job", extra?.jobId ?? model.jobId!);
-  if (extra?.panel ?? model.panel) params.set("panel", extra?.panel ?? model.panel);
+  const panel = extra?.panel === null ? undefined : (extra?.panel ?? model.panel);
+  if (panel) params.set("panel", panel);
+  const inspectorTab = extra?.inspectorTab ?? model.inspectorTab;
+  if (inspectorTab && inspectorTab !== "overview") params.set("inspectorTab", inspectorTab);
   if (extra?.focusKind ?? model.focusKind) params.set("focusKind", extra?.focusKind ?? model.focusKind!);
   if (extra?.focusId ?? model.focusId) params.set("focusId", extra?.focusId ?? model.focusId!);
   const query = params.toString();
   return query ? `?${query}` : "";
+};
+
+const normalizedDefaultInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
+  value === "notes" ? "notes" : "overview";
+
+const renderInspectorActionButton = (
+  label: string,
+  command: string | undefined,
+  tone: "primary" | "secondary" | "danger" = "secondary",
+  href?: string,
+): string => {
+  const className = tone === "primary"
+    ? "inline-flex items-center justify-center border border-primary bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"
+    : tone === "danger"
+      ? `${dangerButtonClass} !px-3 !py-2 !text-sm`
+      : `${ghostButtonClass} !px-3 !py-2 !text-sm`;
+  if (href) {
+    return `<button type="button" data-factory-href="${esc(href)}" class="${className}">${esc(label)}</button>`;
+  }
+  const onclick = command
+    ? `document.getElementById('factory-prompt').value = '${command}'; document.getElementById('factory-prompt').focus();`
+    : "document.getElementById('factory-prompt')?.focus();";
+  return `<button type="button" onclick="${onclick}" class="${className}">${esc(label)}</button>`;
+};
+
+const renderInspectorActionSet = (
+  model: FactoryInspectorModel,
+  objective: FactoryInspectorModel["selectedObjective"] | undefined,
+): string => {
+  const focusHref = `/factory${inspectorQuery(model, { panel: null, inspectorTab: "chat" })}`;
+  const primary = objective?.primaryAction
+    ? renderInspectorActionButton(
+      objective.primaryAction.label,
+      objective.primaryAction.command,
+      "primary",
+      objective.primaryAction.focusOnly ? focusHref : undefined,
+    )
+    : renderInspectorActionButton("Message engineer", undefined, "primary", focusHref);
+  const secondary = (objective?.secondaryActions ?? [])
+    .map((action) => renderInspectorActionButton(
+      action.label,
+      action.command,
+      action.tone === "danger" ? "danger" : "secondary",
+      action.focusOnly ? focusHref : undefined,
+    ))
+    .join("");
+  return `<div class="mt-4 space-y-2">
+    <div class="flex flex-wrap gap-2">${primary}</div>
+    ${secondary ? `<div class="flex flex-wrap gap-2">${secondary}</div>` : ""}
+  </div>`;
 };
 
 const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
@@ -96,10 +153,10 @@ const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
     ["Last Message", task.lastMessagePath],
   ].flatMap(([label, value]) => value ? [[label, value] as const] : []);
   const packetFiles = artifacts.length > 0
-    ? `<details class="rounded-lg border border-border bg-muted px-2.5 py-2">
+    ? `<details class="border border-border bg-muted px-2.5 py-2">
     <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Packet Files</summary>
     <div class="mt-2 space-y-2">
-      ${artifacts.map(([label, value]) => `<div class="rounded-md border border-border bg-background px-2 py-1.5">
+      ${artifacts.map(([label, value]) => `<div class="border border-border bg-background px-2 py-1.5">
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(label)}</div>
         <code class="mt-1 block text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(value)}</code>
       </div>`).join("")}
@@ -107,10 +164,10 @@ const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
   </details>`
     : "";
   const extraArtifacts = task.artifactActivity?.length
-    ? `<details class="rounded-lg border border-border bg-muted px-2.5 py-2">
+    ? `<details class="border border-border bg-muted px-2.5 py-2">
     <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Task Artifacts</summary>
     <div class="mt-2 space-y-2">
-      ${task.artifactActivity.map((artifact) => `<div class="rounded-md border border-border bg-background px-2 py-1.5">
+      ${task.artifactActivity.map((artifact) => `<div class="border border-border bg-background px-2 py-1.5">
         <div class="flex items-center justify-between gap-2">
           <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(artifact.label)}</div>
           <div class="text-[10px] text-muted-foreground">${esc(formatBytes(artifact.bytes))}</div>
@@ -131,8 +188,8 @@ const renderInspectorRailSummary = (model: FactoryInspectorModel): string => {
   const receiptsHref = `/factory${inspectorQuery(model, { panel: "receipts" })}`;
   const receiptsActive = model.panel === "receipts";
   const receiptsCtaClass = receiptsActive
-    ? "inline-flex items-center justify-center rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-primary"
-    : "inline-flex items-center justify-center rounded-full border border-border bg-muted px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground transition hover:bg-accent hover:text-foreground";
+    ? "inline-flex items-center justify-center border border-primary/20 bg-primary/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-primary"
+    : "inline-flex items-center justify-center border border-border bg-muted px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground transition hover:bg-accent hover:text-foreground";
   return `<div class="space-y-3 border-b border-border px-3 py-3 md:px-3.5">
     ${typeof objective.tokensUsed === "number" ? renderTokenUsageHero(objective.tokensUsed) : ""}
     <div class="${softPanelClass} px-3 py-2.5">
@@ -226,9 +283,9 @@ const renderFocusedOutput = (model: FactoryInspectorModel, heading: string): str
       </div>
       ${focus.summary ? `<div class="text-xs text-foreground">${esc(focus.summary)}</div>` : ''}
       ${focus.artifactSummary ? `<div class="text-[11px] text-muted-foreground">${esc(focus.artifactSummary)}</div>` : ''}
-      ${focus.lastMessage ? `<pre class="mt-1 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(focus.lastMessage)}</pre>` : ''}
-      ${focus.stdoutTail ? `<pre class="mt-1 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(focus.stdoutTail)}</pre>` : ''}
-      ${focus.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto">${esc(focus.stderrTail)}</pre>` : ''}
+      ${focus.lastMessage ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(focus.lastMessage, 800))}</pre>` : ''}
+      ${focus.stdoutTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(focus.stdoutTail, 800))}</pre>` : ''}
+      ${focus.stderrTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive">${esc(truncate(focus.stderrTail, 800))}</pre>` : ''}
     </div>
     ${renderFocusedArtifacts(model)}
   </div>`;
@@ -239,13 +296,13 @@ const renderChatContextDebug = (model: FactoryInspectorModel): string => {
   if (!chatContext) return "";
   const importSections = [
     chatContext.imports.profileMemorySummary
-      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+      ? `<div class="border border-border bg-background px-2.5 py-2">
           <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Profile Memory</div>
           <div class="mt-1 text-[11px] leading-5 text-foreground">${esc(chatContext.imports.profileMemorySummary)}</div>
         </div>`
       : "",
     chatContext.imports.objective
-      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+      ? `<div class="border border-border bg-background px-2.5 py-2">
           <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Objective Import</div>
           <div class="mt-1 text-[11px] leading-5 text-foreground">${esc([
             chatContext.imports.objective.title || chatContext.imports.objective.objectiveId,
@@ -255,7 +312,7 @@ const renderChatContextDebug = (model: FactoryInspectorModel): string => {
         </div>`
       : "",
     chatContext.imports.runtime
-      ? `<div class="rounded-md border border-border bg-background px-2.5 py-2">
+      ? `<div class="border border-border bg-background px-2.5 py-2">
           <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Runtime Import</div>
           <div class="mt-1 text-[11px] leading-5 text-foreground">${esc(chatContext.imports.runtime.summary)}</div>
         </div>`
@@ -277,7 +334,7 @@ const renderChatContextDebug = (model: FactoryInspectorModel): string => {
     </summary>
     <div class="mt-3 space-y-2">
       ${importSections}
-      <div class="rounded-md border border-border bg-background px-2.5 py-2">
+      <div class="border border-border bg-background px-2.5 py-2">
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Source Refs</div>
         <div class="mt-2 space-y-1">
           ${chatContext.source.receiptRefs.slice(0, 10).map((ref) => `<div class="text-[10px] text-muted-foreground">
@@ -289,6 +346,94 @@ const renderChatContextDebug = (model: FactoryInspectorModel): string => {
       </div>
     </div>
   </details>`;
+};
+
+const renderEmployeeOverviewPanel = (model: FactoryInspectorModel): string => {
+  if (model.objectiveMissing) return renderMissingObjectivePanel(model);
+  const objective = model.selectedObjective;
+  const status = objective?.displayState ?? objective?.status ?? "Available";
+  const perspective = buildEngineerPerspectiveOverview({
+    engineerLabel: model.activeProfileLabel ?? "Engineer",
+    role: model.activeProfilePrimaryRole,
+    status,
+    load: objective ? `${objective.reviewStatus ?? "active"} objective context` : "no active objective",
+    objective,
+  });
+  const reviewLinks = objective ? [
+    `<a href="/factory${inspectorQuery(model, { panel: "analysis", inspectorTab: "overview" })}" class="text-[11px] font-medium text-primary hover:underline">Analysis</a>`,
+    `<a href="/factory${inspectorQuery(model, { panel: "execution", inspectorTab: "overview" })}" class="text-[11px] font-medium text-primary hover:underline">Tasks</a>`,
+    `<a href="/factory${inspectorQuery(model, { panel: "live", inspectorTab: "overview" })}" class="text-[11px] font-medium text-primary hover:underline">Live output</a>`,
+    `<a href="/factory${inspectorQuery(model, { panel: "receipts", inspectorTab: "overview" })}" class="text-[11px] font-medium text-primary hover:underline">Receipts</a>`,
+  ].join("") : "";
+  return `<div class="space-y-4 px-3 py-3 md:px-3.5">
+    <section class="${softPanelClass} p-3">
+      <div class="flex items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center border border-border bg-background text-primary">
+          ${iconWorker("h-4 w-4")}
+        </span>
+        <div class="min-w-0 flex-1">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Engineer Perspective</div>
+          <div class="mt-1 text-base font-semibold text-foreground">${esc(model.activeProfileLabel ?? "Engineer")}</div>
+          ${model.activeProfilePrimaryRole ? `<div class="mt-1 text-sm text-muted-foreground">${esc(model.activeProfilePrimaryRole)}</div>` : ""}
+        </div>
+        ${badge(status)}
+      </div>
+      <div class="mt-3 space-y-3">
+        <div class="border border-border bg-background px-3 py-2.5">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">What I&#39;m Doing</div>
+          <div class="mt-1 text-sm leading-6 text-foreground">${esc(perspective.focus)}</div>
+        </div>
+        <div class="border border-border bg-background px-3 py-2.5">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">What I Need</div>
+          <div class="mt-1 text-sm leading-6 text-foreground">${esc(perspective.need)}</div>
+        </div>
+        <div class="border border-border bg-background px-3 py-2.5">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">How I&#39;m Operating</div>
+          <div class="mt-1 text-sm leading-6 text-foreground">${esc(perspective.operating)}</div>
+        </div>
+      </div>
+    </section>
+    ${typeof objective?.tokensUsed === "number" ? renderTokenUsageHero(objective.tokensUsed) : ""}
+    ${objective ? `<section class="${softPanelClass} p-3">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">My Assignment</div>
+      <div class="mt-2 text-sm font-semibold text-foreground">${esc(objective.title)}</div>
+      <div class="mt-2 text-sm leading-6 text-foreground">${esc(objective.bottomLine ?? objective.summary ?? "No bottom line yet.")}</div>
+      <div class="mt-3 text-sm text-muted-foreground"><span class="font-medium text-foreground">What I need next:</span> ${esc(perspective.need)}</div>
+      ${renderInspectorActionSet(model, objective)}
+      ${reviewLinks ? `<div class="mt-4 flex flex-wrap gap-3">${reviewLinks}</div>` : ""}
+    </section>` : renderInspectorEmptyState("overview")}
+  </div>`;
+};
+
+const renderEmployeeNotesPanel = (model: FactoryInspectorModel): string => {
+  const sections = (model.activeProfileSections ?? []).filter((section) => section.items.length > 0);
+  const responsibilities = (model.activeProfileResponsibilities ?? []).slice(0, 6);
+  if (responsibilities.length === 0 && sections.length === 0) {
+    return `<div class="px-3 py-3 md:px-3.5">
+      ${renderEmptyState({
+        icon: iconWorker("h-5 w-5"),
+        tone: "neutral",
+        eyebrow: "Notes",
+        title: "No employee notes.",
+        message: "Profile and soul notes will appear here when available.",
+        minHeightClass: "min-h-[220px]",
+      })}
+    </div>`;
+  }
+  return `<div class="space-y-3 px-3 py-3 md:px-3.5">
+    ${responsibilities.length > 0 ? `<section class="${softPanelClass} p-3">
+      <div class="${sectionLabelClass}">Responsibilities</div>
+      <div class="mt-3 space-y-2">
+        ${responsibilities.map((item) => `<div class="border border-border bg-background px-3 py-2 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
+      </div>
+    </section>` : ""}
+    ${sections.map((section) => `<section class="${softPanelClass} p-3">
+      <div class="${sectionLabelClass}">${esc(section.title)}</div>
+      <div class="mt-3 space-y-2">
+        ${section.items.slice(0, 6).map((item) => `<div class="border border-border bg-background px-3 py-2 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
+      </div>
+    </section>`).join("")}
+  </div>`;
 };
 
 const renderOverviewPanel = (model: FactoryInspectorModel): string => {
@@ -303,7 +448,7 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
   
   return `<div class="space-y-4 px-3 py-3 md:px-3.5">
     <div class="flex items-start gap-3">
-      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/80 bg-muted/90 text-primary shadow-sm">
+      <span class="flex h-10 w-10 shrink-0 items-center justify-center border border-border/80 bg-muted/90 text-primary shadow-sm">
         ${iconProject("h-4 w-4")}
       </span>
       <div class="min-w-0 flex-1">
@@ -367,7 +512,7 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
         </div>
         ${focus.summary ? `<div class="text-xs text-foreground">${esc(focus.summary)}</div>` : ''}
         ${focus.artifactSummary ? `<div class="text-[11px] text-muted-foreground">${esc(focus.artifactSummary)}</div>` : ''}
-        ${focusedTask ? `<div class="rounded-lg border border-border bg-background px-2.5 py-2">
+        ${focusedTask ? `<div class="border border-border bg-background px-2.5 py-2">
           <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Task Prompt</div>
           <pre class="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(focusedTask.prompt)}</pre>
         </div>` : ''}
@@ -398,8 +543,8 @@ const renderOverviewPanel = (model: FactoryInspectorModel): string => {
       <div class="${softPanelClass} p-3 flex flex-col gap-2">
         <div class="text-xs text-foreground">${esc(model.activeCodex.summary)}</div>
         ${model.activeCodex.latestNote ? `<div class="text-xs text-muted-foreground mt-1">${esc(model.activeCodex.latestNote)}</div>` : ''}
-        ${model.activeCodex.stdoutTail ? `<pre class="mt-2 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto factory-scrollbar">${esc(model.activeCodex.stdoutTail)}</pre>` : ''}
-        ${model.activeCodex.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto factory-scrollbar">${esc(model.activeCodex.stderrTail)}</pre>` : ''}
+        ${model.activeCodex.stdoutTail ? `<pre class="mt-2 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(model.activeCodex.stdoutTail, 800))}</pre>` : ''}
+        ${model.activeCodex.stderrTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive">${esc(truncate(model.activeCodex.stderrTail, 800))}</pre>` : ''}
       </div>
     </div>` : ''}
 
@@ -431,7 +576,7 @@ const renderExecutionPanel = (model: FactoryInspectorModel): string => {
           
           <div class="flex items-center justify-between gap-2 relative">
             <div class="flex items-center gap-1.5 min-w-0">
-              <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-background border border-border text-[8px] font-bold text-muted-foreground z-10">${idx + 1}</span>
+              <span class="flex h-4 w-4 shrink-0 items-center justify-center bg-background border border-border text-[8px] font-bold text-muted-foreground z-10">${idx + 1}</span>
               <span class="text-xs font-semibold text-foreground truncate">${esc(task.title)}</span>
             </div>
             ${badge(task.status)}
@@ -502,7 +647,7 @@ const renderAnalysisPanel = (model: FactoryInspectorModel): string => {
             <div class="text-sm font-semibold text-foreground">${esc(anomaly.kind.replaceAll("_", " "))}</div>
             <div class="mt-1 text-xs text-foreground">${esc(anomaly.summary)}</div>
           </div>
-          <span class="inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${analysisSeverityClass(anomaly.severity)}">${esc(anomaly.severity)}</span>
+          <span class="inline-flex shrink-0 border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${analysisSeverityClass(anomaly.severity)}">${esc(anomaly.severity)}</span>
         </div>
         <div class="text-[10px] text-muted-foreground">
           ${esc([
@@ -591,8 +736,8 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
         </div>
         <div class="text-xs text-foreground">${esc(model.activeCodex.summary)}</div>
         ${model.activeCodex.latestNote ? `<div class="text-xs text-muted-foreground mt-1">${esc(model.activeCodex.latestNote)}</div>` : ''}
-        ${model.activeCodex.stdoutTail ? `<pre class="mt-2 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(model.activeCodex.stdoutTail)}</pre>` : ''}
-        ${model.activeCodex.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto">${esc(model.activeCodex.stderrTail)}</pre>` : ''}
+        ${model.activeCodex.stdoutTail ? `<pre class="mt-2 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(model.activeCodex.stdoutTail, 800))}</pre>` : ''}
+        ${model.activeCodex.stderrTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive">${esc(truncate(model.activeCodex.stderrTail, 800))}</pre>` : ''}
       </div>
     `);
   }
@@ -607,8 +752,8 @@ const renderLivePanel = (model: FactoryInspectorModel): string => {
           </div>
           <div class="text-xs text-foreground">${esc(child.summary)}</div>
           ${child.latestNote ? `<div class="text-xs text-muted-foreground mt-1">${esc(child.latestNote)}</div>` : ''}
-          ${child.stdoutTail ? `<pre class="mt-2 text-[10px] p-2 bg-background border border-border rounded text-muted-foreground overflow-x-auto">${esc(child.stdoutTail)}</pre>` : ''}
-          ${child.stderrTail ? `<pre class="mt-1 text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive overflow-x-auto">${esc(child.stderrTail)}</pre>` : ''}
+          ${child.stdoutTail ? `<pre class="mt-2 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(child.stdoutTail, 800))}</pre>` : ''}
+          ${child.stderrTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive">${esc(truncate(child.stderrTail, 800))}</pre>` : ''}
         </div>
       `);
     }
@@ -648,42 +793,63 @@ const renderReceiptsPanel = (model: FactoryInspectorModel): string => {
 };
 
 const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: FactoryInspectorIslandOptions): string => {
-  const tabs: ReadonlyArray<{ readonly id: FactoryInspectorRouteModel["panel"]; readonly label: string }> = [
-    { id: "overview", label: "Overview" },
-    { id: "analysis", label: "Analysis" },
-    { id: "execution", label: "Tasks" },
-    { id: "live", label: "Live Output" },
-    { id: "receipts", label: "Receipts" },
-  ];
+  const missionControl = model.mode === "mission-control";
   const tabsPath = options?.tabsPath ?? "/factory/island/inspector/tabs";
   const triggerAttrs = options?.tabsTrigger
     ? ` hx-get="${tabsPath}${inspectorQuery(model)}" hx-trigger="${esc(options.tabsTrigger)}" hx-swap="outerHTML"`
     : "";
-  const wrapperClass = model.mode === "mission-control"
+  const wrapperClass = missionControl
     ? "flex items-center gap-1.5 border-b border-border/80 px-3 py-3 overflow-x-auto factory-scrollbar bg-card/95 sticky top-0 z-10"
     : "flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10";
 
   return `<div id="factory-inspector-tabs" class="${wrapperClass}"${triggerAttrs}>
-    ${tabs.map(t => {
-      const active = model.panel === t.id;
-      const tabClass = model.mode === "mission-control"
-        ? active
-          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
-          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground"
-        : active
-          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
-          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground";
-      return `<a
-        href="/factory${inspectorQuery(model, { panel: t.id })}"
-        data-factory-inspector-tab="${esc(t.id)}"
+    ${(missionControl
+      ? [
+          { id: "overview" as const, label: "Overview" },
+          { id: "analysis" as const, label: "Analysis" },
+          { id: "execution" as const, label: "Tasks" },
+          { id: "live" as const, label: "Live Output" },
+          { id: "receipts" as const, label: "Receipts" },
+        ].map((tab) => {
+        const active = model.panel === tab.id;
+        const tabClass = missionControl
+          ? active
+          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
+          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground"
+          : active
+            ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
+            : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground";
+        return `<a
+        href="/factory${inspectorQuery(model, { panel: tab.id, inspectorTab: "overview" })}"
+        data-factory-inspector-tab="${esc(tab.id)}"
         ${active ? 'aria-current="page"' : ""}
         class="${tabClass}"
-      >${esc(t.label)}</a>`;
-    }).join('')}
+      >${esc(tab.label)}</a>`;
+      }).join("")
+      : [
+          { id: "overview" as const, label: "Overview" },
+          { id: "notes" as const, label: "Notes" },
+        ].map((tab) => {
+        const active = normalizedDefaultInspectorTab(model.inspectorTab) === tab.id;
+        const tabClass = active
+          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
+          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground";
+        return `<a
+        href="/factory${inspectorQuery(model, { panel: null, inspectorTab: tab.id })}"
+        data-factory-inspector-tab="${esc(tab.id)}"
+        ${active ? 'aria-current="page"' : ""}
+        class="${tabClass}"
+      >${esc(tab.label)}</a>`;
+      }).join(""))}
   </div>`;
 };
 
 const renderInspectorPanel = (model: FactoryInspectorModel): string => {
+  if (model.mode !== "mission-control") {
+    return normalizedDefaultInspectorTab(model.inspectorTab) === "notes"
+      ? renderEmployeeNotesPanel(model)
+      : renderEmployeeOverviewPanel(model);
+  }
   let content = "";
   switch (model.panel) {
     case "overview": content = renderOverviewPanel(model); break;
@@ -728,5 +894,5 @@ export const factoryInspectorIsland = (
   options?: FactoryInspectorIslandOptions,
 ): string =>
   factoryInspectorTabsIsland(model, options)
-  + renderInspectorRailSummary(model)
+  + (model.mode === "mission-control" ? renderInspectorRailSummary(model) : "")
   + factoryInspectorPanelIsland(model, options);

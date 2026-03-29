@@ -290,12 +290,42 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     case "task.integrated": {
       const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
       const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
-      return {
-        ...setActiveTaskIds(updateTask(state, event.taskId, {
+      let next = updateTask(state, event.taskId, {
+        status: "integrated",
+        latestSummary: event.summary,
+        completedAt: event.integratedAt,
+      });
+      const candidate = latestTaskCandidate(next, event.taskId);
+      if (candidate && (candidate.status === "approved" || candidate.status === "integrated")) {
+        next = updateCandidate(next, candidate.candidateId, {
           status: "integrated",
-          latestSummary: event.summary,
-          completedAt: event.integratedAt,
-        }), active, event.integratedAt),
+          latestReason: event.summary,
+          integratedAt: event.integratedAt,
+          updatedAt: event.integratedAt,
+        });
+      }
+      return {
+        ...setActiveTaskIds(next, active, event.integratedAt),
+        latestSummary: event.summary,
+        consecutiveFailuresByTask: remainingFailures,
+      };
+    }
+    case "task.noop_completed": {
+      const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
+      const { [event.taskId]: _, ...remainingFailures } = state.consecutiveFailuresByTask;
+      let next = updateTask(state, event.taskId, {
+        status: "approved",
+        latestSummary: event.summary,
+        completedAt: event.completedAt,
+      });
+      next = updateCandidate(next, event.candidateId, {
+        status: "approved",
+        integrationDisposition: "noop",
+        latestReason: event.summary,
+        updatedAt: event.completedAt,
+      });
+      return {
+        ...setActiveTaskIds(next, active, event.completedAt),
         latestSummary: event.summary,
         consecutiveFailuresByTask: remainingFailures,
       };

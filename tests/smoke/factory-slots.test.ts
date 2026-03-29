@@ -208,6 +208,56 @@ test("slot release: integration-level promoted releases slot even when status is
   expect(refreshedSecond.scheduler.slotState).toBe("active");
 }, 30_000);
 
+test("slot admission: investigation objectives do not block delivery admission", async () => {
+  const dataDir = await createTempDir("slots-investigation-free");
+  const repoRoot = await createSourceRepo();
+  const service = createService(dataDir, repoRoot);
+
+  const investigation = await service.createObjective({
+    title: "Investigate AWS posture",
+    prompt: "Inspect the current AWS account posture without promoting code.",
+    objectiveMode: "investigation",
+    checks: ["true"],
+  });
+  const delivery = await service.createObjective({
+    title: "Delivery objective",
+    prompt: "Implement a tracked repo change.",
+    checks: ["true"],
+  });
+
+  expect(investigation.scheduler.slotState).toBe("active");
+  expect(delivery.scheduler.slotState).toBe("active");
+  expect(delivery.scheduler.queuePosition).toBeUndefined();
+}, 30_000);
+
+test("slot queueing: admitted investigation objectives do not count against delivery queue position", async () => {
+  const dataDir = await createTempDir("slots-investigation-queue-order");
+  const repoRoot = await createSourceRepo();
+  const service = createService(dataDir, repoRoot);
+
+  const firstDelivery = await service.createObjective({
+    title: "First delivery objective",
+    prompt: "Hold the repo slot with delivery work.",
+    checks: ["true"],
+  });
+  const investigation = await service.createObjective({
+    title: "Parallel investigation",
+    prompt: "Inspect AWS usage while delivery is active.",
+    objectiveMode: "investigation",
+    checks: ["true"],
+  });
+  const secondDelivery = await service.createObjective({
+    title: "Second delivery objective",
+    prompt: "Wait only behind delivery work.",
+    checks: ["true"],
+  });
+
+  expect(firstDelivery.scheduler.slotState).toBe("active");
+  expect(investigation.scheduler.slotState).toBe("active");
+  expect(secondDelivery.scheduler.slotState).toBe("queued");
+  expect(secondDelivery.scheduler.queuePosition).toBe(1);
+}, 30_000);
+
 // ---------------------------------------------------------------------------
 // Queue ordering: FIFO is preserved at any scale
 // ---------------------------------------------------------------------------

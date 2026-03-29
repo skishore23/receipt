@@ -12,13 +12,15 @@ type FactoryProfileOverviewInput = {
 
 type FactoryProfileOverview = {
   readonly summary?: string;
+  readonly soulSummary?: string;
+  readonly profileSummary?: string;
   readonly sections: ReadonlyArray<FactoryProfileSectionView>;
   readonly primaryRole?: string;
   readonly roles: ReadonlyArray<string>;
   readonly responsibilities: ReadonlyArray<string>;
 };
 
-const clipProfileText = (value: string, max = 180): string =>
+const clipProfileText = (value: string, max = 320): string =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
 const normalizedList = (items: ReadonlyArray<string> | undefined): ReadonlyArray<string> =>
@@ -48,7 +50,7 @@ export const describeProfileMarkdown = (value: string | FactoryProfileOverviewIn
     if (!currentSection || currentSection.items.length === 0) return;
     markdownSections.push({
       title: currentSection.title,
-      items: currentSection.items.slice(0, 4),
+      items: currentSection.items.slice(0, 6),
     });
   };
   for (const line of lines) {
@@ -71,9 +73,10 @@ export const describeProfileMarkdown = (value: string | FactoryProfileOverviewIn
   }
   flushSection();
   const soulSummary = firstMarkdownParagraph(soulBody);
+  const profileSummary = summary;
   const sections: FactoryProfileSectionView[] = [
-    ...(roles.length > 0 ? [{ title: "Roles", items: roles.slice(0, 4) }] : []),
-    ...(responsibilities.length > 0 ? [{ title: "Responsibilities", items: responsibilities.slice(0, 4) }] : []),
+    ...(roles.length > 0 ? [{ title: "Roles", items: roles.slice(0, 6) }] : []),
+    ...(responsibilities.length > 0 ? [{ title: "Responsibilities", items: responsibilities.slice(0, 6) }] : []),
     ...markdownSections.filter((section) => {
       const normalizedTitle = section.title.trim().toLowerCase();
       if (roles.length > 0 && normalizedTitle === "roles") return false;
@@ -82,8 +85,10 @@ export const describeProfileMarkdown = (value: string | FactoryProfileOverviewIn
     }),
   ];
   return {
-    summary: soulSummary ?? roles[0] ?? summary,
-    sections: sections.slice(0, 3),
+    summary: soulSummary ?? roles[0] ?? profileSummary,
+    soulSummary,
+    profileSummary,
+    sections: sections.slice(0, 6),
     primaryRole: roles[0],
     roles,
     responsibilities,

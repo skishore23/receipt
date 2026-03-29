@@ -221,6 +221,7 @@ const renderMarkdown = (raw: string): string => {
 import type {
   FactoryChatProfileNav,
   FactoryChatObjectiveNav,
+  FactoryInspectorTab,
   FactorySelectedObjectiveCard,
   FactoryWorkCard,
   FactoryChatItem,
@@ -240,6 +241,7 @@ type FactoryChatRouteContext = {
   readonly runId?: string;
   readonly jobId?: string;
   readonly panel?: FactoryInspectorPanel;
+  readonly inspectorTab?: FactoryInspectorTab;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
 };
@@ -253,6 +255,7 @@ const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   if (input.runId) params.set("run", input.runId);
   if (input.jobId) params.set("job", input.jobId);
   if (input.panel) params.set("panel", input.panel);
+  if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
   if (input.focusKind && input.focusId) {
     params.set("focusKind", input.focusKind);
     params.set("focusId", input.focusId);
@@ -286,6 +289,7 @@ const workbenchHref = (routeContext: FactoryChatRouteContext): string => {
   params.set("profile", routeContext.profileId);
   if (routeContext.chatId) params.set("chat", routeContext.chatId);
   if (routeContext.objectiveId) params.set("objective", routeContext.objectiveId);
+  if (routeContext.inspectorTab) params.set("inspectorTab", routeContext.inspectorTab);
   if (routeContext.focusKind && routeContext.focusId) {
     params.set("focusKind", routeContext.focusKind);
     params.set("focusId", routeContext.focusId);
@@ -310,13 +314,18 @@ const factoryShellIslandBindings = (shellQuery: string) => ({
 });
 
 const renderJobControls = (jobId: string, running?: boolean, abortRequested?: boolean): string =>
-  running ? `<div class="mt-4">${renderJobActionCards(jobId, { abortRequested })}</div>` : "";
+  running
+    ? `<details class="mt-3 border border-border bg-background/70 px-3 py-2">
+      <summary class="cursor-pointer list-none text-[11px] font-medium text-muted-foreground hover:text-foreground">Need to stop this job?</summary>
+      <div class="mt-2">${renderJobActionCards(jobId, { abortRequested })}</div>
+    </details>`
+    : "";
 
 const renderWorkControls = (card: FactoryWorkCard): string =>
-  card.jobId ? renderJobControls(card.jobId, card.running, false) : "";
+  card.jobId ? renderJobControls(card.jobId, card.running, card.abortRequested) : "";
 
 const shellPill = (label: string, tone: Tone = "neutral", icon?: string): string =>
-  `<span class="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] whitespace-nowrap ${badgeToneClass(tone)}">${icon ?? ""}${esc(label)}</span>`;
+  `<span class="inline-flex shrink-0 items-center gap-1.5  border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] whitespace-nowrap ${badgeToneClass(tone)}">${icon ?? ""}${esc(label)}</span>`;
 
 const shellHeaderTitle = (model: FactoryChatShellModel): string =>
   model.inspector.selectedObjective?.title
@@ -329,8 +338,8 @@ const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   const pills: string[] = [];
   const objective = model.inspector.selectedObjective;
   if (objective) {
-    const phaseLabel = displayLabel(objective.phase) || displayLabel(objective.status) || "active";
-    pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.phase || objective.status), iconProject("h-3 w-3")));
+    const phaseLabel = objective.displayState ?? displayLabel(objective.phase) ?? displayLabel(objective.status) ?? "active";
+    pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.displayState ?? objective.phase ?? objective.status), iconProject("h-3 w-3")));
     if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning", iconQueue("h-3 w-3")));
     if (typeof objective.tokensUsed === "number") pills.push(shellPill(`${objective.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")));
   }
@@ -350,7 +359,7 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
   aliases: command.aliases ?? [],
 })));
 
-const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none rounded-md border border-border bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-background focus-visible:ring-2 focus-visible:ring-ring/40";
+const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none  border border-border bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-background focus-visible:ring-2 focus-visible:ring-ring/40";
 const composerShellClass = "mx-auto w-full max-w-6xl";
 const composerPanelClass = "relative flex flex-col gap-2";
 const assistantResponseCardClass = "overflow-hidden border border-border/80 bg-card/90";
@@ -384,7 +393,7 @@ const withQueryParam = (query: string, key: string, value: string): string =>
 
 const factoryEventsPath = (query: string): string => `/factory/events${query}`;
 
-const headerProfileSelectClass = "min-w-[11rem] rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground outline-none transition hover:bg-accent hover:text-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/30";
+const headerProfileSelectClass = "min-w-[11rem]  border border-border bg-background px-3 py-2 text-sm font-medium text-foreground outline-none transition hover:bg-accent hover:text-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/30";
 
 const renderHeaderProfileSelect = (input: {
   readonly id: string;
@@ -460,6 +469,81 @@ const splitSystemBody = (body: string): { readonly summary: string; readonly det
     summary,
     detail: detail || undefined,
   };
+};
+
+const looksLikeTechnicalStatusSummary = (value?: string): boolean => {
+  const text = value?.trim();
+  if (!text) return false;
+  return /^command (?:completed|failed|started|running):/i.test(text)
+    || /^\/bin\/(?:bash|zsh)\b/i.test(text)
+    || /^receipt\b/i.test(text);
+};
+
+const liveOutputCardHeading = (card: FactoryWorkCard): string =>
+  compactStatusText(
+    card.subject
+      ? `Working on ${card.subject}`
+      : card.focusKind === "job"
+        ? "Current job progress"
+        : "Current task progress",
+    140,
+  ) || "Current progress";
+
+const liveOutputCardSummary = (card: FactoryWorkCard): string => {
+  const primary = compactStatusText(card.latestNote ?? "", 180);
+  if (primary) return primary;
+  const fallback = looksLikeTechnicalStatusSummary(card.summary)
+    ? ""
+    : compactStatusText(card.summary, 180);
+  return fallback || "Factory is still working on this.";
+};
+
+const liveOutputCardSupport = (card: FactoryWorkCard): string | undefined => {
+  const summary = compactStatusText(card.summary, 180);
+  if (!summary || looksLikeTechnicalStatusSummary(summary) || summary === liveOutputCardSummary(card)) return undefined;
+  return summary;
+};
+
+const renderLiveOutputWorkCard = (card: FactoryWorkCard): string => {
+  const metadata = [
+    card.taskId ? `Task ${card.taskId}` : undefined,
+    card.candidateId ? `Candidate ${card.candidateId}` : undefined,
+    card.jobId ? `Job ${card.jobId}` : undefined,
+    card.meta,
+  ].filter((value): value is string => Boolean(value));
+  return `<section class="border border-border bg-muted/45 px-3 py-3">
+    <div class="flex min-w-0 items-center justify-between gap-2">
+      <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        ${iconForEntity(card.worker, "w-3 h-3 text-muted-foreground shrink-0 self-center")}
+        <span class="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">${esc(card.worker)}</span>
+        <span class="text-xs font-semibold text-foreground">${esc(card.focusKind === "job" ? "Job Update" : "Task Update")}</span>
+      </div>
+      ${badge(card.status)}
+    </div>
+    <div class="mt-2 text-sm font-semibold text-foreground">${esc(liveOutputCardHeading(card))}</div>
+    <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(liveOutputCardSummary(card))}</div>
+    ${liveOutputCardSupport(card) ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(liveOutputCardSupport(card)!)}</div>` : ""}
+    ${metadata.length > 0 ? `<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+      ${metadata.map((value) => `<span class="rounded-full border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
+    </div>` : ""}
+    ${(card.artifactSummary || card.stdoutTail || card.stderrTail || card.detail || card.link) ? `<details class="mt-3 border border-border bg-background/70 px-3 py-2">
+      <summary class="cursor-pointer list-none text-[11px] font-medium text-muted-foreground hover:text-foreground">More details</summary>
+      <div class="mt-2 space-y-3">
+        ${card.artifactSummary ? `<div class="text-xs leading-5 text-muted-foreground">${esc(card.artifactSummary)}</div>` : ""}
+        ${card.stdoutTail ? `<section class="border border-border bg-muted/25">
+          <div class="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Recent output</div>
+          <pre class="max-h-40 overflow-auto px-3 py-3 text-[11px] leading-5 text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.stdoutTail)}</pre>
+        </section>` : ""}
+        ${card.stderrTail ? `<section class="border border-destructive/30 bg-destructive/5">
+          <div class="border-b border-destructive/20 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-destructive">Error output</div>
+          <pre class="max-h-40 overflow-auto px-3 py-3 text-[11px] leading-5 text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.stderrTail)}</pre>
+        </section>` : ""}
+        ${card.detail ? `<pre class="max-h-32 overflow-auto bg-muted/25 px-3 py-3 text-[11px] leading-5 text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.detail)}</pre>` : ""}
+        ${card.link ? `<a class="inline-flex text-[11px] font-medium text-primary transition hover:text-primary/80" href="${esc(card.link)}">Inspect</a>` : ""}
+      </div>
+    </details>` : ""}
+    ${renderWorkControls(card)}
+  </section>`;
 };
 
 const systemBadgeLabel = (item: Extract<FactoryChatItem, { readonly kind: "system" }>): string => {
@@ -541,6 +625,7 @@ const renderChatItem = (
     </a>`;
   }
   const card = item.card;
+  if (card.variant === "live-output") return renderLiveOutputWorkCard(card);
   return `<section class="border border-border bg-muted/45 px-3 py-2">
     <div class="flex min-w-0 items-center justify-between gap-2">
       <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -554,7 +639,7 @@ const renderChatItem = (
     ${card.detail || card.meta || card.link ? `<details class="mt-1.5">
       <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground">Details</summary>
       <div class="mt-1.5 space-y-1.5">
-        ${card.detail ? `<pre class="max-h-32 overflow-auto rounded-md bg-background px-2 py-1.5 text-[11px] leading-4 text-card-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.detail)}</pre>` : ""}
+        ${card.detail ? `<pre class="max-h-32 overflow-auto  bg-background px-2 py-1.5 text-[11px] leading-4 text-card-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(card.detail)}</pre>` : ""}
         <div class="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
           ${card.meta ? `<span>${esc(card.meta)}</span>` : ""}
           ${card.jobId ? `<span>Job ${esc(card.jobId)}</span>` : ""}
@@ -602,7 +687,7 @@ const renderWorkGroup = (
   const latestHtml = renderChatItem(latest, context);
   return `<div class="space-y-1">
     <details>
-      <summary class="cursor-pointer list-none px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition">${esc(`${earlier.length} earlier update${earlier.length > 1 ? "s" : ""}`)}</summary>
+      <summary class="cursor-pointer list-none px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition">${esc(`Earlier progress (${earlier.length})`)}</summary>
       <div class="mt-1 space-y-1">
         ${earlier.map((item) => renderChatItem(item, context)).join("")}
       </div>
@@ -799,7 +884,7 @@ const renderObjectiveTasks = (tasks?: ReadonlyArray<ThreadTaskCard>): string => 
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-3">
-                <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-[10px] font-semibold text-muted-foreground">${index + 1}</span>
+                <span class="flex h-5 w-5 shrink-0 items-center justify-center  border border-border bg-background text-[10px] font-semibold text-muted-foreground">${index + 1}</span>
                 <div class="min-w-0">
                   <div class="text-sm font-semibold text-foreground truncate">${esc(task.title)}</div>
                   ${note ? `<div class="mt-0.5 text-xs leading-5 text-muted-foreground">${esc(note)}</div>` : ""}
@@ -849,6 +934,36 @@ const renderRunningWorkbench = (model: FactoryChatIslandModel): string => {
   </section>`;
 };
 
+const renderCompactObjectiveFraming = (thread?: FactorySelectedObjectiveCard): string => {
+  if (!thread) return "";
+  return `<section class="${softPanelClass} px-4 py-3">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="${sectionLabelClass}">Objective</div>
+        <div class="mt-1 text-sm font-semibold text-foreground">${esc(thread.title)}</div>
+        ${thread.bottomLine ? `<div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(thread.bottomLine)}</div>` : ""}
+      </div>
+      ${badge(thread.displayState ?? displayLabel(thread.phase || thread.status) ?? "Active", toneForValue(thread.displayState ?? thread.phase ?? thread.status))}
+    </div>
+    ${thread.lifecycleSteps?.length ? `<div class="mt-3 grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
+      ${thread.lifecycleSteps.map((step) => `<div class=" border px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] ${step.state === "done"
+        ? "border-success/20 bg-success/10 text-success"
+        : step.state === "current"
+          ? "border-primary/20 bg-primary/10 text-primary"
+          : step.state === "paused"
+            ? "border-warning/20 bg-warning/10 text-warning"
+            : "border-border bg-background text-muted-foreground"}">${esc(step.label)}</div>`).join("")}
+    </div>` : ""}
+    ${thread.evidenceStats?.length ? `<div class="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+      ${thread.evidenceStats.slice(0, 4).map((stat) => `<div class=" border border-border bg-background px-3 py-2">
+        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
+        <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
+      </div>`).join("")}
+    </div>` : ""}
+    ${thread.nextAction ? `<div class="mt-3 text-xs text-muted-foreground"><span class="font-medium text-foreground">Next step:</span> ${esc(thread.nextAction)}</div>` : ""}
+  </section>`;
+};
+
 const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
   const thread = model.selectedThread;
   const jobs = model.jobs ?? [];
@@ -862,17 +977,7 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
   const runningWorkbench = renderRunningWorkbench(model);
   if (!thread && !hasLiveWork && jobs.length === 0 && !liveCodexSection && !liveStepsSection && !tasksSection && !runningWorkbench) return "";
   return `<section class="space-y-2">
-    <section class="${softPanelClass} px-4 py-2.5">
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <div class="min-w-0 flex-1 flex items-center gap-2">
-          <div class="text-sm font-semibold text-foreground truncate">${esc(thread?.title ?? `${model.activeProfileLabel} chat`)}</div>
-          ${thread?.nextAction ? `<div class="hidden sm:block text-xs text-muted-foreground truncate">${esc(thread.nextAction)}</div>` : ""}
-        </div>
-        <div class="flex shrink-0 items-center gap-1.5">
-          ${thread ? badge(`Objective ${displayLabel(thread.phase || thread.status)}`, toneForValue(thread.phase || thread.status)) : ""}
-        </div>
-      </div>
-    </section>
+    ${renderCompactObjectiveFraming(thread)}
     ${runningWorkbench || renderThreadOverview(model, thread)}
     ${liveStepsSection}
     ${tasksSection}
@@ -1024,7 +1129,7 @@ const renderMissionControlTaskList = (
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/80 text-[10px] font-semibold text-muted-foreground">${index + 1}</span>
+                <span class="flex h-5 w-5 shrink-0 items-center justify-center  border border-border/80 bg-background/80 text-[10px] font-semibold text-muted-foreground">${index + 1}</span>
                 <div class="text-sm font-semibold leading-5 text-foreground">${esc(task.title)}</div>
               </div>
               ${note ? `<div class="mt-1.5 text-xs leading-5 text-muted-foreground">${esc(note)}</div>` : ""}
@@ -1103,6 +1208,7 @@ const renderMissionControlChatIsland = (model: FactoryChatIslandModel): string =
     runId: model.runId,
     jobId: model.jobId,
     panel: model.panel,
+    inspectorTab: model.inspectorTab,
     focusKind: model.focusKind,
     focusId: model.focusId,
   };
@@ -1324,27 +1430,27 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
   </div>`;
 };
 
-const renderObjectiveTokenCallout = (tokensUsed: number): string => `<div class="mt-2 rounded-xl border border-info/20 bg-info/10 px-3 py-2.5">
+const renderObjectiveTokenCallout = (tokensUsed: number): string => `<div class="mt-2  border border-info/20 bg-info/10 px-3 py-2.5">
   <div class="flex items-start justify-between gap-2">
     <div class="min-w-0">
       <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-info">Token Usage</div>
       <div class="mt-1 text-lg font-semibold leading-none tracking-tight text-foreground">${esc(tokensUsed.toLocaleString())}</div>
     </div>
-    <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-info/20 bg-background/70 text-info">
+    <span class="flex h-8 w-8 shrink-0 items-center justify-center  border border-info/20 bg-background/70 text-info">
       ${iconTokens("h-4 w-4")}
     </span>
   </div>
   <div class="mt-1 text-[11px] text-muted-foreground">Codex tokens recorded so far</div>
 </div>`;
 
-const renderSidebarTokenHero = (tokensUsed: number): string => `<div class="rounded-2xl border border-info/25 bg-info/10 px-3 py-3">
+const renderSidebarTokenHero = (tokensUsed: number): string => `<div class="l border border-info/25 bg-info/10 px-3 py-3">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-info">Token Usage</div>
       <div class="mt-1 text-2xl font-semibold leading-none tracking-tight text-foreground">${esc(tokensUsed.toLocaleString())}</div>
       <div class="mt-2 text-[11px] text-muted-foreground">Codex tokens recorded for this thread</div>
     </div>
-    <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-info/20 bg-background/70 text-info">
+    <span class="flex h-10 w-10 shrink-0 items-center justify-center l border border-info/20 bg-background/70 text-info">
       ${iconTokens("h-5 w-5")}
     </span>
   </div>
@@ -1449,6 +1555,7 @@ const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjec
     mode: model.mode,
     profileId: objective.profileId || model.activeProfileId,
     objectiveId: objective.objectiveId,
+    inspectorTab: model.inspectorTab,
   });
   const selectedClass = objective.selected
     ? "border-primary bg-primary/5"
@@ -1520,6 +1627,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
     chatId: model.chatId,
     objectiveId: selectedObjective?.objectiveId,
     panel: model.panel,
+    inspectorTab: model.inspectorTab,
   });
   const viewAllQuery = `${selectedObjectiveQuery}${selectedObjectiveQuery.includes("?") ? "&" : "?"}all=1`;
   const runningObjectiveCards = runningObjectives.length > 0
@@ -1547,12 +1655,12 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
   return `<div class="space-y-3 px-3 py-3 md:px-3.5">
     <div class="border-b border-border pb-3">
       <a
-        class="inline-flex items-center gap-2 rounded-xl px-1 py-0.5 text-base font-semibold tracking-[-0.01em] text-foreground transition hover:text-primary md:text-[1.05rem]"
+        class="inline-flex items-center gap-2  px-1 py-0.5 text-base font-semibold tracking-[-0.01em] text-foreground transition hover:text-primary md:text-[1.05rem]"
         href="/receipt"
         aria-label="Receipt home"
         title="Receipt home"
       >
-        <span aria-hidden="true" class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background/80 text-primary shadow-sm md:h-7 md:w-7">
+        <span aria-hidden="true" class="flex h-6 w-6 shrink-0 items-center justify-center  border border-border/70 bg-background/80 text-primary shadow-sm md:h-7 md:w-7">
           ${iconReceipt("h-3.5 w-3.5")}
         </span>
         <span class="leading-none">Receipt</span>
@@ -1596,6 +1704,7 @@ const missionControlRailIsland = (model: FactoryNavModel, selectedObjective?: Fa
     chatId: model.chatId,
     objectiveId: selectedObjective?.objectiveId,
     panel: model.panel,
+    inspectorTab: model.inspectorTab,
   });
   const viewAllQuery = `${selectedObjectiveQuery}${selectedObjectiveQuery.includes("?") ? "&" : "?"}all=1`;
   const profileLinks = model.profiles.length > 0
@@ -1606,6 +1715,7 @@ const missionControlRailIsland = (model: FactoryNavModel, selectedObjective?: Fa
       return `<a class="border-b-2 px-0 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
         mode: model.mode,
         profileId: profile.id,
+        inspectorTab: model.inspectorTab,
       })}">${esc(profile.label)}</a>`;
     }).join("")
     : "";
@@ -1662,6 +1772,7 @@ const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
     runId: model.runId,
     jobId: model.jobId,
     panel: model.panel,
+    inspectorTab: model.inspectorTab,
     focusKind: model.focusKind,
     focusId: model.focusId,
   };
@@ -1732,7 +1843,7 @@ const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
                   profiles: model.nav.profiles,
                 })}
                 <a
-                  class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  class="inline-flex items-center justify-center  border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
                   href="${workbenchViewHref}"
                   aria-label="Open workbench"
                   title="Workbench"
@@ -1740,7 +1851,7 @@ const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
                   Workbench
                 </a>
                 <a
-                  class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  class="inline-flex items-center justify-center  border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
                   href="${missionControlHref}"
                   aria-label="Open mission control"
                   title="Mission control"
@@ -1748,7 +1859,7 @@ const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
                   Mission Control
                 </a>
                 <a
-                  class="inline-flex items-center justify-center rounded-md border border-primary/20 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:border-primary/35 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  class="inline-flex items-center justify-center  border border-primary/20 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:border-primary/35 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
                   href="${newChatHref}"
                   aria-label="Start a new chat"
                   title="New chat"
@@ -1775,11 +1886,11 @@ const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
                 <div class="${composerPanelClass}">
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
                     <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass} sm:min-h-[104px]" rows="2" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <button id="factory-composer-submit" class="inline-flex min-h-[88px] w-full shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem] sm:min-h-[104px]" type="submit">Send</button>
+                    <button id="factory-composer-submit" class="inline-flex min-h-[88px] w-full shrink-0 items-center justify-center  border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem] sm:min-h-[104px]" type="submit">Send</button>
                   </div>
-                  <div id="factory-composer-completions" class="hidden max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                  <div id="factory-composer-completions" class="hidden max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                 </div>
-                <div id="factory-composer-status" class="mt-2 hidden rounded-sm border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+                <div id="factory-composer-status" class="mt-2 hidden  border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
             </div>
           </section>
@@ -1808,6 +1919,7 @@ const renderMissionControlShell = (model: FactoryChatShellModel): string => {
     runId: model.runId,
     jobId: model.jobId,
     panel: model.panel,
+    inspectorTab: model.inspectorTab,
     focusKind: model.focusKind,
     focusId: model.focusId,
   };
@@ -1883,9 +1995,9 @@ const renderMissionControlShell = (model: FactoryChatShellModel): string => {
               label: "Profile",
               profiles: model.nav.profiles,
             })}
-            <a class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${workbenchViewHref}">Workbench</a>
-            <a class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${standardHref}">Standard View</a>
-            <a class="inline-flex items-center justify-center rounded-md border border-primary/30 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:bg-primary/10" href="${newChatHref}" aria-label="Start a new chat">New Thread</a>
+            <a class="inline-flex items-center justify-center  border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${workbenchViewHref}">Workbench</a>
+            <a class="inline-flex items-center justify-center  border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${standardHref}">Standard View</a>
+            <a class="inline-flex items-center justify-center  border border-primary/30 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:bg-primary/10" href="${newChatHref}" aria-label="Start a new chat">New Thread</a>
           </div>
         </div>
         <div id="factory-shell-metrics" class="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
@@ -1919,12 +2031,12 @@ const renderMissionControlShell = (model: FactoryChatShellModel): string => {
                 <label class="sr-only" for="factory-prompt">Factory prompt</label>
                 <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_10rem]">
                   <div class="relative">
-                    <textarea id="factory-prompt" name="prompt" class="min-h-[112px] w-full resize-none rounded-md border border-border/80 bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/40" rows="3" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                    <textarea id="factory-prompt" name="prompt" class="min-h-[112px] w-full resize-none  border border-border/80 bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/40" rows="3" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
+                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                   </div>
-                  <button id="factory-composer-submit" class="inline-flex min-h-[112px] w-full items-center justify-center rounded-md border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
+                  <button id="factory-composer-submit" class="inline-flex min-h-[112px] w-full items-center justify-center  border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
                 </div>
-                <div id="factory-composer-status" class="mt-2 hidden rounded-sm border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+                <div id="factory-composer-status" class="mt-2 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
             </section>
           </div>

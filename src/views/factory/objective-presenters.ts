@@ -4,6 +4,15 @@ import type {
   FactoryObjectiveDetail,
 } from "../../services/factory-types";
 import type { FactorySelectedObjectiveCard } from "../factory-models";
+import {
+  buildObjectiveActionSet,
+  buildObjectiveBottomLine,
+  buildObjectiveEvidenceStats,
+  buildObjectiveTimelineGroups,
+  deriveObjectiveDisplayState,
+  deriveObjectiveLifecycleSteps,
+  deriveObjectiveReviewStatus,
+} from "../factory/supervision";
 
 export type FactoryObjectiveSummary = {
   readonly objectiveId: string;
@@ -55,38 +64,105 @@ export const summarizeFactoryObjective = (
 
 export const toFactorySelectedObjectiveCard = (
   selectedObjective: FactoryObjectiveCard | FactoryObjectiveDetail,
-): FactorySelectedObjectiveCard => ({
-  objectiveId: selectedObjective.objectiveId,
-  profileId: selectedObjective.profile.rootProfileId,
-  profileLabel: selectedObjective.profile.rootProfileLabel,
-  title: selectedObjective.title,
-  status: selectedObjective.status,
-  phase: selectedObjective.phase,
-  summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
-  debugLink: objectiveDebugLink(selectedObjective.objectiveId),
-  receiptsLink: "/receipt",
-  nextAction: selectedObjective.nextAction,
-  slotState: selectedObjective.scheduler.slotState,
-  queuePosition: selectedObjective.scheduler.queuePosition,
-  blockedReason: selectedObjective.blockedReason,
-  blockedExplanation: selectedObjective.blockedExplanation?.summary,
-  integrationStatus: selectedObjective.integrationStatus,
-  activeTaskCount: selectedObjective.activeTaskCount,
-  readyTaskCount: selectedObjective.readyTaskCount,
-  taskCount: selectedObjective.taskCount,
-  latestCommitHash: selectedObjective.latestCommitHash,
-  prUrl: selectedObjective.prUrl,
-  prNumber: selectedObjective.prNumber,
-  checks: "checks" in selectedObjective ? selectedObjective.checks : undefined,
-  latestDecisionSummary: selectedObjective.latestDecision?.summary,
-  latestDecisionAt: selectedObjective.latestDecision?.at,
-  tokensUsed: selectedObjective.tokensUsed,
-});
+): FactorySelectedObjectiveCard => {
+  const displayState = deriveObjectiveDisplayState(selectedObjective);
+  const lifecycleSteps = deriveObjectiveLifecycleSteps(selectedObjective);
+  const { primaryAction, secondaryActions } = buildObjectiveActionSet({
+    objectiveId: selectedObjective.objectiveId,
+    profileId: selectedObjective.profile.rootProfileId,
+    profileLabel: selectedObjective.profile.rootProfileLabel,
+    title: selectedObjective.title,
+    status: selectedObjective.status,
+    phase: selectedObjective.phase,
+    displayState,
+    summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
+    bottomLine: buildObjectiveBottomLine(selectedObjective),
+    debugLink: objectiveDebugLink(selectedObjective.objectiveId),
+    receiptsLink: "/receipt",
+    nextAction: selectedObjective.nextAction,
+    createdAt: "createdAt" in selectedObjective ? selectedObjective.createdAt : undefined,
+    updatedAt: selectedObjective.updatedAt,
+    severity: selectedObjective.severity,
+    objectiveMode: selectedObjective.objectiveMode,
+    slotState: selectedObjective.scheduler.slotState,
+    queuePosition: selectedObjective.scheduler.queuePosition,
+    blockedReason: selectedObjective.blockedReason,
+    blockedExplanation: selectedObjective.blockedExplanation?.summary,
+    integrationStatus: selectedObjective.integrationStatus,
+    activeTaskCount: selectedObjective.activeTaskCount,
+    readyTaskCount: selectedObjective.readyTaskCount,
+    taskCount: selectedObjective.taskCount,
+    latestCommitHash: selectedObjective.latestCommitHash,
+    prUrl: selectedObjective.prUrl,
+    prNumber: selectedObjective.prNumber,
+    checks: "checks" in selectedObjective ? selectedObjective.checks : undefined,
+    latestDecisionSummary: selectedObjective.latestDecision?.summary,
+    latestDecisionAt: selectedObjective.latestDecision?.at,
+    tokensUsed: selectedObjective.tokensUsed,
+    reviewStatus: deriveObjectiveReviewStatus(selectedObjective),
+    lifecycleSteps,
+    evidenceStats: buildObjectiveEvidenceStats(selectedObjective),
+    timelineGroups: buildObjectiveTimelineGroups(selectedObjective),
+  });
+  return {
+    objectiveId: selectedObjective.objectiveId,
+    profileId: selectedObjective.profile.rootProfileId,
+    profileLabel: selectedObjective.profile.rootProfileLabel,
+    title: selectedObjective.title,
+    status: selectedObjective.status,
+    phase: selectedObjective.phase,
+    displayState,
+    summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
+    bottomLine: buildObjectiveBottomLine(selectedObjective),
+    debugLink: objectiveDebugLink(selectedObjective.objectiveId),
+    receiptsLink: "/receipt",
+    nextAction: selectedObjective.nextAction,
+    createdAt: "createdAt" in selectedObjective ? selectedObjective.createdAt : undefined,
+    updatedAt: selectedObjective.updatedAt,
+    severity: selectedObjective.severity,
+    objectiveMode: selectedObjective.objectiveMode,
+    slotState: selectedObjective.scheduler.slotState,
+    queuePosition: selectedObjective.scheduler.queuePosition,
+    blockedReason: selectedObjective.blockedReason,
+    blockedExplanation: selectedObjective.blockedExplanation?.summary,
+    integrationStatus: selectedObjective.integrationStatus,
+    activeTaskCount: selectedObjective.activeTaskCount,
+    readyTaskCount: selectedObjective.readyTaskCount,
+    taskCount: selectedObjective.taskCount,
+    latestCommitHash: selectedObjective.latestCommitHash,
+    prUrl: selectedObjective.prUrl,
+    prNumber: selectedObjective.prNumber,
+    checks: "checks" in selectedObjective ? selectedObjective.checks : undefined,
+    latestDecisionSummary: selectedObjective.latestDecision?.summary,
+    latestDecisionAt: selectedObjective.latestDecision?.at,
+    tokensUsed: selectedObjective.tokensUsed,
+    reviewStatus: deriveObjectiveReviewStatus(selectedObjective),
+    lifecycleSteps,
+    evidenceStats: buildObjectiveEvidenceStats(selectedObjective),
+    timelineGroups: buildObjectiveTimelineGroups(selectedObjective),
+    primaryAction,
+    secondaryActions,
+  };
+};
 
 export const toFactoryStateSelectedObjectiveCard = (
   state: FactoryState,
 ): FactorySelectedObjectiveCard => {
   const projection = buildFactoryProjection(state);
+  const status = state.status;
+  const displayState = status === "completed"
+    ? "Completed"
+    : status === "blocked"
+      ? "Blocked"
+      : status === "failed"
+        ? "Failed"
+        : status === "canceled"
+          ? "Canceled"
+          : state.scheduler.slotState === "queued"
+            ? "Ready"
+            : state.status === "planning" && projection.tasks.length === 0
+              ? "Draft"
+              : "Running";
   return {
     objectiveId: state.objectiveId,
     profileId: state.profile.rootProfileId,
@@ -94,9 +170,15 @@ export const toFactoryStateSelectedObjectiveCard = (
     title: state.title,
     status: state.status,
     phase: state.status,
+    displayState,
     summary: state.latestSummary,
+    bottomLine: state.latestSummary,
     debugLink: objectiveDebugLink(state.objectiveId),
     receiptsLink: "/receipt",
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+    severity: state.severity,
+    objectiveMode: state.objectiveMode,
     slotState: state.scheduler.slotState,
     blockedReason: state.blockedReason,
     integrationStatus: state.integration.status,

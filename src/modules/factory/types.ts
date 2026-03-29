@@ -30,6 +30,8 @@ export type FactoryCandidateStatus =
   | "rejected"
   | "conflicted";
 
+export type FactoryCandidateIntegrationDisposition = "noop";
+
 export type FactoryIntegrationStatus =
   | "idle"
   | "queued"
@@ -272,6 +274,7 @@ export type FactoryCandidateRecord = {
   readonly candidateId: string;
   readonly taskId: string;
   readonly status: FactoryCandidateStatus;
+  readonly integrationDisposition?: FactoryCandidateIntegrationDisposition;
   readonly parentCandidateId?: string;
   readonly baseCommit: string;
   readonly headCommit?: string;

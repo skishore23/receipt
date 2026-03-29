@@ -516,7 +516,7 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
   expect(queuedJob?.agentId).toBe("codex");
 }, 120_000);
 
-test("factory no-diff discovery tasks block and wait for an explicit react instead of auto-bypassing", async () => {
+test("factory no-diff discovery tasks integrate as no-op passes and unlock dependent work", async () => {
   const dataDir = await createTempDir("receipt-factory-no-diff-bypass");
   const repoRoot = await createSourceRepo();
   const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
@@ -591,10 +591,65 @@ test("factory no-diff discovery tasks block and wait for an explicit react inste
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("executing");
-  expect(detail.phase).toBe("blocked");
-  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
-  expect(detail.tasks.find((task) => task.taskId === "task_01")?.blockedReason ?? "").toMatch(/no tracked diff/i);
-  expect(detail.tasks.find((task) => task.taskId === "task_02")?.status).toBe("pending");
+  expect(detail.phase).toBe("executing");
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("approved");
+  expect(detail.tasks.find((task) => task.taskId === "task_01")?.blockedReason).toBeUndefined();
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.noop_completed" && receipt.taskId === "task_01")).toBe(true);
+  expect(detail.tasks.find((task) => task.taskId === "task_02")?.status).toBe("running");
+}, 120_000);
+
+test("factory runtime: final no-diff task with satisfied operator guidance completes the objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-no-diff-complete");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const codexExecutor: CodexExecutor = {
+    run: async (input) => {
+      await fs.writeFile(input.promptPath, input.prompt, "utf-8");
+      await fs.writeFile(input.stdoutPath, "", "utf-8");
+      await fs.writeFile(input.stderrPath, "", "utf-8");
+      const structured = {
+        outcome: "approved",
+        summary: "Validation passed with the existing repository state; no code changes were required for this objective.",
+        handoff: "The current repository state already satisfies the objective.",
+      };
+      const raw = JSON.stringify(structured);
+      await fs.writeFile(input.lastMessagePath, raw, "utf-8");
+      return { exitCode: 0, signal: null, stdout: raw, stderr: "", lastMessage: raw };
+    },
+  };
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor,
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "CLI-first objective",
+    prompt: "Create a CLI-first Factory objective.",
+    checks: ["git status --short"],
+  });
+  await service.reactObjectiveWithNote(created.objectiveId, "Continue with the operator guidance.");
+
+  const taskJob = await findLatestFactoryJob(queue, created.objectiveId);
+  expect(taskJob.taskId).toBe("task_02");
+  await service.runTask(taskJob);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+  expect(detail.phase).toBe("completed");
+  expect(detail.blockedReason).toBeUndefined();
+  expect(detail.tasks).toHaveLength(2);
+  expect(detail.tasks[0]?.status).toBe("superseded");
+  expect(detail.tasks[1]?.status).toBe("approved");
+  expect(detail.integration.status).toBe("idle");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.noop_completed" && receipt.taskId === "task_02")).toBe(true);
+  expect(detail.evidenceCards.some((card) => card.receiptType === "task.noop_completed")).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.completed")).toBe(true);
+  expect(await findLatestObjectiveJob(queue, created.objectiveId, "factory.integration.validate")).toBeUndefined();
 }, 120_000);
 
 test("factory dispatch refreshes stale state before pinning the task workspace base", async () => {

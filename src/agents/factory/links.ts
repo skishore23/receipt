@@ -1,5 +1,5 @@
 import { factoryChatSessionStream, factoryChatStream } from "../../services/factory-chat-profiles";
-import type { FactoryChatItem, FactoryInspectorPanel, FactoryViewMode } from "../../views/factory-models";
+import type { FactoryChatItem, FactoryInspectorPanel, FactoryInspectorTab, FactoryViewMode } from "../../views/factory-models";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 
 import { tryParseJson } from "./formatters";
@@ -21,6 +21,7 @@ export const buildChatLink = (input: {
   readonly runId?: string;
   readonly jobId?: string;
   readonly panel?: FactoryInspectorPanel;
+  readonly inspectorTab?: FactoryInspectorTab;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
 }): string => {
@@ -32,6 +33,7 @@ export const buildChatLink = (input: {
   if (input.runId) params.set("run", input.runId);
   if (input.jobId) params.set("job", input.jobId);
   if (input.panel) params.set("panel", input.panel);
+  if (input.inspectorTab) params.set("inspectorTab", input.inspectorTab);
   if (input.focusKind && input.focusId) {
     params.set("focusKind", input.focusKind);
     params.set("focusId", input.focusId);

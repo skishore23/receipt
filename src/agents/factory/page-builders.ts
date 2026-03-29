@@ -2,6 +2,7 @@ import type { FactoryService } from "../../services/factory-service";
 import type { FactoryChatObjectiveNav } from "../../views/factory-models";
 import { projectAgentRun } from "./run-projection";
 import type { AgentRunChain } from "./shared";
+import { deriveObjectiveDisplayState } from "../../views/factory/supervision";
 
 type FactoryObjectiveListItem = Awaited<ReturnType<FactoryService["listObjectives"]>>[number];
 
@@ -22,6 +23,7 @@ export const toObjectiveNavCard = (
   title: objective.title,
   status: objective.status,
   phase: objective.phase,
+  displayState: deriveObjectiveDisplayState(objective),
   blockedReason: objective.blockedReason,
   blockedExplanation: objective.blockedExplanation?.summary,
   summary: objective.latestSummary ?? objective.nextAction,

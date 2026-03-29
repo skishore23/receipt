@@ -1168,3 +1168,184 @@ test("jsonl queue: scoped workers prevent parent and control jobs from starving 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+// ============================================================================
+// Performance optimization tests
+// ============================================================================
+
+test("jsonl queue: heartbeat updates lease without full projection sync", async () => {
+  const dir = await mkTmp("receipt-queue-hb-fast");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs", watchDir: dir });
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r1" },
+      maxAttempts: 1,
+    });
+    const leased = await queue.leaseNext({ workerId: "w1", leaseMs: 10_000 });
+    expect(leased?.id).toBe(job.id);
+    expect(leased?.status).toBe("leased");
+
+    const before = await queue.getJob(job.id);
+    expect(before?.leaseUntil).toBeDefined();
+    const hb = await queue.heartbeat(job.id, "w1", 30_000);
+    expect(hb).toBeTruthy();
+    expect(hb!.status).toBe("running");
+    expect(hb!.leaseUntil).toBeGreaterThan(before!.leaseUntil!);
+
+    await queue.complete(job.id, "w1", { ok: true });
+    const settled = await queue.getJob(job.id);
+    expect(settled?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("jsonl queue: leaseNext with agent/lane filters skips non-matching index entries", async () => {
+  const dir = await mkTmp("receipt-queue-lease-filter");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    const agents = ["alpha", "beta", "gamma", "delta", "target"];
+    const jobs = [];
+    for (const agentId of agents) {
+      jobs.push(await queue.enqueue({
+        agentId,
+        lane: agentId === "target" ? "chat" : "collect",
+        payload: { kind: `${agentId}.run` },
+        maxAttempts: 1,
+      }));
+    }
+
+    const leased = await queue.leaseNext({
+      workerId: "w1",
+      leaseMs: 5_000,
+      agentIds: ["target"],
+      lanes: ["chat"],
+    });
+    expect(leased).toBeTruthy();
+    expect(leased!.agentId).toBe("target");
+
+    const others = await queue.listJobs({ status: "queued" });
+    expect(others.length).toBe(4);
+    for (const other of others) {
+      expect(other.agentId).not.toBe("target");
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("jsonl queue: handleExpiredLeases only processes leased/running jobs", async () => {
+  const dir = await mkTmp("receipt-queue-expire-opt");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({
+      runtime,
+      stream: "jobs",
+      expireLeasesOnRefresh: true,
+    });
+
+    const completedJob = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "q1" },
+      maxAttempts: 2,
+    });
+    const toExpire = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "q2" },
+      maxAttempts: 2,
+    });
+
+    const leased = await queue.leaseNext({ workerId: "w1", leaseMs: 1_000 });
+    expect(leased?.id).toBe(completedJob.id);
+
+    const leased2 = await queue.leaseNext({ workerId: "w2", leaseMs: 1_000 });
+    expect(leased2?.id).toBe(toExpire.id);
+
+    await queue.complete(completedJob.id, "w1", { ok: true });
+    const completed = await queue.getJob(completedJob.id);
+    expect(completed?.status).toBe("completed");
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await queue.refresh();
+
+    const expired = await queue.getJob(toExpire.id);
+    expect(expired?.status).toBe("queued");
+
+    const stillCompleted = await queue.getJob(completedJob.id);
+    expect(stillCompleted?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("jsonl queue: refreshAllJobs skips reloading terminal jobs from disk", async () => {
+  const dir = await mkTmp("receipt-queue-refresh-skip");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({
+      runtime,
+      stream: "jobs",
+      expireLeasesOnRefresh: true,
+      fullRefreshWindowMs: 0,
+    });
+
+    const completedJob = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "done" },
+      maxAttempts: 1,
+    });
+    const leased = await queue.leaseNext({ workerId: "w1", leaseMs: 5_000 });
+    expect(leased?.id).toBe(completedJob.id);
+    await queue.complete(completedJob.id, "w1", { result: "done" });
+
+    const activeJob = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "active" },
+      maxAttempts: 1,
+    });
+
+    const snap1 = await queue.refresh();
+    expect(snap1.completed).toBe(1);
+    expect(snap1.queued).toBe(1);
+
+    const snap2 = await queue.refresh();
+    expect(snap2.completed).toBe(1);
+    expect(snap2.queued).toBe(1);
+
+    const settled = await queue.getJob(completedJob.id);
+    expect(settled?.status).toBe("completed");
+
+    const active = await queue.getJob(activeJob.id);
+    expect(active?.status).toBe("queued");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

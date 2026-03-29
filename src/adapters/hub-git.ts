@@ -399,6 +399,11 @@ export class HubGit {
   async restoreWorkspace(spec: HubGitWorkspaceRestoreSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
     await fs.promises.mkdir(this.worktreesDir, { recursive: true });
+    const workspaceExists = fs.existsSync(spec.workspacePath);
+    const hasWorktreeMetadata = workspaceExists ? await this.hasLiveWorktreeMetadata(spec.workspacePath) : false;
+    if (workspaceExists && !hasWorktreeMetadata) {
+      await this.removeWorkspaceDirectory(spec.workspacePath);
+    }
     if (!fs.existsSync(spec.workspacePath)) {
       await this.execGit(["worktree", "prune"], { gitDir: this.bareDir });
       const branchRef = `refs/heads/${spec.branchName}`;
@@ -425,6 +430,12 @@ export class HubGit {
   async removeWorkspace(workspacePath: string): Promise<void> {
     await this.ensureReady();
     if (!fs.existsSync(workspacePath)) return;
+    if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
+      await this.removeWorkspaceDirectory(workspacePath);
+      await this.execGit(["worktree", "prune"], { gitDir: this.bareDir }).catch(() => undefined);
+      this.invalidateGraph();
+      return;
+    }
     await this.execGit(["worktree", "remove", "--force", workspacePath], { gitDir: this.bareDir });
     this.invalidateGraph();
   }
@@ -432,6 +443,9 @@ export class HubGit {
   async resetWorkspace(workspacePath: string, baseHash: string): Promise<HubWorktreeStatus> {
     await this.syncFromSource();
     if (!fs.existsSync(workspacePath)) {
+      throw new HubGitError(404, "workspace path is missing");
+    }
+    if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
       throw new HubGitError(404, "workspace path is missing");
     }
     const resolvedBase = await this.resolveCommit(baseHash);
@@ -447,6 +461,9 @@ export class HubGit {
   async worktreeStatus(workspacePath: string): Promise<HubWorktreeStatus> {
     await this.ensureReady();
     if (!fs.existsSync(workspacePath)) {
+      return { exists: false, dirty: false };
+    }
+    if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
       return { exists: false, dirty: false };
     }
     const dirtyRaw = await this.execGit(["status", "--porcelain=v1", "--", ".", ":(exclude).receipt"], { cwd: workspacePath });
@@ -485,7 +502,7 @@ export class HubGit {
     const workspaceId = `factory_integration_${safeBranchPart(objectiveId)}`;
     const workspacePath = path.join(this.worktreesDir, workspaceId);
     const branchName = `hub/integration/${workspaceId}`;
-    if (fs.existsSync(workspacePath)) {
+    if (fs.existsSync(workspacePath) && await this.hasLiveWorktreeMetadata(workspacePath)) {
       if (opts?.resetToBase) {
         const resolvedBase = await this.resolveCommit(baseHash);
         await this.execGit(["merge", "--abort"], { cwd: workspacePath }).catch(() => undefined);
@@ -854,6 +871,26 @@ export class HubGit {
     await this.execGit(["config", "user.name", userName || "Receipt Hub"], { cwd: workspacePath });
     await this.execGit(["config", "user.email", userEmail || "hub@local"], { cwd: workspacePath });
     await this.ensureWorktreeExclude(workspacePath);
+  }
+
+  private async resolveWorkspaceGitDir(workspacePath: string): Promise<string | undefined> {
+    const gitPath = path.join(workspacePath, ".git");
+    const stat = await fs.promises.stat(gitPath).catch(() => undefined);
+    if (!stat) return undefined;
+    if (stat.isDirectory()) return gitPath;
+    if (!stat.isFile()) return undefined;
+    const gitMeta = await fs.promises.readFile(gitPath, "utf-8").catch(() => "");
+    const gitDirMatch = gitMeta.match(/^gitdir:\s*(.+)$/im);
+    return gitDirMatch ? path.resolve(workspacePath, gitDirMatch[1].trim()) : undefined;
+  }
+
+  private async hasLiveWorktreeMetadata(workspacePath: string): Promise<boolean> {
+    const gitDir = await this.resolveWorkspaceGitDir(workspacePath);
+    return gitDir ? pathExists(gitDir) : false;
+  }
+
+  private async removeWorkspaceDirectory(workspacePath: string): Promise<void> {
+    await fs.promises.rm(workspacePath, { recursive: true, force: true }).catch(() => undefined);
   }
 
   private async ensureWorktreeExclude(workspacePath: string): Promise<void> {

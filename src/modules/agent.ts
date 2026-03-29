@@ -154,7 +154,7 @@ export type AgentEvent =
       readonly agentId?: string;
       readonly objectiveId: string;
       readonly chatId?: string;
-      readonly reason: "startup" | "dispatch_create" | "dispatch_reuse" | "dispatch_update";
+      readonly reason: "startup" | "rebracketed" | "dispatch_create" | "dispatch_reuse" | "dispatch_update";
       readonly created?: boolean;
     }
   | {
@@ -303,7 +303,7 @@ export type AgentState = {
   readonly thread?: {
     readonly objectiveId: string;
     readonly chatId?: string;
-    readonly reason: "startup" | "dispatch_create" | "dispatch_reuse" | "dispatch_update";
+    readonly reason: "startup" | "rebracketed" | "dispatch_create" | "dispatch_reuse" | "dispatch_update";
     readonly created?: boolean;
     readonly updatedAt: number;
   };

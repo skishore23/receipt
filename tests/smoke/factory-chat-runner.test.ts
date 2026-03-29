@@ -3113,6 +3113,21 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
       latestSummary: "Created the follow-up objective.",
       integration: { status: "idle", queuedCandidateIds: [] },
     }),
+    getObjective: async (objectiveId: string) => ({
+      objectiveId,
+      title: "Objective demo",
+      status: "blocked",
+      phase: "executing",
+      objectiveMode: "delivery" as const,
+      severity: 2,
+      latestSummary: "Blocked on human input.",
+      nextAction: "React the current objective.",
+      integration: { status: "idle" as const, queuedCandidateIds: [] as string[] },
+      latestDecision: undefined,
+      blockedExplanation: "Blocked on human input.",
+      evidenceCards: [],
+      tasks: [],
+    }),
   });
   const actions = [
     {
@@ -3234,7 +3249,7 @@ test("factory chat runner: historical infrastructure loop continues on the lates
     getObjective: async (objectiveId: string) =>
       objectiveId === historicalInfrastructureStartupObjectiveId
         ? completedStartup
-        : activeDetail(),
+        : { ...activeDetail(), status: "blocked", blockedExplanation: "Waiting for human input." },
     reactObjectiveWithNote: async (objectiveId: string, message?: string) =>
       objectiveId === historicalInfrastructureStartupObjectiveId
         ? completedStartup

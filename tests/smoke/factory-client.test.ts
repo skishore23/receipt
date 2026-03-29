@@ -215,16 +215,22 @@ const chatMarkup = (input: {
 
 const CHAT_TRIGGER = "sse:agent-refresh throttle:180ms, sse:job-refresh throttle:180ms, sse:objective-runtime-refresh throttle:180ms, sse:factory-refresh throttle:180ms, factory:chat-refresh from:body";
 const OBJECTIVE_TRIGGER = "sse:profile-board-refresh throttle:450ms, sse:objective-runtime-refresh throttle:450ms, sse:factory-refresh throttle:450ms, factory:scope-changed from:body";
-const WORKBENCH_CHAT_TRIGGER = "sse:agent-refresh throttle:180ms, sse:job-refresh throttle:180ms, factory:chat-refresh from:body";
-const WORKBENCH_BACKGROUND_TRIGGER = "sse:profile-board-refresh throttle:350ms, sse:objective-runtime-refresh throttle:350ms, factory:workbench-refresh from:body, factory:scope-changed from:body";
-const WORKBENCH_HEADER_TRIGGER = "sse:profile-board-refresh throttle:300ms, sse:objective-runtime-refresh throttle:300ms, factory:workbench-refresh from:body, factory:scope-changed from:body";
-const WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms, factory:workbench-refresh from:body, factory:scope-changed from:body";
-const WORKBENCH_OBJECTIVE_BLOCK_TRIGGER = "sse:objective-runtime-refresh throttle:320ms, factory:workbench-refresh from:body, factory:scope-changed from:body";
-const WORKBENCH_SHARED_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms, sse:objective-runtime-refresh throttle:320ms, factory:workbench-refresh from:body, factory:scope-changed from:body";
+const WORKBENCH_CHAT_TRIGGER = "sse:agent-refresh throttle:180ms, sse:job-refresh throttle:180ms";
+const WORKBENCH_BACKGROUND_TRIGGER = "";
+const WORKBENCH_HEADER_TRIGGER = "sse:profile-board-refresh throttle:300ms, sse:objective-runtime-refresh throttle:300ms";
+const WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms";
+const WORKBENCH_RUNTIME_BLOCK_TRIGGER = "sse:objective-runtime-refresh throttle:320ms";
+const WORKBENCH_SHARED_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms, sse:objective-runtime-refresh throttle:320ms";
+const WORKBENCH_CHAT_DESCRIPTOR = "sse:agent-refresh@180,sse:job-refresh@180";
+const WORKBENCH_BACKGROUND_DESCRIPTOR = "";
+const WORKBENCH_HEADER_DESCRIPTOR = "sse:profile-board-refresh@300,sse:objective-runtime-refresh@300";
+const WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320";
+const WORKBENCH_RUNTIME_BLOCK_DESCRIPTOR = "sse:objective-runtime-refresh@320";
+const WORKBENCH_SHARED_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
 
 const workbenchHeaderPath = (search: string) => `/factory/island/workbench/header${search}`;
 
-const workbenchBlockPath = (search: string, block: "summary" | "objectives" | "activity" | "history") => {
+const workbenchBlockPath = (search: string, block: "summary" | "activity" | "objectives" | "history") => {
   const parsed = new URL("http://receipt.test/factory" + search);
   parsed.pathname = "/factory/island/workbench/block";
   parsed.searchParams.set("block", block);
@@ -233,10 +239,10 @@ const workbenchBlockPath = (search: string, block: "summary" | "objectives" | "a
 
 const workbenchPanelMarkup = (search: string, objectiveId?: string, content = "workbench panel") =>
   `<div class="factory-scrollbar flex flex-col gap-4 pr-1 lg:h-full lg:min-h-0 lg:overflow-y-auto" data-workbench-objective-id="${objectiveId ?? ""}">
-    <div id="factory-workbench-block-summary" data-workbench-projections="profile-board objective-runtime" hx-get="${workbenchBlockPath(search, "summary")}" hx-trigger="${WORKBENCH_SHARED_BLOCK_TRIGGER}" hx-swap="innerHTML"><div>${content} summary</div></div>
-    <div id="factory-workbench-block-objectives" data-workbench-projections="profile-board" hx-get="${workbenchBlockPath(search, "objectives")}" hx-trigger="${WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER}" hx-swap="innerHTML"><div>${content} objectives</div></div>
-    <div id="factory-workbench-block-activity" data-workbench-projections="objective-runtime" hx-get="${workbenchBlockPath(search, "activity")}" hx-trigger="${WORKBENCH_OBJECTIVE_BLOCK_TRIGGER}" hx-swap="innerHTML"><div>${content} activity</div></div>
-    <div id="factory-workbench-block-history" data-workbench-projections="profile-board" hx-get="${workbenchBlockPath(search, "history")}" hx-trigger="${WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER}" hx-swap="innerHTML"><div>${content} history</div></div>
+    <div id="factory-workbench-block-summary" data-workbench-projections="profile-board objective-runtime" hx-get="${workbenchBlockPath(search, "summary")}" hx-trigger="${WORKBENCH_SHARED_BLOCK_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_SHARED_BLOCK_DESCRIPTOR}"><div>${content} summary</div></div>
+    <div id="factory-workbench-block-activity" data-workbench-projections="objective-runtime" hx-get="${workbenchBlockPath(search, "activity")}" hx-trigger="${WORKBENCH_RUNTIME_BLOCK_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_RUNTIME_BLOCK_DESCRIPTOR}"><div>${content} activity</div></div>
+    <div id="factory-workbench-block-objectives" data-workbench-projections="profile-board" hx-get="${workbenchBlockPath(search, "objectives")}" hx-trigger="${WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR}"><div>${content} objectives</div></div>
+    <div id="factory-workbench-block-history" data-workbench-projections="profile-board" hx-get="${workbenchBlockPath(search, "history")}" hx-trigger="${WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR}"><div>${content} history</div></div>
   </div>`;
 
 const workbenchShellMarkup = (input: {
@@ -252,6 +258,9 @@ const workbenchShellMarkup = (input: {
   const profileLabel = input.profileLabel ?? "Generalist";
   const chatId = parsed.searchParams.get("chat") || "";
   const objectiveId = parsed.searchParams.get("objective") || undefined;
+  const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
+  const focusKind = parsed.searchParams.get("focusKind") || "";
+  const focusId = parsed.searchParams.get("focusId") || "";
   const chatEvents = new URLSearchParams();
   chatEvents.set("profile", profileId);
   if (chatId) chatEvents.set("chat", chatId);
@@ -260,20 +269,20 @@ const workbenchShellMarkup = (input: {
 <head>
   <title>Receipt Factory Workbench</title>
 </head>
-<body data-factory-workbench="true">
-  <div id="factory-workbench-header" hx-get="${workbenchHeaderPath(search)}" hx-trigger="${WORKBENCH_HEADER_TRIGGER}" hx-swap="innerHTML">
+<body data-factory-workbench="true" data-route-key="/factory${search}" data-chat-id="${chatId}" data-objective-id="${objectiveId ?? ""}" data-inspector-tab="${inspectorTab}" data-focus-kind="${focusKind}" data-focus-id="${focusId}">
+  <div id="factory-workbench-header" hx-get="${workbenchHeaderPath(search)}" hx-trigger="${WORKBENCH_HEADER_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_HEADER_DESCRIPTOR}">
     <select id="factory-workbench-profile-select" data-factory-profile-select="true">
       <option value="/factory?profile=${profileId}&chat=${chatId || "chat_demo"}" selected>${profileLabel}</option>
       <option value="/factory?profile=software&chat=${chatId || "chat_demo"}">Software</option>
     </select>
   </div>
   <div id="factory-workbench-background-root" data-events-path="/factory/background/events${search}">
-    <div id="factory-workbench-panel" hx-get="/factory/island/workbench${search}" hx-trigger="${WORKBENCH_BACKGROUND_TRIGGER}" hx-swap="innerHTML">${input.workbenchHtml ?? workbenchPanelMarkup(search, objectiveId)}</div>
+    <div id="factory-workbench-panel" hx-get="/factory/island/workbench${search}" hx-trigger="${WORKBENCH_BACKGROUND_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_BACKGROUND_DESCRIPTOR}">${input.workbenchHtml ?? workbenchPanelMarkup(search, objectiveId)}</div>
   </div>
   <div id="factory-workbench-chat-header"><span>${profileLabel}</span></div>
   <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
     <div id="factory-workbench-chat-scroll">
-      <div id="factory-workbench-chat" hx-get="/factory/island/chat${search}" hx-trigger="${WORKBENCH_CHAT_TRIGGER}" hx-swap="innerHTML">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
+      <div id="factory-workbench-chat" hx-get="/factory/island/chat${search}" hx-trigger="${WORKBENCH_CHAT_TRIGGER}" hx-swap="innerHTML" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
       <div id="factory-chat-live">
         <span id="factory-chat-streaming-label-text">${profileLabel}</span>
         <div id="factory-chat-streaming"></div>
@@ -306,19 +315,22 @@ const workbenchShellSnapshot = (input: {
   const profileLabel = input.profileLabel ?? "Generalist";
   const chatId = parsed.searchParams.get("chat") || "";
   const objectiveId = parsed.searchParams.get("objective") || undefined;
+  const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
   const focusKind = parsed.searchParams.get("focusKind");
   const focusId = parsed.searchParams.get("focusId");
-  const filter = parsed.searchParams.get("filter") || "all";
+  const filter = parsed.searchParams.get("filter") || "objective.running";
   const chatEvents = new URLSearchParams();
   chatEvents.set("profile", profileId);
   if (chatId) chatEvents.set("chat", chatId);
   return {
     pageTitle: "Receipt Factory Workbench",
+    routeKey: `/factory${search}`,
     ...(input.location ? { location: input.location } : {}),
     route: {
       profileId,
       chatId,
       ...(objectiveId ? { objectiveId } : {}),
+      ...(inspectorTab !== "overview" ? { inspectorTab } : {}),
       ...(focusKind === "task" || focusKind === "job" ? { focusKind } : {}),
       ...(focusId ? { focusId } : {}),
       filter,
@@ -380,8 +392,8 @@ const buildParsedDocument = (markup: string) => {
     "factory-workbench-header",
     "factory-workbench-panel",
     "factory-workbench-block-summary",
-    "factory-workbench-block-objectives",
     "factory-workbench-block-activity",
+    "factory-workbench-block-objectives",
     "factory-workbench-block-history",
     "factory-workbench-chat-header",
     "factory-workbench-chat-root",
@@ -761,6 +773,7 @@ const createHarness = async (options: {
     Element: MockElement,
     Node: MockElement,
     URL,
+    URLSearchParams,
     EventSource: MockEventSource,
     DOMParser: class {
       parseFromString(markup: string) {
@@ -865,6 +878,17 @@ const createHarness = async (options: {
 
 const createWorkbenchHarness = async (options: {
   readonly initialLocation?: string;
+  readonly sessionStorageState?: Record<string, string>;
+  readonly beforeBoot?: (input: {
+    readonly body: MockElement;
+    readonly workbenchHeader: MockElement;
+    readonly workbenchPanel: MockElement;
+    readonly workbenchSummary: MockElement;
+    readonly workbenchActivity: MockElement;
+    readonly workbenchObjectives: MockElement;
+    readonly workbenchHistory: MockElement;
+    readonly chat: MockElement;
+  }) => void;
   readonly fetchImpl?: (url: string, init: { readonly body?: FormData }) => Promise<{
     readonly ok: boolean;
     readonly headers: { readonly get: (name: string) => string | null };
@@ -890,11 +914,11 @@ const createWorkbenchHarness = async (options: {
   const workbenchSummary = new MockElement("DIV");
   workbenchSummary.id = "factory-workbench-block-summary";
 
-  const workbenchObjectives = new MockElement("DIV");
-  workbenchObjectives.id = "factory-workbench-block-objectives";
-
   const workbenchActivity = new MockElement("DIV");
   workbenchActivity.id = "factory-workbench-block-activity";
+
+  const workbenchObjectives = new MockElement("DIV");
+  workbenchObjectives.id = "factory-workbench-block-objectives";
 
   const workbenchHistory = new MockElement("DIV");
   workbenchHistory.id = "factory-workbench-block-history";
@@ -961,8 +985,8 @@ const createWorkbenchHarness = async (options: {
     [workbenchHeader.id, workbenchHeader],
     [backgroundRoot.id, backgroundRoot],
     [workbenchSummary.id, workbenchSummary],
-    [workbenchObjectives.id, workbenchObjectives],
     [workbenchActivity.id, workbenchActivity],
+    [workbenchObjectives.id, workbenchObjectives],
     [workbenchHistory.id, workbenchHistory],
     [workbenchChatHeader.id, workbenchChatHeader],
     [chatRoot.id, chatRoot],
@@ -985,29 +1009,37 @@ const createWorkbenchHarness = async (options: {
   const body = new MockElement("BODY");
   body.setAttribute("data-factory-workbench", "true");
   const initialLocation = new URL(options.initialLocation ?? "http://receipt.test/factory?profile=generalist&chat=chat_demo");
+  body.setAttribute("data-route-key", `/factory${initialLocation.search}`);
   body.setAttribute("data-chat-id", initialLocation.searchParams.get("chat") || "");
   body.setAttribute("data-objective-id", initialLocation.searchParams.get("objective") || "");
+  body.setAttribute("data-inspector-tab", initialLocation.searchParams.get("inspectorTab") || "overview");
   body.setAttribute("data-focus-kind", initialLocation.searchParams.get("focusKind") || "");
   body.setAttribute("data-focus-id", initialLocation.searchParams.get("focusId") || "");
   backgroundRoot.setAttribute("data-events-path", `/factory/background/events${initialLocation.search}`);
   workbenchHeader.setAttribute("hx-get", workbenchHeaderPath(initialLocation.search));
   workbenchHeader.setAttribute("hx-trigger", WORKBENCH_HEADER_TRIGGER);
   workbenchHeader.setAttribute("hx-swap", "innerHTML");
+  workbenchHeader.setAttribute("data-refresh-on", WORKBENCH_HEADER_DESCRIPTOR);
   workbenchPanel.setAttribute("hx-get", `/factory/island/workbench${initialLocation.search}`);
   workbenchPanel.setAttribute("hx-trigger", WORKBENCH_BACKGROUND_TRIGGER);
   workbenchPanel.setAttribute("hx-swap", "innerHTML");
+  workbenchPanel.setAttribute("data-refresh-on", WORKBENCH_BACKGROUND_DESCRIPTOR);
   workbenchSummary.setAttribute("hx-get", workbenchBlockPath(initialLocation.search, "summary"));
   workbenchSummary.setAttribute("hx-trigger", WORKBENCH_SHARED_BLOCK_TRIGGER);
   workbenchSummary.setAttribute("hx-swap", "innerHTML");
+  workbenchSummary.setAttribute("data-refresh-on", WORKBENCH_SHARED_BLOCK_DESCRIPTOR);
+  workbenchActivity.setAttribute("hx-get", workbenchBlockPath(initialLocation.search, "activity"));
+  workbenchActivity.setAttribute("hx-trigger", WORKBENCH_RUNTIME_BLOCK_TRIGGER);
+  workbenchActivity.setAttribute("hx-swap", "innerHTML");
+  workbenchActivity.setAttribute("data-refresh-on", WORKBENCH_RUNTIME_BLOCK_DESCRIPTOR);
   workbenchObjectives.setAttribute("hx-get", workbenchBlockPath(initialLocation.search, "objectives"));
   workbenchObjectives.setAttribute("hx-trigger", WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER);
   workbenchObjectives.setAttribute("hx-swap", "innerHTML");
-  workbenchActivity.setAttribute("hx-get", workbenchBlockPath(initialLocation.search, "activity"));
-  workbenchActivity.setAttribute("hx-trigger", WORKBENCH_OBJECTIVE_BLOCK_TRIGGER);
-  workbenchActivity.setAttribute("hx-swap", "innerHTML");
+  workbenchObjectives.setAttribute("data-refresh-on", WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR);
   workbenchHistory.setAttribute("hx-get", workbenchBlockPath(initialLocation.search, "history"));
   workbenchHistory.setAttribute("hx-trigger", WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER);
   workbenchHistory.setAttribute("hx-swap", "innerHTML");
+  workbenchHistory.setAttribute("data-refresh-on", WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR);
   const chatEvents = new URLSearchParams();
   chatEvents.set("profile", initialLocation.searchParams.get("profile") || "generalist");
   if (initialLocation.searchParams.get("chat")) chatEvents.set("chat", initialLocation.searchParams.get("chat")!);
@@ -1015,7 +1047,18 @@ const createWorkbenchHarness = async (options: {
   chat.setAttribute("hx-get", `/factory/island/chat${initialLocation.search}`);
   chat.setAttribute("hx-trigger", WORKBENCH_CHAT_TRIGGER);
   chat.setAttribute("hx-swap", "innerHTML");
+  chat.setAttribute("data-refresh-on", WORKBENCH_CHAT_DESCRIPTOR);
   form.action = "/factory/compose" + initialLocation.search;
+  options.beforeBoot?.({
+    body,
+    workbenchHeader,
+    workbenchPanel,
+    workbenchSummary,
+    workbenchActivity,
+    workbenchObjectives,
+    workbenchHistory,
+    chat,
+  });
 
   const documentListeners = new Map<string, Array<Listener>>();
   const document = {
@@ -1076,6 +1119,7 @@ const createWorkbenchHarness = async (options: {
     },
   };
   const windowListeners = new Map<string, Array<Listener>>();
+  const sessionStorageState = new Map<string, string>(Object.entries(options.sessionStorageState ?? {}));
   const dispatchAfterSwap = (target: MockElement) => {
     document.dispatchEvent(new MockEvent({ type: "htmx:afterSwap", target }));
   };
@@ -1115,6 +1159,7 @@ const createWorkbenchHarness = async (options: {
     Element: MockElement,
     Node: MockElement,
     URL,
+    URLSearchParams,
     EventSource: MockEventSource,
     DOMParser: class {
       parseFromString(markup: string) {
@@ -1208,6 +1253,11 @@ const createWorkbenchHarness = async (options: {
     requestAnimationFrame: (fn: () => void) => fn(),
     setTimeout,
     clearTimeout,
+    sessionStorage: {
+      getItem: (key: string) => sessionStorageState.get(key) ?? null,
+      setItem: (key: string, value: string) => { sessionStorageState.set(key, value); },
+      removeItem: (key: string) => { sessionStorageState.delete(key); },
+    },
     history: historyState,
     location: locationState,
     htmx,
@@ -1236,6 +1286,7 @@ const createWorkbenchHarness = async (options: {
     fetchCalls,
     locationState,
     historyState,
+    sessionStorageState,
     backgroundSource: () => latestSourceFor("/factory/background/events"),
     chatSource: () => latestSourceFor("/factory/chat/events"),
   };
@@ -1670,7 +1721,7 @@ test("factory client: optimistic pending transcript clears on fetch failure", as
   expect(submit.textContent).toBe("Send");
 });
 
-test("factory client: /analyze shows immediate action feedback without optimistic transcript", async () => {
+test("factory client: /analyze shows immediate action feedback with optimistic transcript", async () => {
   const { textarea, form, optimistic, status, submit } = await createHarness({
     fetchImpl: () => new Promise(() => {}),
   });
@@ -1679,54 +1730,10 @@ test("factory client: /analyze shows immediate action feedback without optimisti
   textarea.selectionStart = textarea.value.length;
   form.dispatchEvent(new MockEvent({ type: "submit", target: form }));
 
-  expect(status.textContent).toBe("Opening analysis...");
+  expect(status.textContent).toBe("Analyzing thread...");
   expect(submit.disabled).toBe(true);
-  expect(submit.textContent).toBe("Opening...");
-  expect(optimistic.innerHTML).toBe("");
-});
-
-test("factory client: successful /analyze applies the new route inline", async () => {
-  const { textarea, form, optimistic, status, submit, locationState, historyState } = await createHarness({
-    fetchImpl: async (url) => {
-      if (url.indexOf("/factory/compose") >= 0) {
-        return {
-          ok: true,
-          headers: { get: () => "application/json" },
-          json: async () => ({ location: "/factory?profile=generalist&thread=objective_demo&panel=analysis" }),
-          text: async () => "",
-        };
-      }
-      if (url.indexOf("/factory?profile=generalist&thread=objective_demo&panel=analysis") >= 0) {
-        return {
-          ok: true,
-          headers: { get: () => "text/html" },
-          json: async () => ({}),
-          text: async () => shellMarkup({
-            search: "?profile=generalist&thread=objective_demo&panel=analysis",
-            chatHtml: chatMarkup({ objectiveId: "objective_demo" }),
-          }),
-        };
-      }
-      return {
-        ok: true,
-        headers: { get: () => "text/html" },
-        json: async () => ({}),
-        text: async () => "<div></div>",
-      };
-    },
-  });
-
-  textarea.value = "/analyze";
-  textarea.selectionStart = textarea.value.length;
-  form.dispatchEvent(new MockEvent({ type: "submit", target: form }));
-  await flushAsync();
-
-  expect(status.textContent).toBe("");
-  expect(submit.disabled).toBe(false);
-  expect(submit.textContent).toBe("Send");
-  expect(optimistic.innerHTML).toBe("");
-  expect(locationState.assigned).toEqual([]);
-  expect(historyState.pushed).toEqual(["/factory?profile=generalist&thread=objective_demo&panel=analysis"]);
+  expect(submit.textContent).toBe("Analyzing...");
+  expect(optimistic.innerHTML).toContain("/analyze");
 });
 
 test("factory client: factory-stream-token appends without extra fetches and factory-stream-reset clears stale UI", async () => {
@@ -1916,9 +1923,9 @@ test("factory workbench client: profile-board and objective-runtime events refre
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=summary")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=activity")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=objectives")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=history")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=activity")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(0);
 
   backgroundSource()?.emit("objective-runtime-refresh", "objective_demo");
@@ -1934,6 +1941,39 @@ test("factory workbench client: profile-board and objective-runtime events refre
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(0);
+});
+
+test("factory workbench client: SSE refresh routing follows data-refresh-on declarations", async () => {
+  const { backgroundSource, fetchCalls } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+    beforeBoot: ({
+      workbenchHeader,
+      workbenchPanel,
+      workbenchSummary,
+      workbenchActivity,
+      workbenchObjectives,
+      workbenchHistory,
+      chat,
+    }) => {
+      workbenchHeader.setAttribute("data-refresh-on", "");
+      workbenchPanel.setAttribute("data-refresh-on", "");
+      workbenchSummary.setAttribute("data-refresh-on", "sse:summary-only@0");
+      workbenchActivity.setAttribute("data-refresh-on", "");
+      workbenchObjectives.setAttribute("data-refresh-on", "");
+      workbenchHistory.setAttribute("data-refresh-on", "");
+      chat.setAttribute("data-refresh-on", "");
+    },
+  });
+
+  backgroundSource()?.emit("summary-only", "objective_demo");
+  await flushAsync();
+
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=summary")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=activity")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=objectives")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&block=history")).toHaveLength(0);
 });
 
 test("factory workbench client: objective navigation updates background scope without rewriting the chat stream", async () => {
@@ -2182,4 +2222,175 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   expect(optimistic.innerHTML).toContain("objective_created");
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_created");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo");
+});
+
+test("factory workbench client: inspector tab changes replace history and refresh only the chat island", async () => {
+  const { document, fetchCalls, historyState, locationState } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+  });
+  const anchor = new MockElement("A");
+  anchor.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat");
+
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchor }));
+  await flushAsync(220);
+
+  expect(historyState.replaced).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat"]);
+  expect(historyState.pushed).toEqual([]);
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat");
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat")).toHaveLength(1);
+  expect(fetchCalls.some((call) => call.url === "/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat")).toBe(false);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat")).toBe(false);
+});
+
+test("factory workbench client: focus changes replace history and refresh summary plus activity only", async () => {
+  const { document, fetchCalls, historyState, locationState } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+  });
+  const anchor = new MockElement("A");
+  anchor.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1");
+
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchor }));
+  await flushAsync(260);
+
+  expect(historyState.replaced).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1"]);
+  expect(historyState.pushed).toEqual([]);
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1");
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1&block=summary")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1&block=activity")).toHaveLength(1);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1")).toBe(false);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&focusKind=task&focusId=task_1")).toBe(false);
+});
+
+test("factory workbench client: filter changes push history and refresh header plus workbench island", async () => {
+  const { document, fetchCalls, historyState, locationState } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+  });
+  const anchor = new MockElement("A");
+  anchor.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed");
+
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchor }));
+  await flushAsync(260);
+
+  expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed"]);
+  expect(historyState.replaced).toEqual([]);
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed");
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed")).toHaveLength(1);
+  expect(fetchCalls.some((call) => call.url === "/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed")).toBe(false);
+});
+
+test("factory workbench client: session replay restores local view state and pending live overlay", async () => {
+  const replayKey = "receipt.factory.workbench.v1:generalist:chat_demo";
+  const now = Date.now();
+  const { document, optimistic, historyState, locationState } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+    sessionStorageState: {
+      [replayKey]: JSON.stringify({
+        savedAt: now,
+        route: {
+          profileId: "generalist",
+          chatId: "chat_demo",
+          objectiveId: "objective_old",
+          inspectorTab: "notes",
+          filter: "objective.completed",
+          focusKind: "job",
+          focusId: "job_42",
+        },
+        liveOverlay: {
+          statusLabel: "Queued",
+          summary: "Queued for replay",
+          runId: "run_1",
+          savedAt: now,
+        },
+      }),
+    },
+  });
+
+  expect(historyState.replaced).toContain("/factory?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed&focusKind=job&focusId=job_42");
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed&focusKind=job&focusId=job_42");
+  expect(document.body.getAttribute("data-inspector-tab")).toBe("overview");
+  expect(document.body.getAttribute("data-focus-kind")).toBe("job");
+  expect(document.body.getAttribute("data-focus-id")).toBe("job_42");
+  expect(optimistic.innerHTML).toContain("Queued for replay");
+});
+
+test("factory workbench client: stale shell responses are ignored after a newer scope change wins", async () => {
+  let resolveObjectiveB: ((value: unknown) => void) | undefined;
+  let resolveObjectiveC: ((value: unknown) => void) | undefined;
+  const { document, workbenchPanel, historyState, locationState } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_a",
+    fetchImpl: async (url) => {
+      const parsed = new URL(url, "http://receipt.test");
+      if (parsed.pathname === "/factory/api/workbench-shell" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_b") {
+        return await new Promise((resolve) => {
+          resolveObjectiveB = () => resolve({
+            ok: true,
+            headers: { get: () => "application/json" },
+            json: async () => workbenchShellSnapshot({
+              search: parsed.search,
+              chatHtml: chatMarkup({ profileLabel: "Generalist", chatId: "chat_demo", objectiveId: "objective_b" }),
+              workbenchHtml: '<div data-workbench-objective-id="objective_b">objective b</div>',
+            }),
+            text: async () => "",
+          });
+        }) as {
+          readonly ok: boolean;
+          readonly headers: { readonly get: (name: string) => string | null };
+          readonly json: () => Promise<unknown>;
+          readonly text: () => Promise<string>;
+        };
+      }
+      if (parsed.pathname === "/factory/api/workbench-shell" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_c") {
+        return await new Promise((resolve) => {
+          resolveObjectiveC = () => resolve({
+            ok: true,
+            headers: { get: () => "application/json" },
+            json: async () => workbenchShellSnapshot({
+              search: parsed.search,
+              chatHtml: chatMarkup({ profileLabel: "Generalist", chatId: "chat_demo", objectiveId: "objective_c" }),
+              workbenchHtml: '<div data-workbench-objective-id="objective_c">objective c</div>',
+            }),
+            text: async () => "",
+          });
+        }) as {
+          readonly ok: boolean;
+          readonly headers: { readonly get: (name: string) => string | null };
+          readonly json: () => Promise<unknown>;
+          readonly text: () => Promise<string>;
+        };
+      }
+      return {
+        ok: true,
+        headers: { get: () => "application/json" },
+        json: async () => workbenchShellSnapshot({
+          search: parsed.search || "?profile=generalist&chat=chat_demo&objective=objective_a",
+          chatHtml: chatMarkup({
+            profileLabel: "Generalist",
+            chatId: parsed.searchParams.get("chat") || "chat_demo",
+            objectiveId: parsed.searchParams.get("objective") || "objective_a",
+          }),
+          workbenchHtml: `<div data-workbench-objective-id="${parsed.searchParams.get("objective") || "objective_a"}">workbench panel</div>`,
+        }),
+        text: async () => "",
+      };
+    },
+  });
+
+  const anchorB = new MockElement("A");
+  anchorB.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_b");
+  const anchorC = new MockElement("A");
+  anchorC.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_c");
+
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchorB }));
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchorC }));
+
+  resolveObjectiveC?.(undefined);
+  await flushAsync();
+  resolveObjectiveB?.(undefined);
+  await flushAsync();
+
+  expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_c"]);
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_c");
+  expect(workbenchPanel.innerHTML).toContain("objective c");
+  expect(workbenchPanel.innerHTML).not.toContain("objective b");
 });

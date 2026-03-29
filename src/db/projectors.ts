@@ -182,6 +182,18 @@ export const syncJobProjectionStream = async (
   return record ? toStoredJob(record) : undefined;
 };
 
+export const syncJobProjectionHeartbeat = (
+  dataDir: string,
+  jobId: string,
+  leaseUntil: number,
+  updatedAt: number,
+): void => {
+  const db = getReceiptDb(dataDir);
+  db.sqlite.query(
+    `UPDATE job_projection SET lease_until = ?, updated_at = ? WHERE job_id = ?`,
+  ).run(leaseUntil, updatedAt, jobId);
+};
+
 export const syncChangedJobProjections = async (
   dataDir: string,
   runtime: Runtime<JobCmd, JobEvent, JobState>,

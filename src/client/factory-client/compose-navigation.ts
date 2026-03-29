@@ -138,16 +138,16 @@ const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "work
   return '<section class="flex justify-end">' +
     '<div class="max-w-3xl space-y-1">' +
       '<div class="text-right text-[11px] text-muted-foreground">' + statusMeta + "</div>" +
-      '<div class="rounded-xl border border-info/15 bg-info/10 px-4 py-2.5 text-sm leading-6 text-foreground">' + escapeHtml(payload) + "</div>" +
+      '<div class="border border-info/15 bg-info/10 px-4 py-2.5 text-sm leading-6 text-foreground">' + escapeHtml(payload) + "</div>" +
     "</div>" +
   "</section>" +
-  '<section class="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">' +
+  '<section class=" border border-primary/20 bg-primary/5 px-3 py-2">' +
     '<div class="flex min-w-0 items-center justify-between gap-2">' +
       '<div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">' +
         '<span class="text-xs font-semibold text-foreground">' + escapeHtml(title) + "</span>" +
         '<span class="min-w-0 text-xs leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:1] overflow-hidden">' + escapeHtml(detail) + "</span>" +
       "</div>" +
-      '<span class="inline-flex shrink-0 items-center rounded-full border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + statusLabel + "</span>" +
+      '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + statusLabel + "</span>" +
     "</div>" +
   "</section>";
 };
@@ -166,11 +166,19 @@ export const composerFeedback = (
       || formAction.indexOf("/factory/workbench") >= 0
     ),
   );
+  const hasThread = Boolean(
+    (formAction && formAction.indexOf("thread=") >= 0)
+    || options?.currentObjectiveId,
+  );
   const command = leadingSlashCommand(payload);
   if (command) {
     switch (command) {
       case "analyze":
-        return { buttonLabel: "Opening...", status: "Opening analysis..." };
+        return {
+          buttonLabel: "Analyzing...",
+          status: isWorkbenchSurface ? "Analyzing objective..." : "Analyzing thread...",
+          optimisticHtml: renderOptimisticPrompt(payload, isWorkbenchSurface ? "workbench-chat" : (hasThread ? "thread" : "chat")),
+        };
       case "help":
         return { buttonLabel: "Opening...", status: "Opening help..." };
       case "watch":
@@ -202,10 +210,6 @@ export const composerFeedback = (
       status: "Sending to chat...",
     };
   }
-  const hasThread = Boolean(
-    (formAction && formAction.indexOf("thread=") >= 0)
-    || options?.currentObjectiveId,
-  );
   return {
     buttonLabel: hasThread ? "Updating..." : "Starting...",
     optimisticHtml: renderOptimisticPrompt(payload, hasThread ? "thread" : "chat"),

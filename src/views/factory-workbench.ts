@@ -179,6 +179,13 @@ export const buildFactoryWorkbench = (input: {
 }): FactoryWorkbenchModel | undefined => {
   const detail = input.detail;
   if (!detail) return undefined;
+  const stoppedTaskStatus = detail.status === "canceled"
+    ? "canceled"
+    : detail.status === "failed"
+      ? "failed"
+      : detail.status === "completed"
+        ? "completed"
+        : "blocked";
   const objectiveStopsLiveExecution =
     detail.status === "blocked"
     || detail.status === "failed"
@@ -188,7 +195,7 @@ export const buildFactoryWorkbench = (input: {
   const tasks = detail.tasks.map((task) => {
     const taskLooksActive = task.status === "running" || task.status === "reviewing";
     const stoppedMidTask = objectiveStopsLiveExecution && taskLooksActive && !isActiveJobStatus(task.jobStatus);
-    const effectiveStatus = stoppedMidTask ? "blocked" : task.status;
+    const effectiveStatus = stoppedMidTask ? stoppedTaskStatus : task.status;
     const effectiveBlockedReason = stoppedMidTask
       ? detail.blockedReason ?? task.blockedReason ?? detail.latestSummary
       : task.blockedReason;
@@ -268,17 +275,31 @@ export const buildFactoryWorkbench = (input: {
     focusedTask = taskById.get(input.liveOutput.taskId);
   }
   const output = input.liveOutput;
+  const focusedTaskStatus = focusedTask
+    ? output?.status
+      ?? (isActiveJobStatus(focusedTask.jobStatus) ? focusedTask.jobStatus : undefined)
+      ?? focusedTask.status
+      ?? focusedTask.jobStatus
+    : undefined;
+  const focusedTaskSummary = focusedTask
+    ? output?.summary
+      ?? (
+        focusedTaskStatus === "blocked"
+        || focusedTaskStatus === "failed"
+        || focusedTaskStatus === "canceled"
+        || focusedTaskStatus === "completed"
+          ? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary
+          : focusedTask.latestSummary ?? focusedTask.candidateSummary
+      )
+    : undefined;
   const focus = focusedTask
     ? {
         focusKind: focusedJob ? "job" : "task",
         focusId: focusedJob?.jobId ?? focusedTask.taskId,
         title: focusedTask.title,
-        status: output?.status
-          ?? (isActiveJobStatus(focusedTask.jobStatus) ? focusedTask.jobStatus : undefined)
-          ?? focusedTask.status
-          ?? focusedTask.jobStatus,
+        status: focusedTaskStatus ?? focusedTask.status ?? focusedTask.jobStatus ?? "pending",
         active: output?.active ?? focusedTask.isActive,
-        summary: output?.summary ?? focusedTask.latestSummary ?? focusedTask.candidateSummary,
+        summary: focusedTaskSummary ?? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary,
         taskId: focusedTask.taskId,
         candidateId: output?.candidateId ?? focusedTask.candidateId,
         jobId: output?.jobId ?? focusedTask.jobId ?? focusedJob?.jobId,

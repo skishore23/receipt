@@ -68,7 +68,7 @@ const receiptSummary = (r: ReceiptRecord): string => {
   return truncateText(r.raw, 200);
 };
 
-const chipClass = "inline-flex items-center rounded-full border border-border bg-secondary px-2 py-1 text-[10px] text-muted-foreground no-underline transition hover:bg-accent";
+const chipClass = "inline-flex items-center  border border-border bg-secondary px-2 py-1 text-[10px] text-muted-foreground no-underline transition hover:bg-accent";
 const chipActiveClass = "border-info/40 bg-info/10 text-info";
 const chipLabelClass = "border-transparent bg-transparent text-muted-foreground font-semibold hover:bg-transparent";
 
@@ -227,7 +227,7 @@ export const receiptRecordsHtml = (opts: {
       ${hash ? `<div class="mt-0.5 font-mono text-[10px] text-muted-foreground">${esc(hash)}</div>` : ""}
       ${ts ? `<div class="text-[10px] text-muted-foreground">${esc(ts)}</div>` : ""}
       <div class="mt-1 text-xs leading-5 text-card-foreground">${esc(summary)}</div>
-      <div class="receipt-raw-block mt-2 max-h-[300px] overflow-y-auto rounded-xl border border-border bg-muted px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground whitespace-pre-wrap break-all">${esc(rawJson)}</div>
+      <div class="receipt-raw-block mt-2 max-h-[300px] overflow-y-auto  border border-border bg-muted px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground whitespace-pre-wrap break-all">${esc(rawJson)}</div>
     </div>`;
   }).join("");
 
@@ -252,7 +252,7 @@ export const receiptSideHtml = (opts: {
     const pct = timelineTotal ? Math.round((b.count / timelineTotal) * 100) : 0;
     return `<div class="grid gap-1.5">
       <div class="text-[11px] text-muted-foreground">${esc(b.label)} \u00b7 ${b.count}</div>
-      <div class="relative h-1.5 overflow-hidden rounded-full bg-secondary">
+      <div class="relative h-1.5 overflow-hidden  bg-secondary">
         <span class="absolute inset-0 bg-info/70" style="width:${pct}%"></span>
       </div>
     </div>`;

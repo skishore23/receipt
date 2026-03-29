@@ -1,16 +1,129 @@
 # Receipt
 
-Receipt is a receipt-native runtime for long-lived agents.
+Receipt is an **event-native runtime and orchestration plane** for long-lived agents and software objectives.
 
-Instead of treating traces and job state as incidental logs, Receipt stores immutable, hash-linked receipts and derives runs, jobs, memory, objectives, replay, and operator views from them.
+Instead of treating traces and job state as incidental logs, Receipt stores immutable, hash-linked receipts and derives runs, jobs, memory, objectives, replay, and operator views from them by folding the same receipts.
 
-Today this repo contains:
+## Core Concepts
 
-- a low-level receipt runtime and TypeScript SDK
-- a queue-backed agent execution model with replay and branching
-- a Factory operator surface for repo-scoped multi-agent work
-- a Hono server, web UI, CLI/TUI, and receipt browser
-- a Resonate-backed multi-process runtime by default, with a JSONL fallback
+### What is "Receipt"?
+**Receipt** is the event-native substrate. Everything durable—agent runs, jobs, memory, Factory objectives—is meant to be replayed by folding the same receipts, not by mutating hidden rows.
+
+- **Primitives**: Live in `@receipt/core` (`packages/core/src/`). Features include `createRuntime`, hashing, `fold`, branching, and `Store` / `BranchStore` contracts.
+- **Persistence**: Implemented via SQLite (`src/adapters/jsonl.ts`, backing `receipts` and `streams` tables). Projections are maintained for quick query access (`drizzle/`).
+- **Domain Modules**: Typed events, reducers, and decide functions sit in `src/modules/` (notably `agent.ts`, `job.ts`, and the `factory/` directory).
+
+### What is "Factory"?
+**Factory** is the receipt-native control plane for software objectives on a repository. It provides the task DAG, worker dispatch, candidate review, integration, validation, and promotion. Each step is recorded as Factory receipts on streams under `factory/objectives/<objectiveId>`.
+- **Code Plane**: Git and worktrees remain the code plane.
+- **Orchestration Plane**: Receipt acts as the orchestration plane.
+- **No Hidden State**: The `FactoryService` orchestrates events but has no separate durable "service state". Everything is derived from the receipt streams.
+
+## Architecture Layers
+
+```mermaid
+flowchart TD
+  subgraph Data
+    RS[(Receipt Store / SQLite)]
+    PS[(Projections / Drizzle)]
+  end
+
+  subgraph Workers
+    CQ[Queue: Resonate / Local]
+    CW[Workers: Factory, Codex]
+    CQ --> CW
+  end
+
+  subgraph Application
+    Srv[Hono Server]
+    FS[Factory Service]
+    AM[Agent Modules]
+    Srv --> FS
+    FS --> AM
+    FS --> CQ
+    FS --> RS
+    RS --> PS
+  end
+
+  subgraph Presentation
+    UI[Web UI / HTMX]
+    CLI[Terminal UI / Ink]
+    UI --> Srv
+    CLI --> Srv
+  end
+```
+
+The repository is built in stacked layers:
+
+### Layer A — Transport and Composition
+- **`src/server.ts`**: The Hono application that wires `DATA_DIR`, the job backend (local or resonate), and creates the core runtimes (agent, job, memory). It builds the queue, `SseHub`, OpenAI adapters, and `FactoryService`, attaches REST endpoints (`/agents`, `/jobs`, `/healthz`), and starts workers.
+
+### Layer B — HTTP Routes (Agents as Route Modules)
+- **`src/framework/agent-loader.ts`**: Discovers `src/agents/*.agent.ts` and loads each default export.
+- **Factory Route**: `src/agents/factory.agent.ts` re-exports the extensive Factory surface (`/factory`, HTMX islands, SSE, chat, workbench) from `src/agents/factory/route.ts`.
+
+### Layer C — Factory Execution Seam
+- **`src/services/factory-service.ts`**: The central orchestrator class. It reads/writes Factory streams via `createRuntime`, enqueues jobs, talks to Codex/Git/memory/SSE, and manages objective control and promotion.
+- **Worker Handlers**: `src/services/factory-runtime.ts` exposes `createFactoryWorkerHandlers`, mapping job `agentId` (`factory-control`, `codex`) to their respective execution paths (`runObjectiveControl`, `runTask`).
+
+### Layer D — Semantic / LLM Orchestration
+- **`src/agents/orchestrator.ts`**: The entry point for chat and supervisor interactions. It branches between `runFactoryChat` (for Factory-specific chats) and `runCodexSupervisor`.
+
+### Layer E — Generic Agent Run Loop
+- **SDK**: `src/sdk/agent.ts` provides `defineAgent` and `runDefinedAgent`.
+- **CLI Delegation**: `src/cli/commands.ts` handles `receipt new`, `run`, `trace`, `replay`, `inspect`, delegating Factory commands to `handleFactoryCommand`.
+
+### Layer F — UI (Server-Rendered Projections)
+- **Views**: Server-rendered HTML from `src/views/*`.
+- **Client Behavior**: `src/client/factory-client.ts` boots HTMX, chat, workbench, and receipt browser from DOM markers.
+- **Principle**: The UI is purely a projection of Receipt state. It refreshes via SSE/HTMX invalidations. There is no second client source of truth.
+
+### Layer G — Factory CLI / TUI
+- **Terminal UI**: `src/factory-cli/*` uses Ink and React for terminal-based dashboards, utilizing the exact same fold-over-receipts pattern as the server for local inspection.
+
+## Data Flow (Factory Loop)
+
+1. **Initiation**: An operator or API creates/runs an objective. **Factory receipts** are appended to `factory/objectives/...` via `FactoryService`.
+2. **Derivation**: The reducer (`reduceFactory`) and selectors derive what actions are legally permitted next.
+3. **Dispatch**: The service enqueues jobs onto `jobs` / `jobs/<jobId>`.
+4. **Execution**: Workers run handlers (`factory-control` for objectives, `codex` for task execution/polling).
+5. **Normalization**: Results are normalized back into **Factory receipts**. Git is updated through `HubGit`. SSE publishes topics causing HTMX islands to refresh.
+6. **Projection**: SQLite projectors maintain query-friendly projections for UI and DB features.
+
+## Technologies Used
+
+| Area | Stack |
+|------|--------|
+| **Runtime** | Bun (`bun:sqlite`), TypeScript |
+| **HTTP Framework**| Hono |
+| **Validation** | Zod, `@hono/zod-validator` |
+| **Database** | Drizzle ORM + SQLite |
+| **Queue** | Resonate (`@resonatehq/sdk`, optional) or Local JSONL Queue |
+| **LLM** | OpenAI SDK |
+| **CLI / Workers** | Ink, React, `@clack/prompts` |
+| **Web UI** | HTMX, `htmx-ext-sse`, Vanilla JS/TS |
+| **Styling** | Tailwind CSS v4 |
+| **Monorepo** | Workspace package `@receipt/core` |
+
+## Repository Map
+
+| Path | Responsibility |
+|------|----------------|
+| `packages/core/` | Receipt chain, runtime, graph types |
+| `src/sdk/` | Agent authoring API |
+| `src/modules/` | Agent, job, factory reducers/events |
+| `src/engine/runtime/`| Agent loop, job worker, control receipts, Resonate actions |
+| `src/adapters/` | SQLite store, queue, Codex, OpenAI, memory, Git helpers |
+| `src/services/` | Factory service, planners, artifacts, workers |
+| `src/agents/` | Orchestrator, factory route, capabilities, codex supervisor |
+| `src/factory-cli/` | Factory-focused CLI/TUI |
+| `src/views/`, `src/client/`, `src/styles/`| Server HTML, browser TS, Tailwind assets |
+| `src/db/` | Schema, client, projectors, importer |
+| `src/framework/` | Agent loader, HTTP helpers, SSE hub |
+| `.receipt/` | Repo-local config and data roots |
+| `docs/` | Deep documentation and architecture records |
+
+---
 
 ## Prerequisites
 
@@ -18,8 +131,6 @@ Today this repo contains:
 - `codex` on `PATH` for Factory task execution
 - `resonate` on `PATH` for the default `dev` and `start` runtime
 - `OPENAI_API_KEY` for model-backed features such as chat, planning, and embeddings
-
-If you do not want to install `resonate`, use the local SQLite runtime shown below.
 
 ## Quick Start
 
@@ -40,8 +151,6 @@ Inside this repo, prefer:
 bun run factory
 bun src/cli.ts <command>
 ```
-
-The CLI binary is `receipt` (`src/cli.ts`) if you install or wrap it separately.
 
 ## Common Commands
 
@@ -68,164 +177,58 @@ bun src/cli.ts memory read factory/objectives/<objective-id> --limit 5
 bun src/cli.ts memory search factory/repo/shared --query "integration failure"
 ```
 
-Factory defaults come from [`.receipt/config.json`](./.receipt/config.json). In this repo the default validation checks are:
-
-- `bun run build`
-- `bun run verify`
-
 ## Runtime Modes
 
 Receipt currently supports two runtime topologies.
 
-### Local SQLite default
-
-Use this when you want the default single-process runtime:
-
+### Local SQLite Default
+Starts the local Receipt server directly and persists runtime state in `${DATA_DIR}/receipt.db`.
 ```bash
 bun run dev
 bun run start
 ```
 
-This mode starts the local Receipt server directly and persists runtime state in `${DATA_DIR}/receipt.db`.
-
-### Resonate optional dispatch
-
-Use this when you want the multi-process runtime:
-
+### Resonate Optional Dispatch
+Starts the Receipt API, Resonate driver, workers (chat, control, codex), and a local Resonate server.
 ```bash
 bun run dev:resonate
 bun run start:resonate
 JOB_BACKEND=resonate receipt dev
 ```
 
-This mode starts:
-
-- the Receipt API process
-- the Resonate driver process
-- the chat worker process
-- the control worker process
-- the codex worker process
-- a local Resonate server with its own SQLite persistence
-
-### Repo-local state
-
+### Repo-local State
 The checked-in config currently points Receipt at:
-
-- config: [`.receipt/config.json`](./.receipt/config.json)
-- receipt data: [`.receipt/data`](./.receipt/data)
-- Resonate SQLite state: [`.receipt/resonate`](./.receipt/resonate)
-
-Repo-local recurring jobs can also be declared in `.receipt/config.json` under `schedules`.
-
-## Architecture
-
-Receipt has two layers:
-
-1. a generic receipt runtime that appends immutable events to streams and folds them back into state
-2. a repo-local Factory control plane that turns those streams into objectives, task graphs, candidate review, integration, and promotion
-
-```mermaid
-flowchart LR
-  CLI["CLI / TUI<br/>src/cli.ts + src/factory-cli/*"] --> Server["Hono server<br/>src/server.ts"]
-  Browser["Web UI<br/>/factory + /receipt"] --> Server
-  Server --> Routes["Route modules<br/>src/agents/*"]
-  Routes --> Runtime["Receipt runtimes<br/>@receipt/core + src/modules/*"]
-  Routes --> Factory["Factory service<br/>src/services/factory-service.ts"]
-  Factory --> Queue["Job backend<br/>Resonate default / JSONL fallback"]
-  Queue --> Workers["Workers<br/>chat / control / codex"]
-  Workers --> Codex["Codex executor<br/>src/adapters/codex-executor.ts"]
-  Runtime --> Store["Receipt store + branches<br/>.receipt/data"]
-  Factory --> Memory["Memory tools<br/>memory/<scope>"]
-  Store --> Views["Replay / inspect / SSE / projections"]
-  Memory --> Views
-```
-
-### Key concepts
-
-- Receipts are immutable facts stored on append-only streams.
-- State is always derived by folding receipts, never by mutating in-place records.
-- Jobs are receipt-backed queue entries, not a separate hidden control plane.
-- Factory objectives are receipt-backed state machines with tasks, candidates, integration state, and promotion state.
-- Replay, inspect, fork, and branch all operate on the same underlying receipt chains.
-- The web UI is a projection surface: islands render receipt-backed projections and refresh on live invalidation instead of owning a second durable app state.
-- Browser code should stay extremely thin and only manage ephemeral interaction details such as navigation, focus, optimistic input, and streaming overlays.
-
-### Main stream families
-
-- `agents/<agentId>`
-- `agents/<agentId>/runs/<runId>`
-- `agents/<agentId>/runs/<runId>/branches/<branchId>`
-- `jobs`
-- `jobs/<jobId>`
-- `factory/objectives/<objectiveId>`
-- `memory/<scope>`
-
-## Repository Map
-
-- [`packages/core`](./packages/core): low-level runtime, chain, graph, and type primitives exported as `@receipt/core`
-- [`src/sdk`](./src/sdk): high-level agent authoring surface (`defineAgent`, `receipt`, `action`, `assistant`, `tool`, `human`, `goal`, `merge`, `rebracket`)
-- [`src/modules`](./src/modules): receipt schemas, reducers, selectors, and state models for agents, jobs, and Factory
-- [`src/engine/runtime`](./src/engine/runtime): run loop, job workers, control receipts, Resonate execution adapter, and failure policy
-- [`src/adapters`](./src/adapters): JSONL storage, Resonate integration, Codex execution, OpenAI calls, memory tools, delegation, and Git/worktree helpers
-- [`src/services`](./src/services): Factory orchestration, planning, promotion, artifacts, helper catalog, cloud context, and worker result handling
-- [`src/agents`](./src/agents): built-in agents plus Factory route modules and orchestration entry points
-- [`src/factory-cli`](./src/factory-cli): CLI/TUI board, commands, formatting, analysis, and mutations
-- [`src/views`](./src/views), [`src/client`](./src/client), [`src/styles`](./src/styles): server-rendered HTML, browser behavior, and Tailwind CSS assets
-- [`scripts`](./scripts) and [`docker`](./docker): local boot scripts, Docker entrypoints, and operational helpers
+- config: `.receipt/config.json`
+- receipt data: `.receipt/data`
+- Resonate SQLite state: `.receipt/resonate`
 
 ## Web and API Surfaces
 
-Receipt currently exposes:
+- `/factory`: Main web operator shell for chats, objectives, task state, live output.
+- `/receipt`: Browser for raw receipt streams and folds.
+- `/healthz`: Runtime health snapshot.
+- `/jobs`, `/jobs/:id`: Queue inspection and live updates.
+- `/memory/*`: Memory read/search/summarize APIs.
 
-- `/factory`: the main web operator shell for chats, objectives, task state, live output, and receipts
-- `/receipt`: a browser for raw receipt streams and folds
-- `/healthz`: runtime health snapshot
-- `/jobs`, `/jobs/:id`, `/jobs/:id/events`: queue inspection and live updates
-- `/memory/*`: receipt-backed memory read/search/summarize/commit/diff APIs
-
-The web UI is server-rendered and progressively enhanced:
-
-- Hono serves the HTML and JSON routes
-- HTMX and SSE handle refresh and live updates
-- [`src/client/factory-client.js`](./src/client/factory-client.js) provides the browser-side behavior
-- Tailwind builds the shared UI styles into `dist/assets`
-
-UI rule of thumb:
-
-- Receipt is the source of truth.
-- UI islands are projections or aggregated projections over Receipt state.
-- When receipts change, subscribed islands should refresh from the server.
-- If a UI change needs its own durable business state, that state probably belongs in receipts instead.
+UI rule of thumb: Receipt is the source of truth. UI islands are projections that refresh on live invalidation.
 
 ## Docker
 
-There are two supported Docker flows.
-
-### Dev container
-
+### Dev Container
+Bind-mounts the repo, uses repo-local `.receipt/` state. Best for iterative work.
 ```bash
 bun run docker:dev:up
 bun run docker:dev:down
 ```
 
-Dev mode bind-mounts the repo, uses repo-local `.receipt/` state, and is the best option for iterative work.
-
-### Prod-style container
-
+### Prod-style Container
+Runs from an image without bind-mounting the full repo.
 ```bash
 bun run docker:prod:up
 bun run docker:prod:down
 ```
 
-Prod mode runs from an image without bind-mounting the full repo and only persists runtime state volumes.
-
-Both modes expose:
-
-- `http://localhost:8787` for Receipt
-- `http://localhost:8001` for Resonate HTTP
-- `http://localhost:9090/metrics` for Resonate metrics
-
-The container image also includes `receipt-debug-env` for quick environment inspection.
+Both modes expose: `http://localhost:8787` (Receipt), `http://localhost:8001` (Resonate HTTP), `http://localhost:9090/metrics` (Resonate metrics).
 
 ## Development
 
@@ -235,12 +238,9 @@ bun run test:smoke
 bun run verify
 ```
 
-`bun run verify` currently runs build, `check:no-any`, and the smoke suite.
-
 ## Docs
 
 Start here:
-
 - [architecture.md](./architecture.md)
 - [docs/api/README.md](./docs/api/README.md)
 - [docs/create-agent.md](./docs/create-agent.md)

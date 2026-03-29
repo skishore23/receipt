@@ -18,7 +18,7 @@ import type {
   QueueCommandLane,
   QueueCommandType,
 } from "../modules/job";
-import { readJobProjection, syncChangedJobProjections, syncJobProjectionStream, type StoredJobProjection } from "../db/projectors";
+import { readJobProjection, syncChangedJobProjections, syncJobProjectionHeartbeat, syncJobProjectionStream, type StoredJobProjection } from "../db/projectors";
 
 export type QueueCommandRecord = {
   readonly id: string;
@@ -212,8 +212,17 @@ const compareQueuedJobs = (left: QueueJob, right: QueueJob): number =>
 
 const CROSS_PROCESS_POLL_MS = 250;
 const CROSS_PROCESS_FULL_REFRESH_MS = 30_000;
-const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boolean =>
-  JSON.stringify(left) === JSON.stringify(right);
+const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boolean => {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.updatedAt !== right.updatedAt) return false;
+  if (left.status !== right.status) return false;
+  if (left.attempt !== right.attempt) return false;
+  if (left.leaseUntil !== right.leaseUntil) return false;
+  if (left.commands.length !== right.commands.length) return false;
+  if (left.abortRequested !== right.abortRequested) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+};
 
 export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   const nowTs = opts.now ?? Date.now;
@@ -232,10 +241,12 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     timeout?: ReturnType<typeof setTimeout>;
   };
   const waiters = new Set<QueueWaiter>();
+  const LEASED_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>(["leased", "running"]);
   const index = {
     jobsById: new Map<string, QueueJob>(),
     recentJobIds: [] as string[],
     queuedJobIds: [] as string[],
+    leasedJobs: new Set<string>(),
     sessionJobs: new Map<string, Set<string>>(),
     counts: emptyCounts(),
     version: 0,
@@ -358,6 +369,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       index.counts[previous.status] -= 1;
       removeJobId(index.recentJobIds, previous.id);
       if (shouldQueueJob(previous)) removeJobId(index.queuedJobIds, previous.id);
+      index.leasedJobs.delete(previous.id);
       removeSessionMember(previous);
     }
     const stored = cloneJob(job);
@@ -365,6 +377,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     index.counts[stored.status] += 1;
     insertJobId(index.recentJobIds, stored, compareRecentJobs);
     if (shouldQueueJob(stored)) insertJobId(index.queuedJobIds, stored, compareQueuedJobs);
+    if (LEASED_STATUSES.has(stored.status)) index.leasedJobs.add(stored.id);
     addSessionMember(stored);
     index.version += 1;
     index.updatedAt = Math.max(index.updatedAt ?? 0, stored.updatedAt, stored.createdAt);
@@ -391,6 +404,9 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       .filter((job) => shouldQueueJob(job))
       .sort(compareQueuedJobs)
       .map((job) => job.id);
+    index.leasedJobs = new Set(
+      nextJobs.filter((job) => LEASED_STATUSES.has(job.status)).map((job) => job.id),
+    );
     index.sessionJobs = nextSessionJobs;
     index.counts = emptyCounts();
     index.updatedAt = undefined;
@@ -399,7 +415,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       index.updatedAt = Math.max(index.updatedAt ?? 0, job.updatedAt, job.createdAt);
     }
     index.loaded = true;
-    const changed = nextJobs.filter((job) => JSON.stringify(previousJobs.get(job.id)) !== JSON.stringify(job));
+    const changed = nextJobs.filter((job) => !sameJob(previousJobs.get(job.id), job));
     if (previousJobs.size !== nextJobs.length || changed.length > 0 || index.version === 0) {
       index.version += 1;
     }
@@ -444,16 +460,41 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     return cloneJob(loaded);
   };
 
+  const emitHeartbeatFastPath = async (
+    event: JobEvent & { readonly type: "job.heartbeat"; readonly jobId: string },
+    changedJobs: Map<string, QueueJob>,
+  ): Promise<void> => {
+    await emitToStream(jobStream(event.jobId), event, eventId());
+    const state = await opts.runtime.state(jobStream(event.jobId));
+    const record = state.jobs[event.jobId];
+    if (projectionDataDir && record?.leaseUntil != null) {
+      syncJobProjectionHeartbeat(projectionDataDir, event.jobId, record.leaseUntil, record.updatedAt);
+    }
+    const changedJob = record ? toQueueJob(record) : await loadQueueJob(event.jobId);
+    if (changedJob) {
+      upsertIndexedJob(changedJob);
+      changedJobs.set(changedJob.id, cloneJob(changedJob));
+    }
+  };
+
   const emitEvent = async (
     event: JobEvent,
     changedJobs: Map<string, QueueJob>,
   ): Promise<void> => {
     if ("jobId" in event) {
-      await emitToStream(jobStream(event.jobId), event, eventId());
-      if (projectionDataDir) {
-        await syncJobProjectionStream(projectionDataDir, opts.runtime, jobStream(event.jobId));
+      if (event.type === "job.heartbeat") {
+        await emitHeartbeatFastPath(event, changedJobs);
+        return;
       }
-      const changedJob = await loadQueueJob(event.jobId);
+      await emitToStream(jobStream(event.jobId), event, eventId());
+      let changedJob: QueueJob | undefined;
+      if (projectionDataDir) {
+        const projected = await syncJobProjectionStream(projectionDataDir, opts.runtime, jobStream(event.jobId));
+        changedJob = projected ? projectedToQueueJob(projected) : undefined;
+      }
+      if (!changedJob) {
+        changedJob = await loadQueueJob(event.jobId);
+      }
       if (changedJob) {
         upsertIndexedJob(changedJob);
         changedJobs.set(changedJob.id, cloneJob(changedJob));
@@ -512,8 +553,16 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   const refreshAllJobs = async (): Promise<ReadonlyArray<QueueJob>> => {
     const changed = await withWriteLock(async () => {
       const ids = await discoverJobIds();
-      const jobs = (await Promise.all(ids.map((jobId) => loadQueueJob(jobId))))
-        .filter((job): job is QueueJob => Boolean(job));
+      const jobs: QueueJob[] = [];
+      for (const jobId of ids) {
+        const indexed = index.jobsById.get(jobId);
+        if (indexed && TERMINAL.has(indexed.status)) {
+          jobs.push(cloneJob(indexed));
+          continue;
+        }
+        const loaded = await loadQueueJob(jobId);
+        if (loaded) jobs.push(loaded);
+      }
       const changedJobs = new Map<string, QueueJob>();
       for (const job of resetIndex(jobs)) {
         changedJobs.set(job.id, cloneJob(job));
@@ -630,10 +679,12 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     timestamp: number,
     changedJobs: Map<string, QueueJob>,
   ): Promise<void> => {
-    for (const jobId of [...index.jobsById.keys()]) {
+    for (const jobId of [...index.leasedJobs]) {
+      const indexed = index.jobsById.get(jobId);
+      if (!indexed || !indexed.leaseUntil || indexed.leaseUntil > timestamp) continue;
       const job = await loadAuthoritativeJob(jobId, changedJobs);
       if (!job) continue;
-      if ((job.status !== "leased" && job.status !== "running") || !job.leaseUntil) continue;
+      if (!LEASED_STATUSES.has(job.status) || !job.leaseUntil) continue;
       if (job.leaseUntil > timestamp) continue;
       const retryable = job.attempt < job.maxAttempts;
       await emitEvent({
@@ -806,6 +857,10 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         const lanes = matchingLanes(lease);
         let next: QueueJob | undefined;
         for (const jobId of [...index.queuedJobIds]) {
+          const indexed = index.jobsById.get(jobId);
+          if (!indexed || !shouldQueueJob(indexed)) continue;
+          if (agentIds.size > 0 && !agentIds.has(indexed.agentId)) continue;
+          if (lanes.size > 0 && !lanes.has(indexed.lane)) continue;
           const current = await loadAuthoritativeJob(jobId, changed);
           if (!current || !shouldQueueJob(current)) continue;
           if (agentIds.size > 0 && !agentIds.has(current.agentId)) continue;

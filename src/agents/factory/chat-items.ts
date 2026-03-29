@@ -151,6 +151,9 @@ const overlayLiveJobState = (card: FactoryWorkCard, job: QueueJob | undefined): 
   if (!job) return card;
   const parsed = asObject(job.result);
   const failure = asObject(parsed?.failure);
+  const lastMessage = asString(parsed?.lastMessage) ?? asString(parsed?.message);
+  const stderrTail = asString(parsed?.stderrTail);
+  const stdoutTail = asString(parsed?.stdoutTail);
   const terminalSummary = job.status === "failed"
     ? job.lastError ?? asString(failure?.message)
     : job.status === "canceled"
@@ -160,15 +163,14 @@ const overlayLiveJobState = (card: FactoryWorkCard, job: QueueJob | undefined): 
     ?? asString(parsed?.summary)
     ?? asString(parsed?.finalResponse)
     ?? asString(parsed?.note)
-    ?? asString(parsed?.message)
+    ?? lastMessage
     ?? asString(failure?.message)
     ?? job.lastError
     ?? card.summary;
   const detail = [
-    asString(parsed?.lastMessage),
-    asString(parsed?.message),
-    asString(parsed?.stderrTail),
-    asString(parsed?.stdoutTail),
+    lastMessage,
+    stderrTail,
+    stdoutTail,
     card.detail,
   ].filter(Boolean).join("\n\n");
   return {
@@ -176,6 +178,10 @@ const overlayLiveJobState = (card: FactoryWorkCard, job: QueueJob | undefined): 
     status: job.status,
     summary,
     detail: detail || undefined,
+    latestNote: lastMessage ?? card.latestNote,
+    stderrTail: stderrTail ?? card.stderrTail,
+    stdoutTail: stdoutTail ?? card.stdoutTail,
+    abortRequested: job.abortRequested === true,
     running: !isTerminalJobStatus(job.status),
   };
 };
@@ -436,6 +442,16 @@ const workCardFromObservation = (observation: ToolObservation): FactoryWorkCard 
       meta: durationLabel,
       objectiveId: asString(parsed?.objectiveId),
       jobId: asString(parsed?.jobId),
+      variant: "live-output",
+      focusKind: focusKind === "job" || focusKind === "task" ? focusKind : undefined,
+      focusId: asString(parsed?.focusId),
+      taskId: asString(parsed?.taskId),
+      candidateId: asString(parsed?.candidateId),
+      subject: asString(parsed?.title),
+      latestNote: asString(parsed?.lastMessage),
+      artifactSummary: asString(parsed?.artifactSummary),
+      stderrTail: asString(parsed?.stderrTail),
+      stdoutTail: asString(parsed?.stdoutTail),
       running: active,
     };
   }

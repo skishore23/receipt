@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
 import type { CodexExecutor, CodexRunControl, CodexRunInput } from "../adapters/codex-executor";
-import { HubGit } from "../adapters/hub-git";
+import { HubGit, HubGitError } from "../adapters/hub-git";
 import type { MemoryTools } from "../adapters/memory-tools";
 import {
   DEFAULT_FACTORY_OBJECTIVE_POLICY,
@@ -110,6 +110,16 @@ import {
   processObjectiveReconcileControl,
   processObjectiveStartupControl,
 } from "./factory/objective-control";
+import {
+  planObjectiveReact,
+  planTaskResult,
+} from "./factory/planner";
+import type {
+  FactoryObjectivePlannerFacts,
+  FactoryPlannerEffect,
+  FactoryTaskReworkBlock,
+  FactoryTaskResultPlannerInput,
+} from "./factory/effects";
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
 import { type GraphRef } from "@receipt/core/graph";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
@@ -1410,7 +1420,10 @@ export class FactoryService {
       baseCommit: baseHash,
       createdAt: createdAt + 2,
     });
-    const hasActiveSlot = await this.hasActiveObjectiveSlot();
+    const consumesRepoSlot = this.objectiveConsumesRepoSlot(objectiveMode);
+    const hasActiveSlot = consumesRepoSlot
+      ? await this.hasActiveObjectiveSlot()
+      : false;
     await this.emitObjectiveBatch(objectiveId, [
       {
         type: "objective.created",
@@ -1953,6 +1966,13 @@ export class FactoryService {
     return status === "completed" || status === "failed" || status === "canceled";
   }
 
+  private objectiveConsumesRepoSlot(
+    objective: Pick<FactoryState, "objectiveMode"> | FactoryObjectiveMode,
+  ): boolean {
+    const objectiveMode = typeof objective === "string" ? objective : objective.objectiveMode;
+    return objectiveMode !== "investigation";
+  }
+
   private releasesObjectiveSlot(state: Pick<FactoryState, "status" | "integration">): boolean {
     const { status } = state;
     if (this.isTerminalObjectiveStatus(status) || status === "blocked" || status === "promoting") return true;
@@ -1993,6 +2013,7 @@ export class FactoryService {
       .filter((state) =>
         Boolean(state.objectiveId)
         && !state.archivedAt
+        && this.objectiveConsumesRepoSlot(state)
         && !this.isTerminalObjectiveStatus(state.status)
         && state.scheduler.slotState === "queued",
       )
@@ -2107,8 +2128,12 @@ export class FactoryService {
     const latest = this.latestTaskCandidate(state, task.taskId);
     if (!latest || !["changes_requested", "rejected", "conflicted"].includes(latest.status)) return undefined;
     const passes = state.candidatePassesByTask[task.taskId] ?? 0;
-    if (passes < state.policy.budgets.maxCandidatePassesPerTask) return undefined;
-    return `Policy blocked: ${task.taskId} exhausted maxCandidatePassesPerTask (${passes}/${state.policy.budgets.maxCandidatePassesPerTask}).`;
+    return this.reworkPassCapReason(task.taskId, passes, state.policy.budgets.maxCandidatePassesPerTask);
+  }
+
+  private reworkPassCapReason(taskId: string, passes: number, maxPasses: number): string | undefined {
+    if (passes < maxPasses) return undefined;
+    return `Policy blocked: ${taskId} exhausted maxCandidatePassesPerTask (${passes}/${maxPasses}).`;
   }
 
   private taskCircuitBreakerReason(state: FactoryState, taskId: string): string | undefined {
@@ -2261,19 +2286,6 @@ export class FactoryService {
     };
   }
 
-  private nextApprovedIntegrationCandidate(state: FactoryState): FactoryCandidateRecord | undefined {
-    for (const taskId of state.workflow.taskIds) {
-      const task = state.workflow.tasksById[taskId];
-      if (!task || task.status !== "approved") continue;
-      const candidate = this.latestTaskCandidate(state, taskId);
-      if (!candidate || candidate.status !== "approved") continue;
-      if (state.integration.activeCandidateId === candidate.candidateId) continue;
-      if (state.integration.queuedCandidateIds.includes(candidate.candidateId)) continue;
-      return candidate;
-    }
-    return undefined;
-  }
-
   private resolveSelectedObjectiveId(
     objectives: ReadonlyArray<{ readonly objectiveId: string }>,
     preferredId?: string,
@@ -2286,6 +2298,7 @@ export class FactoryService {
     const states = await this.listObjectiveStates();
     return states.some((state) =>
       !state.archivedAt
+      && this.objectiveConsumesRepoSlot(state)
       && !this.releasesObjectiveSlot(state)
       && state.scheduler.slotState === "active"
       && !state.scheduler.releasedAt,
@@ -2343,7 +2356,8 @@ export class FactoryService {
     const states = await this.listObjectiveStates();
     for (const state of states) {
       if (
-        state.scheduler.slotState === "active"
+        this.objectiveConsumesRepoSlot(state)
+        && state.scheduler.slotState === "active"
         && !state.scheduler.releasedAt
         && (this.releasesObjectiveSlot(state) || Boolean(state.archivedAt))
       ) {
@@ -2359,8 +2373,24 @@ export class FactoryService {
     }
 
     const refreshed = await this.listObjectiveStates();
+    const slotFreeQueued = refreshed.filter((state) =>
+      !state.archivedAt
+      && !this.objectiveConsumesRepoSlot(state)
+      && !this.releasesObjectiveSlot(state)
+      && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt)
+    );
+    for (const state of slotFreeQueued) {
+      await this.emitObjective(state.objectiveId, {
+        type: "objective.slot.admitted",
+        objectiveId: state.objectiveId,
+        admittedAt: Date.now(),
+      });
+      await this.enqueueObjectiveControl(state.objectiveId, "admitted");
+    }
+
     const active = refreshed.find((state) =>
       !state.archivedAt
+      && this.objectiveConsumesRepoSlot(state)
       && !this.releasesObjectiveSlot(state)
       && state.scheduler.slotState === "active"
       && !state.scheduler.releasedAt,
@@ -2369,6 +2399,7 @@ export class FactoryService {
 
     const next = refreshed.find((state) =>
       !state.archivedAt
+      && this.objectiveConsumesRepoSlot(state)
       && !this.releasesObjectiveSlot(state)
       && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt),
     );
@@ -2411,15 +2442,34 @@ export class FactoryService {
     return undefined;
   }
 
-  private async queueFollowUpTaskFromLatestNote(state: FactoryState): Promise<boolean> {
-    if (state.workflow.activeTaskIds.length > 0) return false;
-    const latestNote = await this.latestObjectiveOperatorNote(state.objectiveId);
-    if (!latestNote) return false;
-    const latestTask = [...state.workflow.taskIds]
+  private buildInitialObjectiveTask(state: FactoryState): FactoryTaskRecord {
+    const createdAt = Date.now();
+    return this.createObjectiveTaskRecord({
+      objectiveId: state.objectiveId,
+      title: state.title,
+      prompt: state.prompt,
+      workerType: this.normalizeProfileWorkerType(
+        this.objectiveProfileForState(state),
+        this.objectiveProfileForState(state).objectivePolicy.defaultWorkerType,
+      ),
+      executionMode: this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode,
+      baseCommit: state.baseHash,
+      createdAt,
+    });
+  }
+
+  private latestObjectiveTask(state: FactoryState): FactoryTaskRecord | undefined {
+    return [...state.workflow.taskIds]
       .map((taskId) => state.workflow.tasksById[taskId])
       .filter((task): task is FactoryTaskRecord => Boolean(task))
       .at(-1);
-    if (latestTask?.prompt.includes(`Operator follow-up for this attempt:\n${latestNote}`)) return false;
+  }
+
+  private async emitFollowUpTaskFromLatestNote(
+    state: FactoryState,
+    latestNote: string,
+  ): Promise<void> {
+    const latestTask = this.latestObjectiveTask(state);
     const now = Date.now();
     const basedOn = await this.currentHeadHash(state.objectiveId);
     const nextTask = this.createObjectiveTaskRecord({
@@ -2459,7 +2509,6 @@ export class FactoryService {
     });
     await this.emitObjectiveBatch(state.objectiveId, events, basedOn);
     await this.recordPlanningReceipt(state.objectiveId);
-    return true;
   }
 
   private async syncFailedActiveTasks(state: FactoryState): Promise<void> {
@@ -2492,12 +2541,242 @@ export class FactoryService {
     }
   }
 
+  private async syncInvestigationSynthesisIfReady(state: FactoryState): Promise<boolean> {
+    if (state.objectiveMode !== "investigation") return false;
+    const projection = buildFactoryProjection(state);
+    const investigationReady = (
+      projection.tasks.length > 0
+      && projection.readyTasks.length === 0
+      && projection.activeTasks.length === 0
+      && projection.tasks.every((task) => ["approved", "superseded"].includes(task.status))
+      && this.finalInvestigationReports(state).length > 0
+    );
+    if (!investigationReady) return false;
+    const synthesis = this.buildInvestigationSynthesis(state);
+    if (!synthesis) return false;
+    const existing = state.investigation.synthesized;
+    const changed = !existing
+      || existing.summary !== synthesis.summary
+      || existing.taskIds.join(",") !== synthesis.taskIds.join(",")
+      || existing.report.conclusion !== synthesis.report.conclusion;
+    if (!changed) return false;
+    await this.emitObjective(state.objectiveId, {
+      type: "investigation.synthesized",
+      objectiveId: state.objectiveId,
+      summary: synthesis.summary,
+      report: synthesis.report,
+      taskIds: synthesis.taskIds,
+      synthesizedAt: synthesis.synthesizedAt,
+    });
+    const refreshed = await this.getObjectiveState(state.objectiveId);
+    await this.commitInvestigationSynthesisMemory(refreshed, refreshed.investigation.synthesized ?? synthesis);
+    return true;
+  }
+
+  private async collectObjectivePlannerFacts(state: FactoryState): Promise<FactoryObjectivePlannerFacts> {
+    const latestObjectiveOperatorNote = await this.latestObjectiveOperatorNote(state.objectiveId);
+    const taskReworkBlocks: FactoryTaskReworkBlock[] = [];
+    for (const task of factoryReadyTasks(state)) {
+      const reason = this.taskReworkPolicyBlockedReason(state, task);
+      if (!reason) continue;
+      taskReworkBlocks.push({
+        taskId: task.taskId,
+        reason,
+      });
+    }
+    return {
+      latestObjectiveOperatorNote,
+      taskReworkBlocks,
+      dispatchCapacity: Math.max(0, this.effectiveMaxParallelChildren(state) - state.workflow.activeTaskIds.length),
+      policyBlockedReason: state.taskRunsUsed >= state.policy.budgets.maxTaskRuns
+        ? `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`
+        : undefined,
+      readyToPromoteBlockedReason: factoryPromotionGateBlockedReason(state),
+      hasInvestigationReports: this.finalInvestigationReports(state).length > 0,
+      investigationSynthesisSummary: state.investigation.synthesized?.summary,
+    };
+  }
+
+  private async applyObjectivePreparationEffects(
+    state: FactoryState,
+    effects: ReadonlyArray<FactoryPlannerEffect>,
+    facts: FactoryObjectivePlannerFacts,
+  ): Promise<boolean> {
+    const initial = effects.find((effect) => effect.type === "objective.add_initial_task");
+    if (initial) {
+      const task = this.buildInitialObjectiveTask(state);
+      await this.emitObjective(state.objectiveId, {
+        type: "task.added",
+        objectiveId: state.objectiveId,
+        task,
+        createdAt: task.createdAt,
+      });
+      await this.recordPlanningReceipt(state.objectiveId);
+      return true;
+    }
+
+    const followUp = effects.find((effect) => effect.type === "objective.queue_follow_up_task");
+    if (followUp && facts.latestObjectiveOperatorNote) {
+      await this.emitFollowUpTaskFromLatestNote(state, facts.latestObjectiveOperatorNote);
+      return true;
+    }
+
+    const taskEvents = effects.flatMap((effect): FactoryEvent[] => {
+      const at = Date.now();
+      switch (effect.type) {
+        case "task.unblock":
+          return [{
+            type: "task.unblocked",
+            objectiveId: state.objectiveId,
+            taskId: effect.taskId,
+            readyAt: at,
+          }];
+        case "task.ready":
+          return [{
+            type: "task.ready",
+            objectiveId: state.objectiveId,
+            taskId: effect.taskId,
+            readyAt: at,
+          }];
+        case "task.block":
+          return [{
+            type: "task.blocked",
+            objectiveId: state.objectiveId,
+            taskId: effect.taskId,
+            reason: effect.reason,
+            blockedAt: at,
+          }];
+        default:
+          return [];
+      }
+    });
+    if (taskEvents.length === 0) return false;
+    await this.emitObjectiveBatch(state.objectiveId, taskEvents);
+    return true;
+  }
+
+  private async applyObjectiveDispatchEffect(
+    state: FactoryState,
+    effect: Extract<FactoryPlannerEffect, { readonly type: "task.dispatch" }>,
+  ): Promise<void> {
+    const task = state.workflow.tasksById[effect.taskId];
+    if (!task) return;
+    const basedOn = await this.currentHeadHash(state.objectiveId);
+    try {
+      await this.dispatchTask(state, task, {
+        expectedPrev: basedOn,
+        prefixEvents: [
+          this.runtimeDecisionEvent(
+            state,
+            `dispatch_${task.taskId}`,
+            `Dispatch ready task ${task.taskId}.`,
+            { basedOn, frontierTaskIds: [task.taskId] },
+          ),
+        ],
+      });
+    } catch (err) {
+      if (!(err instanceof FactoryStaleObjectiveError)) throw err;
+    }
+  }
+
+  private async applyObjectiveFinalEffect(
+    state: FactoryState,
+    effect: Exclude<
+      FactoryPlannerEffect,
+      { readonly type: "objective.add_initial_task" }
+      | { readonly type: "objective.queue_follow_up_task" }
+      | { readonly type: "task.unblock" }
+      | { readonly type: "task.ready" }
+      | { readonly type: "task.block" }
+      | { readonly type: "task.dispatch" }
+      | { readonly type: "candidate.produce" }
+      | { readonly type: "task.review.request" }
+      | { readonly type: "candidate.review" }
+      | { readonly type: "task.noop_complete" }
+    >,
+  ): Promise<"applied" | "retried" | "asked_human"> {
+    switch (effect.type) {
+      case "integration.queue": {
+        const basedOn = await this.currentHeadHash(state.objectiveId);
+        try {
+          await this.queueIntegration(state, effect.candidateId, {
+            expectedPrev: basedOn,
+            prefixEvents: [
+              this.runtimeDecisionEvent(
+                state,
+                `queue_integration_${effect.candidateId}`,
+                `Queue approved candidate ${effect.candidateId} for integration.`,
+                { basedOn, frontierTaskIds: [effect.taskId] },
+              ),
+            ],
+          });
+        } catch (err) {
+          if (!(err instanceof FactoryStaleObjectiveError)) throw err;
+        }
+        return "applied";
+      }
+      case "integration.ready_to_promote":
+        await this.emitObjective(state.objectiveId, {
+          type: "integration.ready_to_promote",
+          objectiveId: state.objectiveId,
+          candidateId: effect.candidateId,
+          headCommit: effect.headCommit,
+          summary: effect.summary,
+          readyAt: Date.now(),
+        });
+        return "applied";
+      case "integration.promote": {
+        const basedOn = await this.currentHeadHash(state.objectiveId);
+        try {
+          await this.promoteIntegration(state, effect.candidateId, {
+            expectedPrev: basedOn,
+            prefixEvents: [
+              this.runtimeDecisionEvent(
+                state,
+                `promote_integration_${effect.candidateId}`,
+                `Promote integrated candidate ${effect.candidateId}.`,
+                { basedOn },
+              ),
+            ],
+          });
+        } catch (err) {
+          if (!(err instanceof FactoryStaleObjectiveError)) throw err;
+        }
+        return "applied";
+      }
+      case "objective.complete":
+        await this.emitObjective(state.objectiveId, {
+          type: "objective.completed",
+          objectiveId: state.objectiveId,
+          summary: effect.summary,
+          completedAt: Date.now(),
+        });
+        return "applied";
+      case "objective.block":
+        if (effect.allowAutonomousNextStep) {
+          const nextStep = await this.maybeAutonomousNextStepForBlockedObjective(state.objectiveId, state);
+          if (nextStep === "retried") return "retried";
+          if (nextStep === "asked_human") return "asked_human";
+        }
+        await this.emitObjective(state.objectiveId, {
+          type: "objective.blocked",
+          objectiveId: state.objectiveId,
+          reason: effect.reason,
+          summary: effect.summary,
+          blockedAt: Date.now(),
+        });
+        return "applied";
+      default:
+        return "applied";
+    }
+  }
+
   async reactObjective(objectiveId: string): Promise<void> {
     await this.rebalanceObjectiveSlots();
     const refreshState = () => this.getObjectiveState(objectiveId);
     let state = await refreshState();
 
-    if (this.isTerminalObjectiveStatus(state.status)) {
+    if (this.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
       await this.rebalanceObjectiveSlots();
       return;
     }
@@ -2526,323 +2805,47 @@ export class FactoryService {
       await this.rebalanceObjectiveSlots();
       return;
     }
-
-    if (state.workflow.taskIds.length === 0) {
-      if (state.status === "blocked") {
-        await this.rebalanceObjectiveSlots();
-        return;
-      }
-      const createdAt = Date.now();
-      const initialTask = this.createObjectiveTaskRecord({
-        objectiveId,
-        title: state.title,
-        prompt: state.prompt,
-        workerType: this.normalizeProfileWorkerType(
-          this.objectiveProfileForState(state),
-          this.objectiveProfileForState(state).objectivePolicy.defaultWorkerType,
-        ),
-        executionMode: this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode,
-        baseCommit: state.baseHash,
-        createdAt,
-      });
-      await this.emitObjective(objectiveId, {
-        type: "task.added",
-        objectiveId,
-        task: initialTask,
-        createdAt,
-      });
-      await this.recordPlanningReceipt(objectiveId);
-      state = await refreshState();
-    }
-
-    if (await this.queueFollowUpTaskFromLatestNote(state)) {
-      state = await refreshState();
-    }
-
-    if (state.status === "blocked") {
-      const blockedTasks = state.workflow.taskIds
-        .map((taskId) => state.workflow.tasksById[taskId])
-        .filter((task): task is FactoryTaskRecord => Boolean(task) && task.status === "blocked");
-      if (blockedTasks.length > 0) {
-        await this.emitObjectiveBatch(objectiveId, blockedTasks.map((task, index) => ({
-          type: "task.unblocked" as const,
-          objectiveId,
-          taskId: task.taskId,
-          readyAt: Date.now() + index,
-        })));
-        state = await refreshState();
-      }
-      if (state.status === "blocked") {
-        await this.rebalanceObjectiveSlots();
-        return;
-      }
-    }
-
-    const activatable = factoryActivatableTasks(state);
-    for (const task of activatable) {
-      await this.emitObjective(objectiveId, {
-        type: "task.ready",
-        objectiveId,
-        taskId: task.taskId,
-        readyAt: Date.now(),
-      });
-    }
-    if (activatable.length > 0) state = await refreshState();
-
-    for (const task of factoryReadyTasks(state)) {
-      const blockedReason = this.taskReworkPolicyBlockedReason(state, task);
-      if (blockedReason) {
-        await this.emitObjective(objectiveId, {
-          type: "task.blocked",
-          objectiveId,
-          taskId: task.taskId,
-          reason: blockedReason,
-          blockedAt: Date.now(),
-        });
-      }
-    }
-    state = await refreshState();
-
-    const dispatchPolicyBlockedReason = state.taskRunsUsed >= state.policy.budgets.maxTaskRuns
-      ? `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`
-      : undefined;
-    if (dispatchPolicyBlockedReason && state.workflow.activeTaskIds.length === 0 && factoryReadyTasks(state).length > 0) {
-      await this.emitObjective(objectiveId, {
-        type: "objective.blocked",
-        objectiveId,
-        reason: dispatchPolicyBlockedReason,
-        summary: dispatchPolicyBlockedReason,
-        blockedAt: Date.now(),
-      });
-      await this.rebalanceObjectiveSlots();
-      return;
-    }
-
-    while (true) {
+    let plannerPasses = 0;
+    while (plannerPasses < 64) {
+      plannerPasses += 1;
       state = await refreshState();
       if (this.isTerminalObjectiveStatus(state.status) || state.scheduler.slotState === "queued") break;
-      const capacity = Math.max(0, this.effectiveMaxParallelChildren(state) - state.workflow.activeTaskIds.length);
-      if (capacity <= 0) break;
-      const nextTask = factoryReadyTasks(state)[0];
-      if (!nextTask) break;
-      const basedOn = await this.currentHeadHash(objectiveId);
-      try {
-        await this.dispatchTask(state, nextTask, {
-          expectedPrev: basedOn,
-          prefixEvents: [
-            this.runtimeDecisionEvent(
-              state,
-              `dispatch_${nextTask.taskId}`,
-              `Dispatch ready task ${nextTask.taskId}.`,
-              { basedOn, frontierTaskIds: [nextTask.taskId] },
-            ),
-          ],
-        });
-      } catch (err) {
-        if (err instanceof FactoryStaleObjectiveError) break;
-        throw err;
-      }
-    }
 
-    state = await refreshState();
-    const finalProjection = buildFactoryProjection(state);
-
-    if (state.objectiveMode === "investigation") {
-      const investigationReady = (
-        finalProjection.tasks.length > 0
-        && finalProjection.readyTasks.length === 0
-        && finalProjection.activeTasks.length === 0
-        && finalProjection.tasks.every((task) => ["approved", "superseded"].includes(task.status))
-        && this.finalInvestigationReports(state).length > 0
-      );
-      const investigationBlocked = (
-        finalProjection.tasks.length > 0
-        && finalProjection.readyTasks.length === 0
-        && finalProjection.activeTasks.length === 0
-        && factoryActivatableTasks(state).length === 0
-        && finalProjection.tasks.some((task) => task.status === "blocked")
-      );
-
-      if (investigationReady) {
-        const synthesis = this.buildInvestigationSynthesis(state);
-        if (synthesis) {
-          const existing = state.investigation.synthesized;
-          const changed = !existing
-            || existing.summary !== synthesis.summary
-            || existing.taskIds.join(",") !== synthesis.taskIds.join(",")
-            || existing.report.conclusion !== synthesis.report.conclusion;
-          if (changed) {
-            await this.emitObjective(objectiveId, {
-              type: "investigation.synthesized",
-              objectiveId,
-              summary: synthesis.summary,
-              report: synthesis.report,
-              taskIds: synthesis.taskIds,
-              synthesizedAt: synthesis.synthesizedAt,
-            });
-            state = await refreshState();
-            await this.commitInvestigationSynthesisMemory(state, state.investigation.synthesized ?? synthesis);
-          }
-        }
-        if (state.status !== "completed") {
-          await this.emitObjective(objectiveId, {
-            type: "objective.completed",
-            objectiveId,
-            summary: state.investigation.synthesized?.summary
-              ?? state.latestSummary
-              ?? "Investigation objective completed.",
-            completedAt: Date.now(),
-          });
-        }
-        await this.rebalanceObjectiveSlots();
-        return;
-      }
-
-      if (investigationBlocked && state.status !== "blocked") {
-        const nextStep = await this.maybeAutonomousNextStepForBlockedObjective(objectiveId, state);
-        if (nextStep === "retried") {
-          await this.reactObjective(objectiveId);
-          return;
-        }
-        if (nextStep !== "asked_human") {
-          await this.emitObjective(objectiveId, {
-            type: "objective.blocked",
-            objectiveId,
-            reason: "No runnable investigation tasks remained.",
-            summary: "Investigation objective is blocked with no runnable tasks.",
-            blockedAt: Date.now(),
-          });
-        }
-        await this.rebalanceObjectiveSlots();
-        return;
-      }
-
-      await this.rebalanceObjectiveSlots();
-      return;
-    }
-
-    const integrationCandidate = (
-      finalProjection.activeTasks.length === 0
-      && (state.integration.status === "idle" || state.integration.status === "conflicted")
-    )
-      ? this.nextApprovedIntegrationCandidate(state)
-      : undefined;
-    if (integrationCandidate) {
-      const basedOn = await this.currentHeadHash(objectiveId);
-      try {
-        await this.queueIntegration(state, integrationCandidate.candidateId, {
-          expectedPrev: basedOn,
-          prefixEvents: [
-            this.runtimeDecisionEvent(
-              state,
-              `queue_integration_${integrationCandidate.candidateId}`,
-              `Queue approved candidate ${integrationCandidate.candidateId} for integration.`,
-              { basedOn, frontierTaskIds: [integrationCandidate.taskId] },
-            ),
-          ],
-        });
-      } catch (err) {
-        if (!(err instanceof FactoryStaleObjectiveError)) throw err;
-      }
+      if (await this.syncInvestigationSynthesisIfReady(state)) continue;
       state = await refreshState();
-    }
+      if (this.isTerminalObjectiveStatus(state.status) || state.scheduler.slotState === "queued") break;
 
-    const readyToPromoteBase = (
-      state.workflow.taskIds.length > 0
-      && state.workflow.taskIds
-        .map((taskId) => state.workflow.tasksById[taskId])
-        .filter((task): task is FactoryTaskRecord => Boolean(task))
-        .every((task) => ["integrated", "superseded"].includes(task.status))
-      && state.workflow.taskIds
-        .map((taskId) => state.workflow.tasksById[taskId])
-        .some((task) => Boolean(task) && task.status === "integrated")
-      && state.integration.status === "validated"
-    );
-    const readyToPromoteBlockedReason = readyToPromoteBase
-      ? factoryPromotionGateBlockedReason(state)
-      : undefined;
-
-    if (readyToPromoteBlockedReason) {
-      await this.emitObjective(objectiveId, {
-        type: "objective.blocked",
-        objectiveId,
-        reason: readyToPromoteBlockedReason,
-        summary: readyToPromoteBlockedReason,
-        blockedAt: Date.now(),
+      const facts = await this.collectObjectivePlannerFacts(state);
+      const effects = planObjectiveReact({
+        state,
+        facts,
       });
-      await this.rebalanceObjectiveSlots();
-      return;
-    }
+      if (effects.length === 0) break;
 
-    if (readyToPromoteBase && state.integration.activeCandidateId) {
-      await this.emitObjective(objectiveId, {
-        type: "integration.ready_to_promote",
-        objectiveId,
-        candidateId: state.integration.activeCandidateId,
-        headCommit: state.integration.headCommit ?? state.baseHash,
-        summary: state.integration.lastSummary ?? `All tasks integrated and validated. Ready to promote.`,
-        readyAt: Date.now(),
-      });
-      state = await refreshState();
+      if (await this.applyObjectivePreparationEffects(state, effects, facts)) continue;
 
-      if (state.policy.promotion.autoPromote && state.integration.activeCandidateId) {
-        try {
-          const basedOn = await this.currentHeadHash(objectiveId);
-          await this.promoteIntegration(state, state.integration.activeCandidateId, {
-            expectedPrev: basedOn,
-            prefixEvents: [
-              this.runtimeDecisionEvent(
-                state,
-                `promote_integration_${state.integration.activeCandidateId}`,
-                `Promote integrated candidate ${state.integration.activeCandidateId}.`,
-                { basedOn },
-              ),
-            ],
-          });
-        } catch (err) {
-          if (!(err instanceof FactoryStaleObjectiveError)) throw err;
-        }
-        state = await refreshState();
+      const dispatch = effects.find((effect) => effect.type === "task.dispatch");
+      if (dispatch) {
+        await this.applyObjectiveDispatchEffect(state, dispatch);
+        continue;
       }
-    }
 
-    const completionReady = (
-      finalProjection.tasks.length > 0
-      && finalProjection.tasks.every((task) => ["integrated", "superseded"].includes(task.status))
-      && state.integration.status === "promoted"
-      && state.status !== "completed"
-    );
-    const emptyBlockedReady = (
-      finalProjection.tasks.length > 0
-      && finalProjection.readyTasks.length === 0
-      && finalProjection.activeTasks.length === 0
-      && (state.integration.status === "idle" || state.integration.status === "promoted")
-      && finalProjection.tasks.every((task) => ["blocked", "superseded", "integrated"].includes(task.status))
-      && !finalProjection.tasks.every((task) => ["integrated", "superseded"].includes(task.status))
-      && state.status !== "blocked"
-    );
-
-    if (completionReady) {
-      await this.emitObjective(objectiveId, {
-        type: "objective.completed",
-        objectiveId,
-        summary: state.integration.lastSummary ?? "Factory objective completed.",
-        completedAt: Date.now(),
-      });
-    } else if (emptyBlockedReady) {
-      const nextStep = await this.maybeAutonomousNextStepForBlockedObjective(objectiveId, state);
-      if (nextStep === "retried") {
+      const finalEffect = effects.find((effect) =>
+        effect.type === "integration.queue"
+        || effect.type === "integration.ready_to_promote"
+        || effect.type === "integration.promote"
+        || effect.type === "objective.complete"
+        || effect.type === "objective.block"
+      );
+      if (!finalEffect) break;
+      const outcome = await this.applyObjectiveFinalEffect(state, finalEffect);
+      if (outcome === "retried") {
         await this.reactObjective(objectiveId);
         return;
       }
-      if (nextStep !== "asked_human") {
-        await this.emitObjective(objectiveId, {
-          type: "objective.blocked",
-          objectiveId,
-          reason: "No runnable tasks remained.",
-          summary: "Factory objective is blocked with no runnable tasks.",
-          blockedAt: Date.now(),
-        });
+      if (outcome === "asked_human") {
+        await this.rebalanceObjectiveSlots();
+        return;
       }
     }
 
@@ -2957,6 +2960,70 @@ export class FactoryService {
     return detectArtifactIssues(workspacePath, workerArtifacts);
   }
 
+  private async emitTaskResultPlannerEffects(
+    objectiveId: string,
+    effects: ReadonlyArray<FactoryPlannerEffect>,
+  ): Promise<void> {
+    const events = effects.flatMap((effect): FactoryEvent[] => {
+      switch (effect.type) {
+        case "task.block":
+          return [{
+            type: "task.blocked",
+            objectiveId,
+            taskId: effect.taskId,
+            reason: effect.reason,
+            blockedAt: Date.now(),
+          }];
+        case "candidate.produce":
+          return [{
+            type: "candidate.produced",
+            objectiveId,
+            candidateId: effect.candidateId,
+            taskId: effect.taskId,
+            headCommit: effect.headCommit,
+            summary: effect.summary,
+            handoff: effect.handoff,
+            completion: effect.completion,
+            checkResults: effect.checkResults,
+            scriptsRun: effect.scriptsRun,
+            artifactRefs: effect.artifactRefs,
+            tokensUsed: effect.tokensUsed,
+            producedAt: effect.producedAt,
+          }];
+        case "task.review.request":
+          return [{
+            type: "task.review.requested",
+            objectiveId,
+            taskId: effect.taskId,
+            reviewRequestedAt: effect.reviewRequestedAt,
+          }];
+        case "candidate.review":
+          return [{
+            type: "candidate.reviewed",
+            objectiveId,
+            candidateId: effect.candidateId,
+            taskId: effect.taskId,
+            status: effect.status,
+            summary: effect.summary,
+            handoff: effect.handoff,
+            reviewedAt: effect.reviewedAt,
+          }];
+        case "task.noop_complete":
+          return [{
+            type: "task.noop_completed",
+            objectiveId,
+            taskId: effect.taskId,
+            candidateId: effect.candidateId,
+            summary: effect.summary,
+            completedAt: effect.completedAt,
+          }];
+        default:
+          return [];
+      }
+    });
+    await this.emitObjectiveBatch(objectiveId, events);
+  }
+
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
     const state = await this.getObjectiveState(payload.objectiveId);
     const task = state.workflow.tasksById[payload.taskId];
@@ -3025,13 +3092,30 @@ export class FactoryService {
         renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
         outcome,
       );
-      await this.emitObjective(payload.objectiveId, {
-        type: "task.blocked",
-        objectiveId: payload.objectiveId,
+      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
         taskId: payload.taskId,
-        reason: handoff,
-        blockedAt: completedAt,
-      });
+        candidateId: payload.candidateId,
+        outcome,
+        workspaceDirty: false,
+        hasFailedCheck: false,
+        blockedReason: handoff,
+        candidate: {
+          headCommit: payload.baseCommit,
+          summary: effectiveSummary,
+          handoff,
+          completion: initialCompletion,
+          checkResults: [],
+          scriptsRun,
+          artifactRefs: {},
+          producedAt: completedAt,
+        },
+        review: {
+          status: "changes_requested",
+          summary: effectiveSummary,
+          handoff,
+          reviewedAt: completedAt,
+        },
+      }));
       return;
     }
 
@@ -3048,34 +3132,32 @@ export class FactoryService {
         task,
         payload.candidateId,
         renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
-        "blocked_no_diff",
+        "blocked_isolated_runtime",
       );
-      await this.emitObjective(payload.objectiveId, {
-        type: "task.blocked",
-        objectiveId: payload.objectiveId,
+      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
         taskId: payload.taskId,
-        reason,
-        blockedAt: completedAt,
-      });
-      return;
-    }
-
-    if (!status.dirty && !isInvestigation) {
-      const noDiffReason = `factory task produced no tracked diff: ${effectiveSummary}`;
-      await this.commitTaskMemory(
-        state,
-        task,
-        payload.candidateId,
-        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
-        "blocked_no_diff",
-      );
-      await this.emitObjective(payload.objectiveId, {
-        type: "task.blocked",
-        objectiveId: payload.objectiveId,
-        taskId: payload.taskId,
-        reason: noDiffReason,
-        blockedAt: completedAt,
-      });
+        candidateId: payload.candidateId,
+        outcome,
+        workspaceDirty: false,
+        hasFailedCheck: false,
+        blockedReason: reason,
+        candidate: {
+          headCommit: payload.baseCommit,
+          summary: effectiveSummary,
+          handoff,
+          completion: initialCompletion,
+          checkResults,
+          scriptsRun,
+          artifactRefs: {},
+          producedAt: completedAt,
+        },
+        review: {
+          status: "changes_requested",
+          summary: effectiveSummary,
+          handoff,
+          reviewedAt: completedAt,
+        },
+      }));
       return;
     }
 
@@ -3218,81 +3300,65 @@ export class FactoryService {
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
-    await this.emitObjective(payload.objectiveId, {
-      type: "candidate.produced",
-      objectiveId: payload.objectiveId,
-      candidateId: payload.candidateId,
-      taskId: payload.taskId,
-      headCommit: committed?.hash ?? payload.baseCommit,
-      summary: effectiveSummary,
-      handoff,
-      completion: deliveryCompletion,
-      checkResults,
-      scriptsRun,
-      artifactRefs: resultRefs,
-      tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
-      producedAt: completedAt,
-    });
-    await this.emitObjective(payload.objectiveId, {
-      type: "task.review.requested",
-      objectiveId: payload.objectiveId,
-      taskId: payload.taskId,
-      reviewRequestedAt: completedAt,
-    });
-
+    let reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
+      outcome === "changes_requested" ? "changes_requested" : "approved";
+    let reviewSummary = effectiveSummary;
+    let reviewHandoff = handoff;
     if (failedCheck) {
       const classification = await this.classifyFailedCheck(state, failedCheck, payload.baseCommit);
       const inheritedOnly = classification.inherited;
-      const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
-        inheritedOnly && outcome === "approved" ? "approved" : "changes_requested";
-      const reviewSummary = inheritedOnly
+      reviewStatus = inheritedOnly && outcome === "approved" ? "approved" : "changes_requested";
+      reviewSummary = inheritedOnly
         ? `${effectiveSummary} (checks only reproduced an inherited failure in ${failedCheck.command})`
         : `Verification failed: ${failedCheck.command}`;
-      const reviewHandoff = inheritedOnly
+      reviewHandoff = inheritedOnly
         ? `${handoff}\n\n${buildInheritedFactoryFailureNote(failedCheck, classification)}`
         : handoff;
-      await this.emitObjective(payload.objectiveId, {
-        type: "candidate.reviewed",
-        objectiveId: payload.objectiveId,
-        candidateId: payload.candidateId,
-        taskId: payload.taskId,
+    }
+    const reworkBlockedReason = reviewStatus === "changes_requested"
+      ? this.reworkPassCapReason(
+          payload.taskId,
+          state.candidatePassesByTask[payload.taskId] ?? 0,
+          state.policy.budgets.maxCandidatePassesPerTask,
+        )
+      : undefined;
+
+    const plannerInput: FactoryTaskResultPlannerInput = {
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      outcome,
+      workspaceDirty: status.dirty,
+      hasFailedCheck: Boolean(failedCheck),
+      reworkBlockedReason,
+      candidate: {
+        headCommit: committed?.hash ?? payload.baseCommit,
+        summary: effectiveSummary,
+        handoff,
+        completion: deliveryCompletion,
+        checkResults,
+        scriptsRun,
+        artifactRefs: resultRefs,
+        tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
+        producedAt: completedAt,
+      },
+      review: {
         status: reviewStatus,
         summary: reviewSummary,
         handoff: reviewHandoff,
         reviewedAt: completedAt,
-      });
-      await this.commitTaskMemory(
-        state,
-        task,
-        payload.candidateId,
-        renderDeliveryResultText({
-          summary: reviewSummary,
-          handoff: reviewHandoff,
-          scriptsRun,
-          completion: deliveryCompletion,
-        }),
-        reviewStatus,
-      );
-      return;
-    }
-
-    const reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
-      outcome === "changes_requested" ? "changes_requested" : "approved";
-    await this.emitObjective(payload.objectiveId, {
-      type: "candidate.reviewed",
-      objectiveId: payload.objectiveId,
-      candidateId: payload.candidateId,
-      taskId: payload.taskId,
-      status: reviewStatus,
-      summary: effectiveSummary,
-      handoff,
-      reviewedAt: completedAt,
-    });
+      },
+    };
+    await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult(plannerInput));
     await this.commitTaskMemory(
       state,
       task,
       payload.candidateId,
-      renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: deliveryCompletion }),
+      renderDeliveryResultText({
+        summary: reviewSummary,
+        handoff: reviewHandoff,
+        scriptsRun,
+        completion: deliveryCompletion,
+      }),
       reviewStatus,
     );
   }
@@ -3561,6 +3627,7 @@ export class FactoryService {
       return;
     }
     // console.log(`[DEBUG queueIntegration] candidateId: ${candidateId}, candidateStatus: ${candidate?.status}, integrationStatus: ${state.integration.status}, stack: ${new Error().stack}`);
+    if (candidate?.integrationDisposition === "noop") return;
     if (!candidate?.headCommit) throw new FactoryServiceError(409, "candidate has no commit to integrate");
     const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
     const now = Date.now();
@@ -3951,6 +4018,7 @@ export class FactoryService {
         receipt.type === "rebracket.applied"
         || receipt.type === "investigation.reported"
         || receipt.type === "investigation.synthesized"
+        || receipt.type === "task.noop_completed"
         || receipt.type === "objective.blocked"
         || receipt.type === "task.blocked"
         || receipt.type === "integration.conflicted"
@@ -3963,6 +4031,7 @@ export class FactoryService {
         kind:
           receipt.type === "rebracket.applied" ? "decision"
           : receipt.type.startsWith("investigation.") ? "report"
+          : receipt.type === "task.noop_completed" ? "report"
           : receipt.type === "merge.applied" ? "merge"
           : receipt.type === "integration.ready_to_promote" || receipt.type === "integration.promoted" ? "promotion"
           : "blocked",
@@ -3970,6 +4039,7 @@ export class FactoryService {
           receipt.type === "rebracket.applied" ? "Latest decision"
           : receipt.type === "investigation.reported" ? "Investigation report"
           : receipt.type === "investigation.synthesized" ? "Investigation synthesis"
+          : receipt.type === "task.noop_completed" ? "No-op completion"
           : receipt.type === "merge.applied" ? "Integration merge"
           : receipt.type === "integration.ready_to_promote" ? "Ready to promote"
           : receipt.type === "integration.promoted" ? "Promoted"
@@ -4468,6 +4538,8 @@ export class FactoryService {
         return `${event.taskId} blocked: ${event.reason}`;
       case "task.unblocked":
         return `${event.taskId} unblocked`;
+      case "task.noop_completed":
+        return `${event.taskId} completed with no repo diff: ${event.summary}`;
       case "task.superseded":
         return `${event.taskId} superseded: ${event.reason}`;
       case "candidate.produced":
@@ -4503,10 +4575,13 @@ export class FactoryService {
       case "task.review.requested":
       case "task.approved":
       case "task.integrated":
+      case "task.noop_completed":
       case "task.blocked":
       case "task.unblocked":
       case "task.superseded":
-        return { taskId: event.taskId };
+        return "candidateId" in event
+          ? { taskId: event.taskId, candidateId: event.candidateId }
+          : { taskId: event.taskId };
       case "task.dispatched":
         return { taskId: event.taskId, candidateId: event.candidateId };
       case "candidate.created":
@@ -4943,12 +5018,23 @@ export class FactoryService {
         baseHash: existing.head ?? baseHash,
       };
     }
-    const created = await this.git.createWorkspace({
-      workspaceId,
-      agentId: String(workerType),
-      baseHash,
-    });
-    return created;
+    try {
+      const created = await this.git.createWorkspace({
+        workspaceId,
+        agentId: String(workerType),
+        baseHash,
+      });
+      return created;
+    } catch (err) {
+      if (!(err instanceof HubGitError) || err.status !== 409) throw err;
+      const restored = await this.git.restoreWorkspace({
+        workspaceId,
+        branchName,
+        workspacePath,
+        baseHash,
+      });
+      return restored;
+    }
   }
 
   private async ensureIsolatedTaskRuntime(

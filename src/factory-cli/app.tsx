@@ -1153,13 +1153,6 @@ export const FactoryTerminalApp = ({
       setMessage(`Focused ${next}.`);
       return;
     }
-    if (command.type === "analyze") {
-      setPanel("analysis");
-      setDraft("");
-      await refresh("analysis");
-      setMessage(`Opened analysis for ${selectedObjectiveIdRef.current}.`);
-      return;
-    }
     if (command.type === "new") {
       await runAction("Creating objective", async () => {
         const created = await createObjectiveMutation(runtime, {
