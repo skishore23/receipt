@@ -4019,6 +4019,8 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body).toContain(">receipt<");
   expect(body).toContain("Filters");
   expect(body).toContain("321 tokens");
+  expect(body).toContain('class="flex flex-wrap items-center gap-3"');
+  expect(body).toContain('class="flex flex-wrap items-center gap-2 text-[12px] leading-none text-muted-foreground"');
   expect(body).toContain("Blocked");
   expect(body).toContain("In Progress");
   expect(body).toContain("Recent Activity");
