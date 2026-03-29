@@ -5,10 +5,22 @@
 import type { ReceiptFileInfo, ReceiptRecord } from "../adapters/receipt-tools";
 import {
   esc,
+  liveIslandAttrs,
+  sseConnectAttrs,
   softPanelClass,
   sectionLabelClass,
   CSS_VERSION,
 } from "./ui";
+
+const receiptFoldsRefreshOn = [
+  { kind: "load" },
+  { event: "receipt-refresh", throttleMs: 800 },
+] as const;
+
+const receiptRecordsRefreshOn = [
+  { kind: "load" },
+  { event: "receipt-refresh", throttleMs: 900 },
+] as const;
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -98,10 +110,10 @@ export const receiptShell = (opts: {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
-  <script src="/assets/htmx.min.js"></script>
-  <script src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js"></script>
+  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
+  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-receipt-browser hx-ext="sse" sse-connect="/receipt/stream">
+<body data-receipt-browser ${sseConnectAttrs("/receipt/stream")}>
   <div class="relative flex min-h-screen flex-col lg:grid lg:h-screen lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_320px] lg:overflow-hidden">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,hsl(13_73%_55%_/_0.06),transparent_40%),radial-gradient(circle_at_bottom_right,hsl(210_38%_65%_/_0.06),transparent_40%)]"></div>
 
@@ -113,9 +125,10 @@ export const receiptShell = (opts: {
         <div class="mt-5 ${sectionLabelClass}">Streams</div>
         <div id="receipt-folds"
              class="mt-3 grid gap-2"
-             hx-get="/receipt/island/folds?selected=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}&depth=${depth}"
-             hx-trigger="load, sse:receipt-refresh throttle:800ms"
-             hx-swap="innerHTML">
+             ${liveIslandAttrs({
+               path: `/receipt/island/folds?selected=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}&depth=${depth}`,
+               refreshOn: receiptFoldsRefreshOn,
+             })}>
           <div class="text-xs text-muted-foreground">Loading streams\u2026</div>
         </div>
       </div>
@@ -139,9 +152,10 @@ export const receiptShell = (opts: {
 
         <div id="receipt-records"
              class="mt-4 grid gap-2"
-             hx-get="/receipt/island/records?file=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}"
-             hx-trigger="load, sse:receipt-refresh throttle:900ms"
-             hx-swap="innerHTML">
+             ${liveIslandAttrs({
+               path: `/receipt/island/records?file=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}`,
+               refreshOn: receiptRecordsRefreshOn,
+             })}>
           <div class="text-xs text-muted-foreground">Loading receipts\u2026</div>
         </div>
       </div>
@@ -150,14 +164,15 @@ export const receiptShell = (opts: {
     <aside class="relative hidden min-w-0 border-l border-sidebar-border bg-sidebar text-sidebar-foreground xl:block" id="receipt-side-wrapper">
       <div class="factory-scrollbar h-screen overflow-x-hidden overflow-y-auto px-4 py-5 md:px-5"
            id="receipt-side"
-           hx-get="/receipt/island/side?file=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}&depth=${depth}"
-           hx-trigger="load, sse:receipt-refresh throttle:900ms"
-           hx-swap="innerHTML">
+           ${liveIslandAttrs({
+             path: `/receipt/island/side?file=${encodeURIComponent(selectedName)}&order=${order}&limit=${limit}&depth=${depth}`,
+             refreshOn: receiptRecordsRefreshOn,
+           })}>
         <div class="text-xs text-muted-foreground">Loading context\u2026</div>
       </div>
     </aside>
   </div>
-  <script src="/assets/factory-client.js"></script>
+  <script src="/assets/factory-client.js?v=${CSS_VERSION}"></script>
   <style>
     [data-receipt-row] .receipt-raw-block { display: none; }
     [data-receipt-row].receipt-expanded .receipt-raw-block { display: block; }

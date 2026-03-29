@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { createStreamLocator, jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { jsonlQueue } from "../adapters/jsonl-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../engine/runtime/job-worker";
@@ -10,6 +10,7 @@ import { decide as decideJob, initial as initialJob, reduce as reduceJob, type J
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../services/factory-runtime";
 import type { FactoryService, FactoryTaskView } from "../services/factory-service";
 import type { FactoryCliConfig } from "./config";
+import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "../db/client";
 
 export type FactoryCliRuntime = {
   readonly config: FactoryCliConfig;
@@ -61,6 +62,8 @@ export const createFactoryCliRuntime = (
   const sse = new SseHub();
   const watchers = new Map<string, fs.FSWatcher>();
   const listeners = new Set<FactoryCliRuntimeListener>();
+  let receiptPoller: ReturnType<typeof setInterval> | undefined;
+  let focusedObjectiveId: string | undefined;
   const notify = (event: FactoryCliRuntimeEvent): void => {
     for (const listener of listeners) {
       try {
@@ -137,17 +140,7 @@ export const createFactoryCliRuntime = (
   const objectiveWatchKey = "objective_stream";
   const focusObjective = async (objectiveId?: string): Promise<void> => {
     closeWatcher(objectiveWatchKey);
-    if (!objectiveId) return;
-    const locator = createStreamLocator(config.dataDir);
-    const streamFile = await locator.fileForExisting(`factory/objectives/${objectiveId}`);
-    if (!streamFile) return;
-    watchPath(objectiveWatchKey, streamFile, () => {
-      notify({
-        type: "objective_changed",
-        objectiveId,
-        at: Date.now(),
-      });
-    });
+    focusedObjectiveId = objectiveId;
   };
   const trackTaskLogs = (objectiveId: string | undefined, tasks: ReadonlyArray<FactoryTaskView>): void => {
     for (const key of [...watchers.keys()]) {
@@ -198,11 +191,34 @@ export const createFactoryCliRuntime = (
     trackTaskLogs,
     start: async () => {
       await service.ensureBootstrap();
+      const db = getReceiptDb(config.dataDir);
+      let lastSeq = pollLatestChangeSeq(db);
+      receiptPoller = setInterval(() => {
+        try {
+          const changes = listChangesAfter(db, lastSeq);
+          if (changes.length === 0) return;
+          lastSeq = changes[changes.length - 1]!.seq;
+          for (const change of changes) {
+            if (!focusedObjectiveId) continue;
+            if (change.stream === `factory/objectives/${focusedObjectiveId}`) {
+              notify({
+                type: "objective_changed",
+                objectiveId: focusedObjectiveId,
+                at: change.changedAt,
+              });
+            }
+          }
+        } catch {
+          // Best-effort runtime watching only.
+        }
+      }, 500);
+      receiptPoller.unref();
       worker.start();
       await service.resumeObjectives();
     },
     stop: () => {
       worker.stop();
+      if (receiptPoller) clearInterval(receiptPoller);
       for (const key of [...watchers.keys()]) {
         closeWatcher(key);
       }

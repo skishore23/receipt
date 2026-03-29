@@ -19,6 +19,7 @@ export type CodexRunInput = {
   readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   readonly sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
   readonly mutationPolicy?: "read_only_probe" | "workspace_edit";
+  readonly disableSandboxModeInference?: boolean;
   readonly isolateCodexHome?: boolean;
   readonly objectiveId?: string;
   readonly taskId?: string;
@@ -375,7 +376,7 @@ export class LocalCodexExecutor implements CodexExecutor {
 
   async run(input: CodexRunInput, control?: CodexRunControl): Promise<CodexRunResult> {
     const initialSandboxMode = input.sandboxMode
-      ?? (input.mutationPolicy === "read_only_probe" ? "read-only" : undefined);
+      ?? (!input.disableSandboxModeInference && input.mutationPolicy === "read_only_probe" ? "read-only" : undefined);
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };

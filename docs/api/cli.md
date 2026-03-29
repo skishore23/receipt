@@ -25,8 +25,8 @@ receipt new release-notes --template assistant-tool
 ### receipt dev
 - Purpose: start the local runtime in watch/dev mode.
 - Notes:
-  - defaults to the local Resonate runtime supervisor.
-  - use `JOB_BACKEND=jsonl receipt dev` to force the legacy single-process backend.
+  - defaults to the local SQLite runtime.
+  - use `JOB_BACKEND=resonate receipt dev` or `bun run dev:resonate` for multi-process dispatch.
 - Flags: none.
 - Output: streams server logs to stdout/stderr.
 - Example:
@@ -227,7 +227,7 @@ receipt factory codex-probe --mode both --reply status-ok
 ## Resolution Rules
 - `run-id|stream` arguments:
   - if value contains `/`, treated as stream directly.
-  - otherwise resolved by `_streams.json` mapping and `/runs/<runId>` suffix lookup.
+  - otherwise resolved by stream names stored in SQLite and `/runs/<runId>` suffix lookup.
 - Data directory:
   - uses `DATA_DIR` env var or defaults to `<cwd>/.receipt/data`.
 

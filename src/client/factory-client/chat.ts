@@ -16,7 +16,9 @@ import {
   INSPECTOR_REFRESH_DELAY_MS,
   SIDEBAR_REFRESH_DELAY_MS,
   asString,
+  dispatchBodyEvent,
   parseCommands,
+  queueBodyEvent,
   splitDelimited,
   type FactoryCommand,
   type FactoryFetchResponse,
@@ -491,6 +493,18 @@ export const initFactoryChat = () => {
       queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
       queueIslandRefresh("inspector", INSPECTOR_REFRESH_DELAY_MS, search);
     });
+    liveEventSource.addEventListener("profile-board-refresh", (event) => {
+      const message = event as MessageEvent<string>;
+      if (ignoreInit(message)) return;
+      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
+    });
+    liveEventSource.addEventListener("objective-runtime-refresh", (event) => {
+      const message = event as MessageEvent<string>;
+      if (ignoreInit(message)) return;
+      queueIslandRefresh("chat", CHAT_REFRESH_DELAY_MS, search);
+      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
+      queueIslandRefresh("inspector", INSPECTOR_REFRESH_DELAY_MS, search);
+    });
     liveEventSource.addEventListener("factory-refresh", (event) => {
       const message = event as MessageEvent<string>;
       if (ignoreInit(message)) return;
@@ -622,8 +636,10 @@ export const initFactoryChat = () => {
       connectLiveUpdates(url.search || "");
     }
     if (objectiveChanged && refreshObjectiveIslands) {
-      queueIslandRefresh("sidebar", 0, url.search || "");
-      queueIslandRefresh("inspector", 0, url.search || "");
+      dispatchBodyEvent("factory:scope-changed", {
+        objectiveId: nextObjectiveId,
+        chatId: nextChatId,
+      });
     }
     return true;
   };
@@ -785,6 +801,10 @@ export const initFactoryChat = () => {
             keepBusyForNavigation = true;
             return applyInlineLocation(body.location, undefined, body.live).then((handledInline) => {
               if (!handledInline) return;
+              queueBodyEvent("factory:chat-refresh", 120, {
+                chatId: body.live?.chatId,
+                objectiveId: body.live?.objectiveId,
+              });
               keepBusyForNavigation = false;
               resetComposerAfterSuccess();
             });

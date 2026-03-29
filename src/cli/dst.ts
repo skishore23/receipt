@@ -131,6 +131,7 @@ const AGENT_EVENT_TYPES = new Set<string>([
   "response.finalized",
   "run.continued",
   "thread.bound",
+  "objective.handoff",
   "context.pruned",
   "context.compacted",
   "overflow.recovered",

@@ -9,18 +9,23 @@ export const CSS_VERSION = Date.now();
 
 // ── Layout class constants ──────────────────────────────────────────────────
 
-export const panelClass = "rounded-xl border border-border bg-card shadow-lg backdrop-blur-2xl";
-export const softPanelClass = "rounded-lg border border-border bg-muted backdrop-blur-xl";
+export const panelClass = "border border-border bg-card";
+export const softPanelClass = "border border-border/80 bg-muted/45";
 export const railCardClass = `${softPanelClass} p-4`;
-export const sectionLabelClass = "text-[11px] font-medium uppercase tracking-[0.28em] text-muted-foreground";
+export const sectionLabelClass = "text-[12px] font-medium text-muted-foreground";
+export const missionControlPanelClass = "border border-border bg-card";
+export const missionControlInsetClass = "border border-border/80 bg-muted/45";
+export const missionControlSectionLabelClass = "text-[12px] font-medium text-muted-foreground";
+export const missionControlMonoClass = "font-mono text-[11px] tracking-[0.02em]";
+export const missionControlHotkeyClass = "inline-flex items-center gap-1 border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground";
 
 // ── Badge class constants ───────────────────────────────────────────────────
 
-export const badgeBaseClass = "inline-flex max-w-full shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1 text-center text-[11px] font-medium uppercase tracking-[0.18em] whitespace-nowrap leading-4";
+export const badgeBaseClass = "inline-flex max-w-full shrink-0 items-center justify-center gap-1.5 rounded-sm border px-2 py-1 text-center text-[11px] font-medium whitespace-nowrap leading-4";
 
 // ── Button class constants ──────────────────────────────────────────────────
 
-export const buttonBaseClass = "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition";
+export const buttonBaseClass = "inline-flex items-center justify-center rounded-md border px-3 py-2 text-sm font-medium transition";
 export const ghostButtonClass = `${buttonBaseClass} border-border bg-secondary text-secondary-foreground hover:bg-accent`;
 export const dangerButtonClass = `${buttonBaseClass} border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/20`;
 
@@ -221,15 +226,15 @@ export const statPill = (
     readonly icon?: string;
     readonly supporting?: string;
   },
-): string => `<div class="min-w-0 overflow-hidden rounded-2xl border border-border bg-muted/90 px-3 py-2.5 shadow-sm">
-  <div class="flex items-center gap-2">
-    ${opts?.icon ? `<span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-border/80 bg-background/70 text-muted-foreground">${opts.icon}</span>` : ""}
+) : string => `<div class="min-w-0 overflow-hidden border border-border bg-muted/45 px-3 py-3">
+  <div class="flex items-start gap-2">
+    ${opts?.icon ? `<span class="flex h-7 w-7 shrink-0 items-center justify-center border border-border bg-background text-muted-foreground">${opts.icon}</span>` : ""}
     <div class="min-w-0">
-      <div class="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
-      ${opts?.supporting ? `<div class="mt-0.5 text-[10px] leading-4 text-muted-foreground/80">${esc(opts.supporting)}</div>` : ""}
+      <div class="text-[11px] font-medium text-muted-foreground">${esc(label)}</div>
+      ${opts?.supporting ? `<div class="mt-0.5 text-[11px] leading-4 text-muted-foreground/80">${esc(opts.supporting)}</div>` : ""}
     </div>
   </div>
-  <div class="mt-2 break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">${esc(value)}</div>
+  <div class="mt-2 break-words text-sm font-semibold text-foreground [overflow-wrap:anywhere]">${esc(value)}</div>
 </div>`;
 
 export const renderEmptyState = (input: {
@@ -240,17 +245,60 @@ export const renderEmptyState = (input: {
   readonly eyebrow?: string;
   readonly detail?: string;
   readonly minHeightClass?: string;
-}): string => `<section class="flex ${input.minHeightClass ?? "min-h-[240px]"} items-center justify-center rounded-[28px] border border-border/80 bg-[linear-gradient(180deg,hsl(223_21%_24%/0.92),hsl(223_21%_20%/0.96))] px-6 py-8 text-center shadow-sm">
-  <div class="mx-auto flex max-w-sm flex-col items-center">
-    <span class="flex h-14 w-14 items-center justify-center rounded-[20px] border ${iconBadgeToneClass(input.tone ?? "neutral")} shadow-sm">
+}): string => `<section class="flex ${input.minHeightClass ?? "min-h-[240px]"} items-center justify-center border border-border bg-card px-6 py-8">
+  <div class="mx-auto flex max-w-lg items-start gap-4 text-left">
+    <span class="flex h-11 w-11 shrink-0 items-center justify-center border ${iconBadgeToneClass(input.tone ?? "neutral")}">
       ${input.icon}
     </span>
-    ${input.eyebrow ? `<div class="mt-4 ${sectionLabelClass}">${esc(input.eyebrow)}</div>` : ""}
-    <div class="mt-3 text-lg font-semibold text-foreground">${esc(input.title)}</div>
-    <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(input.message)}</div>
-    ${input.detail ? `<div class="mt-4 text-[11px] leading-5 text-muted-foreground/90">${esc(input.detail)}</div>` : ""}
+    <div class="min-w-0">
+      ${input.eyebrow ? `<div class="${sectionLabelClass}">${esc(input.eyebrow)}</div>` : ""}
+      <div class="mt-1 text-base font-semibold text-foreground">${esc(input.title)}</div>
+      <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(input.message)}</div>
+      ${input.detail ? `<div class="mt-3 text-[12px] leading-5 text-muted-foreground/90">${esc(input.detail)}</div>` : ""}
+    </div>
   </div>
 </section>`;
+
+export type LiveRefreshSpec =
+  | {
+      readonly kind: "load";
+    }
+  | {
+      readonly kind: "body";
+      readonly event: string;
+    }
+  | {
+      readonly kind?: "sse";
+      readonly event: string;
+      readonly throttleMs?: number;
+    };
+
+const liveRefreshTriggerPart = (spec: LiveRefreshSpec): string => {
+  if (spec.kind === "load") return "load";
+  if (spec.kind === "body") return `${spec.event} from:body`;
+  return `sse:${spec.event}${typeof spec.throttleMs === "number" ? ` throttle:${spec.throttleMs}ms` : ""}`;
+};
+
+const liveRefreshDescriptorPart = (spec: LiveRefreshSpec): string => {
+  if (spec.kind === "load") return "load";
+  if (spec.kind === "body") return `body:${spec.event}`;
+  return `sse:${spec.event}${typeof spec.throttleMs === "number" ? `@${spec.throttleMs}` : ""}`;
+};
+
+export const liveRefreshTrigger = (refreshOn: ReadonlyArray<LiveRefreshSpec>): string =>
+  refreshOn.map((spec) => liveRefreshTriggerPart(spec)).join(", ");
+
+export const liveRefreshDescriptor = (refreshOn: ReadonlyArray<LiveRefreshSpec>): string =>
+  refreshOn.map((spec) => liveRefreshDescriptorPart(spec)).join(",");
+
+export const liveIslandAttrs = (input: {
+  readonly path: string;
+  readonly refreshOn: ReadonlyArray<LiveRefreshSpec>;
+  readonly swap?: string;
+}): string => `hx-get="${esc(input.path)}" hx-trigger="${esc(liveRefreshTrigger(input.refreshOn))}" hx-swap="${esc(input.swap ?? "innerHTML")}" data-refresh-on="${esc(liveRefreshDescriptor(input.refreshOn))}"`;
+
+export const sseConnectAttrs = (path: string): string =>
+  `hx-ext="sse" sse-connect="${esc(path)}"`;
 
 
 export const renderCliActionCard = (input: {
@@ -259,7 +307,7 @@ export const renderCliActionCard = (input: {
   readonly command: string;
   readonly badgeClass?: string;
   readonly span?: string;
-}): string => `<div class="${input.span ?? ""} rounded-xl border border-border bg-card px-4 py-4">
+}): string => `<div class="${input.span ?? ""} border border-border bg-card px-4 py-4">
     <span class="flex items-start justify-between gap-3">
       <span class="min-w-0">
         <span class="block text-sm font-semibold text-foreground">${esc(input.label)}</span>
@@ -267,7 +315,7 @@ export const renderCliActionCard = (input: {
       </span>
       <span class="${input.badgeClass ?? ghostButtonClass} shrink-0">CLI</span>
     </span>
-    <code class="mt-3 block overflow-x-auto rounded-lg border border-border bg-muted px-3 py-3 text-[12px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(input.command)}</code>
+    <code class="mt-3 block overflow-x-auto border border-border bg-muted px-3 py-3 text-[12px] leading-5 text-foreground [overflow-wrap:anywhere]">${esc(input.command)}</code>
   </div>`;
 
 // ── Shared job action cards ─────────────────────────────────────────────────

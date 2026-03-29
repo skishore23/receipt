@@ -102,7 +102,6 @@ import {
 import {
   detectArtifactIssues,
   pathExists,
-  readTextIfPresent,
   readdirIfPresent,
   type FactoryArtifactIssue,
 } from "./factory/artifact-inspection";
@@ -118,6 +117,7 @@ import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString
 import type { SseHub } from "../framework/sse-hub";
 import { resolveCliInvocation } from "../lib/runtime-paths";
 import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../modules/job";
+import { readObjectiveStatesFromProjection, syncChangedObjectiveProjections, syncObjectiveProjectionStream } from "../db/projectors";
 
 const execFileAsync = promisify(execFile);
 
@@ -719,6 +719,17 @@ export class FactoryService {
   }
 
   projectionVersion(): number {
+    return this.objectiveProjectionVersion;
+  }
+
+  private async syncObjectiveProjectionCache(): Promise<void> {
+    await this.ensureBootstrap();
+    const changedStreams = await syncChangedObjectiveProjections(this.dataDir, this.runtime);
+    if (changedStreams.length > 0) this.invalidateObjectiveProjection();
+  }
+
+  async projectionVersionFresh(): Promise<number> {
+    await this.syncObjectiveProjectionCache();
     return this.objectiveProjectionVersion;
   }
 
@@ -1446,10 +1457,13 @@ export class FactoryService {
 
   async listObjectives(query?: {
     readonly objectiveIds?: ReadonlyArray<string>;
+    readonly profileId?: string;
   }): Promise<ReadonlyArray<FactoryObjectiveCard>> {
     const objectiveIds = (query?.objectiveIds ?? [])
       .map((objectiveId) => objectiveId.trim())
       .filter(Boolean);
+    const profileId = query?.profileId?.trim();
+    await this.syncObjectiveProjectionCache();
     if (objectiveIds.length > 0) {
       const states = await this.listObjectiveStates();
       const queuePositions = this.queuePositionsForStates(states);
@@ -1457,13 +1471,16 @@ export class FactoryService {
       const details = await Promise.all(
         states
           .filter((state) => objectiveIdSet.has(state.objectiveId))
+          .filter((state) => !profileId || state.profile.rootProfileId === profileId)
           .map((state) => this.buildObjectiveCard(state, queuePositions.get(state.objectiveId))),
       );
       return details.sort((a, b) => b.updatedAt - a.updatedAt);
     }
     const cached = this.objectiveListCache;
     if (cached && cached.version === this.objectiveProjectionVersion) {
-      return cached.cards;
+      return profileId
+        ? cached.cards.filter((card) => card.profile.rootProfileId === profileId)
+        : cached.cards;
     }
     const states = await this.listObjectiveStates();
     const queuePositions = this.queuePositionsForStates(states);
@@ -1475,7 +1492,9 @@ export class FactoryService {
       version: this.objectiveProjectionVersion,
       cards,
     };
-    return cards;
+    return profileId
+      ? cards.filter((card) => card.profile.rootProfileId === profileId)
+      : cards;
   }
 
   async getObjectiveState(objectiveId: string): Promise<FactoryState> {
@@ -1539,8 +1558,13 @@ export class FactoryService {
       .slice(-limit);
   }
 
-  async buildBoardProjection(selectedObjectiveId?: string): Promise<FactoryBoardProjection> {
-    const objectives = (await this.listObjectives())
+  async buildBoardProjection(query?: string | {
+    readonly selectedObjectiveId?: string;
+    readonly profileId?: string;
+  }): Promise<FactoryBoardProjection> {
+    const selectedObjectiveId = typeof query === "string" ? query : query?.selectedObjectiveId;
+    const profileId = typeof query === "string" ? undefined : query?.profileId;
+    const objectives = (await this.listObjectives(profileId ? { profileId } : undefined))
       .filter((objective) => !objective.archivedAt)
       .map((objective) => ({
         ...objective,
@@ -1882,7 +1906,8 @@ export class FactoryService {
         await this.queue.cancel(duplicate.id, "superseded duplicate objective control job", "factory.resume");
       }
 
-      const state = statesById.get(current.payload.objectiveId);
+      const objectiveId = typeof current.payload.objectiveId === "string" ? current.payload.objectiveId : "";
+      const state = statesById.get(objectiveId);
       const cancelReason = this.controlJobCancelReason(state);
       if (cancelReason) {
         await this.queue.cancel(current.id, cancelReason, "factory.resume");
@@ -1947,16 +1972,13 @@ export class FactoryService {
   }
 
   private async listObjectiveStates(): Promise<ReadonlyArray<FactoryState>> {
+    await this.syncObjectiveProjectionCache();
     const cached = this.objectiveStateListCache;
     if (cached && cached.version === this.objectiveProjectionVersion) {
       return cached.states;
     }
-    await this.ensureBootstrap();
-    const streams = await this.discoverObjectiveStreams();
-    const states = await Promise.all(
-      streams.map(async (stream) => normalizeFactoryState(await this.runtime.state(stream))),
-    );
-    const resolvedStates = states
+    const resolvedStates = readObjectiveStatesFromProjection(this.dataDir)
+      .map((state) => normalizeFactoryState(state))
       .filter((state) => Boolean(state.objectiveId))
       .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
     this.objectiveStateListCache = {
@@ -4245,6 +4267,7 @@ export class FactoryService {
         events,
         expectedPrev,
       });
+      await syncObjectiveProjectionStream(this.dataDir, this.runtime, stream);
     } catch (err) {
       if (
         typeof expectedPrev === "string"
@@ -4257,7 +4280,15 @@ export class FactoryService {
       throw err;
     }
     this.invalidateObjectiveProjection(objectiveId);
+    await this.publishObjectiveProjectionRefresh(objectiveId);
+  }
+
+  private async publishObjectiveProjectionRefresh(objectiveId: string): Promise<void> {
     this.sse.publish("factory", objectiveId);
+    this.sse.publish("objective-runtime", objectiveId);
+    const detail = await this.getObjective(objectiveId).catch(() => undefined);
+    const profileId = detail?.profile.rootProfileId?.trim();
+    if (profileId) this.sse.publish("profile-board", profileId);
     this.sse.publish("receipt");
   }
 
@@ -4272,27 +4303,6 @@ export class FactoryService {
 
   private async discoverObjectiveStreams(): Promise<ReadonlyArray<string>> {
     const discovered = new Set<string>();
-    const manifestPath = path.join(this.dataDir, "_streams.json");
-    const raw = await readTextIfPresent(manifestPath) ?? "";
-    let manifestLoaded = false;
-    if (raw.trim()) {
-      try {
-        const manifest = JSON.parse(raw) as { readonly byStream?: Record<string, string> };
-        manifestLoaded = true;
-        for (const stream of Object.keys(manifest.byStream ?? {})) {
-          if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
-            discovered.add(stream);
-          }
-        }
-      } catch {
-        manifestLoaded = false;
-      }
-    }
-
-    if (discovered.size > 0 || manifestLoaded) {
-      return [...discovered].sort((a, b) => a.localeCompare(b));
-    }
-
     const runtimeStreams = await this.runtime.listStreams(`${FACTORY_STREAM_PREFIX}/`);
     for (const stream of runtimeStreams) {
       if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {

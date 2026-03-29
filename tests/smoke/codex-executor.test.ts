@@ -94,6 +94,30 @@ const createSandboxBootstrapFailureCodexStub = async (): Promise<{
   return { scriptPath, attemptsPath };
 };
 
+const createArgvCaptureCodexStub = async (): Promise<{
+  readonly scriptPath: string;
+  readonly argsPath: string;
+}> => {
+  const dir = await mkTmp("receipt-codex-executor-argv");
+  const scriptPath = path.join(dir, "codex-argv-stub");
+  const argsPath = path.join(dir, "args.json");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const argsPath = process.env.ARGV_CAPTURE_PATH;",
+    "if (!lastMessagePath || !argsPath) throw new Error('missing argv capture contract');",
+    "fs.writeFileSync(argsPath, JSON.stringify(args), 'utf8');",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'argv captured', handoff: 'ok' }), 'utf8');",
+    "process.stdout.write('argv-captured');",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return { scriptPath, argsPath };
+};
+
 const createLastMessageHungCodexStub = async (): Promise<string> => {
   const dir = await mkTmp("receipt-codex-executor-last-message");
   const scriptPath = path.join(dir, "codex-last-message-hang-stub");
@@ -674,4 +698,38 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
   expect(stderrLog).toContain("bwrap: Unknown option --argv0");
   expect(stderrLog).not.toContain("retrying with danger-full-access");
+}, 15_000);
+
+test("local codex executor can keep read-only mutation policy while bypassing sandbox inference", async () => {
+  const root = await mkTmp("receipt-codex-executor-readonly-bypass");
+  const { scriptPath, argsPath } = await createArgvCaptureCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      ARGV_CAPTURE_PATH: argsPath,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    mutationPolicy: "read_only_probe",
+    disableSandboxModeInference: true,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const args = JSON.parse(await fs.readFile(argsPath, "utf-8")) as string[];
+  expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(args).not.toContain("--sandbox");
 }, 15_000);

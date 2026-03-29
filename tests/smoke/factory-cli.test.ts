@@ -1958,6 +1958,7 @@ test("factory cli: helper list surfaces the checked-in helper catalog without in
   }>;
   expect(parsed.some((item) => item.id === "aws_account_scope" && item.provider === "aws")).toBe(true);
   expect(parsed.some((item) => item.id === "aws_resource_inventory" && item.provider === "aws")).toBe(true);
+  expect(parsed.some((item) => item.id === "nat_gateway_cost_spike" && item.provider === "aws")).toBe(true);
 }, 120_000);
 
 test("factory cli: helper run executes a checked-in helper through the shared runner", async () => {

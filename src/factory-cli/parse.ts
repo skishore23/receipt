@@ -5,6 +5,7 @@ import { fold } from "@receipt/core/chain";
 import type { Receipt } from "@receipt/core/types";
 
 import { jsonlStore } from "../adapters/jsonl";
+import { getReceiptDb } from "../db/client";
 import type { AgentEvent } from "../modules/agent";
 import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent";
 import type { FactoryEvent } from "../modules/factory";
@@ -18,7 +19,6 @@ type ParseFocusKind = "task" | "candidate";
 
 type StreamEntry = {
   readonly stream: string;
-  readonly filePath: string;
   readonly mtimeMs: number;
 };
 
@@ -316,8 +316,6 @@ export type FactoryParsedRun = {
   readonly taskRuns: ReadonlyArray<ParsedTaskRun>;
 };
 
-const STREAM_MANIFEST = "_streams.json";
-
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -420,26 +418,20 @@ const parseRunIdFromStream = (stream: string | undefined): string | undefined =>
 };
 
 const readStreamEntries = async (dataDir: string): Promise<ReadonlyArray<StreamEntry>> => {
-  const manifestPath = path.join(dataDir, STREAM_MANIFEST);
-  const raw = await fs.readFile(manifestPath, "utf-8").catch(() => "");
-  const parsed: { readonly byStream?: Record<string, string> } = raw.trim()
-    ? JSON.parse(raw) as { readonly byStream?: Record<string, string> }
-    : {};
-  const byStream = parsed.byStream ?? {};
-  const entries = await Promise.all(
-    Object.entries(byStream).map(async ([stream, key]) => {
-      const filePath = path.join(dataDir, `${key}.jsonl`);
-      const stat = await fs.stat(filePath).catch(() => undefined);
-      return stat
-        ? {
-            stream,
-            filePath,
-            mtimeMs: stat.mtimeMs,
-          } satisfies StreamEntry
-        : undefined;
-    }),
-  );
-  return entries.filter((entry): entry is StreamEntry => Boolean(entry));
+  const db = getReceiptDb(dataDir);
+  const rows = db.sqlite.query(`
+    SELECT name, updated_at, last_ts
+    FROM streams
+    ORDER BY updated_at DESC, name DESC
+  `).all() as Array<{
+    readonly name: string;
+    readonly updated_at: number;
+    readonly last_ts: number | null;
+  }>;
+  return rows.map((row) => ({
+    stream: row.name,
+    mtimeMs: Math.max(Number(row.updated_at), Number(row.last_ts ?? 0)),
+  }));
 };
 
 const streamKind = (stream: string): ParseTargetKind | undefined => {
@@ -701,6 +693,8 @@ const runEventSummary = (event: AgentEvent): string => {
       return `Profile resolved: ${event.rootProfileId}`;
     case "thread.bound":
       return `Bound to ${event.objectiveId} (${event.reason})`;
+    case "objective.handoff":
+      return `Objective ${event.status}: ${truncateInline(event.summary, 220)}`;
     case "run.status":
       return `Run ${event.status}${event.note ? `: ${truncateInline(event.note, 220)}` : ""}`;
     case "iteration.started":
@@ -906,7 +900,7 @@ const jobEventSummary = (event: JobEvent): string => {
     case "job.lease_expired":
       return event.willRetry ? "Lease expired; retrying" : "Lease expired";
     default:
-      return event.type;
+      return "unknown";
   }
 };
 

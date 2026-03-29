@@ -11,6 +11,7 @@ import { runAgentLoop } from "../engine/runtime/agent-loop";
 import { createResonateAgentActionAdapter } from "../engine/runtime/resonate-agent-actions";
 import { handleFactoryCommand } from "../factory-cli/commands";
 import type { JobCmd, JobEvent, JobState } from "../modules/job";
+import { importLegacyJsonlToSqlite } from "../db/importer";
 import {
   asIntegerFlag,
   asString,
@@ -461,6 +462,20 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
   }
 };
 
+const commandMigrate = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const target = args[0];
+  if (target !== "sqlite") throw new Error("receipt migrate requires the 'sqlite' target");
+  const dataDir = asString(flags, "data-dir") ?? DATA_DIR;
+  const dbPath = asString(flags, "db-path");
+  const forceRebuild = flags["force-rebuild"] === true || flags.forceRebuild === true;
+  const result = await importLegacyJsonlToSqlite({
+    dataDir,
+    dbPath,
+    forceRebuild,
+  });
+  console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+};
+
 export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
   switch (parsed.command) {
     case "new": {
@@ -518,6 +533,9 @@ export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
     }
     case "memory":
       await commandMemory(parsed.args, parsed.flags);
+      return;
+    case "migrate":
+      await commandMigrate(parsed.args, parsed.flags);
       return;
     case "factory":
       await handleFactoryCommand(process.cwd(), parsed.args, parsed.flags);

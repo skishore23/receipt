@@ -10,7 +10,7 @@ import { receipt } from "@receipt/core/chain";
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 
-test("delegation tools: agent.inspect accepts a stream id and resolves it through the stream manifest", async () => {
+test("delegation tools: agent.inspect accepts a stream id and reads it from the sqlite-backed store", async () => {
   const dataDir = await createTempDir("receipt-delegation-inspect");
   const store = jsonlStore<Record<string, unknown>>(dataDir);
   const stream = "agents/factory/demo/generalist";

@@ -6,8 +6,8 @@ import { performance } from "node:perf_hooks";
 
 import { createRuntime } from "@receipt/core/runtime";
 import { receipt } from "@receipt/core/chain";
-import { createStreamLocator, jsonBranchStore } from "../../src/adapters/jsonl";
-import { jsonlStore } from "../../src/adapters/jsonl";
+import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { getReceiptDb } from "../../src/db/client";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -21,11 +21,10 @@ type PerfCmd = {
 
 const nowMs = (): number => performance.now();
 
-test("perf: jsonl store replays 100k receipts without timing out", async () => {
+test("perf: sqlite receipt store replays 100k receipts without timing out", async () => {
   const dataDir = await createTempDir("receipt-perf-100k");
   try {
     const store = jsonlStore<PerfEvent>(dataDir);
-    const locator = createStreamLocator(dataDir);
     const runtime = createRuntime<PerfCmd, PerfEvent, { readonly count: number }>(
       store,
       jsonBranchStore(dataDir),
@@ -36,16 +35,50 @@ test("perf: jsonl store replays 100k receipts without timing out", async () => {
 
     const stream = "perf";
     const total = 100_000;
-    const file = await locator.fileFor(stream);
+    const db = getReceiptDb(dataDir);
     let prev: string | undefined;
-    let output = "";
-    for (let i = 0; i < total; i += 1) {
-      const r = receipt(stream, prev, { type: "tick", seq: i }, Date.now() + i);
-      output += `${JSON.stringify(r)}\n`;
-      prev = r.hash;
-    }
-    await fs.writeFile(file, output, "utf-8");
-    await store.count(stream);
+    const startedAt = Date.now();
+    const insert = db.sqlite.query(`
+      INSERT INTO receipts (
+        stream,
+        stream_seq,
+        receipt_id,
+        ts,
+        prev_hash,
+        hash,
+        event_type,
+        body_json,
+        hints_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const upsertStream = db.sqlite.query(`
+      INSERT INTO streams (name, head_hash, receipt_count, updated_at, last_ts)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET
+        head_hash = excluded.head_hash,
+        receipt_count = excluded.receipt_count,
+        updated_at = excluded.updated_at,
+        last_ts = excluded.last_ts
+    `);
+    const seed = db.sqlite.transaction(() => {
+      for (let i = 0; i < total; i += 1) {
+        const r = receipt(stream, prev, { type: "tick", seq: i }, startedAt + i);
+        insert.run(
+          stream,
+          i + 1,
+          r.id,
+          r.ts,
+          r.prev ?? null,
+          r.hash,
+          r.body.type,
+          JSON.stringify(r.body),
+          null,
+        );
+        prev = r.hash;
+      }
+      upsertStream.run(stream, prev ?? null, total, Date.now(), startedAt + total - 1);
+    });
+    seed();
 
     const headStart = nowMs();
     const head = await store.head(stream);

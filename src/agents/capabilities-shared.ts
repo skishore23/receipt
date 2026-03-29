@@ -192,7 +192,7 @@ export const capabilityDescriptions = {
   "skill.read": '{"name": string} — Get the full parameter spec for any tool by name.',
   "agent.delegate": '{"agentId": string, "task": string, "config"?: object, "timeoutMs"?: number} — Delegate a sub-task to a specialized agent (theorem, writer, agent, axiom, inspector). Blocks until complete or timeout.',
   "agent.status": '{"jobId": string} — Check status and result of a previously delegated job.',
-  "agent.inspect": '{"file": string, "maxChars"?: number} — Read another agent\'s event history by bare .jsonl filename or by stream id such as agents/factory/<repoKey>/<profileId>.',
+  "agent.inspect": '{"file": string, "maxChars"?: number} — Read another agent\'s event history by stream id such as agents/factory/<repoKey>/<profileId>. Bare .jsonl filenames remain supported only for legacy imports.',
   "jobs.list": '{"limit"?: number, "status"?: string, "includeCompleted"?: boolean} — List recent child jobs for the current session.',
   "repo.status": '{} — Read control-plane git state for the current workspace: HEAD baseHash, branch, dirty/clean state, and a bounded git status --porcelain summary.',
   "codex.logs": '{"jobId"?: string} — Inspect Codex child logs and artifact paths for the current session. Without jobId, use the latest Codex child.',

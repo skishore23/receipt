@@ -58,6 +58,7 @@ export type ComposerCommandDefinition = {
 export const COMPOSER_COMMANDS: ReadonlyArray<ComposerCommandDefinition> = [
   { name: "help", label: "/help", usage: "/help or /?", description: "Show slash command help.", aliases: ["?", "help"] },
   { name: "analyze", label: "/analyze", usage: "/analyze", description: "Open the run analysis for the selected objective." },
+  { name: "obj", label: "/obj", usage: "/obj <prompt>", description: "Create a new objective from the prompt." },
   { name: "new", label: "/new", usage: "/new <prompt>", description: "Start a new thread from the prompt." },
   { name: "react", label: "/react", usage: "/react [message]", description: "React to the selected objective." },
   { name: "watch", label: "/watch", usage: "/watch <objective-id>", description: "Focus an objective by id." },
@@ -221,8 +222,9 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
       }
       return { ok: true, command: { type: "analyze" } };
     case "new":
+    case "obj":
       if (!payload) {
-        return { ok: false, error: "Use /new followed by an objective prompt." };
+        return { ok: false, error: `Use /${name.toLowerCase()} followed by an objective prompt.` };
       }
       {
         const prepared = prepareObjectiveCreation(payload);

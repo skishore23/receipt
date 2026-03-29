@@ -18,6 +18,7 @@ import type {
   QueueCommandLane,
   QueueCommandType,
 } from "../modules/job";
+import { readJobProjection, syncChangedJobProjections, syncJobProjectionStream, type StoredJobProjection } from "../db/projectors";
 
 export type QueueCommandRecord = {
   readonly id: string;
@@ -164,6 +165,30 @@ const cloneJob = (job: QueueJob): QueueJob => ({
   })),
 });
 
+const projectedToQueueJob = (job: StoredJobProjection): QueueJob => ({
+  id: job.id,
+  agentId: job.agentId,
+  lane: job.lane,
+  sessionKey: job.sessionKey,
+  singletonMode: job.singletonMode,
+  payload: { ...job.payload },
+  status: job.status,
+  attempt: job.attempt,
+  maxAttempts: job.maxAttempts,
+  createdAt: job.createdAt,
+  updatedAt: job.updatedAt,
+  leaseOwner: job.leaseOwner,
+  leaseUntil: job.leaseUntil,
+  lastError: job.lastError,
+  result: job.result ? { ...job.result } : undefined,
+  canceledReason: job.canceledReason,
+  abortRequested: job.abortRequested,
+  commands: job.commands.map((command) => ({
+    ...command,
+    payload: command.payload ? { ...command.payload } : undefined,
+  })),
+});
+
 const eventId = (): string => `jobevt_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`;
 
 const emptyCounts = (): Record<JobStatus, number> => ({
@@ -225,8 +250,8 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   };
 
   const jobStream = (jobId: string): string => `${opts.stream}/${jobId}`;
-  const manifestPath = opts.watchDir ? path.join(opts.watchDir, "_streams.json") : undefined;
-  const manifestSyncWindowMs = 250;
+  const projectionDataDir = opts.watchDir;
+  const discoverySyncWindowMs = 250;
 
   const emitToStream = async (stream: string, event: JobEvent, hint?: string): Promise<void> => {
     await opts.runtime.execute(stream, {
@@ -392,6 +417,10 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   };
 
   const loadQueueJob = async (jobId: string): Promise<QueueJob | undefined> => {
+    if (projectionDataDir) {
+      const projected = readJobProjection(projectionDataDir, jobId);
+      if (projected) return projectedToQueueJob(projected);
+    }
     const state = await opts.runtime.state(jobStream(jobId));
     jobStateCache.set(jobId, state);
     const record = state.jobs[jobId];
@@ -421,6 +450,9 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   ): Promise<void> => {
     if ("jobId" in event) {
       await emitToStream(jobStream(event.jobId), event, eventId());
+      if (projectionDataDir) {
+        await syncJobProjectionStream(projectionDataDir, opts.runtime, jobStream(event.jobId));
+      }
       const changedJob = await loadQueueJob(event.jobId);
       if (changedJob) {
         upsertIndexedJob(changedJob);
@@ -433,23 +465,6 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   };
 
   const discoverJobIds = async (): Promise<ReadonlyArray<string>> => {
-    if (manifestPath) {
-      const raw = await fs.promises.readFile(manifestPath, "utf-8").catch(() => "");
-      if (raw.trim()) {
-        try {
-          const parsed = JSON.parse(raw) as { readonly byStream?: Record<string, string> };
-          const prefix = `${opts.stream}/`;
-          const ids = Object.keys(parsed.byStream ?? {})
-            .map((stream) => stream.startsWith(prefix) ? stream.slice(prefix.length) : "")
-            .filter((jobId) => Boolean(jobId) && !jobId.includes("/"))
-            .sort((a, b) => a.localeCompare(b));
-          knownJobIds = ids;
-          return ids;
-        } catch {
-          // Fall through to the runtime manifest view.
-        }
-      }
-    }
     if (!opts.runtime.listStreams) {
       return knownJobIds ?? [];
     }
@@ -513,6 +528,22 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   };
 
   const refresh = async (): Promise<QueueSnapshot> => {
+    if (projectionDataDir && !expireLeasesOnRefresh) {
+      const changedIds = await syncChangedJobProjections(projectionDataDir, opts.runtime);
+      if (changedIds.length > 0) {
+        const changedJobs = new Map<string, QueueJob>();
+        await withWriteLock(async () => {
+          for (const jobId of changedIds) {
+            await loadAuthoritativeJob(jobId, changedJobs);
+          }
+          index.loaded = true;
+        });
+        const changed = [...changedJobs.values()].sort(compareRecentJobs);
+        if (changed.length > 0) notifyWaiters();
+        await publishChangedJobList(changed);
+        return snapshot();
+      }
+    }
     if (expireLeasesOnRefresh || !index.loaded || (nowTs() - lastFullRefreshAt) >= fullRefreshWindowMs) {
       const changed = await refreshAllJobs();
       if (changed.length > 0) notifyWaiters();
@@ -546,7 +577,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
 
   const syncDiscoveredJobs = async (force = false): Promise<void> => {
     const ts = nowTs();
-    if (!force && index.loaded && ts - manifestSyncAt < manifestSyncWindowMs) return;
+    if (!force && index.loaded && ts - manifestSyncAt < discoverySyncWindowMs) return;
     manifestSyncAt = ts;
     const ids = await discoverJobIds();
     if (!index.loaded && ids.length === 0) {

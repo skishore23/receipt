@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import { createStreamLocator, jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
 import { receipt } from "@receipt/core/chain";
 
@@ -87,39 +87,18 @@ test("smoke: reducer rejections do not append invalid receipts", async () => {
   }
 });
 
-test("smoke: stream discovery repairs a truncated manifest from existing jsonl files", async () => {
-  const dataDir = await createTempDir("receipt-smoke-manifest-repair");
+test("smoke: stream discovery reads known streams from SQLite metadata", async () => {
+  const dataDir = await createTempDir("receipt-smoke-stream-discovery");
 
   try {
     const store = jsonlStore<CounterEvent>(dataDir);
     await store.append(receipt("factory/objectives/objective_alpha", undefined, { type: "counter.inc", seq: 1 }), undefined);
     await store.append(receipt("agents/factory-chat/generalist/chats/chat_01/objectives/objective_alpha/runs/run_01", undefined, { type: "counter.inc", seq: 2 }), undefined);
+    const discovered = await store.listStreams?.();
 
-    const manifestPath = path.join(dataDir, "_streams.json");
-    const raw = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
-      readonly byStream?: Record<string, string>;
-      readonly byKey?: Record<string, string>;
-    };
-    const keptStream = "factory/objectives/objective_alpha";
-    const keptKey = raw.byStream?.[keptStream];
-    expect(keptKey).toBeTruthy();
-
-    await fs.writeFile(manifestPath, JSON.stringify({
-      version: 1,
-      byStream: keptKey ? { [keptStream]: keptKey } : {},
-      byKey: keptKey ? { [keptKey]: keptStream } : {},
-    }, null, 2), "utf-8");
-
-    const locator = createStreamLocator(dataDir);
-    const repaired = await locator.listStreams();
-
-    expect(repaired).toContain("factory/objectives/objective_alpha");
-    expect(repaired).toContain("agents/factory-chat/generalist/chats/chat_01/objectives/objective_alpha/runs/run_01");
-
-    const repairedManifest = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
-      readonly byStream?: Record<string, string>;
-    };
-    expect(Object.keys(repairedManifest.byStream ?? {})).toHaveLength(2);
+    expect(discovered).toContain("factory/objectives/objective_alpha");
+    expect(discovered).toContain("agents/factory-chat/generalist/chats/chat_01/objectives/objective_alpha/runs/run_01");
+    expect(discovered).toHaveLength(2);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }

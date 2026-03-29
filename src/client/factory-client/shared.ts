@@ -103,3 +103,16 @@ export const splitDelimited = (value: string | null): ReadonlyArray<string> =>
   value
     ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
     : [];
+
+export const dispatchBodyEvent = (eventName: string, detail?: unknown): void => {
+  if (!document.body || typeof window.CustomEvent !== "function") return;
+  document.body.dispatchEvent(new window.CustomEvent(eventName, {
+    bubbles: true,
+    detail,
+  }));
+};
+
+export const queueBodyEvent = (eventName: string, delayMs = 0, detail?: unknown): number =>
+  window.setTimeout(() => {
+    dispatchBodyEvent(eventName, detail);
+  }, Math.max(0, delayMs));

@@ -2,9 +2,7 @@
 // Delegation Tools - framework-level agent-to-agent delegation primitives
 // ============================================================================
 
-import path from "node:path";
-
-import { createStreamLocator } from "./jsonl";
+import { jsonlStore } from "./jsonl";
 import { assertReceiptFileName, buildReceiptContext, readReceiptFile } from "./receipt-tools";
 
 export type DelegationDeps = {
@@ -58,7 +56,12 @@ const hasPathSeparator = (value: string): boolean =>
   value.includes("/") || value.includes("\\");
 
 export const createDelegationTools = (deps: DelegationDeps): DelegationTools => {
-  const locator = createStreamLocator(deps.dataDir);
+  let store: ReturnType<typeof jsonlStore<Record<string, unknown>>> | undefined;
+  const getStore = (): ReturnType<typeof jsonlStore<Record<string, unknown>>> => {
+    if (store) return store;
+    store = jsonlStore<Record<string, unknown>>(deps.dataDir);
+    return store;
+  };
   return {
     "agent.delegate": async (input) => {
       const agentId = requireString(input, "agentId");
@@ -107,32 +110,39 @@ export const createDelegationTools = (deps: DelegationDeps): DelegationTools => 
     },
 
     "agent.inspect": async (input) => {
-      const file = requireString(input, "file");
+      const reference = requireString(input, "file");
       const maxChars = requireNumber(input, "maxChars", 4_000);
-      const existingStreamFile = await locator.fileForExisting(file);
-      let fileName = existingStreamFile ? path.basename(existingStreamFile) : undefined;
-
-      if (!fileName && hasPathSeparator(file)) {
-        throw new Error(`unknown receipt stream '${file}'. Use a known stream id or a bare .jsonl filename.`);
-      }
-
-      if (!fileName) {
-        if (!file.endsWith(".jsonl")) {
-          throw new Error(`receipt reference '${file}' must be a bare .jsonl filename or a known stream id.`);
+      if (reference.endsWith(".jsonl")) {
+        const fileName = assertReceiptFileName(reference);
+        const records = await readReceiptFile(deps.dataDir, fileName);
+        if (records.length === 0) {
+          return { output: "(empty chain)", summary: `${reference}: 0 records` };
         }
-        fileName = assertReceiptFileName(file);
+        const context = buildReceiptContext(records, maxChars);
+        const clipped = truncate(context, maxChars);
+        return {
+          output: clipped.text,
+          summary: `${reference}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
+        };
       }
 
-      const records = await readReceiptFile(deps.dataDir, fileName);
-      if (records.length === 0) {
-        return { output: "(empty chain)", summary: `${file}: 0 records` };
+      if (!hasPathSeparator(reference)) {
+        throw new Error(`receipt reference '${reference}' must be a stream id or a bare .jsonl filename.`);
       }
 
+      const chain = await getStore().read(reference);
+      if (chain.length === 0) {
+        return { output: "(empty chain)", summary: `${reference}: 0 records` };
+      }
+      const records = chain.map((receipt) => ({
+        raw: JSON.stringify(receipt),
+        data: receipt as unknown as Record<string, unknown>,
+      }));
       const context = buildReceiptContext(records, maxChars);
       const clipped = truncate(context, maxChars);
       return {
         output: clipped.text,
-        summary: `${file}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
+        summary: `${reference}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
       };
     },
   };

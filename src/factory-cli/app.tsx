@@ -45,8 +45,6 @@ import type {
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory";
 import { buildFactoryWorkbench } from "../views/factory-workbench";
 
-type FactoryAppMode = "board" | "objective";
-
 export type FactoryAppExit = {
   readonly code: number;
   readonly reason: "quit" | "completed" | "failed" | "canceled" | "blocked" | "manual" | "integration_conflicted";
@@ -55,7 +53,6 @@ export type FactoryAppExit = {
 
 type FactoryTerminalAppProps = {
   readonly runtime: FactoryCliRuntime;
-  readonly initialMode: FactoryAppMode;
   readonly initialObjectiveId?: string;
   readonly initialPanel?: FactoryObjectivePanel;
   readonly exitOnTerminal?: boolean;
@@ -76,8 +73,8 @@ const HOTKEYS = [
   ["j/k, ↑/↓", "select"],
   ["1-9,0", "panel"],
   ["tab", "focus"],
-  ["/", "command"],
-  ["enter", "send/open"],
+  ["/", "chat"],
+  ["enter", "focus/send"],
   ["r/p/c/x/a", "act"],
   ["o", "rail"],
   ["?", "help"],
@@ -266,12 +263,14 @@ const ObjectiveRail = ({
   </Box>
 );
 
-const TimelinePane = ({
+const WorkbenchPane = ({
   snapshot,
   railVisible,
+  focused,
 }: {
   readonly snapshot: MissionControlSnapshot;
   readonly railVisible: boolean;
+  readonly focused: boolean;
 }): React.ReactElement => {
   const model = buildMissionControlViewModel({
     compose: snapshot.compose,
@@ -280,27 +279,64 @@ const TimelinePane = ({
     live: snapshot.live,
     debug: snapshot.debug,
   });
+  const workbench = snapshot.detail
+    ? buildFactoryWorkbench({
+        detail: snapshot.detail,
+        recentJobs: snapshot.live?.recentJobs,
+      })
+    : undefined;
+  const readyTasks = snapshot.detail?.tasks.filter((task) => task.status === "ready").length ?? 0;
   return (
     <Surface
-      kicker="Objective Stream"
-      title={model.timeline.title}
-      subtitle={model.timeline.subtitle}
+      kicker="Workbench"
+      title={snapshot.detail ? snapshot.detail.title : "Factory workbench"}
+      subtitle={snapshot.detail?.nextAction ?? model.timeline.subtitle}
       flexGrow={1}
       marginRight={1}
       marginBottom={1}
+      borderColor={focused ? tone("selection") : tone("border")}
     >
-      {model.timeline.entries.length ? (
+      {snapshot.detail ? (
         <Box flexDirection="column">
-          {model.timeline.entries.map((entry) => (
-            <TimelineEntryView
-              key={entry.id}
-              title={entry.title}
-              summary={entry.summary}
-              meta={entry.meta}
-              emphasis={entry.emphasis}
-              body={entry.body}
-            />
-          ))}
+          <Box flexWrap="wrap" marginBottom={1}>
+            <Box marginRight={1} marginBottom={1}><StateBadge value={snapshot.detail.phase} /></Box>
+            <Box marginRight={1} marginBottom={1}><StateBadge value={snapshot.detail.scheduler.slotState} /></Box>
+            <Box marginRight={1} marginBottom={1}><StateBadge value={snapshot.detail.integration.status} /></Box>
+          </Box>
+          <Box flexWrap="wrap" marginBottom={1}>
+            <MetricCell label="Tasks" value={String(snapshot.detail.tasks.length)} />
+            <MetricCell label="Ready" value={String(readyTasks)} />
+            <MetricCell label="Active Jobs" value={String(workbench?.summary.activeJobCount ?? 0)} />
+            <MetricCell label="Checks" value={String(snapshot.detail.checks.length)} />
+          </Box>
+          <Text color={tone("muted")}>
+            {snapshot.detail.objectiveId} · {labelize(snapshot.detail.objectiveMode)} · severity {snapshot.detail.severity}
+          </Text>
+          {workbench ? <ExecutionWorkbenchRail detail={snapshot.detail} live={snapshot.live ?? { activeTasks: [], recentJobs: [] }} /> : null}
+          <Box marginTop={1} flexDirection="column">
+            <Text bold color={tone("text")}>Recent Stream</Text>
+            {model.timeline.entries.length ? (
+              <Box marginTop={1} flexDirection="column">
+                {model.timeline.entries.map((entry) => (
+                  <TimelineEntryView
+                    key={entry.id}
+                    title={entry.title}
+                    summary={entry.summary}
+                    meta={entry.meta}
+                    emphasis={entry.emphasis}
+                    body={entry.body}
+                  />
+                ))}
+              </Box>
+            ) : (
+              <Box marginTop={1}>
+                <EmptyState
+                  title={model.timeline.emptyTitle}
+                  message={model.timeline.emptyMessage}
+                />
+              </Box>
+            )}
+          </Box>
         </Box>
       ) : (
         <EmptyState
@@ -630,9 +666,9 @@ const RightRail = ({
   readonly compact: boolean;
 }): React.ReactElement => (
   <Surface
-    kicker="Control Rail"
-    title={detail ? detail.title : "Objective status"}
-    subtitle={detail ? `${detail.objectiveId} · ${labelize(detail.phase)}` : "Select an objective to inspect state and controls."}
+    kicker="Inspector"
+    title={detail ? `${PANEL_LABELS[panel]} panel` : "Objective inspector"}
+    subtitle={detail ? `${detail.objectiveId} · ${labelize(detail.phase)}` : "Select an objective to inspect receipts, evidence, and controls."}
     width={compact ? 40 : 46}
     marginBottom={1}
   >
@@ -660,7 +696,6 @@ const RightRail = ({
           <MetricCell label="Mode" value={labelize(detail.objectiveMode)} />
           <MetricCell label="Severity" value={String(detail.severity)} />
         </Box>
-        <ExecutionWorkbenchRail detail={detail} live={live} />
         <Box marginTop={1} flexDirection="column">
           <Text bold color={tone("text")}>Panel</Text>
           <PanelTabs panel={panel} />
@@ -693,7 +728,7 @@ const ComposerBox = ({
     : [placeholder];
   return (
     <Surface
-      kicker="Composer"
+      kicker="Chat"
       title={title}
       subtitle={subtitle}
       borderColor={focused ? tone("selection") : tone("border")}
@@ -756,7 +791,7 @@ const HelpOverlay = (): React.ReactElement => (
   </Surface>
 );
 
-const MissionControlScreen = ({
+const FactoryWorkbenchScreen = ({
   snapshot,
   selectedObjectiveId,
   panel,
@@ -796,9 +831,9 @@ const MissionControlScreen = ({
     <FactoryThemeProvider>
       <Box flexDirection="column">
         <Surface
-          kicker="Mission Control"
-          title="Factory"
-          subtitle="Receipt-native software automation with a live objective timeline, control rail, and operator composer."
+          kicker="Workbench"
+          title="Factory CLI"
+          subtitle="One consolidated terminal surface for objective selection, execution state, inspection, and chat."
           marginBottom={1}
           right={<StateBadge value={snapshot.detail?.integration.status ?? "planning"} />}
         >
@@ -816,9 +851,9 @@ const MissionControlScreen = ({
         <Box flexDirection={stacked ? "column" : "row"}>
           {railVisible ? (
             <Surface
-              kicker="Objective Rail"
-              title="Queue and attention"
-              subtitle="Grouped by operational state."
+              kicker="Objectives"
+              title="Queue"
+              subtitle="Receipt-backed objectives grouped by operational state."
               width={stacked ? undefined : compact ? 34 : 40}
               marginRight={stacked ? 0 : 1}
               marginBottom={1}
@@ -829,7 +864,11 @@ const MissionControlScreen = ({
           ) : null}
           <Box flexGrow={1} flexDirection={stacked ? "column" : "row"}>
             <Box flexGrow={1} flexDirection="column">
-              <TimelinePane snapshot={snapshot} railVisible={railVisible} />
+              <WorkbenchPane
+                snapshot={snapshot}
+                railVisible={railVisible}
+                focused={focusArea === "timeline"}
+              />
               {showComposer ? (
                 <ComposerBox
                   draft={draft}
@@ -864,7 +903,7 @@ export const FactoryBoardScreen = ({
   readonly snapshot: MissionControlSnapshot;
   readonly message?: string;
 }): React.ReactElement => (
-  <MissionControlScreen
+  <FactoryWorkbenchScreen
     snapshot={snapshot}
     selectedObjectiveId={snapshot.board.selectedObjectiveId}
     panel="overview"
@@ -888,7 +927,7 @@ export const FactoryObjectiveScreen = ({
   readonly panel?: FactoryObjectivePanel;
   readonly message?: string;
 }): React.ReactElement => (
-  <MissionControlScreen
+  <FactoryWorkbenchScreen
     snapshot={snapshot}
     selectedObjectiveId={snapshot.detail?.objectiveId ?? snapshot.board.selectedObjectiveId}
     panel={panel}
@@ -924,7 +963,6 @@ const nextPanel = (panel: FactoryObjectivePanel, delta: number): FactoryObjectiv
 
 export const FactoryTerminalApp = ({
   runtime,
-  initialMode,
   initialObjectiveId,
   initialPanel = "overview",
   exitOnTerminal = false,
@@ -933,12 +971,12 @@ export const FactoryTerminalApp = ({
   const { exit } = useApp();
   const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | undefined>(initialObjectiveId);
   const [panel, setPanel] = useState<FactoryObjectivePanel>(initialPanel);
-  const [focusArea, setFocusArea] = useState<MissionControlFocusArea>(initialMode === "objective" ? "composer" : "rail");
+  const [focusArea, setFocusArea] = useState<MissionControlFocusArea>(initialObjectiveId ? "composer" : "rail");
   const [draft, setDraft] = useState("");
   const [showHelp, setShowHelp] = useState(false);
   const [showRail, setShowRail] = useState((process.stdout.columns ?? 120) >= 110);
   const [snapshot, setSnapshot] = useState<MissionControlSnapshot>();
-  const [message, setMessage] = useState<string>("Loading Factory mission control...");
+  const [message, setMessage] = useState<string>("Loading Factory workbench...");
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState<string | undefined>();
   const [terminalWidth, setTerminalWidth] = useState<number>(process.stdout.columns ?? 120);
@@ -1098,7 +1136,7 @@ export const FactoryTerminalApp = ({
     if (command.type === "help") {
       setShowHelp(true);
       setDraft("");
-      setMessage("Showing command help.");
+      setMessage("Showing chat command help.");
       return;
     }
     if (command.type === "watch") {
@@ -1351,7 +1389,7 @@ export const FactoryTerminalApp = ({
   }, [snapshot, runtime.config.defaultChecks]);
 
   return (
-    <MissionControlScreen
+    <FactoryWorkbenchScreen
       snapshot={renderedSnapshot}
       selectedObjectiveId={selectedObjectiveId}
       panel={panel}

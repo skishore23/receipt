@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
@@ -81,6 +82,12 @@ export const FACTORY_CHAT_DEFAULT_CONFIG: FactoryChatRunConfig = {
 
 const FACTORY_CHAT_ITERATION_LADDER = [8, 12, 16, 24, 32, 40] as const;
 
+const FACTORY_CHAT_META_REFLECTION_RE =
+  /\b(?:do you think you did|did you do (?:good|well)|grade your performance|how did you do|self[- ]reflection|self[- ]reflect|reflect on (?:your|that)|what is off here|what feels off|why (?:is|was) (?:this|that|it) (?:off|robotic|unnatural|procedural)|missing soul|sound(?:ing)? (?:more )?(?:human|natural)|too (?:robotic|procedural)|answered? (?:like|as) (?:a )?(?:human|person)|why did that sound)\b/i;
+
+const FACTORY_CHAT_WORKLIKE_SIGNAL_RE =
+  /\b(?:fix|implement|change|update|edit|refactor|debug|investigate|inspect|analyze|review|check|build|test|file|code|repo|branch|commit|diff|task|objective|thread|deploy|aws|ec2|s3|lambda|bug|error|failure|ci|pr|inventory|bucket|buckets|running jobs|cost spike)\b/i;
+
 export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "llmStructured"> & {
   readonly config: FactoryChatRunConfig;
   readonly queue: JsonlQueue;
@@ -100,6 +107,30 @@ export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "ll
   readonly continuationDepth?: number;
 };
 
+export const classifyFactoryResponseStyle = (problem: string): "conversational" | "work" => {
+  const compact = problem.replace(/\s+/g, " ").trim();
+  if (!compact) return "work";
+  if (FACTORY_CHAT_META_REFLECTION_RE.test(compact)) return "conversational";
+  if (compact.length <= 140 && !FACTORY_CHAT_WORKLIKE_SIGNAL_RE.test(compact)) return "conversational";
+  return "work";
+};
+
+export const renderFactoryResponseStyleGuidance = (problem: string): string => {
+  if (classifyFactoryResponseStyle(problem) === "conversational") {
+    return [
+      "- This turn is conversational or meta. Answer like a human engineer talking to another person.",
+      "- Prefer short natural prose. Use first person for self-reflection.",
+      "- Do not use headings, scorecards, grades, verdict labels, or rubric language unless the user explicitly asked for that format.",
+      "- Do not turn the reply into operator-handoff analysis, workflow briefing, or report scaffolding.",
+    ].join("\n");
+  }
+  return [
+    "- This turn is work-focused. Use structure only when it genuinely helps the operator.",
+    "- Keep the answer direct and specific; do not default to a report template if a short paragraph would do.",
+    "- Mention workflow mechanics only when they materially affect the next step or the freshness of the answer.",
+  ].join("\n");
+};
+
 const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Goal:",
   "{{problem}}",
@@ -116,6 +147,9 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Memory summary:",
   "{{memory}}",
   "",
+  "Response style:",
+  "{{response_style}}",
+  "",
   "Available tools (one per step):",
   "{{available_tools}}",
   "",
@@ -124,7 +158,10 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "",
   "Orchestration rules:",
   "- Profiles are orchestration-only. Do not claim this chat edited code directly.",
+  "- Treat chat sessions as transport only. A new chatId does not reset repo, profile, objective, or worker memory.",
+  "- When the selected objective is blocked, first explain the handoff in plain language: what the objective established, what is still missing, and whether the next step belongs in Chat or in tracked objective work.",
   "- Use `codex.run` only for lightweight read-only inspection or evidence-gathering in the current repo.",
+  "- If a Codex probe is already queued or running for this chat context, reuse it instead of spawning another one.",
   "- Use `factory.dispatch` for any code-changing delivery work, any substantive infrastructure investigation, or when the next step should run in an objective worktree.",
   "- If a completed objective already contains the answer in `factory.status`, `factory.receipts`, or `factory.output`, answer directly only when the answer is historical, meta, or clearly not freshness-sensitive.",
   "- If the answer depends on current cloud/account/runtime state and checked-in helpers are available in the current situation or `factory.status`, rerun the best matching helper first via `codex.run` or `factory.dispatch` instead of finalizing from saved results alone.",
@@ -142,14 +179,13 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "For final answers to the user:",
   "- write plain language, not raw JSON",
   "- keep it concise and operator-facing",
-  "- prefer the words Skill, Chat, and Work",
   "- mention objective, run, and job only when needed for debugging or inspection",
-  "- follow the active profile's reporting voice and answer shape when it defines one",
-  "- format `action.text` as clean markdown when structure helps: use explicit `##` headings, a short lead paragraph, one bullet or numbered item per line, and markdown tables for repeated rows with shared columns",
-  "- if the active profile does not define a specific investigation answer shape, use a short conversational lead followed by sections named Conclusion, Evidence, Disagreements, Scripts Run, Artifacts, and Next Steps",
+  "- follow the active profile's voice, but do not let older transcript or memory phrasing override it",
+  "- for conversational or meta turns, prefer short natural prose instead of sections",
+  "- use structure only when the task benefits from it; choose headings that fit the situation instead of reusing canned labels",
+  "- do not emit headings like Conclusion, Evidence, Disagreements, Scripts Run, Artifacts, What you did well, or Next Steps unless they add real signal for this specific answer or the user explicitly asked for that structure",
   "- never compress lists into a single paragraph such as `1) a 2) b 3) c`",
   "- prefer bold lead-ins such as `**Smallest unblock:**` before a short list instead of plain label lines ending with `:`",
-  "- do not emit empty sections just to satisfy a template",
   "- if code changes are needed, route them through Factory objective work instead of claiming this chat changed code directly",
   "",
   "Respond with JSON only, no markdown. Always include every field in the action object:",
@@ -216,6 +252,13 @@ const objectiveMemoryScope = (repoKey: string, profileId: string, objectiveId: s
   `${profileMemoryScope(repoKey, profileId)}/objectives/${objectiveId}`;
 const workerMemoryScope = (repoKey: string, worker: string): string => `repos/${repoKey}/subagents/${worker}`;
 
+type FactoryChatMemorySection = {
+  readonly label: string;
+  readonly scope: string;
+  readonly maxChars: number;
+  readonly summary?: string;
+};
+
 const toolSummary = (worker: string, status: string, summary: string): string =>
   `${worker} ${status}: ${summary}`;
 
@@ -233,9 +276,129 @@ const commitWorkerSummary = async (
   });
 };
 
+const summarizeMemoryScope = async (
+  memoryTools: MemoryTools,
+  input: {
+    readonly scope: string;
+    readonly query: string;
+    readonly maxChars: number;
+    readonly audit: Readonly<Record<string, unknown>>;
+  },
+): Promise<string | undefined> => {
+  try {
+    const { summary } = await memoryTools.summarize({
+      scope: input.scope,
+      query: input.query,
+      limit: 6,
+      maxChars: input.maxChars,
+      audit: input.audit,
+    });
+    const trimmed = summary.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const renderLayeredMemorySummary = async (input: {
+  readonly memoryTools: MemoryTools;
+  readonly repoKey: string;
+  readonly profileId: string;
+  readonly objectiveId?: string;
+  readonly primaryScope: string;
+  readonly primarySummary: string;
+  readonly query: string;
+  readonly runId: string;
+  readonly iteration: number;
+}): Promise<string> => {
+  const repoScope = repoMemoryScope(input.repoKey);
+  const profileScope = profileMemoryScope(input.repoKey, input.profileId);
+  const currentObjectiveScope = input.objectiveId
+    ? objectiveMemoryScope(input.repoKey, input.profileId, input.objectiveId)
+    : undefined;
+  const factoryObjectiveScope = input.objectiveId
+    ? `factory/objectives/${input.objectiveId}`
+    : undefined;
+  const integrationScope = input.objectiveId
+    ? `factory/objectives/${input.objectiveId}/integration`
+    : undefined;
+  const sections: FactoryChatMemorySection[] = [
+    {
+      label: "Repo memory",
+      scope: repoScope,
+      maxChars: 220,
+      summary: input.primaryScope === repoScope ? input.primarySummary : undefined,
+    },
+    {
+      label: "Profile memory",
+      scope: profileScope,
+      maxChars: 240,
+      summary: input.primaryScope === profileScope ? input.primarySummary : undefined,
+    },
+    ...(currentObjectiveScope ? [{
+      label: "Objective memory",
+      scope: currentObjectiveScope,
+      maxChars: 280,
+      summary: input.primaryScope === currentObjectiveScope ? input.primarySummary : undefined,
+    }] : []),
+    {
+      label: "Factory shared memory",
+      scope: "factory/repo/shared",
+      maxChars: 220,
+    },
+    ...(factoryObjectiveScope ? [{
+      label: "Factory objective memory",
+      scope: factoryObjectiveScope,
+      maxChars: 260,
+    }] : []),
+    ...(integrationScope ? [{
+      label: "Integration memory",
+      scope: integrationScope,
+      maxChars: 220,
+    }] : []),
+    {
+      label: "Factory worker memory",
+      scope: workerMemoryScope(input.repoKey, "factory"),
+      maxChars: 180,
+    },
+    {
+      label: "Codex worker memory",
+      scope: workerMemoryScope(input.repoKey, "codex"),
+      maxChars: 180,
+    },
+  ];
+
+  const seenScopes = new Set<string>();
+  const rendered: string[] = [];
+  const seenSummaries = new Set<string>();
+  for (const section of sections) {
+    if (seenScopes.has(section.scope)) continue;
+    seenScopes.add(section.scope);
+    const summary = (section.summary ?? await summarizeMemoryScope(input.memoryTools, {
+      scope: section.scope,
+      query: input.query,
+      maxChars: section.maxChars,
+      audit: {
+        actor: "factory-chat",
+        operation: "layered-memory",
+        runId: input.runId,
+        iteration: input.iteration,
+        label: section.label,
+      },
+    }))?.trim();
+    if (!summary) continue;
+    const dedupeKey = summary.toLowerCase();
+    if (seenSummaries.has(dedupeKey)) continue;
+    seenSummaries.add(dedupeKey);
+    rendered.push(`${section.label}:\n${summary}`);
+  }
+  return rendered.join("\n\n") || "(empty)";
+};
+
 type GitChangedFileEntry = {
   readonly path: string;
   readonly status: string;
+  readonly previousPath?: string;
 };
 
 type GitChangedFileSnapshotEntry = {
@@ -258,12 +421,115 @@ const gitStatusEntries = async (repoRoot: string): Promise<ReadonlyArray<GitChan
       const status = token.slice(0, 2);
       const filePath = token.slice(3);
       if (!status || !filePath) continue;
-      entries.push({ path: filePath, status });
-      if (status.includes("R") || status.includes("C")) index += 1;
+      const previousPath = status.includes("R") || status.includes("C")
+        ? tokens[index + 1] || undefined
+        : undefined;
+      entries.push(previousPath ? { path: filePath, status, previousPath } : { path: filePath, status });
+      if (previousPath) index += 1;
     }
     return entries;
   } catch {
     return [];
+  }
+};
+
+const pathExists = async (targetPath: string): Promise<boolean> => {
+  try {
+    await fs.lstat(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const copyPathPreservingType = async (sourcePath: string, targetPath: string): Promise<void> => {
+  const stat = await fs.lstat(sourcePath);
+  await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  if (stat.isSymbolicLink()) {
+    const linkTarget = await fs.readlink(sourcePath);
+    await fs.symlink(linkTarget, targetPath);
+    return;
+  }
+  if (stat.isDirectory()) {
+    await fs.cp(sourcePath, targetPath, { recursive: true, dereference: false });
+    return;
+  }
+  await fs.copyFile(sourcePath, targetPath);
+};
+
+const ensureProbeWorkspaceNodeModulesLink = async (sourceRoot: string, workspacePath: string): Promise<void> => {
+  const sourceNodeModulesPath = path.join(sourceRoot, "node_modules");
+  const workspaceNodeModulesPath = path.join(workspacePath, "node_modules");
+  if (!(await pathExists(sourceNodeModulesPath)) || await pathExists(workspaceNodeModulesPath)) return;
+  await fs.symlink(
+    sourceNodeModulesPath,
+    workspaceNodeModulesPath,
+    process.platform === "win32" ? "junction" : "dir",
+  ).catch(() => undefined);
+};
+
+const mirrorDirtyGitStateToWorkspace = async (sourceRoot: string, workspacePath: string): Promise<void> => {
+  const entries = await gitStatusEntries(sourceRoot);
+  for (const entry of entries) {
+    if (entry.previousPath && entry.previousPath !== entry.path) {
+      await fs.rm(path.join(workspacePath, entry.previousPath), { recursive: true, force: true }).catch(() => undefined);
+    }
+    const sourcePath = path.join(sourceRoot, entry.path);
+    const targetPath = path.join(workspacePath, entry.path);
+    const sourceExists = await pathExists(sourcePath);
+    if (!sourceExists || entry.status.includes("D")) {
+      await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+      continue;
+    }
+    await copyPathPreservingType(sourcePath, targetPath);
+  }
+};
+
+type DisposableProbeWorkspace = {
+  readonly workspacePath: string;
+  readonly cleanup: () => Promise<void>;
+};
+
+const createDisposableProbeWorkspace = async (
+  repoRoot: string,
+  jobId: string,
+): Promise<DisposableProbeWorkspace> => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), `receipt-direct-probe-${jobId}-`));
+  const workspacePath = path.join(tempRoot, "workspace");
+  try {
+    await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      maxBuffer: 1024 * 1024,
+    });
+    await execFileAsync("git", ["worktree", "add", "--detach", workspacePath, "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    await ensureProbeWorkspaceNodeModulesLink(repoRoot, workspacePath);
+    await mirrorDirtyGitStateToWorkspace(repoRoot, workspacePath);
+    return {
+      workspacePath,
+      cleanup: async () => {
+        await execFileAsync("git", ["worktree", "remove", "--force", workspacePath], {
+          cwd: repoRoot,
+          encoding: "utf-8",
+          maxBuffer: 4 * 1024 * 1024,
+        }).catch(() => undefined);
+        await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+      },
+    };
+  } catch {
+    await fs.rm(workspacePath, { recursive: true, force: true }).catch(() => undefined);
+    await fs.cp(repoRoot, workspacePath, { recursive: true, dereference: false });
+    return {
+      workspacePath,
+      cleanup: async () => {
+        await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+      },
+    };
   }
 };
 
@@ -373,6 +639,17 @@ const jobMatchesProfileContext = (
     || profileId === input.profileId
     || (Boolean(input.objectiveId) && objectiveId === input.objectiveId);
 };
+
+const latestActiveCodexJob = async (queue: JsonlQueue, input: {
+  readonly runId: string;
+  readonly stream: string;
+  readonly profileId: string;
+  readonly objectiveId?: string;
+}): Promise<QueueJob | undefined> =>
+  (await queue.listJobs({ limit: 200 }))
+    .filter((job) => job.agentId === "codex" && isActiveJobStatus(job.status))
+    .filter((job) => jobMatchesProfileContext(job, input))
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
 
 const codexJobPriority = (
   job: QueueJob,
@@ -526,10 +803,31 @@ const createCodexRunTool = (input: {
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly memoryTools: MemoryTools;
   readonly profile: FactoryChatResolvedProfile;
+  readonly dataDir?: string;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const prompt = asString(toolInput.prompt) ?? asString(toolInput.task);
     if (!prompt) throw new Error("codex.run requires prompt");
+    const objectiveId = input.getCurrentObjectiveId();
+    const existing = await latestActiveCodexJob(input.queue, {
+      runId: input.runId,
+      stream: input.stream,
+      profileId: input.profile.root.id,
+      objectiveId,
+    });
+    if (existing) {
+      const result: Record<string, unknown> = {
+        ...(await codexJobSnapshot(existing, input.dataDir)),
+        worker: "codex",
+        mode: "read_only_probe",
+        readOnly: true,
+        summary: `reusing active codex probe ${existing.id}`,
+      };
+      return {
+        output: JSON.stringify(result, null, 2),
+        summary: String(result.summary),
+      };
+    }
     const timeoutMs = typeof toolInput.timeoutMs === "number" && Number.isFinite(toolInput.timeoutMs)
       ? Math.max(30_000, Math.min(Math.floor(toolInput.timeoutMs), 900_000))
       : 180_000;
@@ -547,7 +845,7 @@ const createCodexRunTool = (input: {
         parentStream: input.stream,
         stream: input.stream,
         profileId: input.profile.root.id,
-        ...(input.getCurrentObjectiveId() ? { objectiveId: input.getCurrentObjectiveId() } : {}),
+        ...(objectiveId ? { objectiveId } : {}),
         mode: "read_only_probe",
         readOnly: true,
         task: prompt,
@@ -1183,6 +1481,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     getCurrentObjectiveId,
     memoryTools: input.memoryTools,
     profile: resolvedProfile,
+    dataDir,
   });
   const factoryDispatchTool = createFactoryDispatchTool({
     factoryService,
@@ -1329,7 +1628,19 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         resolvedProfileHash: resolvedProfile.resolvedHash,
         stream: resolvedStream,
       },
-      promptContextBuilder: async () => ({
+      promptContextBuilder: async (promptInput) => ({
+        memory: await renderLayeredMemorySummary({
+          memoryTools: input.memoryTools,
+          repoKey,
+          profileId: resolvedProfile.root.id,
+          objectiveId: getCurrentObjectiveId(),
+          primaryScope: resolvedMemoryScope,
+          primarySummary: promptInput.memorySummary,
+          query: promptInput.problem,
+          runId: input.runId,
+          iteration: promptInput.iteration,
+        }),
+        response_style: renderFactoryResponseStyleGuidance(promptInput.problem),
         situation: await buildFactorySituation({
           queue: input.queue,
           runId: input.runId,
@@ -1370,9 +1681,19 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
 };
 
 const DIRECT_CODEX_MUTATION_MESSAGE = "Direct Codex probes are read-only. This work needs code changes; create or react a Factory objective instead.";
+const SANDBOX_BOOTSTRAP_COMPATIBILITY_RE = /\bbwrap:\s*Unknown option --argv0\b/i;
 
 const looksLikeReadOnlyMutationFailure = (message: string): boolean =>
   /\bread[- ]only\b|\bpermission denied\b|\bcannot write\b|\bwrite access\b|\bsandbox\b/i.test(message);
+
+const isSandboxBootstrapCompatibilityError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(message)) return true;
+  if (!error || typeof error !== "object" || !("result" in error)) return false;
+  const result = (error as { readonly result?: { readonly stderr?: string; readonly stdout?: string } }).result;
+  return SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stderr ?? "")
+    || SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stdout ?? "");
+};
 
 export const runFactoryCodexJob = async (input: {
   readonly dataDir: string;
@@ -1448,30 +1769,57 @@ export const runFactoryCodexJob = async (input: {
     await fs.writeFile(artifacts.resultPath, JSON.stringify(result, null, 2), "utf-8");
   };
 
-  const initialChangedFileSnapshot = readOnly
-    ? await gitChangedFileSnapshot(input.repoRoot)
+  let workspacePath = input.repoRoot;
+  let workspaceCleanup: (() => Promise<void>) | undefined;
+  let sandboxMode = readOnly ? "read-only" : "workspace-write";
+  let mutationPolicy = readOnly ? "read_only_probe" : "workspace_edit";
+  let disableSandboxModeInference = false;
+  let sandboxCompatibilityFallbackUsed = false;
+  let initialChangedFileSnapshot = readOnly
+    ? await gitChangedFileSnapshot(workspacePath)
     : undefined;
 
+  const runExecutor = () => input.executor.run({
+    prompt: renderedPrompt,
+    workspacePath,
+    promptPath: artifacts.promptPath,
+    lastMessagePath: artifacts.lastMessagePath,
+    stdoutPath: artifacts.stdoutPath,
+    stderrPath: artifacts.stderrPath,
+    timeoutMs: input.timeoutMs,
+    env,
+    sandboxMode,
+    mutationPolicy,
+    disableSandboxModeInference,
+  }, control);
+
   try {
-    const result = await input.executor.run({
-      prompt: renderedPrompt,
-      workspacePath: input.repoRoot,
-      promptPath: artifacts.promptPath,
-      lastMessagePath: artifacts.lastMessagePath,
-      stdoutPath: artifacts.stdoutPath,
-      stderrPath: artifacts.stderrPath,
-      timeoutMs: input.timeoutMs,
-      env,
-      sandboxMode: readOnly ? "read-only" : "workspace-write",
-      mutationPolicy: readOnly ? "read_only_probe" : "workspace_edit",
-    }, control);
+    let result;
+    try {
+      result = await runExecutor();
+    } catch (err) {
+      if (!readOnly || !isSandboxBootstrapCompatibilityError(err)) throw err;
+      const fallbackWorkspace = await createDisposableProbeWorkspace(input.repoRoot, input.jobId);
+      workspacePath = fallbackWorkspace.workspacePath;
+      workspaceCleanup = fallbackWorkspace.cleanup;
+      sandboxMode = undefined;
+      disableSandboxModeInference = true;
+      sandboxCompatibilityFallbackUsed = true;
+      initialChangedFileSnapshot = await gitChangedFileSnapshot(workspacePath);
+      await fs.appendFile(
+        artifacts.stderrPath,
+        "[factory] sandbox compatibility fallback: host sandbox startup failed; retrying read-only probe in a disposable workspace without Codex sandboxing.\n",
+        "utf-8",
+      ).catch(() => undefined);
+      result = await runExecutor();
+    }
     progressStopped = true;
     await progressLoop;
     await emitProgress();
 
     const [repoChangedFiles, finalChangedFileSnapshot] = await Promise.all([
       gitChangedFiles(input.repoRoot),
-      readOnly ? gitChangedFileSnapshot(input.repoRoot) : Promise.resolve(undefined),
+      readOnly ? gitChangedFileSnapshot(workspacePath) : Promise.resolve(undefined),
     ]);
     const changedFiles = readOnly && initialChangedFileSnapshot && finalChangedFileSnapshot
       ? diffGitChangedFileSnapshots(initialChangedFileSnapshot, finalChangedFileSnapshot)
@@ -1489,6 +1837,7 @@ export const runFactoryCodexJob = async (input: {
         ...(typeof result.tokensUsed === "number" ? { tokensUsed: result.tokensUsed } : {}),
         changedFiles,
         ...(readOnly ? { repoChangedFiles } : {}),
+        ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
         artifacts,
       };
       await writeResult(failed);
@@ -1507,6 +1856,7 @@ export const runFactoryCodexJob = async (input: {
       ...(typeof result.tokensUsed === "number" ? { tokensUsed: result.tokensUsed } : {}),
       changedFiles,
       ...(readOnly ? { repoChangedFiles } : {}),
+      ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
     };
     await writeResult(completed);
@@ -1521,7 +1871,7 @@ export const runFactoryCodexJob = async (input: {
       readTextTail(artifacts.stdoutPath, 900),
       readTextTail(artifacts.stderrPath, 600),
       gitChangedFiles(input.repoRoot),
-      readOnly ? gitChangedFileSnapshot(input.repoRoot) : Promise.resolve(undefined),
+      readOnly ? gitChangedFileSnapshot(workspacePath) : Promise.resolve(undefined),
     ]);
     const changedFiles = readOnly && initialChangedFileSnapshot && finalChangedFileSnapshot
       ? diffGitChangedFileSnapshots(initialChangedFileSnapshot, finalChangedFileSnapshot)
@@ -1541,8 +1891,13 @@ export const runFactoryCodexJob = async (input: {
       stderrTail,
       changedFiles,
       ...(readOnly ? { repoChangedFiles } : {}),
+      ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
     });
     throw new Error(message);
+  } finally {
+    if (workspaceCleanup) {
+      await workspaceCleanup().catch(() => undefined);
+    }
   }
 };

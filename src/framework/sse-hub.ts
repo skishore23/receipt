@@ -1,4 +1,10 @@
-export type Topic = "agent" | "receipt" | "jobs" | "factory";
+export type Topic =
+  | "agent"
+  | "receipt"
+  | "jobs"
+  | "factory"
+  | "profile-board"
+  | "objective-runtime";
 export type SseSubscription = {
   readonly topic: Topic;
   readonly stream?: string;
@@ -14,6 +20,8 @@ const topicEvent: Record<Topic, string> = {
   receipt: "receipt-refresh",
   jobs: "job-refresh",
   factory: "factory-refresh",
+  "profile-board": "profile-board-refresh",
+  "objective-runtime": "objective-runtime-refresh",
 };
 
 const globalTopicKey = (topic: Topic): string | undefined => (
@@ -23,7 +31,11 @@ const globalTopicKey = (topic: Topic): string | undefined => (
       ? "jobs:*"
       : topic === "factory"
         ? "factory:*"
-      : undefined
+        : topic === "profile-board"
+          ? "profile-board:*"
+          : topic === "objective-runtime"
+            ? "objective-runtime:*"
+        : undefined
 );
 
 const topicKey = (topic: Topic, stream?: string): string =>

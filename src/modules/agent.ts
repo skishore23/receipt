@@ -158,6 +158,19 @@ export type AgentEvent =
       readonly created?: boolean;
     }
   | {
+      readonly type: "objective.handoff";
+      readonly runId: string;
+      readonly agentId?: string;
+      readonly objectiveId: string;
+      readonly title: string;
+      readonly status: "blocked" | "completed" | "failed" | "canceled";
+      readonly summary: string;
+      readonly blocker?: string;
+      readonly nextAction?: string;
+      readonly handoffKey: string;
+      readonly sourceUpdatedAt: number;
+    }
+  | {
       readonly type: "context.pruned";
       readonly runId: string;
       readonly iteration: number;
@@ -446,6 +459,7 @@ export const reduce: Reducer<AgentState, AgentEvent> = (state, event, ts) => {
     case "memory.slice":
     case "validation.report":
     case "thread.bound":
+    case "objective.handoff":
     case "context.pruned":
     case "context.compacted":
     case "overflow.recovered":

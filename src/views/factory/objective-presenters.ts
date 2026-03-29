@@ -57,6 +57,8 @@ export const toFactorySelectedObjectiveCard = (
   selectedObjective: FactoryObjectiveCard | FactoryObjectiveDetail,
 ): FactorySelectedObjectiveCard => ({
   objectiveId: selectedObjective.objectiveId,
+  profileId: selectedObjective.profile.rootProfileId,
+  profileLabel: selectedObjective.profile.rootProfileLabel,
   title: selectedObjective.title,
   status: selectedObjective.status,
   phase: selectedObjective.phase,
@@ -87,6 +89,8 @@ export const toFactoryStateSelectedObjectiveCard = (
   const projection = buildFactoryProjection(state);
   return {
     objectiveId: state.objectiveId,
+    profileId: state.profile.rootProfileId,
+    profileLabel: state.profile.rootProfileLabel,
     title: state.title,
     status: state.status,
     phase: state.status,

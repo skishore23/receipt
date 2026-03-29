@@ -3,21 +3,50 @@ export type FactoryProfileSectionView = {
   readonly items: ReadonlyArray<string>;
 };
 
+type FactoryProfileOverviewInput = {
+  readonly mdBody: string;
+  readonly soulBody?: string;
+  readonly roles?: ReadonlyArray<string>;
+  readonly responsibilities?: ReadonlyArray<string>;
+};
+
+type FactoryProfileOverview = {
+  readonly summary?: string;
+  readonly sections: ReadonlyArray<FactoryProfileSectionView>;
+  readonly primaryRole?: string;
+  readonly roles: ReadonlyArray<string>;
+  readonly responsibilities: ReadonlyArray<string>;
+};
+
 const clipProfileText = (value: string, max = 180): string =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
-export const describeProfileMarkdown = (value: string): {
-  readonly summary?: string;
-  readonly sections: ReadonlyArray<FactoryProfileSectionView>;
-} => {
-  const withoutFrontmatter = value.replace(/^---[\s\S]*?---\s*/, "");
+const normalizedList = (items: ReadonlyArray<string> | undefined): ReadonlyArray<string> =>
+  (items ?? []).map((item) => item.trim()).filter(Boolean);
+
+const firstMarkdownParagraph = (value: string | undefined): string | undefined => {
+  if (!value) return undefined;
+  const lines = value.replace(/^---[\s\S]*?---\s*/, "").split(/\r?\n/).map((line) => line.trim());
+  for (const line of lines) {
+    if (!line || line.startsWith("#") || line.startsWith("-") || line.startsWith("```")) continue;
+    return clipProfileText(line);
+  }
+  return undefined;
+};
+
+export const describeProfileMarkdown = (value: string | FactoryProfileOverviewInput): FactoryProfileOverview => {
+  const mdBody = typeof value === "string" ? value : value.mdBody;
+  const soulBody = typeof value === "string" ? undefined : value.soulBody;
+  const roles = typeof value === "string" ? [] : normalizedList(value.roles);
+  const responsibilities = typeof value === "string" ? [] : normalizedList(value.responsibilities);
+  const withoutFrontmatter = mdBody.replace(/^---[\s\S]*?---\s*/, "");
   const lines = withoutFrontmatter.split(/\r?\n/).map((line) => line.trim());
   let summary: string | undefined;
-  const sections: FactoryProfileSectionView[] = [];
+  const markdownSections: FactoryProfileSectionView[] = [];
   let currentSection: { title: string; items: string[] } | undefined;
   const flushSection = (): void => {
     if (!currentSection || currentSection.items.length === 0) return;
-    sections.push({
+    markdownSections.push({
       title: currentSection.title,
       items: currentSection.items.slice(0, 4),
     });
@@ -41,8 +70,22 @@ export const describeProfileMarkdown = (value: string): {
     }
   }
   flushSection();
+  const soulSummary = firstMarkdownParagraph(soulBody);
+  const sections: FactoryProfileSectionView[] = [
+    ...(roles.length > 0 ? [{ title: "Roles", items: roles.slice(0, 4) }] : []),
+    ...(responsibilities.length > 0 ? [{ title: "Responsibilities", items: responsibilities.slice(0, 4) }] : []),
+    ...markdownSections.filter((section) => {
+      const normalizedTitle = section.title.trim().toLowerCase();
+      if (roles.length > 0 && normalizedTitle === "roles") return false;
+      if (responsibilities.length > 0 && normalizedTitle === "responsibilities") return false;
+      return true;
+    }),
+  ];
   return {
-    summary,
+    summary: soulSummary ?? roles[0] ?? summary,
     sections: sections.slice(0, 3),
+    primaryRole: roles[0],
+    roles,
+    responsibilities,
   };
 };

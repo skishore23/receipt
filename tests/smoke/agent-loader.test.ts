@@ -1,4 +1,7 @@
 import { test, expect } from "bun:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { loadAgentRoutes } from "../../src/framework/agent-loader";
 import type { AgentLoaderContext } from "../../src/framework/agent-types";
@@ -30,8 +33,8 @@ const dummyQueue = {
   waitForJob: async () => undefined,
 };
 
-const ctx: AgentLoaderContext = {
-  dataDir: "data",
+const baseCtx: AgentLoaderContext = {
+  dataDir: "",
   sse: {
     publish: () => {},
     publishData: () => {},
@@ -61,7 +64,15 @@ const ctx: AgentLoaderContext = {
 };
 
 test("agent loader auto-discovers route modules", async () => {
-  const routes = await loadAgentRoutes(ctx);
-  const ids = routes.map((route) => route.id).sort();
-  expect(ids).toContain("factory");
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-agent-loader-"));
+  try {
+    const routes = await loadAgentRoutes({
+      ...baseCtx,
+      dataDir,
+    });
+    const ids = routes.map((route) => route.id).sort();
+    expect(ids).toContain("factory");
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });

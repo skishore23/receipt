@@ -1,5 +1,5 @@
 import { factoryChatSessionStream, factoryChatStream } from "../../services/factory-chat-profiles";
-import type { FactoryChatItem, FactoryInspectorPanel } from "../../views/factory-models";
+import type { FactoryChatItem, FactoryInspectorPanel, FactoryViewMode } from "../../views/factory-models";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 
 import { tryParseJson } from "./formatters";
@@ -14,6 +14,7 @@ import {
 } from "./shared";
 
 export const buildChatLink = (input: {
+  readonly mode?: FactoryViewMode;
   readonly profileId?: string;
   readonly chatId?: string;
   readonly objectiveId?: string;
@@ -24,6 +25,7 @@ export const buildChatLink = (input: {
   readonly focusId?: string;
 }): string => {
   const params = new URLSearchParams();
+  if (input.mode === "mission-control") params.set("mode", input.mode);
   if (input.profileId) params.set("profile", input.profileId);
   if (input.chatId) params.set("chat", input.chatId);
   if (input.objectiveId) params.set("thread", input.objectiveId);

@@ -167,7 +167,24 @@ Integrity guarantees:
 
 Projections are disposable caches.
 
-## 9. CLI contract
+## 9. UI contract
+
+The UI is receipt-native too:
+
+- Receipt is the only durable source of truth.
+- UI models are projections or aggregated projections derived from receipt streams.
+- UI islands subscribe to receipt-backed invalidation and re-render from fresh projections.
+- Browser code should stay thin and only own ephemeral interaction state such as focus, navigation, optimistic compose state, and streaming overlays.
+- Do not introduce a second client-side state store for objective, run, queue, or receipt truth.
+
+The performance model is:
+
+- keep projection building cheap
+- refresh islands instead of diffing a second application store
+- let SSE or equivalent invalidation wake the relevant island
+- make the UI feel instant because the client is mostly projection transport, not business logic
+
+## 10. CLI contract
 
 Core commands:
 

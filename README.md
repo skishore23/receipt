@@ -19,7 +19,7 @@ Today this repo contains:
 - `resonate` on `PATH` for the default `dev` and `start` runtime
 - `OPENAI_API_KEY` for model-backed features such as chat, planning, and embeddings
 
-If you do not want to install `resonate`, use the JSONL fallback commands shown below.
+If you do not want to install `resonate`, use the local SQLite runtime shown below.
 
 ## Quick Start
 
@@ -27,11 +27,11 @@ If you do not want to install `resonate`, use the JSONL fallback commands shown 
 bun install
 bun run build
 
-# default: multi-process runtime + local Resonate
+# default: single-process runtime backed by local SQLite
 bun run dev
 
-# fallback: single-process JSONL runtime
-bun run dev:jsonl
+# optional: multi-process runtime + local Resonate
+bun run dev:resonate
 ```
 
 Inside this repo, prefer:
@@ -77,13 +77,25 @@ Factory defaults come from [`.receipt/config.json`](./.receipt/config.json). In 
 
 Receipt currently supports two runtime topologies.
 
-### Resonate default
+### Local SQLite default
 
-Use this when you want the current multi-process runtime:
+Use this when you want the default single-process runtime:
 
 ```bash
 bun run dev
 bun run start
+```
+
+This mode starts the local Receipt server directly and persists runtime state in `${DATA_DIR}/receipt.db`.
+
+### Resonate optional dispatch
+
+Use this when you want the multi-process runtime:
+
+```bash
+bun run dev:resonate
+bun run start:resonate
+JOB_BACKEND=resonate receipt dev
 ```
 
 This mode starts:
@@ -93,17 +105,7 @@ This mode starts:
 - the chat worker process
 - the control worker process
 - the codex worker process
-- a local Resonate server with SQLite persistence
-
-### JSONL fallback
-
-Use this when you want a simpler single-process runtime or do not have `resonate` installed:
-
-```bash
-bun run dev:jsonl
-bun run start:jsonl
-JOB_BACKEND=jsonl receipt dev
-```
+- a local Resonate server with its own SQLite persistence
 
 ### Repo-local state
 
@@ -145,6 +147,8 @@ flowchart LR
 - Jobs are receipt-backed queue entries, not a separate hidden control plane.
 - Factory objectives are receipt-backed state machines with tasks, candidates, integration state, and promotion state.
 - Replay, inspect, fork, and branch all operate on the same underlying receipt chains.
+- The web UI is a projection surface: islands render receipt-backed projections and refresh on live invalidation instead of owning a second durable app state.
+- Browser code should stay extremely thin and only manage ephemeral interaction details such as navigation, focus, optimistic input, and streaming overlays.
 
 ### Main stream families
 
@@ -185,6 +189,13 @@ The web UI is server-rendered and progressively enhanced:
 - HTMX and SSE handle refresh and live updates
 - [`src/client/factory-client.js`](./src/client/factory-client.js) provides the browser-side behavior
 - Tailwind builds the shared UI styles into `dist/assets`
+
+UI rule of thumb:
+
+- Receipt is the source of truth.
+- UI islands are projections or aggregated projections over Receipt state.
+- When receipts change, subscribed islands should refresh from the server.
+- If a UI change needs its own durable business state, that state probably belongs in receipts instead.
 
 ## Docker
 

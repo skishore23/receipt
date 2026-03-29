@@ -256,8 +256,8 @@ Recommended layout:
 
 ```text
 DATA_DIR/
-  _streams.json
-  jobs/
+  receipt.db
+  factory/
   coding/
     mount-sets/
       <customerId>/

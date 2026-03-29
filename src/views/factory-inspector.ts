@@ -25,6 +25,7 @@ import type {
   FactoryInspectorModel,
   FactoryInspectorRouteModel,
   FactoryInspectorTabsModel,
+  FactoryViewMode,
 } from "./factory-models";
 
 const formatBytes = (bytes: number | undefined): string => {
@@ -69,6 +70,7 @@ const inspectorQuery = (model: FactoryInspectorRouteModel, extra?: {
   readonly jobId?: string;
 }): string => {
   const params = new URLSearchParams();
+  if (model.mode === "mission-control") params.set("mode", model.mode);
   params.set("profile", model.activeProfileId);
   if (model.chatId) params.set("chat", model.chatId);
   if (model.objectiveId) params.set("thread", model.objectiveId);
@@ -598,14 +600,25 @@ const renderInspectorTabs = (model: FactoryInspectorTabsModel, options?: Factory
   const triggerAttrs = options?.tabsTrigger
     ? ` hx-get="${tabsPath}${inspectorQuery(model)}" hx-trigger="${esc(options.tabsTrigger)}" hx-swap="outerHTML"`
     : "";
+  const wrapperClass = model.mode === "mission-control"
+    ? "flex items-center gap-1.5 border-b border-border/80 px-3 py-3 overflow-x-auto factory-scrollbar bg-card/95 sticky top-0 z-10"
+    : "flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10";
 
-  return `<div id="factory-inspector-tabs" class="flex items-center gap-1.5 border-b border-border px-3 py-2.5 overflow-x-auto factory-scrollbar bg-card sticky top-0 z-10"${triggerAttrs}>
+  return `<div id="factory-inspector-tabs" class="${wrapperClass}"${triggerAttrs}>
     ${tabs.map(t => {
       const active = model.panel === t.id;
+      const tabClass = model.mode === "mission-control"
+        ? active
+          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
+          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground"
+        : active
+          ? "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap bg-primary/10 text-primary border border-primary/20"
+          : "px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground";
       return `<a
         href="/factory${inspectorQuery(model, { panel: t.id })}"
+        data-factory-inspector-tab="${esc(t.id)}"
         ${active ? 'aria-current="page"' : ""}
-        class="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.15em] transition rounded-md whitespace-nowrap ${active ? 'bg-primary/10 text-primary border border-primary/20' : 'text-muted-foreground border border-transparent hover:bg-muted hover:text-foreground'}"
+        class="${tabClass}"
       >${esc(t.label)}</a>`;
     }).join('')}
   </div>`;

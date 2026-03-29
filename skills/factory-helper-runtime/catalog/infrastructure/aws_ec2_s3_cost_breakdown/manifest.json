@@ -1,0 +1,17 @@
+{
+  "id": "aws_ec2_s3_cost_breakdown",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["cost", "billing", "ec2", "s3", "cost-explorer", "service", "breakdown", "investigation"],
+  "description": "Compare EC2 and S3 unblended cost for a billing period using AWS Cost Explorer.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile.",
+    "Defaults to the most recent completed calendar month when no explicit period is supplied."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --start 2025-01-01 --end 2025-02-01"
+  ]
+}

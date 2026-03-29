@@ -20,9 +20,8 @@
     "assets:prepare": "bun scripts/copy-runtime-assets.mjs",
     "css:build": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --minify",
     "css:watch": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --watch",
-    "dev": "bun run assets:prepare && bun run css:build && bun scripts/start-resonate-dev.mjs",
-    "dev:resonate": "bun run dev",
-    "dev:jsonl": "bun run assets:prepare && bun run css:build && bun --watch src/server.ts",
+    "dev": "bun run assets:prepare && bun run css:build && bun --watch src/server.ts",
+    "dev:resonate": "bun run assets:prepare && bun run css:build && bun scripts/start-resonate-dev.mjs",
     "cli": "bun src/cli.ts",
     "receipt": "bun src/cli.ts",
     "factory": "bun src/cli.ts factory",
@@ -30,9 +29,8 @@
     "video:preview": "cd video && bun run preview",
     "video:render": "cd video && bun run render",
     "video:render:vertical": "cd video && bun run render:vertical",
-    "start": "bun run assets:prepare && bun run css:build && bun scripts/start-resonate-local.mjs",
-    "start:resonate": "bun run start",
-    "start:jsonl": "bun run assets:prepare && bun run css:build && bun src/server.ts",
+    "start": "bun run assets:prepare && bun run css:build && bun src/server.ts",
+    "start:resonate": "bun run assets:prepare && bun run css:build && bun scripts/start-resonate-local.mjs",
     "docker:dev:up": "bash scripts/docker-dev.sh",
     "docker:dev:down": "bash scripts/docker-dev.sh down",
     "docker:dev:reset": "bash scripts/docker-dev.sh down -v",
@@ -48,7 +46,8 @@
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
-    "verify": "bun run build && bun run check:no-any && bun run test:smoke"
+    "verify": "bun run build && bun run check:no-any && bun run test:smoke",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
@@ -59,7 +58,9 @@
     "@resonatehq/sdk": "^0.9.6",
     "@tailwindcss/cli": "^4.2.1",
     "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.12.4",
+    "htmx-ext-sse": "^2.2.4",
     "htmx.org": "^2.0.8",
     "ink": "^6.8.0",
     "openai": "^6.16.0",
@@ -72,6 +73,7 @@
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
+    "drizzle-kit": "^0.31.4",
     "ts-morph": "^27.0.2",
     "typescript": "^5.6.0"
   }

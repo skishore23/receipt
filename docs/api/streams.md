@@ -67,11 +67,11 @@ Singleton modes:
 
 ## Storage Layout
 - Data root: `DATA_DIR` (default `<cwd>/.receipt/data`).
-- Stream key registry: `_streams.json`.
+- Stream registry: SQLite `streams` table inside `${DATA_DIR}/receipt.db`.
 - Branch metadata stream: `__meta/branches`.
-- JSONL file naming uses hashed stream keys.
+- Receipt rows live in the append-only SQLite `receipts` table.
 
 ## Integrity Guarantees
 - Receipt hash chain via `prev` linkage.
 - Runtime supports idempotent event IDs and expected-prev checks.
-- Corrupt JSONL records are surfaced as explicit errors.
+- Corrupt receipt rows or hash mismatches are surfaced as explicit errors.

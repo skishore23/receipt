@@ -20,6 +20,9 @@ const writeProfile = async (root: string, input: {
   readonly id: string;
   readonly label: string;
   readonly default?: boolean;
+  readonly soulBody?: string;
+  readonly roles?: ReadonlyArray<string>;
+  readonly responsibilities?: ReadonlyArray<string>;
   readonly skills?: ReadonlyArray<string>;
   readonly cloudProvider?: "aws" | "gcp" | "azure";
   readonly defaultObjectiveMode?: "delivery" | "investigation";
@@ -34,6 +37,8 @@ const writeProfile = async (root: string, input: {
     id: input.id,
     label: input.label,
     default: input.default ?? false,
+    roles: input.roles ?? [],
+    responsibilities: input.responsibilities ?? [],
     skills: input.skills ?? [],
     cloudProvider: input.cloudProvider,
     defaultObjectiveMode: input.defaultObjectiveMode,
@@ -47,6 +52,9 @@ const writeProfile = async (root: string, input: {
     `---\n${JSON.stringify(manifest, null, 2)}\n---\n\n# ${input.label}\n\nProfile instructions for ${input.id}.\n`,
     "utf-8",
   );
+  if (input.soulBody) {
+    await fs.writeFile(path.join(dir, "SOUL.md"), `${input.soulBody.trim()}\n`, "utf-8");
+  }
 };
 
 test("factory chat profiles: discovers checked-in profiles under the profile root", async () => {
@@ -91,6 +99,9 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   await writeProfile(profileRoot, {
     id: "infrastructure",
     label: "Infrastructure",
+    soulBody: "Sounds like a calm, skeptical infra lead who starts with the current signal.",
+    roles: ["Infrastructure engineer"],
+    responsibilities: ["Investigate platform behavior", "Recommend the next safe operational step"],
     skills: ["skills/factory-infrastructure-aws/SKILL.md"],
     cloudProvider: "aws",
     defaultObjectiveMode: "investigation",
@@ -111,6 +122,16 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.imports).toEqual([]);
   expect(resolved.stack.map((profile) => profile.id)).toEqual(["infrastructure"]);
   expect(resolved.skills).toEqual(["skills/factory-infrastructure-aws/SKILL.md"]);
+  expect(resolved.root.roles).toEqual(["Infrastructure engineer"]);
+  expect(resolved.root.responsibilities).toEqual([
+    "Investigate platform behavior",
+    "Recommend the next safe operational step",
+  ]);
+  expect(resolved.root.soulBody).toContain("calm, skeptical infra lead");
+  expect(resolved.profilePaths).toEqual([
+    "profiles/infrastructure/PROFILE.md",
+    "profiles/infrastructure/SOUL.md",
+  ]);
   expect(resolved.root.cloudProvider).toBe("aws");
   expect(resolved.cloudProvider).toBe("aws");
   expect(resolved.objectivePolicy.defaultObjectiveMode).toBe("investigation");
@@ -121,6 +142,16 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.toolAllowlist).toContain("factory.dispatch");
   expect(resolved.toolAllowlist).not.toContain("profile.handoff");
   expect(resolved.systemPrompt).toContain("You are the active Factory profile in the product UI.");
+  expect(resolved.systemPrompt).toContain("Sound human.");
+  expect(resolved.systemPrompt).toContain("Use prior transcript, receipts, and memory for facts and context");
+  expect(resolved.systemPrompt).toContain("treat that as genuine self-reflection");
+  expect(resolved.systemPrompt).toContain("## Personality and Voice");
+  expect(resolved.systemPrompt).toContain("evolve with the active profile and relevant skills");
+  expect(resolved.systemPrompt).toContain("calm, skeptical infra lead");
+  expect(resolved.systemPrompt).toContain("## Roles");
+  expect(resolved.systemPrompt).toContain("Infrastructure engineer");
+  expect(resolved.systemPrompt).toContain("## Responsibilities");
+  expect(resolved.systemPrompt).toContain("Recommend the next safe operational step");
   expect(resolved.systemPrompt).toContain("up to 20 parallel child runs");
 });
 
@@ -200,6 +231,8 @@ test("factory chat profiles: checked-in software profile resolves worktree deliv
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("repo_profile");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
   expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
+  expect(resolved.root.soulBody).toContain("strong staff engineer or delivery lead");
   expect(resolved.systemPrompt).toContain("published or clearly blocked");
+  expect(resolved.systemPrompt).toContain("## Personality and Voice");
   expect(resolved.systemPrompt).toContain("PR link");
 });

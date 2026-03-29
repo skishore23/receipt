@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 
 import type { Decide, Reducer } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
+import { getReceiptDb } from "../db/client";
+import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
 
 export type MemoryEntry = {
   readonly id: string;
@@ -233,12 +235,32 @@ export type MemoryToolsDeps = {
 
 export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
   const root = path.join(deps.dir, "memory");
+  const db = getReceiptDb(deps.dir);
   const embedFn = deps.embed;
   const now = deps.now ?? Date.now;
   const streamForScope = deps.streamForScope ?? ((scope: string) => `memory/${safeScope(scope)}`);
 
   const readEntries = async (scope: string): Promise<ReadonlyArray<MemoryEntry>> =>
-    (await deps.runtime.state(streamForScope(scope))).entries;
+    (db.sqlite.query(`
+      SELECT entry_id, scope, text, tags_json, meta_json, ts
+      FROM memory_entries
+      WHERE scope = ?
+      ORDER BY ts DESC
+    `).all(scope) as Array<{
+      readonly entry_id: string;
+      readonly scope: string;
+      readonly text: string;
+      readonly tags_json: string | null;
+      readonly meta_json: string | null;
+      readonly ts: number;
+    }>).map((row) => ({
+      id: row.entry_id,
+      scope: row.scope,
+      text: row.text,
+      tags: jsonParseOptional<ReadonlyArray<string>>(row.tags_json),
+      meta: jsonParseOptional<Readonly<Record<string, unknown>>>(row.meta_json),
+      ts: Number(row.ts),
+    }));
 
   const semanticSearch = async (scope: string, query: string, limit: number): Promise<ReadonlyArray<MemoryEntry>> => {
     if (!embedFn) throw new Error("semantic search requires embed dependency");
@@ -279,6 +301,39 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
         access: record,
       },
     });
+    db.sqlite.query(`
+      INSERT INTO memory_accesses (
+        access_id,
+        scope,
+        operation,
+        strategy,
+        query,
+        "limit",
+        max_chars,
+        from_ts,
+        to_ts,
+        result_count,
+        result_ids_json,
+        summary_chars,
+        meta_json,
+        ts
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      record.id,
+      record.scope,
+      record.operation,
+      record.strategy,
+      record.query ?? null,
+      record.limit ?? null,
+      record.maxChars ?? null,
+      record.fromTs ?? null,
+      record.toTs ?? null,
+      record.resultCount,
+      jsonStringifyOptional(record.resultIds),
+      record.summaryChars ?? null,
+      jsonStringifyOptional(record.meta),
+      record.ts,
+    );
   };
 
   return {
@@ -359,6 +414,23 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
           entry,
         },
       });
+      db.sqlite.query(`
+        INSERT INTO memory_entries (entry_id, scope, text, tags_json, meta_json, ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(entry_id) DO UPDATE SET
+          scope = excluded.scope,
+          text = excluded.text,
+          tags_json = excluded.tags_json,
+          meta_json = excluded.meta_json,
+          ts = excluded.ts
+      `).run(
+        entry.id,
+        entry.scope,
+        entry.text,
+        jsonStringifyOptional(entry.tags),
+        jsonStringifyOptional(entry.meta),
+        entry.ts,
+      );
 
       if (embedFn) {
         const embFile = scopeToEmbeddingsFile(root, input.scope);

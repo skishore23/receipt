@@ -1,0 +1,17 @@
+{
+  "id": "nat_gateway_cost_spike",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["cost", "billing", "nat", "gateway", "vpc", "cloudwatch", "flowlogs", "investigation"],
+  "description": "Investigate NAT Gateway cost spikes with Cost Explorer, NAT Gateway inventory, CloudWatch metrics, and VPC Flow Logs when available.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile and optional region scope when one is already available in the packet.",
+    "Can query all mounted EC2 regions by default when no region scope is provided."
+  ],
+  "examples": [
+    "--profile default --lookback-days 180",
+    "--profile default --all-regions --lookback-days 90"
+  ]
+}

@@ -273,7 +273,10 @@ export const buildFactoryWorkbench = (input: {
         focusKind: focusedJob ? "job" : "task",
         focusId: focusedJob?.jobId ?? focusedTask.taskId,
         title: focusedTask.title,
-        status: output?.status ?? focusedTask.jobStatus ?? focusedTask.status,
+        status: output?.status
+          ?? (isActiveJobStatus(focusedTask.jobStatus) ? focusedTask.jobStatus : undefined)
+          ?? focusedTask.status
+          ?? focusedTask.jobStatus,
         active: output?.active ?? focusedTask.isActive,
         summary: output?.summary ?? focusedTask.latestSummary ?? focusedTask.candidateSummary,
         taskId: focusedTask.taskId,

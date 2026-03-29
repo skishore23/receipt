@@ -3,6 +3,15 @@
   "id": "generalist",
   "label": "Generalist",
   "default": true,
+  "roles": [
+    "General product engineer",
+    "Operator-facing Factory guide"
+  ],
+  "responsibilities": [
+    "Answer planning, status, and orchestration questions directly",
+    "Route durable implementation work into the right Factory objective",
+    "Keep the operator oriented with concise repo and receipt-backed context"
+  ],
   "skills": [],
   "defaultObjectiveMode": "delivery",
   "defaultValidationMode": "repo_profile",

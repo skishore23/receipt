@@ -22,10 +22,26 @@ const normalizeLivePayload = (value: unknown): FactoryLiveScopePayload | undefin
 export const parseComposeResponse = (value: unknown): FactoryComposeResponseBody => {
   const record = asRecord(value);
   if (!record) return {};
+  const selection = asRecord(record.selection);
+  const chat = asRecord(record.chat);
   return {
     location: asString(record.location),
     error: asString(record.error),
     live: normalizeLivePayload(record.live),
+    chat: chat
+      ? {
+          chatId: asString(chat.chatId),
+        }
+      : undefined,
+    selection: selection
+      ? {
+          objectiveId: asString(selection.objectiveId),
+          focusKind: selection.focusKind === "task" || selection.focusKind === "job"
+            ? selection.focusKind
+            : undefined,
+          focusId: asString(selection.focusId),
+        }
+      : undefined,
   };
 };
 
@@ -47,7 +63,7 @@ export const islandUrl = (kind: "chat" | "sidebar" | "inspector", search: string
 export const buildScope = (url: URL, live?: FactoryLiveScopePayload): LiveScope => ({
   profileId: live?.profileId || asString(url.searchParams.get("profile")) || undefined,
   chatId: live?.chatId || asString(url.searchParams.get("chat")) || undefined,
-  objectiveId: live?.objectiveId || asString(url.searchParams.get("thread")) || undefined,
+  objectiveId: live?.objectiveId || asString(url.searchParams.get("objective")) || asString(url.searchParams.get("thread")) || undefined,
   runId: live?.runId || asString(url.searchParams.get("run")) || undefined,
   jobId: live?.jobId || asString(url.searchParams.get("job")) || undefined,
   search: url.search || "",
@@ -102,14 +118,26 @@ const leadingSlashCommand = (payload: string) => {
   return match[1] === "?" ? "help" : match[1].toLowerCase();
 };
 
-const renderOptimisticPrompt = (payload: string, hasThread: boolean) => {
-  const title = hasThread ? "Queued follow-up" : "Queued thread";
-  const detail = hasThread
-    ? "Starting work in this thread..."
+const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "workbench-chat") => {
+  const title = mode === "thread"
+    ? "Updating thread"
+    : mode === "workbench-chat"
+    ? "Sending to chat"
+    : "Queued thread";
+  const detail = mode === "thread"
+    ? "Applying your note to this thread..."
+    : mode === "workbench-chat"
+    ? "Keeping the operator conversation moving..."
     : "Creating the thread and starting work...";
+  const statusLabel = mode === "thread"
+    ? "Updating"
+    : mode === "workbench-chat"
+    ? "Chat"
+    : "Queued";
+  const statusMeta = mode === "thread" ? "Updated just now" : "Queued just now";
   return '<section class="flex justify-end">' +
     '<div class="max-w-3xl space-y-1">' +
-      '<div class="text-right text-[11px] text-muted-foreground">Queued just now</div>' +
+      '<div class="text-right text-[11px] text-muted-foreground">' + statusMeta + "</div>" +
       '<div class="rounded-xl border border-info/15 bg-info/10 px-4 py-2.5 text-sm leading-6 text-foreground">' + escapeHtml(payload) + "</div>" +
     "</div>" +
   "</section>" +
@@ -119,12 +147,25 @@ const renderOptimisticPrompt = (payload: string, hasThread: boolean) => {
         '<span class="text-xs font-semibold text-foreground">' + escapeHtml(title) + "</span>" +
         '<span class="min-w-0 text-xs leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:1] overflow-hidden">' + escapeHtml(detail) + "</span>" +
       "</div>" +
-      '<span class="inline-flex shrink-0 items-center rounded-full border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">Queued</span>' +
+      '<span class="inline-flex shrink-0 items-center rounded-full border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + statusLabel + "</span>" +
     "</div>" +
   "</section>";
 };
 
-export const composerFeedback = (payload: string, formAction?: string) => {
+export const composerFeedback = (
+  payload: string,
+  formAction?: string,
+  options?: {
+    readonly currentObjectiveId?: string;
+  },
+) => {
+  const isWorkbenchSurface = Boolean(
+    formAction
+    && (
+      formAction.indexOf("/factory/compose") >= 0
+      || formAction.indexOf("/factory/workbench") >= 0
+    ),
+  );
   const command = leadingSlashCommand(payload);
   if (command) {
     switch (command) {
@@ -133,29 +174,41 @@ export const composerFeedback = (payload: string, formAction?: string) => {
       case "help":
         return { buttonLabel: "Opening...", status: "Opening help..." };
       case "watch":
-        return { buttonLabel: "Opening...", status: "Opening thread..." };
+        return { buttonLabel: "Opening...", status: isWorkbenchSurface ? "Opening objective..." : "Opening thread..." };
+      case "obj":
+        return { buttonLabel: "Starting...", status: "Starting objective..." };
       case "new":
-        return { buttonLabel: "Starting...", status: "Starting a new thread..." };
+        return { buttonLabel: "Starting...", status: isWorkbenchSurface ? "Starting objective..." : "Starting a new thread..." };
       case "react":
-        return { buttonLabel: "Updating...", status: "Updating the thread..." };
+        return { buttonLabel: "Updating...", status: isWorkbenchSurface ? "Updating the objective..." : "Updating the thread..." };
       case "promote":
-        return { buttonLabel: "Promoting...", status: "Promoting the thread..." };
+        return { buttonLabel: "Promoting...", status: isWorkbenchSurface ? "Promoting the objective..." : "Promoting the thread..." };
       case "cancel":
-        return { buttonLabel: "Stopping...", status: "Stopping the thread..." };
+        return { buttonLabel: "Stopping...", status: isWorkbenchSurface ? "Stopping the objective..." : "Stopping the thread..." };
       case "cleanup":
         return { buttonLabel: "Cleaning...", status: "Cleaning worktrees..." };
       case "archive":
-        return { buttonLabel: "Archiving...", status: "Archiving the thread..." };
+        return { buttonLabel: "Archiving...", status: isWorkbenchSurface ? "Archiving the objective..." : "Archiving the thread..." };
       case "abort-job":
         return { buttonLabel: "Aborting...", status: "Requesting job abort..." };
       default:
         return { buttonLabel: "Running...", status: "Running command..." };
     }
   }
-  const hasThread = Boolean(formAction && formAction.indexOf("thread=") >= 0);
+  if (isWorkbenchSurface) {
+    return {
+      buttonLabel: "Sending...",
+      optimisticHtml: renderOptimisticPrompt(payload, "workbench-chat"),
+      status: "Sending to chat...",
+    };
+  }
+  const hasThread = Boolean(
+    (formAction && formAction.indexOf("thread=") >= 0)
+    || options?.currentObjectiveId,
+  );
   return {
-    buttonLabel: hasThread ? "Queueing..." : "Starting...",
-    optimisticHtml: renderOptimisticPrompt(payload, hasThread),
-    status: hasThread ? "Queueing follow-up..." : "Starting a new thread...",
+    buttonLabel: hasThread ? "Updating..." : "Starting...",
+    optimisticHtml: renderOptimisticPrompt(payload, hasThread ? "thread" : "chat"),
+    status: hasThread ? "Updating the thread..." : "Starting a new thread...",
   };
 };

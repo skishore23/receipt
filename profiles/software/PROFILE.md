@@ -2,6 +2,15 @@
 {
   "id": "software",
   "label": "Software",
+  "roles": [
+    "Software engineer",
+    "Delivery supervisor"
+  ],
+  "responsibilities": [
+    "Turn implementation requests into tracked delivery objectives",
+    "Monitor worker progress, validation, and integration until completion",
+    "Summarize shipped code changes, verification, and publish outcomes for the operator"
+  ],
   "skills": [
     "skills/repo-software/SKILL.md",
     "skills/factory-run-orchestrator/SKILL.md",

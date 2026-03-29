@@ -14,16 +14,21 @@ import {
   iconCodex,
   iconForEntity,
   iconNext,
-  iconPlus,
   iconProject,
   iconPullRequest,
   iconQueue,
-  iconReceipt,
   iconRun,
   iconStatus,
   iconTask,
   iconTokens,
   iconBadgeToneClass,
+  missionControlHotkeyClass,
+  missionControlInsetClass,
+  missionControlMonoClass,
+  missionControlPanelClass,
+  missionControlSectionLabelClass,
+  liveIslandAttrs,
+  sseConnectAttrs,
   renderEmptyState,
   renderJobActionCards,
   sectionLabelClass,
@@ -213,6 +218,7 @@ const renderMarkdown = (raw: string): string => {
 };
 
 import type {
+  FactoryChatProfileNav,
   FactoryChatObjectiveNav,
   FactorySelectedObjectiveCard,
   FactoryWorkCard,
@@ -222,9 +228,11 @@ import type {
   FactoryNavModel,
   FactoryLiveCodexCard,
   FactoryInspectorPanel,
+  FactoryViewMode,
 } from "./factory-models";
 
 type FactoryChatRouteContext = {
+  readonly mode?: FactoryViewMode;
   readonly profileId: string;
   readonly chatId?: string;
   readonly objectiveId?: string;
@@ -237,6 +245,7 @@ type FactoryChatRouteContext = {
 
 const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   const params = new URLSearchParams();
+  if (input.mode === "mission-control") params.set("mode", input.mode);
   params.set("profile", input.profileId);
   if (input.chatId) params.set("chat", input.chatId);
   if (input.objectiveId) params.set("thread", input.objectiveId);
@@ -251,6 +260,54 @@ const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   return query ? `?${query}` : "";
 };
 
+const isMissionControlMode = (mode?: FactoryViewMode): boolean => mode === "mission-control";
+const chatLiveRefreshOn = [
+  { event: "agent-refresh", throttleMs: 180 },
+  { event: "job-refresh", throttleMs: 180 },
+  { event: "objective-runtime-refresh", throttleMs: 180 },
+  { event: "factory-refresh", throttleMs: 180 },
+  { kind: "body", event: "factory:chat-refresh" },
+] as const;
+const objectiveLiveRefreshOn = [
+  { event: "profile-board-refresh", throttleMs: 450 },
+  { event: "objective-runtime-refresh", throttleMs: 450 },
+  { event: "factory-refresh", throttleMs: 450 },
+  { kind: "body", event: "factory:scope-changed" },
+] as const;
+
+const modeSwitchHref = (
+  routeContext: FactoryChatRouteContext,
+  mode: FactoryViewMode,
+): string => `/factory${factoryChatQuery({ ...routeContext, mode })}`;
+
+const workbenchHref = (routeContext: FactoryChatRouteContext): string => {
+  const params = new URLSearchParams();
+  params.set("profile", routeContext.profileId);
+  if (routeContext.chatId) params.set("chat", routeContext.chatId);
+  if (routeContext.objectiveId) params.set("objective", routeContext.objectiveId);
+  if (routeContext.focusKind && routeContext.focusId) {
+    params.set("focusKind", routeContext.focusKind);
+    params.set("focusId", routeContext.focusId);
+  }
+  const query = params.toString();
+  return `/factory/workbench${query ? `?${query}` : ""}`;
+};
+
+const factoryShellIslandBindings = (shellQuery: string) => ({
+  sidebar: {
+    path: `/factory/island/sidebar${shellQuery}`,
+    refreshOn: objectiveLiveRefreshOn,
+  },
+  chat: {
+    path: `/factory/island/chat${shellQuery}`,
+    refreshOn: chatLiveRefreshOn,
+  },
+  inspector: {
+    path: `/factory/island/inspector${shellQuery}`,
+    refreshOn: objectiveLiveRefreshOn,
+  },
+});
+
 const renderJobControls = (jobId: string, running?: boolean, abortRequested?: boolean): string =>
   running ? `<div class="mt-4">${renderJobActionCards(jobId, { abortRequested })}</div>` : "";
 
@@ -263,6 +320,9 @@ const shellPill = (label: string, tone: Tone = "neutral", icon?: string): string
 const shellHeaderTitle = (model: FactoryChatShellModel): string =>
   model.inspector.selectedObjective?.title
     ?? (!model.objectiveId ? "New chat" : model.activeProfileLabel);
+
+const shellProfileSummary = (model: FactoryChatShellModel): string | undefined =>
+  model.chat.activeProfileSummary?.trim() || undefined;
 
 const renderShellStatusPills = (model: FactoryChatShellModel): string => {
   const pills: string[] = [];
@@ -289,11 +349,11 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
   aliases: command.aliases ?? [],
 })));
 
-const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none rounded-xl border border-border bg-muted px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
+const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none rounded-md border border-border bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-background focus-visible:ring-2 focus-visible:ring-ring/40";
 const composerShellClass = "mx-auto w-full max-w-6xl";
 const composerPanelClass = "relative flex flex-col gap-2";
-const assistantResponseCardClass = "overflow-hidden rounded-xl border border-border/80 bg-card/90 shadow-sm backdrop-blur-xl";
-const assistantResponseBodyClass = "max-w-[72ch] px-5 py-4 sm:px-6 sm:py-5";
+const assistantResponseCardClass = "overflow-hidden border border-border/80 bg-card/90";
+const assistantResponseBodyClass = "max-w-[72ch] px-4 py-3 sm:px-5 sm:py-4";
 
 const composerJobId = (model: FactoryChatShellModel): string | undefined => {
   if (model.jobId) return model.jobId;
@@ -320,6 +380,64 @@ const titleCaseLabel = (value?: string): string => {
 
 const withQueryParam = (query: string, key: string, value: string): string =>
   `${query}${query.includes("?") ? "&" : "?"}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+
+const factoryEventsPath = (query: string): string => `/factory/events${query}`;
+
+const headerProfileSelectClass = "min-w-[11rem] rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground outline-none transition hover:bg-accent hover:text-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/30";
+
+const renderHeaderProfileSelect = (input: {
+  readonly id: string;
+  readonly label: string;
+  readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
+}): string => {
+  if (input.profiles.length === 0) return "";
+  return `<select id="${esc(input.id)}" aria-label="${esc(input.label)}" data-factory-profile-select="true" class="${headerProfileSelectClass}">
+    ${input.profiles.map((profile) => `<option value="${esc(profile.href)}"${profile.selected ? " selected" : ""}>${esc(profile.label)}</option>`).join("")}
+  </select>`;
+};
+
+export const renderFactoryStreamingShell = (
+  profileLabel: string,
+  options?: {
+    readonly liveMode?: "sse" | "js";
+  },
+): string => `<div id="factory-chat-streaming" class="space-y-2" aria-live="polite">
+  <section data-factory-stream-shell class="flex justify-start">
+    <div class="w-full max-w-3xl space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} <span id="factory-chat-streaming-label-text">${esc(profileLabel)}</span></div>
+        <span class="text-[11px] text-muted-foreground">Streaming</span>
+      </div>
+      <div class="${assistantResponseCardClass}">
+        <div class="${assistantResponseBodyClass}">
+          <div
+            id="factory-chat-streaming-content"
+            class="whitespace-pre-wrap text-sm leading-6 text-foreground"
+            ${options?.liveMode === "js"
+              ? ""
+              : 'sse-swap="factory-stream-token" hx-swap="beforeend"'}
+          ></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <div
+    id="factory-chat-stream-reset-listener"
+    class="hidden"
+    aria-hidden="true"
+    ${options?.liveMode === "js"
+      ? ""
+      : 'sse-swap="factory-stream-reset" hx-swap="none"'}
+  ></div>
+</div>`;
+
+export const renderFactoryStreamingTokenFragment = (input: {
+  readonly delta: string;
+  readonly runId?: string;
+}): string => `<span${input.runId ? ` data-run-id="${esc(input.runId)}"` : ""}>${esc(input.delta)}</span>`;
+
+export const renderFactoryStreamingResetFragment = (): string =>
+  '<div id="factory-chat-streaming-content" hx-swap-oob="innerHTML"></div>';
 
 const systemItemTone = (item: Extract<FactoryChatItem, { readonly kind: "system" }>): Tone => {
   const metaTone = toneForValue(item.meta);
@@ -354,16 +472,18 @@ const systemBadgeLabel = (item: Extract<FactoryChatItem, { readonly kind: "syste
 const renderChatItem = (
   item: FactoryChatItem,
   context: {
+    readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
     readonly activeProfileLabel: string;
     readonly chatId?: string;
+    readonly objectiveHref?: (objectiveId: string) => string;
   },
 ): string => {
   if (item.kind === "user") {
     return `<section class="flex justify-end">
       <div class="max-w-3xl space-y-1">
         ${item.meta ? `<div class="text-right text-[11px] text-muted-foreground">${esc(item.meta)}</div>` : ""}
-        <div class="rounded-xl border border-info/15 bg-info/10 px-4 py-2.5 text-sm leading-6 text-foreground">
+        <div class="border border-border bg-muted/45 px-4 py-2.5 text-sm leading-6 text-foreground">
           ${esc(item.body)}
         </div>
       </div>
@@ -387,7 +507,7 @@ const renderChatItem = (
   if (item.kind === "system") {
     const tone = systemItemTone(item);
     const body = splitSystemBody(item.body);
-    return `<section class="rounded-lg border px-3 py-2 ${iconBadgeToneClass(tone)} bg-muted">
+    return `<section class="border px-3 py-2 ${iconBadgeToneClass(tone)} bg-muted/45">
       <div class="flex min-w-0 items-center justify-between gap-2">
         <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span class="text-xs font-semibold text-foreground">${esc(item.title)}</span>
@@ -395,20 +515,24 @@ const renderChatItem = (
         </div>
         ${badge(systemBadgeLabel(item), tone)}
       </div>
-      ${body.detail ? `<details class="mt-1.5 rounded-lg border border-border bg-muted px-2.5 py-2">
-        <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Details</summary>
+      ${body.detail ? `<details class="mt-1.5 border border-border bg-muted/45 px-2.5 py-2">
+        <summary class="cursor-pointer list-none text-[11px] font-medium text-muted-foreground">Details</summary>
         <div class="mt-1.5 whitespace-pre-wrap text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">${esc(body.detail)}</div>
       </details>` : ""}
     </section>`;
   }
   if (item.kind === "objective_event") {
-    return `<a class="block rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 transition hover:bg-primary/20"
-      href="/factory${factoryChatQuery({
-        profileId: context.activeProfileId,
-        chatId: context.chatId,
-        objectiveId: item.objectiveId,
-        panel: "overview",
-      })}">
+    const href = context.objectiveHref
+      ? context.objectiveHref(item.objectiveId)
+      : `/factory${factoryChatQuery({
+          mode: context.mode,
+          profileId: context.activeProfileId,
+          chatId: context.chatId,
+          objectiveId: item.objectiveId,
+          panel: "overview",
+        })}`;
+    return `<a class="block border-l-2 border-primary px-3 py-2 transition hover:bg-accent/40"
+      href="${href}">
       <div class="flex items-center gap-2 text-sm font-semibold text-primary">
         ${iconProject("w-4 h-4")} ${esc(item.title)}
       </div>
@@ -416,7 +540,7 @@ const renderChatItem = (
     </a>`;
   }
   const card = item.card;
-  return `<section class="rounded-lg border border-border bg-muted px-3 py-2">
+  return `<section class="border border-border bg-muted/45 px-3 py-2">
     <div class="flex min-w-0 items-center justify-between gap-2">
       <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         ${iconForEntity(card.worker, "w-3 h-3 text-muted-foreground shrink-0 self-center")}
@@ -466,6 +590,7 @@ const groupChatItems = (items: ReadonlyArray<FactoryChatItem>): ReadonlyArray<Ch
 const renderWorkGroup = (
   items: ReadonlyArray<Extract<FactoryChatItem, { readonly kind: "work" }>>,
   context: {
+    readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
     readonly activeProfileLabel: string;
     readonly chatId?: string;
@@ -476,7 +601,7 @@ const renderWorkGroup = (
   const latestHtml = renderChatItem(latest, context);
   return `<div class="space-y-1">
     <details>
-      <summary class="cursor-pointer list-none rounded-md px-2 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground hover:bg-accent transition">${esc(`${earlier.length} earlier update${earlier.length > 1 ? "s" : ""}`)}</summary>
+      <summary class="cursor-pointer list-none px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition">${esc(`${earlier.length} earlier update${earlier.length > 1 ? "s" : ""}`)}</summary>
       <div class="mt-1 space-y-1">
         ${earlier.map((item) => renderChatItem(item, context)).join("")}
       </div>
@@ -564,7 +689,7 @@ const renderThreadSummaryCard = (
 ): string => `<section class="${softPanelClass} px-4 py-3">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0 flex flex-1 items-start gap-3">
-      <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border ${iconBadgeToneClass(input.tone ?? "neutral")} shadow-sm">
+      <span class="flex h-9 w-9 shrink-0 items-center justify-center border ${iconBadgeToneClass(input.tone ?? "neutral")}">
         ${input.icon}
       </span>
       <div class="min-w-0">
@@ -656,7 +781,7 @@ const renderObjectiveTasks = (tasks?: ReadonlyArray<ThreadTaskCard>): string => 
       <div class="${sectionLabelClass}">Tasks</div>
       <div class="text-[11px] text-muted-foreground">${esc(`${tasks.length}`)}</div>
     </div>
-    <div class="overflow-hidden rounded-xl border border-border bg-card">
+    <div class="overflow-hidden border border-border bg-card">
       ${tasks.map((task, index) => {
         const dependencyText = describeTaskDependencies(task, taskById);
         const note = task.blockedReason
@@ -702,12 +827,16 @@ const renderRunningWorkbench = (model: FactoryChatIslandModel): string => {
       ?? "Live task state is updating in the inspector.",
     180,
   ) || "Live task state is updating in the inspector.";
+  const telemetryNote = focus?.active
+    ? "Recent Activity shows live inner steps from the active task pass. The objective stays in progress until the task reports a result, blocks, or fails."
+    : undefined;
   return `<section class="space-y-2">
     <section class="${softPanelClass} px-4 py-2.5">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="text-sm font-semibold text-foreground truncate">${esc(thread?.title ?? workbench.summary.title)}</div>
           <div class="mt-1 text-xs text-muted-foreground">${esc(focusSummary)}</div>
+          ${telemetryNote ? `<div class="mt-1 text-[11px] leading-5 text-muted-foreground/90">${esc(telemetryNote)}</div>` : ""}
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
           ${badge(`Objective ${displayLabel(workbench.summary.phase) || workbench.summary.phase}`, toneForValue(workbench.summary.phase))}
@@ -750,6 +879,269 @@ const renderCenterWorkbench = (model: FactoryChatIslandModel): string => {
   </section>`;
 };
 
+const isTerminalTaskCardStatus = (status?: string): boolean =>
+  status === "approved" || status === "blocked" || status === "integrated" || status === "superseded";
+
+const renderMissionControlProgressCard = (model: FactoryChatIslandModel): string => {
+  const workbench = model.workbench;
+  const tasks = workbench?.tasks ?? [];
+  const completedCount = tasks.filter((task) => isTerminalTaskCardStatus(task.status)).length;
+  const totalCount = tasks.length;
+  const percent = totalCount > 0 ? Math.max(4, Math.round((completedCount / totalCount) * 100)) : 0;
+  const summary = workbench?.summary;
+  const nextSignal = compactStatusText(
+    workbench?.focus?.summary
+      ?? workbench?.summary.nextAction
+      ?? workbench?.summary.latestDecisionSummary
+      ?? model.selectedThread?.nextAction
+      ?? model.selectedThread?.summary
+      ?? "Pick a thread or send a prompt to start work.",
+    180,
+  ) || "Pick a thread or send a prompt to start work.";
+  const phaseLabel = displayLabel(summary?.phase || model.selectedThread?.phase || model.selectedThread?.status || "idle") || "idle";
+  return `<section class="${missionControlPanelClass} p-4">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="${missionControlSectionLabelClass}">Objective Progress</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <div class="text-xl font-semibold tracking-tight text-foreground">${esc(`${completedCount}/${totalCount || 0}`)}</div>
+          ${badge(`Phase ${phaseLabel}`, toneForValue(summary?.phase || model.selectedThread?.phase || model.selectedThread?.status))}
+        </div>
+      </div>
+      <div class="grid min-w-[220px] grid-cols-2 gap-2 text-right">
+        <div class="${missionControlInsetClass} px-3 py-2">
+          <div class="${missionControlSectionLabelClass}">Active</div>
+          <div class="mt-1 text-base font-semibold text-foreground">${esc(String(summary?.activeTaskCount ?? 0))}</div>
+        </div>
+        <div class="${missionControlInsetClass} px-3 py-2">
+          <div class="${missionControlSectionLabelClass}">Ready</div>
+          <div class="mt-1 text-base font-semibold text-foreground">${esc(String(summary?.readyTaskCount ?? 0))}</div>
+        </div>
+      </div>
+    </div>
+    <div class="mt-4 mission-control-track">${percent > 0 ? `<span style="width:${percent}%"></span>` : `<span style="width:0%"></span>`}</div>
+    <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="text-sm text-muted-foreground">${esc(nextSignal)}</div>
+      <div class="flex flex-wrap gap-2">
+        ${typeof summary?.checksCount === "number" && summary.checksCount > 0 ? `<span class="${missionControlHotkeyClass}">${esc(`${summary.checksCount} checks`)}</span>` : ""}
+        ${typeof summary?.elapsedMinutes === "number" && summary.elapsedMinutes > 0 ? `<span class="${missionControlHotkeyClass}">${esc(`${summary.elapsedMinutes} min`)}</span>` : ""}
+      </div>
+    </div>
+  </section>`;
+};
+
+const renderMissionControlFocusCard = (model: FactoryChatIslandModel): string => {
+  const workbench = model.workbench;
+  const focus = workbench?.focus;
+  const focusedTask = workbench?.focusedTask;
+  const activeCodex = model.activeCodex;
+  const title = focus?.title
+    ?? focusedTask?.title
+    ?? activeCodex?.task
+    ?? model.selectedThread?.title
+    ?? `${model.activeProfileLabel} queue`;
+  const status = focus?.status
+    ?? focusedTask?.status
+    ?? activeCodex?.status
+    ?? model.selectedThread?.phase
+    ?? model.selectedThread?.status;
+  const summary = compactStatusText(
+    focus?.summary
+      ?? focus?.lastMessage
+      ?? focus?.stdoutTail
+      ?? focusedTask?.latestSummary
+      ?? activeCodex?.latestNote
+      ?? activeCodex?.summary
+      ?? model.activeRun?.summary
+      ?? model.selectedThread?.summary
+      ?? "No live task selected.",
+    240,
+  ) || "No live task selected.";
+  const meta: string[] = [];
+  if (focus?.focusKind && focus?.focusId) meta.push(`${focus.focusKind} ${focus.focusId}`);
+  if (focusedTask?.taskId) meta.push(`task ${focusedTask.taskId}`);
+  if (activeCodex?.jobId) meta.push(`job ${activeCodex.jobId}`);
+  return `<section class="${missionControlPanelClass} p-4">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="${missionControlSectionLabelClass}">Current Signal</div>
+        <div class="mt-2 text-lg font-semibold leading-tight text-foreground">${esc(title)}</div>
+      </div>
+      ${status ? badge(displayLabel(status), toneForValue(status)) : ""}
+    </div>
+    <div class="mt-3 text-sm leading-6 text-muted-foreground">${esc(summary)}</div>
+    ${meta.length ? `<div class="mt-4 flex flex-wrap gap-2">${meta.map((item) => `<span class="${missionControlHotkeyClass}">${esc(item)}</span>`).join("")}</div>` : ""}
+  </section>`;
+};
+
+const renderMissionControlTaskList = (
+  model: FactoryChatIslandModel,
+  routeContext: FactoryChatRouteContext,
+): string => {
+  const tasks = model.workbench?.tasks ?? [];
+  if (tasks.length === 0) {
+    return `<section class="${missionControlPanelClass} p-4">
+      <div class="flex items-center justify-between gap-2">
+        <div class="${missionControlSectionLabelClass}">Task Board</div>
+        <div class="text-[11px] text-muted-foreground">0</div>
+      </div>
+      <div class="mt-4 text-sm text-muted-foreground">Task state will appear here when a thread has a workbench projection.</div>
+    </section>`;
+  }
+  const taskById = new Map(tasks.map((task) => [task.taskId, task] as const));
+  return `<section class="${missionControlPanelClass} p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="${missionControlSectionLabelClass}">Task Board</div>
+      <div class="text-[11px] text-muted-foreground">${esc(`${tasks.length}`)}</div>
+    </div>
+    <div class="mt-3 space-y-2">
+      ${tasks.map((task, index) => {
+        const note = compactStatusText(
+          task.blockedReason
+            ?? task.latestSummary
+            ?? describeTaskDependencies(task, taskById)
+            ?? (task.isReady ? "Ready to run." : undefined)
+            ?? (task.isActive ? "Running now." : undefined)
+            ?? "",
+          120,
+        );
+        const href = `/factory${factoryChatQuery({
+          ...routeContext,
+          panel: "execution",
+          focusKind: "task",
+          focusId: task.taskId,
+        })}`;
+        const stateTone = toneForValue(task.status);
+        const rowClass = task.isActive
+          ? "border-primary/25 bg-primary/10"
+          : task.isReady
+            ? "border-success/25 bg-success/10"
+            : task.status === "blocked"
+              ? "border-warning/25 bg-warning/10"
+              : "border-border/70 bg-muted/45";
+        return `<a href="${href}" class="block ${missionControlInsetClass} ${rowClass} px-3 py-3 transition hover:bg-accent/60">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/80 text-[10px] font-semibold text-muted-foreground">${index + 1}</span>
+                <div class="text-sm font-semibold leading-5 text-foreground">${esc(task.title)}</div>
+              </div>
+              ${note ? `<div class="mt-1.5 text-xs leading-5 text-muted-foreground">${esc(note)}</div>` : ""}
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+              ${statusDot(stateTone)}
+              <span class="${missionControlMonoClass} text-muted-foreground">${esc(task.taskId)}</span>
+            </div>
+          </div>
+        </a>`;
+      }).join("")}
+    </div>
+  </section>`;
+};
+
+const renderMissionControlActivityLog = (model: FactoryChatIslandModel): string => {
+  const activity = model.workbench?.activity ?? [];
+  if (activity.length === 0) {
+    return `<section class="${missionControlPanelClass} p-4">
+      <div class="flex items-center justify-between gap-2">
+        <div class="${missionControlSectionLabelClass}">Decision Log</div>
+        <div class="text-[11px] text-muted-foreground">0</div>
+      </div>
+      <div class="mt-4 text-sm text-muted-foreground">Supervisor and receipt activity will appear here once work starts.</div>
+    </section>`;
+  }
+  return `<section class="${missionControlPanelClass} p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="${missionControlSectionLabelClass}">Decision Log</div>
+      <div class="text-[11px] text-muted-foreground">${esc(`${activity.length}`)}</div>
+    </div>
+    <div class="mt-3 space-y-2">
+      ${activity.slice(0, 8).map((entry) => {
+        const toneClass = entry.emphasis === "danger"
+          ? "text-destructive"
+          : entry.emphasis === "warning"
+            ? "text-warning"
+            : entry.emphasis === "success"
+              ? "text-success"
+              : entry.emphasis === "accent"
+                ? "text-primary"
+                : "text-muted-foreground";
+        return `<div class="${missionControlInsetClass} px-3 py-2.5">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold text-foreground">${esc(entry.title)}</div>
+              <div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(entry.summary)}</div>
+            </div>
+            <div class="shrink-0 ${missionControlMonoClass} ${toneClass}">${esc(entry.kind)}</div>
+          </div>
+          <div class="mt-2 ${missionControlMonoClass} text-muted-foreground">${esc(entry.meta)}</div>
+        </div>`;
+      }).join("")}
+    </div>
+  </section>`;
+};
+
+const renderMissionControlTranscriptSection = (
+  model: FactoryChatIslandModel,
+  body: string,
+  itemCount: number,
+): string => `<section class="${missionControlPanelClass} p-4">
+  <div class="flex items-center justify-between gap-2">
+    <div class="${missionControlSectionLabelClass}">Transcript</div>
+    <div class="text-[11px] text-muted-foreground">${esc(`${itemCount}`)}</div>
+  </div>
+  <div class="mt-3 space-y-3">${body}</div>
+</section>`;
+
+const renderMissionControlChatIsland = (model: FactoryChatIslandModel): string => {
+  const routeContext: FactoryChatRouteContext = {
+    mode: model.mode,
+    profileId: model.activeProfileId,
+    chatId: model.chatId,
+    objectiveId: model.objectiveId,
+    runId: model.runId,
+    jobId: model.jobId,
+    panel: model.panel,
+    focusKind: model.focusKind,
+    focusId: model.focusId,
+  };
+  const transcriptItems = synthesizedTranscriptItems(model);
+  const grouped = groupChatItems(transcriptItems);
+  const renderContext = {
+    mode: model.mode,
+    activeProfileId: model.activeProfileId,
+    activeProfileLabel: model.activeProfileLabel,
+    chatId: model.chatId,
+  };
+  const transcriptBody = grouped.length > 0
+    ? grouped.map((group) =>
+      group.kind === "single"
+        ? renderChatItem(group.item, renderContext)
+        : renderWorkGroup(group.items, renderContext)
+    ).join("")
+    : renderTranscriptEmptyState(model);
+  const liveStepsSection = renderFactoryRunSteps(model.activeRun, {
+    title: "Progress Log",
+    subtitle: "Recent supervisor steps and worker updates land here while the thread is active.",
+  });
+  const liveCodexSection = model.selectedThread ? "" : renderLiveCodexExecution(model);
+  return `<div class="chat-stack mx-auto flex w-full max-w-[1440px] flex-col gap-3 px-3 pb-4 pt-3 md:px-4 xl:px-6" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
+    ${renderMissionControlProgressCard(model)}
+    <div class="grid gap-3 2xl:grid-cols-[minmax(0,1.18fr)_minmax(360px,0.82fr)]">
+      <section class="space-y-3">
+        ${renderMissionControlFocusCard(model)}
+        ${liveStepsSection}
+        ${liveCodexSection}
+      </section>
+      <aside class="space-y-3">
+        ${renderMissionControlTaskList(model, routeContext)}
+        ${renderMissionControlActivityLog(model)}
+      </aside>
+    </div>
+    ${renderMissionControlTranscriptSection(model, transcriptBody, transcriptItems.length)}
+  </div>`;
+};
+
 const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
   renderEmptyState({
     icon: iconChat("h-6 w-6"),
@@ -768,6 +1160,11 @@ const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
+const isGenericCompletedNextAction = (value?: string): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "investigation is complete." || normalized === "objective is complete.";
+};
+
 const objectiveSidebarStateValue = (objective: Pick<FactoryChatObjectiveNav, "phase" | "status" | "integrationStatus" | "slotState">): string | undefined =>
   objective.phase || objective.status || objective.integrationStatus || objective.slotState;
 
@@ -779,28 +1176,100 @@ const isRunningSidebarObjective = (objective: FactoryChatObjectiveNav): boolean 
   return state !== "blocked" && state !== "conflicted";
 };
 
-const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArray<FactoryChatItem> => {
-  if (model.items.length > 0) return model.items;
+const blockedObjectiveTranscriptItem = (
+  model: FactoryChatIslandModel,
+): FactoryChatItem | undefined => {
   const thread = model.selectedThread;
+  const workbench = model.workbench;
+  const isBlockedWorkbench = workbench?.summary.phase === "blocked" || workbench?.summary.status === "blocked";
+  if (!thread?.blockedReason && !isBlockedWorkbench) return undefined;
+  const title = thread?.title ?? workbench?.summary.title;
+  if (!title) return undefined;
+  const currentSignal = compactStatusText(
+    thread?.summary
+      ?? thread?.latestDecisionSummary
+      ?? thread?.blockedExplanation
+      ?? thread?.blockedReason
+      ?? workbench?.focus?.summary
+      ?? workbench?.focusedTask?.latestSummary
+      ?? workbench?.summary.latestDecisionSummary
+      ?? workbench?.summary.nextAction
+      ?? "",
+    220,
+  );
+  const blocker = compactStatusText(
+    thread?.blockedExplanation
+      ?? thread?.blockedReason
+      ?? workbench?.focus?.summary
+      ?? "",
+    220,
+  );
+  const next = compactStatusText(thread?.nextAction ?? workbench?.summary.nextAction ?? "", 220);
+  const lines = [
+    `${title} is blocked and handed back to Chat.`,
+    currentSignal ? `What we know: ${currentSignal}` : "",
+    blocker && blocker !== currentSignal ? `Still missing: ${blocker}` : "",
+    next ? `Tracked next step: ${next}` : "",
+    "Chat can explain the current evidence or inspect the repo with a read-only Codex probe. Use `/react <guidance>` to continue the tracked objective.",
+  ].filter(Boolean);
+  return {
+    key: `objective-blocked-handoff-${thread?.objectiveId ?? workbench?.summary.objectiveId ?? model.objectiveId ?? "current"}-${thread?.latestDecisionAt ?? thread?.updatedAt ?? 0}`,
+    kind: "assistant",
+    body: lines.join("\n\n"),
+    meta: "Blocked handoff",
+  };
+};
+
+const hasDurableObjectiveHandoff = (
+  items: ReadonlyArray<FactoryChatItem>,
+): boolean => items.some((item) => item.key.includes("-objective-handoff-"));
+
+const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArray<FactoryChatItem> => {
+  const thread = model.selectedThread;
+  if (hasDurableObjectiveHandoff(model.items)) return model.items;
+  const blockedHandoff = blockedObjectiveTranscriptItem(model);
+  if (model.items.length > 0) {
+    return blockedHandoff ? [...model.items, blockedHandoff] : model.items;
+  }
   const summary = thread?.summary?.trim();
+  if (blockedHandoff) return [blockedHandoff];
   if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !summary) return model.items;
   const detail = thread.nextAction?.trim();
   return [{
     key: `objective-summary-${thread.objectiveId}-${thread.status}`,
     kind: "assistant",
-    body: detail && detail !== summary ? `${summary}\n\nNext: ${detail}` : summary,
+    body: detail && detail !== summary && !(thread.status === "completed" && isGenericCompletedNextAction(detail))
+      ? `${summary}\n\nNext: ${detail}`
+      : summary,
     meta: displayLabel(thread.status) || thread.status,
   }];
 };
 
-export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
-  const workbench = renderCenterWorkbench(model);
+type FactoryTranscriptSectionOptions = {
+  readonly objectiveHref?: (objectiveId: string) => string;
+  readonly sectionLabel?: string;
+  readonly emptyState?: {
+    readonly title?: string;
+    readonly message?: string;
+    readonly detail?: string;
+  };
+};
+
+const renderTranscriptContent = (
+  model: FactoryChatIslandModel,
+  options?: FactoryTranscriptSectionOptions,
+): {
+  readonly body: string;
+  readonly count: number;
+} => {
   const transcriptItems = synthesizedTranscriptItems(model);
   const grouped = groupChatItems(transcriptItems);
   const renderContext = {
+    mode: model.mode,
     activeProfileId: model.activeProfileId,
     activeProfileLabel: model.activeProfileLabel,
     chatId: model.chatId,
+    objectiveHref: options?.objectiveHref,
   };
   const body = grouped.length > 0
     ? grouped.map((group) =>
@@ -808,16 +1277,49 @@ export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
         ? renderChatItem(group.item, renderContext)
         : renderWorkGroup(group.items, renderContext)
     ).join("")
-    : renderTranscriptEmptyState(model);
+    : renderEmptyState({
+        icon: iconChat("h-6 w-6"),
+        tone: "info",
+        eyebrow: "Ready",
+        title: options?.emptyState?.title ?? (model.objectiveId ? "This thread is quiet." : "Start a new thread"),
+        message: options?.emptyState?.message ?? (
+          model.objectiveId
+            ? "No transcript items have landed yet. Ask for status, react to a task, or wait for the next supervisor update."
+            : `Describe what ${model.activeProfileLabel} should investigate, fix, or review.`
+        ),
+        detail: options?.emptyState?.detail ?? (
+          model.objectiveId
+            ? "Use /react, /cleanup, /promote, /cancel, /archive, or /abort-job from the composer below."
+            : "Slash commands still work here when you want a direct Factory action instead of a new prompt."
+        ),
+        minHeightClass: "min-h-[320px]",
+      });
+  return {
+    body,
+    count: transcriptItems.length,
+  };
+};
+
+export const renderFactoryTranscriptSection = (
+  model: FactoryChatIslandModel,
+  options?: FactoryTranscriptSectionOptions,
+): string => {
+  const content = renderTranscriptContent(model, options);
+  return `<section class="space-y-2">
+    <div class="flex items-center justify-between gap-2">
+      <div class="${sectionLabelClass}">${esc(options?.sectionLabel ?? "Transcript")}</div>
+      <div class="text-[11px] text-muted-foreground">${esc(`${content.count}`)}</div>
+    </div>
+    ${content.body}
+  </section>`;
+};
+
+export const factoryChatIsland = (model: FactoryChatIslandModel): string => {
+  if (isMissionControlMode(model.mode)) return renderMissionControlChatIsland(model);
+  const workbench = renderCenterWorkbench(model);
   return `<div class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 pt-4 md:px-8 xl:px-10" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-active-profile-summary="${esc(model.activeProfileSummary ?? "")}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
     ${workbench}
-    <section class="space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <div class="${sectionLabelClass}">Transcript</div>
-        <div class="text-[11px] text-muted-foreground">${esc(`${transcriptItems.length}`)}</div>
-      </div>
-      ${body}
-    </section>
+    ${renderFactoryTranscriptSection(model)}
   </div>`;
 };
 
@@ -879,10 +1381,10 @@ const renderSidebarSignalCard = (obj: FactorySelectedObjectiveCard): string => {
     : obj.nextAction
       ? iconNext("h-4 w-4")
       : iconProject("h-4 w-4");
-  return `<div class="rounded-xl border border-border/80 bg-muted/65 px-3 py-3">
+  return `<div class="border border-border/80 bg-muted/45 px-3 py-3">
     <div class="flex items-start justify-between gap-3">
       <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
-      <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border ${iconBadgeToneClass(tone)}">
+      <span class="flex h-8 w-8 shrink-0 items-center justify-center border ${iconBadgeToneClass(tone)}">
         ${icon}
       </span>
     </div>
@@ -910,7 +1412,7 @@ const renderSidebarDetailRows = (obj: FactorySelectedObjectiveCard): string => {
     { label: "Checks", value: checksValue, icon: iconCheckCircle("h-3.5 w-3.5") },
     { label: outputLabel, value: outputValue, icon: outputIcon },
   ];
-  return `<div class="rounded-xl border border-border/80 bg-muted/65 px-3 py-1.5">
+  return `<div class="border border-border/80 bg-muted/45 px-3 py-1.5">
     ${rows.map((row, index) => `<div class="flex items-start justify-between gap-3 py-2 ${index > 0 ? "border-t border-border/70" : ""}">
       <div class="flex min-w-0 items-center gap-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
         <span class="text-muted-foreground">${row.icon}</span>
@@ -921,41 +1423,50 @@ const renderSidebarDetailRows = (obj: FactorySelectedObjectiveCard): string => {
   </div>`;
 };
 
-const renderSidebarLinks = (profileId: string, obj: FactorySelectedObjectiveCard): string => {
-  const otherThreadsHref = withQueryParam(factoryChatQuery({ profileId }), "all", "1");
+const renderSidebarLinks = (
+  profileId: string,
+  obj: FactorySelectedObjectiveCard,
+  mode?: FactoryViewMode,
+): string => {
+  const targetProfileId = obj.profileId ?? profileId;
+  const otherThreadsHref = withQueryParam(factoryChatQuery({ mode, profileId: targetProfileId }), "all", "1");
+  const receiptsHref = `/factory${factoryChatQuery({
+    mode,
+    profileId: targetProfileId,
+    objectiveId: obj.objectiveId,
+    panel: "receipts",
+  })}`;
   return `<div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
     <a class="font-medium text-primary hover:underline" href="${otherThreadsHref}">See other threads</a>
-    <a class="font-medium text-primary hover:underline" href="${obj.receiptsLink}">Receipts</a>
+    <a class="font-medium text-primary hover:underline" href="${receiptsHref}">Receipts</a>
   </div>`;
 };
 
 
 const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjectiveNav): string => {
   const href = factoryChatQuery({
+    mode: model.mode,
     profileId: objective.profileId || model.activeProfileId,
     objectiveId: objective.objectiveId,
   });
   const selectedClass = objective.selected
-    ? "border-primary/30 bg-primary/10"
-    : "border-border bg-muted hover:bg-accent";
+    ? "border-primary bg-primary/5"
+    : "border-transparent bg-transparent hover:bg-accent/45";
   const displayStatus = objective.blockedReason ? "blocked" : (objective.phase || objective.status);
   const summary = compactStatusText(objective.blockedReason ?? objective.summary ?? "", 92);
   const tone = toneForValue(displayStatus);
-  return `<a class="block min-w-0 rounded-xl border px-3 py-2.5 transition ${selectedClass}" href="${href}">
+  return `<a class="block min-w-0 border-l-2 px-3 py-2.5 transition ${selectedClass}" href="${href}" data-factory-objective-link="true" data-selected="${objective.selected ? "true" : "false"}" data-objective-id="${esc(objective.objectiveId)}">
     <div class="flex min-w-0 items-start gap-2.5">
-      <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-border/80 bg-background/70 text-muted-foreground">
-        ${iconProject("h-4 w-4")}
-      </span>
       <div class="min-w-0 flex-1">
         <div class="text-sm font-semibold leading-5 text-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(objective.title)}</div>
         ${summary ? `<div class="mt-1 text-[11px] leading-4 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">${esc(summary)}</div>` : ""}
-        ${objective.profileLabel ? `<div class="mt-1.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">${esc(objective.profileLabel)}</div>` : ""}
+        ${objective.profileLabel ? `<div class="mt-1.5 text-[10px] font-medium text-muted-foreground">${esc(objective.profileLabel)}</div>` : ""}
         ${typeof objective.tokensUsed === "number" ? renderObjectiveTokenCallout(objective.tokensUsed) : ""}
       </div>
     </div>
     <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
       <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-        <span class="inline-flex items-center gap-1.5 uppercase tracking-[0.18em]" title="${esc(displayLabel(displayStatus) || displayStatus)}">
+        <span class="inline-flex items-center gap-1.5" title="${esc(displayLabel(displayStatus) || displayStatus)}">
           ${statusDot(tone)}
           <span class="sr-only">${esc(displayLabel(displayStatus) || displayStatus)}</span>
         </span>
@@ -979,7 +1490,11 @@ const renderSidebarEmptyState = (input: {
     minHeightClass: "min-h-[168px]",
   });
 
-const renderSidebarMetrics = (profileId: string, obj?: FactorySelectedObjectiveCard): string => {
+const renderSidebarMetrics = (
+  profileId: string,
+  obj?: FactorySelectedObjectiveCard,
+  mode?: FactoryViewMode,
+): string => {
   if (!obj) return "";
   return `<section class="space-y-2">
     <div class="flex items-center justify-between gap-2">
@@ -989,7 +1504,7 @@ const renderSidebarMetrics = (profileId: string, obj?: FactorySelectedObjectiveC
     ${typeof obj.tokensUsed === "number" ? renderSidebarTokenHero(obj.tokensUsed) : ""}
     ${renderSidebarSignalCard(obj)}
     ${renderSidebarDetailRows(obj)}
-    ${renderSidebarLinks(profileId, obj)}
+    ${renderSidebarLinks(profileId, obj, mode)}
   </section>`;
 };
 
@@ -999,6 +1514,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
   const visiblePreviousSessions = model.showAll ? previousSessions : previousSessions.slice(0, 5);
   const hasMorePreviousSessions = !model.showAll && previousSessions.length > 5;
   const selectedObjectiveQuery = factoryChatQuery({
+    mode: model.mode,
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: selectedObjective?.objectiveId,
@@ -1010,7 +1526,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
     : renderSidebarEmptyState({
         eyebrow: "Running",
         title: "No running objectives",
-        message: "Queued, active, and integrating work will stay pinned here across profiles.",
+        message: "Queued, active, and integrating work for this profile will stay pinned here.",
       });
   const previousSessionCards = visiblePreviousSessions.length > 0
     ? visiblePreviousSessions.map((objective) => renderObjectiveLink(model, objective)).join("")
@@ -1022,19 +1538,15 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
   const profileLinks = model.profiles.length > 0
     ? model.profiles.map((profile) => {
         const selectedClass = profile.selected
-          ? "border-primary/30 bg-primary/10 text-primary"
-          : "border-border bg-secondary/65 text-muted-foreground hover:bg-accent hover:text-foreground";
-        return `<a class="rounded-full border px-3 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
-          profileId: profile.id,
-        })}">${esc(profile.label)}</a>`;
+          ? "border-primary text-foreground"
+          : "border-transparent text-muted-foreground hover:border-border hover:text-foreground";
+        return `<a class="border-b-2 px-0 py-1 text-[11px] font-medium transition ${selectedClass}" href="${esc(profile.href)}">${esc(profile.label)}</a>`;
       }).join("")
     : "";
   return `<div class="space-y-3 px-3 py-3 md:px-3.5">
-    <div class="space-y-2">
-      <a class="flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition" href="/receipt">
-        ${iconReceipt("text-primary")} Receipt
-      </a>
-      <div class="flex flex-wrap gap-1.5">
+    <div class="border-b border-border pb-3">
+      <a class="text-[11px] font-medium text-muted-foreground transition hover:text-foreground" href="/receipt">receipt / factory</a>
+      <div class="mt-2 flex flex-wrap gap-4">
         ${profileLinks}
       </div>
     </div>
@@ -1047,7 +1559,7 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
         ${runningObjectiveCards}
       </div>
     </section>
-    ${renderSidebarMetrics(model.activeProfileId, selectedObjective)}
+    ${renderSidebarMetrics(model.activeProfileId, selectedObjective, model.mode)}
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} Previous Sessions</div>
@@ -1063,13 +1575,76 @@ const factoryRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySe
   </div>`;
 };
 
-export const factorySidebarIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard): string => factoryRailIsland(model, selectedObjective);
+const missionControlRailIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard): string => {
+  const runningObjectives = model.objectives.filter((objective) => isRunningSidebarObjective(objective));
+  const previousSessions = model.objectives.filter((objective) => !isRunningSidebarObjective(objective));
+  const visiblePreviousSessions = model.showAll ? previousSessions : previousSessions.slice(0, 6);
+  const selectedObjectiveQuery = factoryChatQuery({
+    mode: model.mode,
+    profileId: model.activeProfileId,
+    chatId: model.chatId,
+    objectiveId: selectedObjective?.objectiveId,
+    panel: model.panel,
+  });
+  const viewAllQuery = `${selectedObjectiveQuery}${selectedObjectiveQuery.includes("?") ? "&" : "?"}all=1`;
+  const profileLinks = model.profiles.length > 0
+    ? model.profiles.map((profile) => {
+      const selectedClass = profile.selected
+        ? "border-primary text-foreground"
+        : "border-transparent text-muted-foreground hover:border-border hover:text-foreground";
+      return `<a class="border-b-2 px-0 py-1 text-[11px] font-medium transition ${selectedClass}" href="${factoryChatQuery({
+        mode: model.mode,
+        profileId: profile.id,
+      })}">${esc(profile.label)}</a>`;
+    }).join("")
+    : "";
+  const renderSection = (title: string, count: number, content: string, footer?: string): string => `<section class="${missionControlPanelClass} p-3">
+    <div class="flex items-center justify-between gap-2">
+      <div class="${missionControlSectionLabelClass}">${esc(title)}</div>
+      <div class="${missionControlMonoClass} text-muted-foreground">${esc(String(count))}</div>
+    </div>
+    <div class="mt-3 space-y-2">${content}</div>
+    ${footer ? `<div class="mt-3">${footer}</div>` : ""}
+  </section>`;
+  return `<div class="space-y-3 px-3 py-3">
+    <section class="${missionControlPanelClass} p-3">
+      <a class="text-[11px] font-medium text-muted-foreground transition hover:text-foreground" href="/receipt">receipt / factory</a>
+      <div class="mt-3 flex flex-wrap gap-4">
+        ${profileLinks}
+      </div>
+      ${selectedObjective ? `<div class="mt-3">${renderSidebarMetrics(model.activeProfileId, selectedObjective, model.mode)}</div>` : ""}
+    </section>
+    ${renderSection(
+      "Objective Queue",
+      runningObjectives.length,
+      runningObjectives.length > 0
+        ? runningObjectives.map((objective) => renderObjectiveLink(model, objective)).join("")
+        : `<div class="${missionControlInsetClass} px-3 py-3 text-sm text-muted-foreground">No live objectives are running right now.</div>`,
+    )}
+    ${renderSection(
+      "Recent Threads",
+      previousSessions.length,
+      visiblePreviousSessions.length > 0
+        ? visiblePreviousSessions.map((objective) => renderObjectiveLink(model, objective)).join("")
+        : `<div class="${missionControlInsetClass} px-3 py-3 text-sm text-muted-foreground">Completed and archived objectives will show up here.</div>`,
+      !model.showAll && previousSessions.length > visiblePreviousSessions.length
+        ? `<a href="/factory${viewAllQuery}" class="text-[11px] font-medium text-primary hover:underline">View all recent threads</a>`
+        : "",
+    )}
+  </div>`;
+};
+
+export const factorySidebarIsland = (model: FactoryNavModel, selectedObjective?: FactorySelectedObjectiveCard): string =>
+  isMissionControlMode(model.mode)
+    ? missionControlRailIsland(model, selectedObjective)
+    : factoryRailIsland(model, selectedObjective);
 
 const isTerminalJobStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
-export const factoryChatShell = (model: FactoryChatShellModel): string => {
+const renderDefaultFactoryShell = (model: FactoryChatShellModel): string => {
   const routeContext: FactoryChatRouteContext = {
+    mode: model.mode,
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: model.objectiveId,
@@ -1082,12 +1657,21 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
   const shellQuery = factoryChatQuery(routeContext);
   const composerRouteContext: FactoryChatRouteContext = model.inspector.objectiveMissing
     ? {
+        mode: model.mode,
         profileId: model.activeProfileId,
         panel: model.panel,
       }
     : routeContext;
   const composerQuery = factoryChatQuery(composerRouteContext);
   const currentJobId = model.inspector.objectiveMissing ? undefined : composerJobId(model);
+  const missionControlHref = modeSwitchHref(routeContext, "mission-control");
+  const workbenchViewHref = workbenchHref(routeContext);
+  const islandBindings = factoryShellIslandBindings(shellQuery);
+  const profileSummary = shellProfileSummary(model);
+  const newChatHref = `/factory/new-chat${factoryChatQuery({
+    mode: model.mode,
+    profileId: model.activeProfileId,
+  })}`;
   const composerPlaceholder = model.inspector.objectiveMissing
     ? "This thread no longer exists. Send a message to start a new thread."
     : model.objectiveId
@@ -1103,46 +1687,72 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
-  <script src="/assets/htmx.min.js"></script>
+  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
+  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-factory-chat data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden md:h-screen md:overflow-hidden">
-  <div class="relative min-h-screen bg-background text-foreground md:h-screen">
-    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,hsl(13_73%_55%/0.06),transparent_40%),radial-gradient(circle_at_top_right,hsl(210_38%_65%/0.08),transparent_40%)]"></div>
-    <div class="relative flex min-h-screen flex-col md:grid md:h-screen md:min-h-0 md:grid-cols-[248px_minmax(0,1fr)_320px] lg:grid-cols-[256px_minmax(0,1fr)_336px] md:overflow-hidden">
+<body data-factory-chat data-factory-mode="${esc(model.mode ?? "default")}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden md:h-screen md:overflow-hidden">
+  <div class="min-h-screen bg-background text-foreground md:h-screen">
+    <div id="factory-live-root" ${sseConnectAttrs(factoryEventsPath(shellQuery))} class="flex min-h-screen flex-col md:grid md:h-screen md:min-h-0 md:grid-cols-[248px_minmax(0,1fr)_320px] lg:grid-cols-[256px_minmax(0,1fr)_336px] md:overflow-hidden">
       <aside class="order-2 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:order-0 md:min-h-0 md:border-r md:border-t-0">
         <div class="factory-scrollbar max-h-[40vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
-          <div id="factory-sidebar" hx-get="/factory/island/sidebar${shellQuery}" hx-swap="innerHTML">
+          <div id="factory-sidebar" ${liveIslandAttrs(islandBindings.sidebar)}>
             ${factoryRailIsland(model.nav, model.inspector.selectedObjective)}
           </div>
         </div>
       </aside>
       <main class="order-1 min-w-0 overflow-hidden bg-background md:order-0 md:min-h-0">
         <div class="flex min-h-screen flex-col md:h-full md:min-h-0">
-          <header class="shrink-0 border-b border-border bg-card/80 backdrop-blur-xl">
+          <header class="shrink-0 border-b border-border bg-card">
             <div class="flex items-center justify-between gap-3 px-4 py-2.5">
               <div class="min-w-0 flex flex-1 items-center gap-2 overflow-x-auto factory-scrollbar">
-                <span class="flex items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} Thread</span>
-                <h1 id="factory-shell-title" class="min-w-0 truncate text-sm font-semibold text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
-                <span id="factory-shell-status-pills" class="contents">${renderShellStatusPills(model)}</span>
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2 overflow-x-auto factory-scrollbar">
+                    <span class="text-[11px] font-medium text-muted-foreground">receipt / factory</span>
+                    <h1 id="factory-shell-title" class="min-w-0 truncate text-sm font-semibold text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
+                    <span id="factory-shell-status-pills" class="contents">${renderShellStatusPills(model)}</span>
+                  </div>
+                  ${profileSummary ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(profileSummary)}</div>` : ""}
+                </div>
               </div>
-              <div class="flex shrink-0 items-center gap-1.5">
+              <div id="factory-shell-controls" class="flex shrink-0 items-center gap-1.5">
+                ${renderHeaderProfileSelect({
+                  id: "factory-shell-profile-select",
+                  label: "Profile",
+                  profiles: model.nav.profiles,
+                })}
                 <a
-                  class="group inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary shadow-sm transition hover:border-primary/35 hover:bg-primary/15 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
-                  href="/factory/new-chat?profile=${encodeURIComponent(model.activeProfileId)}"
+                  class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  href="${workbenchViewHref}"
+                  aria-label="Open workbench"
+                  title="Workbench"
+                >
+                  Workbench
+                </a>
+                <a
+                  class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  href="${missionControlHref}"
+                  aria-label="Open mission control"
+                  title="Mission control"
+                >
+                  Mission Control
+                </a>
+                <a
+                  class="inline-flex items-center justify-center rounded-md border border-primary/20 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:border-primary/35 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  href="${newChatHref}"
                   aria-label="Start a new chat"
                   title="New chat"
                 >
-                  ${iconPlus("h-3 w-3")}
+                  New Chat
                 </a>
               </div>
             </div>
           </header>
           <section id="factory-chat-scroll" class="factory-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <div id="factory-chat" data-active-profile-label="${esc(model.activeProfileLabel)}" hx-get="/factory/island/chat${shellQuery}" hx-swap="innerHTML">
+            <div id="factory-chat" data-active-profile-label="${esc(model.activeProfileLabel)}" ${liveIslandAttrs(islandBindings.chat)}>
               ${factoryChatIsland(model.chat)}
             </div>
             <div id="factory-chat-live" class="chat-stack mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 pb-4 md:px-8 xl:px-10">
-              <div id="factory-chat-streaming" class="space-y-2" aria-live="polite"></div>
+              ${renderFactoryStreamingShell(model.activeProfileLabel)}
               <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
             </div>
           </section>
@@ -1154,11 +1764,11 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
                 <div class="${composerPanelClass}">
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
                     <textarea id="factory-prompt" name="prompt" class="${composerTextareaClass} sm:min-h-[104px]" rows="2" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <button id="factory-composer-submit" class="inline-flex min-h-[88px] w-full shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem] sm:min-h-[104px]" type="submit">Send</button>
+                    <button id="factory-composer-submit" class="inline-flex min-h-[88px] w-full shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground sm:w-[8.5rem] sm:min-h-[104px]" type="submit">Send</button>
                   </div>
-                  <div id="factory-composer-completions" class="hidden max-h-56 overflow-auto rounded-xl border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                  <div id="factory-composer-completions" class="hidden max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
                 </div>
-                <div id="factory-composer-status" class="mt-2 hidden rounded-lg border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+                <div id="factory-composer-status" class="mt-2 hidden rounded-sm border border-border bg-muted px-3 py-1.5 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
               </form>
             </div>
           </section>
@@ -1166,14 +1776,170 @@ export const factoryChatShell = (model: FactoryChatShellModel): string => {
       </main>
       <aside class="order-3 min-w-0 overflow-hidden border-t border-sidebar-border bg-sidebar text-sidebar-foreground md:min-h-0 md:border-l md:border-t-0">
         <div class="factory-scrollbar max-h-[45vh] overflow-x-hidden overflow-y-auto md:h-full md:max-h-none">
-          <div id="factory-inspector" class="factory-inspector-panel">
+          <div id="factory-inspector" class="factory-inspector-panel" ${liveIslandAttrs(islandBindings.inspector)}>
             ${factoryInspectorIsland(model.inspector)}
           </div>
         </div>
       </aside>
     </div>
   </div>
-  <script src="/assets/factory-client.js"></script>
+  <script src="/assets/factory-client.js?v=${CSS_VERSION}"></script>
 </body>
 </html>`;
 };
+
+const renderMissionControlShell = (model: FactoryChatShellModel): string => {
+  const routeContext: FactoryChatRouteContext = {
+    mode: model.mode,
+    profileId: model.activeProfileId,
+    chatId: model.chatId,
+    objectiveId: model.objectiveId,
+    runId: model.runId,
+    jobId: model.jobId,
+    panel: model.panel,
+    focusKind: model.focusKind,
+    focusId: model.focusId,
+  };
+  const shellQuery = factoryChatQuery(routeContext);
+  const composerRouteContext: FactoryChatRouteContext = model.inspector.objectiveMissing
+    ? {
+        mode: model.mode,
+        profileId: model.activeProfileId,
+        panel: model.panel,
+      }
+    : routeContext;
+  const composerQuery = factoryChatQuery(composerRouteContext);
+  const currentJobId = model.inspector.objectiveMissing ? undefined : composerJobId(model);
+  const standardHref = modeSwitchHref(routeContext, "default");
+  const workbenchViewHref = workbenchHref(routeContext);
+  const islandBindings = factoryShellIslandBindings(shellQuery);
+  const profileSummary = shellProfileSummary(model);
+  const newChatHref = `/factory/new-chat${factoryChatQuery({
+    mode: model.mode,
+    profileId: model.activeProfileId,
+  })}`;
+  const composerPlaceholder = model.inspector.objectiveMissing
+    ? "This thread no longer exists. Send a message to start a new thread."
+    : model.objectiveId
+      ? "Ask for status or use /react, /promote, /cancel, /cleanup, /archive, /abort-job..."
+      : "Describe the next operator task to start a new thread.";
+  const summary = model.chat.workbench?.summary;
+  const statTiles = [
+    ["profile", model.activeProfileLabel],
+    ["phase", displayLabel(summary?.phase || model.inspector.selectedObjective?.phase || model.inspector.selectedObjective?.status || "idle") || "Idle"],
+    ["tasks", `${summary?.activeTaskCount ?? 0} active / ${summary?.taskCount ?? 0} total`],
+    ["checks", typeof summary?.checksCount === "number" && summary.checksCount > 0 ? `${summary.checksCount}` : "0"],
+  ].map(([label, value]) => `<div class="${missionControlInsetClass} px-3 py-2">
+      <div class="${missionControlSectionLabelClass}">${esc(label)}</div>
+      <div class="mt-1 text-sm font-semibold text-foreground">${esc(value)}</div>
+    </div>`).join("");
+  const hotkeys = [
+    ["tab", "cycle pane"],
+    ["j / k", "queue nav"],
+    ["1-5", "inspector"],
+    ["c", "composer"],
+    ["esc", "clear"],
+  ].map(([key, label]) => `<span class="${missionControlHotkeyClass}"><span class="font-semibold text-foreground">${esc(key)}</span><span>${esc(label)}</span></span>`).join("");
+  return `<!doctype html>
+<html class="dark h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receipt Factory Mission Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
+  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
+  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
+</head>
+<body data-factory-chat data-factory-mode="mission-control" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="font-sans antialiased overflow-x-hidden">
+  <div class="mission-control-shell min-h-screen bg-background text-foreground">
+    <div id="factory-live-root" ${sseConnectAttrs(factoryEventsPath(shellQuery))} class="mx-auto flex min-h-screen max-w-[1680px] flex-col gap-3 px-3 py-3 lg:px-4">
+      <header class="${missionControlPanelClass} px-4 py-3">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-[11px] font-medium text-muted-foreground">receipt / factory</div>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <h1 id="factory-shell-title" class="min-w-0 truncate text-lg font-semibold tracking-tight text-foreground" data-profile-label>${esc(shellHeaderTitle(model))}</h1>
+              <span id="factory-shell-status-pills" class="contents">${renderShellStatusPills(model)}</span>
+            </div>
+            ${profileSummary ? `<div class="mt-2 max-w-[64ch] text-sm leading-6 text-muted-foreground">${esc(profileSummary)}</div>` : ""}
+          </div>
+          <div id="factory-shell-controls" class="flex flex-wrap items-center gap-2">
+            ${renderHeaderProfileSelect({
+              id: "factory-shell-profile-select",
+              label: "Profile",
+              profiles: model.nav.profiles,
+            })}
+            <a class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${workbenchViewHref}">Workbench</a>
+            <a class="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground" href="${standardHref}">Standard View</a>
+            <a class="inline-flex items-center justify-center rounded-md border border-primary/30 bg-background px-3 py-2 text-sm font-medium text-primary transition hover:bg-primary/10" href="${newChatHref}" aria-label="Start a new chat">New Thread</a>
+          </div>
+        </div>
+        <div id="factory-shell-metrics" class="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+          ${statTiles}
+        </div>
+      </header>
+      <div class="grid min-h-0 flex-1 gap-3 xl:grid-cols-[300px_minmax(0,1fr)_360px]">
+        <aside id="factory-sidebar-shell" data-mission-control-pane="sidebar" data-pane-active="false" class="mission-control-pane min-w-0 ${missionControlPanelClass} overflow-hidden">
+          <div class="factory-scrollbar max-h-[42vh] overflow-y-auto xl:h-full xl:max-h-none">
+            <div id="factory-sidebar" ${liveIslandAttrs(islandBindings.sidebar)}>
+              ${factorySidebarIsland(model.nav, model.inspector.selectedObjective)}
+            </div>
+          </div>
+        </aside>
+        <main class="min-w-0">
+          <div class="grid gap-3">
+            <section id="factory-chat-shell" data-mission-control-pane="chat" data-pane-active="false" class="mission-control-pane min-w-0 ${missionControlPanelClass} overflow-hidden">
+              <div id="factory-chat-scroll" class="factory-scrollbar min-h-[360px] overflow-y-auto overscroll-contain xl:max-h-[calc(100vh-18rem)]">
+                <div id="factory-chat" data-active-profile-label="${esc(model.activeProfileLabel)}" ${liveIslandAttrs(islandBindings.chat)}>
+                  ${factoryChatIsland(model.chat)}
+                </div>
+                <div id="factory-chat-live" class="chat-stack mx-auto flex w-full max-w-[1440px] flex-col gap-3 px-3 pb-4 md:px-4 xl:px-6">
+                  ${renderFactoryStreamingShell(model.activeProfileLabel)}
+                  <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
+                </div>
+              </div>
+            </section>
+            <section id="factory-composer-shell" data-mission-control-pane="composer" data-pane-active="false" class="mission-control-pane ${missionControlPanelClass} p-3">
+              <form id="factory-composer" action="/factory/compose${composerQuery}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
+                <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="${esc(currentJobId ?? "")}" />
+                <label class="sr-only" for="factory-prompt">Factory prompt</label>
+                <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_10rem]">
+                  <div class="relative">
+                    <textarea id="factory-prompt" name="prompt" class="min-h-[112px] w-full resize-none rounded-md border border-border/80 bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/40" rows="3" placeholder="${esc(composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
+                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto rounded-md border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+                  </div>
+                  <button id="factory-composer-submit" class="inline-flex min-h-[112px] w-full items-center justify-center rounded-md border border-primary/40 bg-primary px-6 py-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
+                </div>
+                <div id="factory-composer-status" class="mt-2 hidden rounded-sm border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+              </form>
+            </section>
+          </div>
+        </main>
+        <aside id="factory-inspector-shell" data-mission-control-pane="inspector" data-pane-active="false" class="mission-control-pane min-w-0 ${missionControlPanelClass} overflow-hidden">
+          <div class="factory-scrollbar max-h-[42vh] overflow-y-auto xl:h-full xl:max-h-none">
+            <div id="factory-inspector" class="factory-inspector-panel" ${liveIslandAttrs(islandBindings.inspector)}>
+              ${factoryInspectorIsland(model.inspector)}
+            </div>
+          </div>
+        </aside>
+      </div>
+      <footer class="${missionControlPanelClass} px-4 py-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="${missionControlSectionLabelClass}">Hotkeys</div>
+          <div class="flex flex-wrap gap-2">${hotkeys}</div>
+        </div>
+      </footer>
+    </div>
+  </div>
+  <script src="/assets/factory-client.js?v=${CSS_VERSION}"></script>
+</body>
+</html>`;
+};
+
+export const factoryChatShell = (model: FactoryChatShellModel): string =>
+  isMissionControlMode(model.mode)
+    ? renderMissionControlShell(model)
+    : renderDefaultFactoryShell(model);

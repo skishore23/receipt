@@ -44,6 +44,11 @@ import { JobWorker, type JobHandler } from "./engine/runtime/job-worker";
 import { deriveJobFailureDecision } from "./engine/runtime/job-failure-policy";
 import { registerResonateAgentActionWorker } from "./engine/runtime/resonate-agent-actions";
 import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
+import {
+  renderFactoryStreamingResetFragment,
+  renderFactoryStreamingTokenFragment,
+} from "./views/factory-chat";
+import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "./db/client";
 
 // ============================================================================
 // Config
@@ -53,7 +58,7 @@ const PORT = Number(process.env.PORT ?? 8787);
 const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(process.cwd());
 const WORKSPACE_ROOT = FACTORY_RUNTIME.repoRoot;
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
-const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
+const JOB_BACKEND = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
 const STARTUP_SETTLE_MS = (() => {
   const fallback = JOB_BACKEND === "resonate" ? 1_000 : 0;
   const parsed = Number(process.env.RESONATE_STARTUP_SETTLE_MS ?? fallback);
@@ -157,22 +162,71 @@ const objectiveIdForJob = (job: { readonly payload: Record<string, unknown>; rea
     : undefined;
 };
 
+const profileIdForJob = (job: { readonly payload: Record<string, unknown>; readonly result?: unknown } | undefined): string | undefined => {
+  if (!job) return undefined;
+  const payloadProfile = job.payload.profile;
+  if (payloadProfile && typeof payloadProfile === "object" && !Array.isArray(payloadProfile)) {
+    const rootProfileId = typeof (payloadProfile as { readonly rootProfileId?: unknown }).rootProfileId === "string"
+      ? (payloadProfile as { readonly rootProfileId: string }).rootProfileId.trim()
+      : "";
+    if (rootProfileId) return rootProfileId;
+  }
+  const payloadProfileId = typeof job.payload.profileId === "string" && job.payload.profileId.trim()
+    ? job.payload.profileId.trim()
+    : undefined;
+  if (payloadProfileId) return payloadProfileId;
+  const result = job.result && typeof job.result === "object" && !Array.isArray(job.result)
+    ? job.result as Record<string, unknown>
+    : undefined;
+  if (result?.profile && typeof result.profile === "object" && !Array.isArray(result.profile)) {
+    const rootProfileId = typeof (result.profile as { readonly rootProfileId?: unknown }).rootProfileId === "string"
+      ? (result.profile as { readonly rootProfileId: string }).rootProfileId.trim()
+      : "";
+    if (rootProfileId) return rootProfileId;
+  }
+  return typeof result?.profileId === "string" && result.profileId.trim()
+    ? result.profileId.trim()
+    : undefined;
+};
+
+const agentStreamForJob = (job: { readonly payload: Record<string, unknown> } | undefined): string | undefined => {
+  if (!job) return undefined;
+  const payloadKind = typeof job.payload.kind === "string" ? job.payload.kind.trim() : "";
+  const payloadStream = typeof job.payload.stream === "string" && job.payload.stream.trim()
+    ? job.payload.stream.trim()
+    : undefined;
+  if (payloadKind !== "factory.run") return undefined;
+  return payloadStream;
+};
+
 const baseQueue = jsonlQueue({
   runtime: jobRuntime,
   stream: JOB_STREAM,
   watchDir: DATA_DIR,
-  expireLeasesOnRefresh: JOB_BACKEND === "jsonl",
+  expireLeasesOnRefresh: JOB_BACKEND === "local",
   fullRefreshWindowMs: Number(process.env.RESONATE_QUEUE_FULL_REFRESH_MS ?? (JOB_BACKEND === "resonate" ? 300_000 : 30_000)),
   onJobChange: async (jobs) => {
     for (const job of jobs) {
       sse.publish("jobs", job.id);
+      const agentStream = agentStreamForJob(job ? { payload: job.payload as Record<string, unknown> } : undefined);
+      if (agentStream) sse.publish("agent", agentStream);
       const objectiveId = objectiveIdForJob(job
         ? {
             payload: job.payload as Record<string, unknown>,
             result: job.result,
           }
         : undefined);
-      if (objectiveId) sse.publish("factory", objectiveId);
+      if (objectiveId) {
+        sse.publish("factory", objectiveId);
+        sse.publish("objective-runtime", objectiveId);
+      }
+      const profileId = profileIdForJob(job
+        ? {
+            payload: job.payload as Record<string, unknown>,
+            result: job.result,
+          }
+        : undefined);
+      if (profileId) sse.publish("profile-board", profileId);
 
       // Structurally sound auto-recovery for crashed/expired factory jobs
       // We enqueue a control job to reconcile the objective so the orchestrator
@@ -280,6 +334,8 @@ type AgentRunnerSpec = {
   readonly jobKind: string;
   readonly sseTopic: "agent";
   readonly sseTokenEvent: string;
+  readonly sseHtmlTokenEvent?: string;
+  readonly sseResetEvent?: string;
   readonly normalizeConfig: (input: Record<string, unknown>) => unknown;
   readonly runtime: unknown;
   readonly prompts: unknown;
@@ -305,6 +361,10 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
       ...payload,
       supervisorSessionId,
     };
+    const publishStreamingReset = () => {
+      if (!spec.sseResetEvent) return;
+      sse.publishData(spec.sseTopic, stream, spec.sseResetEvent, renderFactoryStreamingResetFragment());
+    };
     const onIterationBudgetExhausted = spec.autoContinueOnBudget
       ? createQueuedBudgetContinuation({
         queue,
@@ -315,28 +375,41 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
         continuationDepth: parseContinuationDepth(payload.continuationDepth),
       })
       : undefined;
-    const runnerResult = await spec.runFn({
-      ...payloadWithSession,
-      stream, runId, runStream, problem, config,
-      runtime: spec.runtime, prompts: spec.prompts,
-      llmText: (opts: Record<string, unknown>) => llmText({
-        ...(opts as { system?: string; user: string }),
-        onDelta: async (delta) => {
-          if (!delta) return;
-          sse.publishData(spec.sseTopic, stream, spec.sseTokenEvent, JSON.stringify({ runId, delta }));
-        },
-      }),
-      model: spec.model, promptHash: spec.promptHash, promptPath: spec.promptPath,
-      apiReady, apiNote, control,
-      onIterationBudgetExhausted,
-      broadcast: () => { sse.publish(spec.sseTopic, stream); sse.publish("receipt"); },
-      ...(spec.extras ?? {}),
-    });
-    return {
-      runId,
-      stream,
-      ...(runnerResult ?? {}),
-    };
+    publishStreamingReset();
+    try {
+      const runnerResult = await spec.runFn({
+        ...payloadWithSession,
+        stream, runId, runStream, problem, config,
+        runtime: spec.runtime, prompts: spec.prompts,
+        llmText: (opts: Record<string, unknown>) => llmText({
+          ...(opts as { system?: string; user: string }),
+          onDelta: async (delta) => {
+            if (!delta) return;
+            sse.publishData(spec.sseTopic, stream, spec.sseTokenEvent, JSON.stringify({ runId, delta }));
+            if (spec.sseHtmlTokenEvent) {
+              sse.publishData(
+                spec.sseTopic,
+                stream,
+                spec.sseHtmlTokenEvent,
+                renderFactoryStreamingTokenFragment({ runId, delta }),
+              );
+            }
+          },
+        }),
+        model: spec.model, promptHash: spec.promptHash, promptPath: spec.promptPath,
+        apiReady, apiNote, control,
+        onIterationBudgetExhausted,
+        broadcast: () => { sse.publish(spec.sseTopic, stream); sse.publish("receipt"); },
+        ...(spec.extras ?? {}),
+      });
+      return {
+        runId,
+        stream,
+        ...(runnerResult ?? {}),
+      };
+    } finally {
+      publishStreamingReset();
+    }
   };
 
 const delegationTools = createDelegationTools({
@@ -401,6 +474,8 @@ const agentRunner = createAgentRunner({
 const factoryRunner = createAgentRunner({
   defaultAgentId: "factory",
   defaultStream: "agents/factory", sseTopic: "agent", sseTokenEvent: "agent-token",
+  sseHtmlTokenEvent: "factory-stream-token",
+  sseResetEvent: "factory-stream-reset",
   jobKind: "factory.run",
   normalizeConfig: normalizeFactoryChatConfig, runtime: agentRuntime,
   prompts: AGENT_PROMPTS, model: FACTORY_CHAT_MODEL,
@@ -815,7 +890,7 @@ if (JOB_BACKEND === "resonate") {
   });
 }
 const startRuntimeWorkers = async (): Promise<void> => {
-  if (JOB_BACKEND === "jsonl") {
+  if (JOB_BACKEND === "local") {
     for (const worker of workers) worker.start();
     return;
   }
@@ -1169,7 +1244,7 @@ app.get("/assets/:file", async (c) => {
     return new Response(body, {
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": ext === ".css" ? "no-cache" : "public, max-age=3600",
+        "Cache-Control": ext === ".css" || ext === ".js" ? "no-cache" : "public, max-age=3600",
       },
     });
   } catch {
@@ -1179,8 +1254,8 @@ app.get("/assets/:file", async (c) => {
 
 app.notFound(() => text(404, "Not found"));
 
-const shouldServeHttp = JOB_BACKEND === "jsonl" || PROCESS_ROLE === "api";
-const shouldRunHeartbeats = JOB_BACKEND === "jsonl" || PROCESS_ROLE === "api";
+const shouldServeHttp = JOB_BACKEND === "local" || PROCESS_ROLE === "api";
+const shouldRunHeartbeats = JOB_BACKEND === "local" || PROCESS_ROLE === "api";
 const queueRefreshMs = Number(process.env.RESONATE_QUEUE_REFRESH_MS ?? 5_000);
 let uiWarmupScheduled = false;
 const scheduleUiWarmup = (): void => {
@@ -1237,18 +1312,32 @@ if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "api" && Number.isFinite(queu
   scheduleNextQueueRefresh();
 }
 
-const receiptWatcher = shouldServeHttp
-  ? (() => {
-      try {
-        return fs.watch(DATA_DIR, { persistent: false }, () => {
-          sse.publish("receipt");
-        });
-      } catch (err) {
-        console.warn("Receipt watcher failed:", err);
-        return undefined;
+let receiptWatcher: ReturnType<typeof setInterval> | undefined;
+if (shouldServeHttp) {
+  const db = getReceiptDb(DATA_DIR);
+  let lastSeq = pollLatestChangeSeq(db);
+  receiptWatcher = setInterval(() => {
+    try {
+      const changes = listChangesAfter(db, lastSeq);
+      if (changes.length === 0) return;
+      lastSeq = changes[changes.length - 1]!.seq;
+      for (const change of changes) {
+        sse.publish("receipt");
+        if (change.stream.startsWith("jobs/")) {
+          const jobId = change.stream.slice("jobs/".length);
+          if (jobId && !jobId.includes("/")) sse.publish("jobs", jobId);
+        }
+        if (change.stream.startsWith("factory/objectives/")) {
+          const objectiveId = change.stream.slice("factory/objectives/".length);
+          if (objectiveId && !objectiveId.includes("/")) sse.publish("factory", objectiveId);
+        }
       }
-    })()
-  : undefined;
+    } catch (err) {
+      console.warn("Receipt change poller failed:", err);
+    }
+  }, 500);
+  receiptWatcher.unref();
+}
 
 const SERVER_IDLE_TIMEOUT_SECONDS = 30;
 const serverOptions: Bun.Serve.Options<undefined> = {
@@ -1277,7 +1366,7 @@ const shutdown = (signal: string): void => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Receipt server shutting down (${signal})`);
-  receiptWatcher?.close();
+  if (receiptWatcher) clearInterval(receiptWatcher);
   if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
   for (const worker of workers) worker.stop();
   for (const hb of heartbeats) hb.stop();

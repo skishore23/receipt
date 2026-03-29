@@ -135,7 +135,7 @@ For server-driven workflows and UI routes:
 receipt dev
 ```
 
-`receipt dev` starts the local Resonate runtime by default. If you explicitly need the legacy single-process backend, use `JOB_BACKEND=jsonl receipt dev`.
+`receipt dev` starts the local SQLite runtime by default. If you need the multi-process dispatch stack, use `JOB_BACKEND=resonate receipt dev` or `bun run dev:resonate`.
 
 Route modules are auto-discovered from `src/agents/*.agent.ts`.
 

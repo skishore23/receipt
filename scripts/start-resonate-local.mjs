@@ -8,6 +8,7 @@ const cwd = process.cwd();
 const resonateUrl = process.env.RESONATE_URL ?? "http://127.0.0.1:8001";
 const resonateSqlitePath = process.env.RESONATE_SQLITE_PATH
   ?? path.join(cwd, ".receipt", "resonate", "resonate.db");
+const resonatePath = typeof Bun.which === "function" ? Bun.which("resonate") : null;
 
 let shuttingDown = false;
 const children = new Map();
@@ -36,7 +37,13 @@ const waitForResonate = async () => {
 
 await fs.mkdir(path.dirname(resonateSqlitePath), { recursive: true });
 
-const resonate = spawn("resonate", ["serve", "--aio-store-sqlite-path", resonateSqlitePath], {
+if (!resonatePath) {
+  throw new Error(
+    "[resonate-local] 'resonate' was not found on PATH. Install the Resonate CLI or use 'bun run start' for the local SQLite runtime.",
+  );
+}
+
+const resonate = spawn(resonatePath, ["serve", "--aio-store-sqlite-path", resonateSqlitePath], {
   cwd,
   env: process.env,
   stdio: "inherit",

@@ -9,6 +9,14 @@ export type FactoryLiveScopePayload = {
 export type FactoryComposeResponseBody = {
   readonly location?: string;
   readonly live?: FactoryLiveScopePayload;
+  readonly chat?: {
+    readonly chatId?: string;
+  };
+  readonly selection?: {
+    readonly objectiveId?: string;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+  };
   readonly error?: string;
 };
 

@@ -1,6 +1,7 @@
-import type { AgentState } from "../../modules/agent";
+import type { AgentEvent, AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
+import { displayLabel } from "../../views/ui";
 
 import { buildDetail, compactJsonValue, jsonRecordToMarkdown, truncateInline, tryParseJson } from "./formatters";
 import {
@@ -447,6 +448,60 @@ const formatRunMeta = (runId: string, state: AgentState, firstTs?: number): stri
   return parts.join(" · ");
 };
 
+const isGenericCompletedNextAction = (value?: string): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "investigation is complete." || normalized === "objective is complete.";
+};
+
+const objectiveHandoffItem = (
+  runId: string,
+  hash: string,
+  event: Extract<AgentEvent, { readonly type: "objective.handoff" }>,
+): FactoryChatItem => {
+  const title = event.title.trim();
+  if (event.status === "blocked") {
+    const lines = [
+      `${title} is blocked and handed back to Chat.`,
+      event.summary ? `What we know: ${event.summary}` : "",
+      event.blocker && event.blocker !== event.summary ? `Still missing: ${event.blocker}` : "",
+      event.nextAction ? `Tracked next step: ${event.nextAction}` : "",
+      "Chat can explain the current evidence or inspect the repo with a read-only Codex probe. Use `/react <guidance>` to continue the tracked objective.",
+    ].filter(Boolean);
+    return {
+      key: `${runId}-objective-handoff-${hash}`,
+      kind: "assistant",
+      body: lines.join("\n\n"),
+      meta: "Blocked handoff",
+    };
+  }
+  if (event.status === "completed") {
+    const nextAction = event.nextAction?.trim();
+    const lines = [
+      event.summary,
+      nextAction && nextAction !== event.summary && !isGenericCompletedNextAction(nextAction)
+        ? `Next: ${nextAction}`
+        : "",
+    ].filter(Boolean);
+    return {
+      key: `${runId}-objective-handoff-${hash}`,
+      kind: "assistant",
+      body: lines.join("\n\n"),
+      meta: "Completed handoff",
+    };
+  }
+  const lines = [
+    `${title} ${event.status === "completed" ? "completed" : `ended ${event.status}`} and handed back to Chat.`,
+    event.summary,
+    event.nextAction ? `Next: ${event.nextAction}` : "",
+  ].filter(Boolean);
+  return {
+    key: `${runId}-objective-handoff-${hash}`,
+    kind: "assistant",
+    body: lines.join("\n\n"),
+    meta: displayLabel(event.status) || event.status,
+  };
+};
+
 export const buildChatItemsForRun = (
   runId: string,
   chain: AgentRunChain,
@@ -457,7 +512,8 @@ export const buildChatItemsForRun = (
   const state = projection.state;
   const firstTs = projection.firstTs;
   const problem = projection.problem;
-  if (problem?.type === "problem.set") {
+  const hasObjectiveHandoff = chain.some((receipt) => receipt.body.type === "objective.handoff");
+  if (problem?.type === "problem.set" && !hasObjectiveHandoff) {
     items.push({
       key: `${runId}-user`,
       kind: "user",
@@ -469,6 +525,10 @@ export const buildChatItemsForRun = (
   for (const receipt of chain) {
     const event = receipt.body;
     if (event.type === "profile.selected") {
+      continue;
+    }
+    if (event.type === "objective.handoff") {
+      items.push(objectiveHandoffItem(runId, receipt.hash, event));
       continue;
     }
     if (event.type === "subagent.merged") {

@@ -1,11 +1,14 @@
 import type { ObjectiveAnalysis } from "../factory-cli/analyze";
 import type { FactoryState } from "../modules/factory";
-import type { FactoryObjectiveDetail } from "../services/factory-types";
+import type { FactoryBoardProjection, FactoryObjectiveDetail } from "../services/factory-types";
 import type { FactoryWorkbenchModel } from "./factory-workbench";
+
+export type FactoryViewMode = "default" | "mission-control";
 
 export type FactoryChatProfileNav = {
   readonly id: string;
   readonly label: string;
+  readonly href: string;
   readonly summary?: string;
   readonly selected: boolean;
 };
@@ -44,6 +47,8 @@ export type FactoryChatJobNav = {
 
 export type FactorySelectedObjectiveCard = {
   readonly objectiveId: string;
+  readonly profileId?: string;
+  readonly profileLabel?: string;
   readonly title: string;
   readonly status: string;
   readonly phase: string;
@@ -196,6 +201,7 @@ export type FactoryChatItem =
     };
 
 export type FactoryChatIslandModel = {
+  readonly mode?: FactoryViewMode;
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
   readonly chatId?: string;
@@ -207,6 +213,9 @@ export type FactoryChatIslandModel = {
   readonly panel?: FactoryInspectorPanel;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
+  readonly activeProfilePrimaryRole?: string;
+  readonly activeProfileRoles?: ReadonlyArray<string>;
+  readonly activeProfileResponsibilities?: ReadonlyArray<string>;
   readonly activeProfileSummary?: string;
   readonly activeProfileSections?: ReadonlyArray<FactoryProfileSectionView>;
   readonly activeProfileTools?: ReadonlyArray<string>;
@@ -220,6 +229,7 @@ export type FactoryChatIslandModel = {
 };
 
 export type FactoryNavModel = {
+  readonly mode?: FactoryViewMode;
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
   readonly chatId?: string;
@@ -232,6 +242,7 @@ export type FactoryNavModel = {
 export type FactoryInspectorPanel = "overview" | "analysis" | "execution" | "live" | "receipts";
 
 export type FactoryInspectorRouteModel = {
+  readonly mode?: FactoryViewMode;
   readonly panel: FactoryInspectorPanel;
   readonly activeProfileId: string;
   readonly chatId?: string;
@@ -259,6 +270,7 @@ export type FactoryInspectorModel = FactoryInspectorRouteModel & {
 };
 
 export type FactoryChatShellModel = {
+  readonly mode?: FactoryViewMode;
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
   readonly chatId?: string;
@@ -271,4 +283,113 @@ export type FactoryChatShellModel = {
   readonly chat: FactoryChatIslandModel;
   readonly nav: FactoryNavModel;
   readonly inspector: FactoryInspectorModel;
+};
+
+export type FactoryWorkbenchWorkspaceModel = {
+  readonly activeProfileId: string;
+  readonly activeProfileLabel: string;
+  readonly objectiveId?: string;
+  readonly focusKind?: "task" | "job";
+  readonly focusId?: string;
+  readonly filter: FactoryWorkbenchFilterKey;
+  readonly filters: ReadonlyArray<FactoryWorkbenchFilterModel>;
+  readonly selectedObjective?: FactorySelectedObjectiveCard;
+  readonly activeCodex?: FactoryLiveCodexCard;
+  readonly liveChildren?: ReadonlyArray<FactoryLiveChildCard>;
+  readonly activeRun?: FactoryLiveRunCard;
+  readonly workbench?: FactoryWorkbenchModel;
+  readonly board: FactoryBoardProjection;
+  readonly activeObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+  readonly pastObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+  readonly blocks: ReadonlyArray<FactoryWorkbenchBlockModel>;
+};
+
+export type FactoryWorkbenchPageModel = {
+  readonly activeProfileId: string;
+  readonly activeProfileLabel: string;
+  readonly chatId: string;
+  readonly objectiveId?: string;
+  readonly focusKind?: "task" | "job";
+  readonly focusId?: string;
+  readonly filter: FactoryWorkbenchFilterKey;
+  readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly chat: FactoryChatIslandModel;
+};
+
+export type FactoryWorkbenchFilterKey =
+  | "all"
+  | "objective.running"
+  | "objective.needs_attention"
+  | "objective.queued"
+  | "objective.completed";
+
+export type FactoryWorkbenchFilterModel = {
+  readonly key: FactoryWorkbenchFilterKey;
+  readonly label: string;
+  readonly count: number;
+  readonly selected: boolean;
+};
+
+export type FactoryWorkbenchStatModel = {
+  readonly key: string;
+  readonly label: string;
+  readonly value: string;
+};
+
+export type FactoryWorkbenchSummarySectionModel = {
+  readonly key: string;
+  readonly title: string;
+  readonly shape: "summary";
+  readonly empty: boolean;
+  readonly eyebrow?: string;
+  readonly headline: string;
+  readonly message: string;
+  readonly tokenCount?: string;
+  readonly stats: ReadonlyArray<FactoryWorkbenchStatModel>;
+};
+
+export type FactoryWorkbenchObjectiveListSectionModel = {
+  readonly key: string;
+  readonly title: string;
+  readonly shape: "objective-list";
+  readonly count: number;
+  readonly emptyMessage: string;
+  readonly items: ReadonlyArray<FactoryChatObjectiveNav>;
+};
+
+export type FactoryWorkbenchActivityItemModel = {
+  readonly key: string;
+  readonly kind: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly meta?: string;
+  readonly at?: number;
+};
+
+export type FactoryWorkbenchActivitySectionModel = {
+  readonly key: string;
+  readonly title: string;
+  readonly shape: "activity-list";
+  readonly count: number;
+  readonly emptyMessage: string;
+  readonly items: ReadonlyArray<FactoryWorkbenchActivityItemModel>;
+  readonly callout?: string;
+  readonly focus?: {
+    readonly title: string;
+    readonly summary: string;
+    readonly status: string;
+  };
+  readonly run?: FactoryLiveRunCard;
+};
+
+export type FactoryWorkbenchSectionModel =
+  | FactoryWorkbenchSummarySectionModel
+  | FactoryWorkbenchObjectiveListSectionModel
+  | FactoryWorkbenchActivitySectionModel;
+
+export type FactoryWorkbenchBlockModel = {
+  readonly key: string;
+  readonly layout: "full" | "split";
+  readonly sections: ReadonlyArray<FactoryWorkbenchSectionModel>;
 };

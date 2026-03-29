@@ -3,11 +3,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const PROFILE_DIR = "profiles";
+const PROFILE_FILENAME = "PROFILE.md";
+const SOUL_FILENAME = "SOUL.md";
 
 const sha256 = (value: string): string =>
   createHash("sha256").update(value, "utf-8").digest("hex");
 
 const unique = (items: ReadonlyArray<string>): ReadonlyArray<string> => [...new Set(items.filter(Boolean))];
+
+const normalizeStringList = (value: unknown): ReadonlyArray<string> =>
+  unique(Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim())
+    : []);
 
 export type FactoryChatProfileObjectiveMode = "delivery" | "investigation";
 export type FactoryChatTaskExecutionMode = "worktree" | "isolated";
@@ -28,6 +35,8 @@ export type FactoryChatProfile = {
   readonly id: string;
   readonly label: string;
   readonly isDefault: boolean;
+  readonly roles: ReadonlyArray<string>;
+  readonly responsibilities: ReadonlyArray<string>;
   readonly skills: ReadonlyArray<string>;
   readonly cloudProvider?: FactoryChatCloudProvider;
   readonly defaultObjectiveMode?: FactoryChatProfileObjectiveMode;
@@ -38,6 +47,9 @@ export type FactoryChatProfile = {
   readonly mdPath: string;
   readonly mdBody: string;
   readonly mdHash: string;
+  readonly soulPath?: string;
+  readonly soulBody?: string;
+  readonly soulHash?: string;
 };
 
 export type FactoryChatResolvedProfile = {
@@ -72,6 +84,8 @@ type FactoryChatProfileManifest = {
   readonly id?: string;
   readonly label?: string;
   readonly default?: boolean;
+  readonly roles?: ReadonlyArray<string>;
+  readonly responsibilities?: ReadonlyArray<string>;
   readonly skills?: ReadonlyArray<string>;
   readonly cloudProvider?: FactoryChatCloudProvider;
   readonly defaultObjectiveMode?: FactoryChatProfileObjectiveMode;
@@ -153,9 +167,9 @@ const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): Factor
     id,
     label,
     isDefault: raw.default === true,
-    skills: unique(Array.isArray(raw.skills)
-      ? raw.skills.filter((item): item is string => typeof item === "string").map((item) => item.trim())
-      : []),
+    roles: normalizeStringList(raw.roles),
+    responsibilities: normalizeStringList(raw.responsibilities),
+    skills: normalizeStringList(raw.skills),
     cloudProvider: normalizeCloudProvider(raw.cloudProvider),
     defaultObjectiveMode: raw.defaultObjectiveMode === "investigation" || raw.defaultObjectiveMode === "delivery"
       ? raw.defaultObjectiveMode
@@ -226,6 +240,35 @@ const renderObjectivePolicy = (
   `- Worker model: up to ${objectivePolicy.maxParallelChildren} parallel child runs, default worker ${objectivePolicy.defaultWorkerType}`,
 ].join("\n");
 
+const renderProfileIdentity = (profile: FactoryChatProfile): string | undefined => {
+  const sections: string[] = [];
+  if (profile.roles.length > 0) {
+    sections.push([
+      "## Roles",
+      ...profile.roles.map((role) => `- ${role}`),
+    ].join("\n"));
+  }
+  if (profile.responsibilities.length > 0) {
+    sections.push([
+      "## Responsibilities",
+      ...profile.responsibilities.map((responsibility) => `- ${responsibility}`),
+    ].join("\n"));
+  }
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
+};
+
+const renderProfileSoul = (profile: FactoryChatProfile): string | undefined => {
+  const soulBody = profile.soulBody?.trim();
+  if (!soulBody) return undefined;
+  return [
+    "## Personality and Voice",
+    "Treat the following as the engineer's conversational identity. Keep the flow natural, human, and specific rather than sounding like workflow middleware.",
+    "Let this voice evolve with the active profile and relevant skills instead of flattening into generic assistant prose, canned praise, or status-console fragments.",
+    "",
+    soulBody,
+  ].join("\n");
+};
+
 export const repoKeyForRoot = (repoRoot: string): string =>
   sha256(path.resolve(repoRoot).replace(/\\/g, "/")).slice(0, 12);
 
@@ -256,8 +299,13 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
         throw err;
       });
       if (!stat?.isDirectory()) return undefined;
-      const mdPath = path.join(dirPath, "PROFILE.md");
+      const mdPath = path.join(dirPath, PROFILE_FILENAME);
       const mdRaw = await fs.readFile(mdPath, "utf-8");
+      const soulPath = path.join(dirPath, SOUL_FILENAME);
+      const soulRaw = await fs.readFile(soulPath, "utf-8").catch((err) => {
+        if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+        throw err;
+      });
       const parsed = parseProfileMarkdown(mdRaw, entry);
       return {
         ...parsed.manifest,
@@ -265,6 +313,9 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
         mdPath,
         mdBody: parsed.body,
         mdHash: sha256(mdRaw),
+        soulPath: soulRaw ? soulPath : undefined,
+        soulBody: soulRaw?.trim() || undefined,
+        soulHash: soulRaw ? sha256(soulRaw) : undefined,
       } satisfies FactoryChatProfile;
     }));
   return loaded
@@ -300,14 +351,29 @@ export const resolveFactoryChatProfile = async (input: {
     allowObjectiveCreation: root.allowObjectiveCreation ?? DEFAULT_FACTORY_OBJECTIVE_POLICY.allowObjectiveCreation,
   };
   const promptPath = path.relative(profileRoot, root.mdPath).replace(/\\/g, "/");
-  const fileHashes = { [promptPath]: root.mdHash };
+  const soulPath = root.soulPath
+    ? path.relative(profileRoot, root.soulPath).replace(/\\/g, "/")
+    : undefined;
+  const fileHashes = {
+    [promptPath]: root.mdHash,
+    ...(soulPath && root.soulHash ? { [soulPath]: root.soulHash } : {}),
+  };
+  const profilePaths = soulPath ? [promptPath, soulPath] : [promptPath];
+  const profileSoul = renderProfileSoul(root);
+  const profileIdentity = renderProfileIdentity(root);
   const systemPrompt = [
     "You are the active Factory profile in the product UI.",
     "Answer directly and use Receipt-native tools when needed; do not behave like a wrapper around another assistant.",
+    "Sound like a real engineer with a stable point of view. Use natural conversational flow by default and only switch into workflow mechanics when the task actually needs them.",
+    "Sound human. Write like an engineer talking to another person, not like a rubric, dispatcher, or workflow console. Avoid robotic fragments and canned evaluation language unless the user explicitly wants a template.",
+    "Use prior transcript, receipts, and memory for facts and context, not as a template for phrasing. If older runs sound stiff or robotic, do not imitate that tone.",
+    "When the user asks you to evaluate your own answer, judgment, or behavior, treat that as genuine self-reflection: answer in first person, say what you got right or wrong, and do not pivot into grading the user's prompt or handoff unless they explicitly asked for that.",
     "Use available Receipt-native tools to inspect state, dispatch Factory work, inspect receipts, review artifacts, and abort child work when needed.",
     "Profiles are orchestration-only. Do not claim this chat edited code directly.",
     "",
+    ...(profileSoul ? [profileSoul, ""] : []),
     renderObjectivePolicy(root, objectivePolicy),
+    ...(profileIdentity ? ["", profileIdentity] : []),
     "",
     `## Active Profile: ${root.label}`,
     root.mdBody.trim(),
@@ -336,6 +402,8 @@ export const resolveFactoryChatProfile = async (input: {
       profileId: root.id,
       promptPath,
       promptHash: root.mdHash,
+      soulPath,
+      soulHash: root.soulHash,
       objectivePolicy,
       skills: root.skills,
       cloudProvider: root.cloudProvider,
@@ -343,7 +411,7 @@ export const resolveFactoryChatProfile = async (input: {
     systemPrompt,
     promptPath,
     promptHash: sha256(systemPrompt),
-    profilePaths: [promptPath],
+    profilePaths,
     fileHashes,
   };
 };

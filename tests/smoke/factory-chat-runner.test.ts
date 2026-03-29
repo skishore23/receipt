@@ -14,6 +14,8 @@ import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent }
 import { agentRunStream } from "../../src/agents/agent.streams";
 import {
   FACTORY_CHAT_DEFAULT_CONFIG,
+  classifyFactoryResponseStyle,
+  renderFactoryResponseStyleGuidance,
   runFactoryChat,
   runFactoryCodexJob,
 } from "../../src/agents/factory-chat";
@@ -24,6 +26,7 @@ import {
   historicalInfrastructureObjectiveReceipts,
   historicalInfrastructureStartupObjectiveId,
 } from "../fixtures/factory-infrastructure-replay";
+import { repoKeyForRoot } from "../../src/services/factory-chat-profiles";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -42,6 +45,17 @@ const createMemoryStub = (): MemoryTools => ({
   }),
   diff: async () => [],
   reindex: async () => 0,
+});
+
+test("factory chat prompt guidance: classifies self-reflection prompts as conversational", () => {
+  expect(classifyFactoryResponseStyle("grade your performance")).toBe("conversational");
+  expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not use headings, scorecards, grades");
+  expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not turn the reply into operator-handoff analysis");
+});
+
+test("factory chat prompt guidance: keeps infrastructure investigations in work mode", () => {
+  expect(classifyFactoryResponseStyle("inspect AWS cost spike")).toBe("work");
+  expect(renderFactoryResponseStyleGuidance("inspect AWS cost spike")).toContain("This turn is work-focused.");
 });
 
 const createNoopDelegationTools = () => ({
@@ -364,6 +378,97 @@ test("factory chat runner: codex.run queues work asynchronously and returns imme
   expect(observed && "output" in observed ? observed.output : "").toContain('"status": "queued"');
   expect(observed && "output" in observed ? observed.output : "").toContain('"jobId":');
   expect(observed && "output" in observed ? observed.output : "").toContain("codex read-only probe queued as");
+});
+
+test("factory chat runner: codex.run reuses the active codex probe for the same chat context", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-codex-reuse");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["codex.run"],
+  });
+
+  const existing = await queue.enqueue({
+    agentId: "codex",
+    lane: "collect",
+    sessionKey: "codex:existing",
+    singletonMode: "allow",
+    maxAttempts: 1,
+    payload: {
+      kind: "factory.codex.run",
+      parentRunId: "run_async_codex_reuse",
+      parentStream: "agents/factory/demo",
+      stream: "agents/factory/demo",
+      profileId: "generalist",
+      mode: "read_only_probe",
+      readOnly: true,
+      prompt: "Inspect the earlier evidence only.",
+      task: "Inspect the earlier evidence only.",
+    },
+  });
+
+  const actions = [
+    {
+      thought: "reuse existing codex work",
+      action: {
+        type: "tool",
+        name: "codex.run",
+        input: JSON.stringify({ prompt: "Inspect the blocked objective and summarize it." }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond to operator",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Reused the active Codex probe.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_async_codex_reuse",
+    problem: "Inspect the blocked objective and summarize it.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+    dataDir,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Reused the active Codex probe.");
+
+  const jobs = await queue.listJobs({ limit: 10 });
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]?.id).toBe(existing.id);
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_async_codex_reuse"));
+  const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
+  expect(observed && "output" in observed ? observed.output : "").toContain(`reusing active codex probe ${existing.id}`);
 });
 
 test("factory chat runner: codex.status reports live codex work for the current run", async () => {
@@ -2478,6 +2583,103 @@ test("factory chat runner: startup binds the current objective to the chat sessi
   expect(bound && "reason" in bound ? bound.reason : "").toBe("startup");
 });
 
+test("factory chat runner: prompt layers repo, profile, objective, and factory memory", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-layered-memory");
+  const repoRoot = await createGitRepo("receipt-factory-chat-layered-memory-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-layered-memory-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const repoKey = repoKeyForRoot(repoRoot);
+  const objectiveId = "objective_demo";
+  const profileId = "generalist";
+  const summarizeCalls: string[] = [];
+  let capturedUserPrompt = "";
+  const summaries = new Map<string, string>([
+    [`repos/${repoKey}`, "repo note"],
+    [`repos/${repoKey}/profiles/${profileId}`, "profile note"],
+    [`repos/${repoKey}/profiles/${profileId}/objectives/${objectiveId}`, "objective note"],
+    ["factory/repo/shared", "factory shared note"],
+    [`factory/objectives/${objectiveId}`, "factory objective note"],
+    [`factory/objectives/${objectiveId}/integration`, "integration note"],
+    [`repos/${repoKey}/subagents/factory`, "factory worker note"],
+    [`repos/${repoKey}/subagents/codex`, "codex worker note"],
+  ]);
+  const memoryTools: MemoryTools = {
+    read: async () => [],
+    search: async () => [],
+    summarize: async ({ scope }) => {
+      summarizeCalls.push(scope);
+      return {
+        summary: summaries.get(scope) ?? "",
+        entries: [],
+      };
+    },
+    commit: async ({ scope, text, tags, meta }) => ({
+      id: `memory_${Date.now()}`,
+      scope,
+      text,
+      tags,
+      meta,
+      ts: Date.now(),
+    }),
+    diff: async () => [],
+    reindex: async () => 0,
+  };
+  await writeProfile(profileRoot, {
+    id: profileId,
+    label: "Generalist",
+    default: true,
+    toolAllowlist: [],
+  });
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_layered_memory",
+    problem: "What do we already know about this objective?",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema, user }) => {
+      capturedUserPrompt = user;
+      const reply = {
+        thought: "answer from layered memory",
+        action: {
+          type: "final",
+          name: null,
+          input: "{}",
+          text: "Layered memory loaded.",
+        },
+      };
+      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_layered_memory",
+    objectiveId,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(capturedUserPrompt).toContain("Repo memory:\nrepo note");
+  expect(capturedUserPrompt).toContain("Profile memory:\nprofile note");
+  expect(capturedUserPrompt).toContain("Objective memory:\nobjective note");
+  expect(capturedUserPrompt).toContain("Factory shared memory:\nfactory shared note");
+  expect(capturedUserPrompt).toContain("Factory objective memory:\nfactory objective note");
+  expect(capturedUserPrompt).toContain("Integration memory:\nintegration note");
+  expect(capturedUserPrompt).toContain("Factory worker memory:\nfactory worker note");
+  expect(capturedUserPrompt).toContain("Codex worker memory:\ncodex worker note");
+  expect(summarizeCalls).toContain(`factory/objectives/${objectiveId}`);
+  expect(summarizeCalls).toContain("factory/repo/shared");
+  expect(summarizeCalls).toContain(`repos/${repoKey}/subagents/factory`);
+});
+
 test("factory chat runner: factory.dispatch create starts a new objective instead of reusing the bound thread objective", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-dispatch-thread");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -3362,4 +3564,156 @@ test("factory chat runner: direct codex probes fail explicitly if they mutate tr
   })).rejects.toThrow("Direct Codex probes are read-only");
 
   await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_mutation", "result.json"), "utf-8")).resolves.toContain("\"status\": \"failed\"");
+});
+
+test("factory chat runner: direct codex probes retry in a disposable workspace when sandbox startup is incompatible", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-direct-fallback");
+  const repoRoot = await createGitRepo("receipt-factory-chat-direct-fallback-repo");
+  const captured: Array<Record<string, unknown>> = [];
+  let fallbackWorkspacePath = "";
+
+  const result = await runFactoryCodexJob({
+    dataDir,
+    repoRoot,
+    jobId: "job_direct_fallback",
+    prompt: "Inspect the repo without changing it.",
+    payload: {
+      readOnly: true,
+      mode: "read_only_probe",
+      profileId: "software",
+      stream: "agents/factory/demo",
+    },
+    factoryService: {
+      prepareDirectCodexProbePacket: async ({ jobId, prompt, readOnly }) => {
+        const root = path.join(dataDir, "factory-chat", "codex", jobId);
+        const packet = {
+          artifactPaths: {
+            root,
+            promptPath: path.join(root, "prompt.md"),
+            lastMessagePath: path.join(root, "last-message.txt"),
+            stdoutPath: path.join(root, "stdout.log"),
+            stderrPath: path.join(root, "stderr.log"),
+            manifestPath: path.join(root, "manifest.json"),
+            contextPackPath: path.join(root, "context-pack.json"),
+            resultPath: path.join(root, "result.json"),
+            memoryScriptPath: path.join(root, "memory.cjs"),
+            memoryConfigPath: path.join(root, "memory-scopes.json"),
+          },
+          renderedPrompt: `READ ONLY\n${prompt}`,
+          readOnly: readOnly !== false,
+          env: {},
+        };
+        await fs.mkdir(packet.artifactPaths.root, { recursive: true });
+        await fs.writeFile(packet.artifactPaths.manifestPath, JSON.stringify({ kind: "factory.codex.probe" }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.contextPackPath, JSON.stringify({ title: "Direct Codex Probe" }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryConfigPath, JSON.stringify({ scopes: [] }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryScriptPath, "#!/usr/bin/env bun\n", "utf-8");
+        return packet;
+      },
+    } as never,
+    executor: {
+      run: async (execInput) => {
+        captured.push({
+          workspacePath: execInput.workspacePath,
+          sandboxMode: execInput.sandboxMode,
+          mutationPolicy: execInput.mutationPolicy,
+          disableSandboxModeInference: execInput.disableSandboxModeInference,
+        });
+        if (captured.length === 1) {
+          await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
+          throw new Error("bwrap: Unknown option --argv0");
+        }
+        fallbackWorkspacePath = execInput.workspacePath;
+        await fs.writeFile(execInput.lastMessagePath, "Read-only inspection complete.", "utf-8");
+        await fs.writeFile(execInput.stdoutPath, "Scanned files\n", "utf-8");
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "Scanned files\n",
+          stderr: "",
+          lastMessage: "Read-only inspection complete.",
+        };
+      },
+    },
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.readOnly).toBe(true);
+  expect(result.sandboxCompatibilityFallbackUsed).toBe(true);
+  expect(captured).toHaveLength(2);
+  expect(captured[0]?.workspacePath).toBe(repoRoot);
+  expect(captured[0]?.sandboxMode).toBe("read-only");
+  expect(captured[1]?.workspacePath).not.toBe(repoRoot);
+  expect(captured[1]?.sandboxMode).toBeUndefined();
+  expect(captured[1]?.mutationPolicy).toBe("read_only_probe");
+  expect(captured[1]?.disableSandboxModeInference).toBe(true);
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback", "stderr.log"), "utf-8")).resolves.toContain("sandbox compatibility fallback");
+  await expect(fs.stat(fallbackWorkspacePath)).rejects.toThrow();
+  await expect(fs.readFile(path.join(repoRoot, "README.md"), "utf-8")).resolves.toBe("# demo\n");
+});
+
+test("factory chat runner: disposable fallback still rejects read-only probe mutations", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-direct-fallback-mutation");
+  const repoRoot = await createGitRepo("receipt-factory-chat-direct-fallback-mutation-repo");
+
+  await expect(runFactoryCodexJob({
+    dataDir,
+    repoRoot,
+    jobId: "job_direct_fallback_mutation",
+    prompt: "Inspect the repo without changing it.",
+    payload: {
+      readOnly: true,
+      mode: "read_only_probe",
+      profileId: "software",
+      stream: "agents/factory/demo",
+    },
+    factoryService: {
+      prepareDirectCodexProbePacket: async ({ jobId, prompt, readOnly }) => {
+        const root = path.join(dataDir, "factory-chat", "codex", jobId);
+        const packet = {
+          artifactPaths: {
+            root,
+            promptPath: path.join(root, "prompt.md"),
+            lastMessagePath: path.join(root, "last-message.txt"),
+            stdoutPath: path.join(root, "stdout.log"),
+            stderrPath: path.join(root, "stderr.log"),
+            manifestPath: path.join(root, "manifest.json"),
+            contextPackPath: path.join(root, "context-pack.json"),
+            resultPath: path.join(root, "result.json"),
+            memoryScriptPath: path.join(root, "memory.cjs"),
+            memoryConfigPath: path.join(root, "memory-scopes.json"),
+          },
+          renderedPrompt: `READ ONLY\n${prompt}`,
+          readOnly: readOnly !== false,
+          env: {},
+        };
+        await fs.mkdir(packet.artifactPaths.root, { recursive: true });
+        await fs.writeFile(packet.artifactPaths.manifestPath, JSON.stringify({ kind: "factory.codex.probe" }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.contextPackPath, JSON.stringify({ title: "Direct Codex Probe" }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryConfigPath, JSON.stringify({ scopes: [] }, null, 2), "utf-8");
+        await fs.writeFile(packet.artifactPaths.memoryScriptPath, "#!/usr/bin/env bun\n", "utf-8");
+        return packet;
+      },
+    } as never,
+    executor: {
+      run: async (execInput) => {
+        if (execInput.sandboxMode === "read-only") {
+          await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
+          throw new Error("bwrap: Unknown option --argv0");
+        }
+        await fs.writeFile(path.join(execInput.workspacePath, "README.md"), "# changed in fallback\n", "utf-8");
+        await fs.writeFile(execInput.lastMessagePath, "Attempted to change files.", "utf-8");
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          lastMessage: "Attempted to change files.",
+        };
+      },
+    },
+  })).rejects.toThrow("Direct Codex probes are read-only");
+
+  await expect(fs.readFile(path.join(repoRoot, "README.md"), "utf-8")).resolves.toBe("# demo\n");
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback_mutation", "result.json"), "utf-8")).resolves.toContain("\"sandboxCompatibilityFallbackUsed\": true");
 });

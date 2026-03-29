@@ -594,7 +594,6 @@ const ensureFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCl
 
 const runInteractiveFactoryApp = async (opts: {
   readonly runtime: ReturnType<typeof createFactoryCliRuntime>;
-  readonly initialMode: "board" | "objective";
   readonly initialObjectiveId?: string;
   readonly initialPanel?: FactoryObjectivePanel;
   readonly exitOnTerminal?: boolean;
@@ -602,7 +601,6 @@ const runInteractiveFactoryApp = async (opts: {
   let result: FactoryAppExit = { code: 0, reason: "quit", objectiveId: opts.initialObjectiveId };
   const instance = render(React.createElement(FactoryTerminalApp, {
     runtime: opts.runtime,
-    initialMode: opts.initialMode,
     initialObjectiveId: opts.initialObjectiveId,
     initialPanel: opts.initialPanel,
     exitOnTerminal: opts.exitOnTerminal,
@@ -796,7 +794,6 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         }
         const result = await runInteractiveFactoryApp({
           runtime,
-          initialMode: "board",
         });
         process.exitCode = result.code;
         return;
@@ -829,7 +826,6 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         }
         const result = await runInteractiveFactoryApp({
           runtime,
-          initialMode: "objective",
           initialObjectiveId: created.objectiveId,
           exitOnTerminal: true,
         });
@@ -894,7 +890,6 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const initialPanel = await resolveObjectivePanel(runtime, objectiveId, panelFlag ? parsePanel(panelFlag) : undefined);
         await runInteractiveFactoryApp({
           runtime,
-          initialMode: "objective",
           initialObjectiveId: objectiveId,
           initialPanel,
         });
@@ -964,7 +959,6 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         }
         const result = await runInteractiveFactoryApp({
           runtime,
-          initialMode: "objective",
           initialObjectiveId: objectiveId,
           exitOnTerminal: true,
         });

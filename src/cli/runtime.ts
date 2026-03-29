@@ -20,7 +20,7 @@ import { decide as decideJob, initial as initialJob, reduce as reduceJob, type J
 export const ROOT = process.cwd();
 export const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 export const DATA_DIR = FACTORY_RUNTIME.dataDir;
-export const JOB_BACKEND = process.env.JOB_BACKEND === "jsonl" ? "jsonl" : "resonate";
+export const JOB_BACKEND = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
 
 export const getJsonlQueue = () => {
   const runtime = createRuntime<JobCmd, JobEvent, JobState>(
@@ -30,7 +30,7 @@ export const getJsonlQueue = () => {
     reduceJob,
     initialJob,
   );
-  return jsonlQueue({ runtime, stream: "jobs" });
+  return jsonlQueue({ runtime, stream: "jobs", watchDir: DATA_DIR });
 };
 
 export const getJobBackend = (): JobBackend => {
@@ -96,21 +96,14 @@ export const loadAgentDefault = async (agentId: string): Promise<unknown | undef
   return undefined;
 };
 
-const streamManifest = async (): Promise<Readonly<Record<string, string>>> => {
-  const file = path.join(DATA_DIR, "_streams.json");
-  if (!fs.existsSync(file)) return {};
-  const raw = await fs.promises.readFile(file, "utf-8");
-  const parsed = JSON.parse(raw) as { byStream?: Record<string, string> };
-  return parsed.byStream ?? {};
-};
-
 export const resolveStream = async (runOrStream: string): Promise<string> => {
   if (runOrStream.includes("/")) return runOrStream;
-  const manifest = await streamManifest();
-  const direct = Object.keys(manifest).find((stream) => stream === runOrStream);
+  const store = jsonlStore<Record<string, unknown>>(DATA_DIR);
+  const streams = await store.listStreams?.();
+  const direct = streams?.find((stream) => stream === runOrStream);
   if (direct) return direct;
   const suffix = `/runs/${runOrStream}`;
-  const runStream = Object.keys(manifest).find((stream) => stream.endsWith(suffix));
+  const runStream = streams?.find((stream) => stream.endsWith(suffix));
   if (runStream) return runStream;
   throw new Error(`Unable to resolve run/stream '${runOrStream}'`);
 };
@@ -124,7 +117,7 @@ export const readChain = async (stream: string): Promise<ReadonlyArray<{ readonl
 export const spawnDevServer = async (): Promise<void> => {
   const child = spawn(
     resolveBunRuntime(),
-    JOB_BACKEND === "jsonl" ? ["--watch", "src/server.ts"] : ["scripts/start-resonate-dev.mjs"],
+    JOB_BACKEND === "resonate" ? ["scripts/start-resonate-dev.mjs"] : ["--watch", "src/server.ts"],
     {
       cwd: ROOT,
       env: process.env,

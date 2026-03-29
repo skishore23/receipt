@@ -5,6 +5,7 @@
 @source "../views/factory-inspector.ts";
 @source "../views/factory-live-steps.ts";
 @source "../views/factory-mission-control.ts";
+@source "../views/factory-workbench-page.ts";
 @source "../views/receipt.ts";
 
 @custom-variant dark (&:is(.dark *));
@@ -51,7 +52,7 @@
   --font-sans: Inter, sans-serif;
   --font-serif: Source Serif 4, serif;
   --font-mono: JetBrains Mono, monospace;
-  --radius: 0.75rem;
+  --radius: 0.5rem;
   --shadow-2xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.05);
   --shadow-xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.05);
   --shadow-sm: 0px 1px 3px 0px hsl(0 0% 0% / 0.10), 0px 1px 2px -1px hsl(0 0% 0% / 0.10);
@@ -105,7 +106,7 @@
   --font-sans: Inter, sans-serif;
   --font-serif: Source Serif 4, serif;
   --font-mono: JetBrains Mono, monospace;
-  --radius: 0.75rem;
+  --radius: 0.5rem;
   --shadow-2xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.05);
   --shadow-xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.05);
   --shadow-sm: 0px 1px 3px 0px hsl(0 0% 0% / 0.10), 0px 1px 2px -1px hsl(0 0% 0% / 0.10);
@@ -213,6 +214,10 @@
   ::selection {
     background: hsl(13.2143 73.0435% 54.9020% / 0.25);
   }
+
+  [data-factory-stream-shell]:has(#factory-chat-streaming-content:empty) {
+    display: none;
+  }
 }
 
 @layer components {
@@ -261,7 +266,7 @@
   }
   
   .factory-markdown h2 {
-    @apply mt-7 mb-3 text-[11px] font-medium uppercase tracking-[0.28em] text-muted-foreground;
+    @apply mt-7 mb-3 text-base font-semibold;
   }
 
   .factory-markdown > h2:first-child {
@@ -273,7 +278,7 @@
   }
 
   .factory-markdown h4 {
-    @apply mt-4 mb-2 text-[13px] font-semibold uppercase tracking-[0.16em] text-muted-foreground;
+    @apply mt-4 mb-2 text-sm font-semibold text-muted-foreground;
   }
 
   .factory-markdown p {
@@ -306,7 +311,7 @@
   }
 
   .factory-markdown table {
-    @apply my-4 rounded-xl border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
+    @apply my-4 rounded-lg border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
     display: block;
     width: max-content;
     min-width: 100%;
@@ -317,11 +322,11 @@
   }
 
   .factory-markdown table thead {
-    @apply bg-muted/70;
+    @apply bg-muted;
   }
 
   .factory-markdown table th {
-    @apply whitespace-nowrap border-b border-border px-3 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+    @apply whitespace-nowrap border-b border-border px-3 py-2.5 text-[11px] font-semibold text-muted-foreground;
   }
 
   .factory-markdown table td {
@@ -333,15 +338,15 @@
   }
 
   .factory-markdown blockquote {
-    @apply my-4 rounded-xl border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground;
+    @apply my-4 rounded-lg border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground;
   }
 
   .factory-markdown pre {
-    @apply my-4 overflow-x-auto rounded-xl border border-border bg-[#1A1A1A] p-4 text-[13px] leading-relaxed text-[#E5E5E5] font-mono shadow-sm;
+    @apply my-4 overflow-x-auto rounded-lg border border-border bg-[#151311] p-4 text-[13px] leading-relaxed text-[#ECE7E1] font-mono shadow-sm;
   }
 
   .factory-markdown code {
-    @apply rounded-md border border-border/45 bg-muted/70 px-[0.34em] py-[0.16em] text-[0.84em] font-mono text-foreground;
+    @apply rounded-sm border border-border/60 bg-muted px-[0.34em] py-[0.16em] text-[0.84em] font-mono text-foreground;
   }
 
   .factory-markdown pre code {
@@ -408,6 +413,55 @@
 
   .factory-job-card__meta {
     overflow-wrap: anywhere;
+  }
+
+  .mission-control-shell {
+    background: var(--background);
+  }
+
+  .mission-control-panel {
+    @apply border border-border bg-card;
+  }
+
+  .mission-control-inset {
+    @apply border border-border bg-muted/45;
+  }
+
+  .mission-control-pane {
+    @apply transition-colors;
+  }
+
+  .mission-control-pane[data-pane-active="true"] {
+    @apply border-primary/35 ring-2 ring-primary/20;
+  }
+
+  .mission-control-track {
+    @apply h-2 overflow-hidden border border-border bg-background;
+  }
+
+  .mission-control-track > span {
+    @apply block h-full bg-primary;
+  }
+
+  .mission-control-log {
+    @apply font-mono text-[11px] leading-5 tracking-[0.01em];
+  }
+
+  .mission-control-log strong {
+    @apply font-semibold text-foreground;
+  }
+
+  .factory-workbench-shell {
+    background: var(--background);
+  }
+
+  .factory-workbench-grid {
+    align-items: stretch;
+    height: 100%;
+  }
+
+  .factory-workbench-chat-shell {
+    background: var(--card);
   }
 
   .sr-only {
