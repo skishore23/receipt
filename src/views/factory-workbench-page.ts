@@ -620,10 +620,17 @@ const renderWorkbenchHeader = (
   workbenchSummary: string,
 ): string => `<div class="flex flex-wrap items-start justify-between gap-4">
   <div class="min-w-0 flex-1">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-primary">receipt</div>
-    <div class="mt-1 flex flex-wrap items-center gap-2">
-      <div class="text-sm font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
-      <div class="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
+    <div class="inline-flex items-center gap-2.5">
+      <span class="inline-flex h-9 w-9 items-center justify-center border border-border bg-primary/10 text-primary">
+        ${iconFactory("h-4.5 w-4.5")}
+      </span>
+      <div class="min-w-0">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.26em] text-primary">receipt</div>
+        <div class="mt-1 flex flex-wrap items-center gap-2">
+          <div class="text-[15px] font-semibold leading-none text-foreground">${esc(model.activeProfileLabel)}</div>
+          <div class="text-[12px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
+        </div>
+      </div>
     </div>
     <div class="mt-1 max-w-[70ch] text-[12px] leading-5 text-muted-foreground"${tooltipAttr(workbenchSummary)}>${esc(workbenchSummaryPreview)}</div>
   </div>
@@ -734,10 +741,17 @@ const renderWorkbenchLoadingHeader = (routeContext: FactoryWorkbenchRouteContext
     : undefined;
   return `<div class="flex flex-wrap items-start justify-between gap-4">
     <div class="min-w-0 flex-1">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-primary">receipt</div>
-      <div class="mt-1 flex flex-wrap items-center gap-2">
-        <div class="text-sm font-semibold text-foreground">${esc(profileLabel)}</div>
-        <div class="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
+      <div class="inline-flex items-center gap-2.5">
+        <span class="inline-flex h-9 w-9 items-center justify-center border border-border bg-primary/10 text-primary">
+          ${iconFactory("h-4.5 w-4.5")}
+        </span>
+        <div class="min-w-0">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.26em] text-primary">receipt</div>
+          <div class="mt-1 flex flex-wrap items-center gap-2">
+            <div class="text-[15px] font-semibold leading-none text-foreground">${esc(profileLabel)}</div>
+            <div class="text-[12px] font-medium uppercase tracking-[0.16em] text-muted-foreground">factory</div>
+          </div>
+        </div>
       </div>
       <div class="mt-1 max-w-[70ch] text-[12px] leading-5 text-muted-foreground">Hydrating receipt-backed workbench projections after first paint.</div>
     </div>
