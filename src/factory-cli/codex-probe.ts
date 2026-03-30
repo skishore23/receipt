@@ -267,13 +267,15 @@ const runQueueProbe = async (
     repoRoot: config.repoRoot,
     codexBin: config.codexBin,
   });
+  const handlers = createFactoryWorkerHandlers(service);
   const worker = new JobWorker({
     queue,
     workerId: `factory_codex_probe_${process.pid}`,
     idleResyncMs: Math.max(250, opts.pollMs),
     leaseMs: Math.max(5_000, Math.min(opts.timeoutMs, 30_000)),
     concurrency: 1,
-    handlers: createFactoryWorkerHandlers(service),
+    leaseAgentIds: Object.keys(handlers),
+    handlers,
   });
   const snapshots: CodexProbeSnapshot[] = [];
   const seen = new Set<string>();

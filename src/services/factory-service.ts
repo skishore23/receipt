@@ -30,6 +30,7 @@ import {
   type FactoryInvestigationTaskReport,
   type FactoryPlanningReceiptRecord,
   type FactoryExecutionScriptRun,
+  type FactoryObjectiveContractRecord,
   type FactoryObjectivePhase,
   type FactoryObjectiveHandoffStatus,
   type FactoryObjectiveMode,
@@ -40,6 +41,7 @@ import {
   type FactoryObjectiveSeverity,
   type FactoryObjectiveStatus,
   type FactoryState,
+  type FactoryTaskAlignmentRecord,
   type FactoryTaskCompletionRecord,
   type FactoryTaskExecutionMode,
   type FactoryTaskResultOutcome,
@@ -94,6 +96,7 @@ import {
   FACTORY_TASK_RESULT_SCHEMA,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
+  normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
   renderDeliveryResultText,
   renderInvestigationReportText,
@@ -159,6 +162,7 @@ const NON_RETRYABLE_BLOCK_REASON_RE = /\b(no tracked diff|isolated runtime|canno
 const HUMAN_INPUT_BLOCK_REASON_RE = /\b(missing (?:dependency |implementation |product |design )?details?|need .*detail|need .*guidance|need .*clarification|choose|which (?:approach|option|api|path)|operator|human|approval|permission denied|access denied|unauthorized|credentials|auth(?:entication|orization)?|forbidden)\b/i;
 const CONTROLLER_RESOLVABLE_DELIVERY_PARTIAL_RE = /\b(final clean completion|clean final termination|terminal success marker|orchestration layer needs|controller requires a pristine worktree|confirm or clean up|codex-home-runtime|\.receipt(?:\/|`)?|pristine worktree)\b/i;
 const AUTONOMOUS_RETRY_MAX_CANDIDATE_PASSES = 1;
+const ALIGNMENT_CORRECTION_NOTE_PREFIX = "Alignment correction for this objective:";
 const PUBLISH_TRANSIENT_FAILURE_RE =
   /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
 const PUBLISH_MAX_ATTEMPTS = 3;
@@ -227,6 +231,33 @@ const dedupeGraphRefs = (refs: ReadonlyArray<GraphRef>): ReadonlyArray<GraphRef>
     seen.add(key);
     return true;
   });
+};
+const formatContractLines = (
+  title: string,
+  items: ReadonlyArray<string>,
+): ReadonlyArray<string> => items.length > 0 ? [title, ...items.map((item) => `- ${item}`), ""] : [];
+const renderAlignmentCorrectionNote = (input: {
+  readonly taskId: string;
+  readonly alignment: FactoryTaskAlignmentRecord;
+  readonly contract: FactoryObjectiveContractRecord;
+}): string => {
+  const lines = [
+    ALIGNMENT_CORRECTION_NOTE_PREFIX,
+    `Task: ${input.taskId}`,
+    `Reported verdict: ${input.alignment.verdict}`,
+    input.alignment.missing.length > 0
+      ? `Missing contract items: ${input.alignment.missing.join(" | ")}`
+      : undefined,
+    input.alignment.outOfScope.length > 0
+      ? `Out-of-scope work to remove or avoid claiming: ${input.alignment.outOfScope.join(" | ")}`
+      : undefined,
+    input.contract.requiredChecks.length > 0
+      ? `Required checks: ${input.contract.requiredChecks.join(", ")}`
+      : "Required checks: use the task contract proof and validation plan.",
+    `Proof expectation: ${input.contract.proofExpectation}`,
+    `Worker rationale: ${input.alignment.rationale}`,
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
 };
 
 type FactoryLiveGuidanceKind = "steer" | "follow_up" | "mixed";
@@ -494,6 +525,7 @@ import {
   type FactoryContextSources,
   type FactoryArtifactActivity,
   type FactoryTaskView,
+  type FactoryObjectiveAlignmentSummary,
   type FactoryObjectiveCard,
   type FactoryObjectiveDetail,
   type FactoryComposeModel,
@@ -626,6 +658,7 @@ type FactoryContextPack = {
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
   readonly planning?: FactoryPlanningReceiptRecord;
+  readonly contract: FactoryObjectiveContractRecord;
   readonly cloudExecutionContext?: FactoryContextCloudExecutionContext;
   readonly profile: FactoryObjectiveProfileSnapshot;
   readonly task: {
@@ -1014,6 +1047,14 @@ export class FactoryService {
       pack.objectiveSlice.objectiveMemorySummary ? `Objective memory: ${pack.objectiveSlice.objectiveMemorySummary}` : "",
       pack.objectiveSlice.integrationMemorySummary ? `Integration memory: ${pack.objectiveSlice.integrationMemorySummary}` : "",
       "",
+      "## Objective Contract",
+      `Acceptance criteria: ${pack.contract.acceptanceCriteria.length}`,
+      ...pack.contract.acceptanceCriteria.map((item) => `- ${item}`),
+      ...formatContractLines("Allowed scope", pack.contract.allowedScope),
+      ...formatContractLines("Disallowed scope", pack.contract.disallowedScope),
+      ...formatContractLines("Required checks", pack.contract.requiredChecks),
+      `Proof expectation: ${pack.contract.proofExpectation}`,
+      "",
       selectedHelpers && selectedHelpers.length > 0 ? "## Selected Helpers" : "",
       ...(selectedHelpers ?? []),
       "",
@@ -1044,6 +1085,102 @@ export class FactoryService {
       "Use the generated memory script for scoped recall.",
       "Open the JSON context pack only when you need exact raw fields, refs, or artifact paths.",
     ].filter(Boolean).join("\n");
+  }
+
+  private objectiveContractForState(
+    state: FactoryState,
+    planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now()),
+  ): FactoryObjectiveContractRecord {
+    return {
+      acceptanceCriteria: planningReceipt.acceptanceCriteria,
+      allowedScope: [
+        `Implement only what is needed to satisfy the accepted delivery objective for ${state.title}.`,
+        "Make the minimum adjacent validation or helper changes required to ship the requested behavior.",
+      ],
+      disallowedScope: [
+        "Do not broaden into unrelated refactors, formatting churn, or side quests outside the current objective.",
+        "Do not claim downstream follow-up work as completed when it is only noted for handoff.",
+      ],
+      requiredChecks: state.checks.length > 0 ? state.checks : planningReceipt.validationPlan,
+      proofExpectation: state.objectiveMode === "investigation"
+        ? "Return concrete evidence and a clear conclusion with any uncertainty called out."
+        : "Return concrete changed files, validation evidence, and no unresolved delivery work in completion.remaining.",
+    };
+  }
+
+  private latestObjectiveAlignmentCandidate(
+    state: FactoryState,
+  ): { readonly task: FactoryTaskRecord; readonly candidate: FactoryCandidateRecord } | undefined {
+    for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
+      const candidateId = state.candidateOrder[index];
+      const candidate = candidateId ? state.candidates[candidateId] : undefined;
+      if (!candidate) continue;
+      const task = state.workflow.tasksById[candidate.taskId];
+      if (!task) continue;
+      return { task, candidate };
+    }
+    return undefined;
+  }
+
+  private objectiveAlignmentForState(state: FactoryState): FactoryObjectiveAlignmentSummary | undefined {
+    if (state.objectiveMode !== "delivery") return undefined;
+    const latest = this.latestObjectiveAlignmentCandidate(state);
+    if (!latest) return undefined;
+    const correctionAttempted = Boolean(
+      latest.task.sourceTaskId
+      || latest.task.prompt.includes(ALIGNMENT_CORRECTION_NOTE_PREFIX),
+    );
+    const alignment = latest.candidate.alignment;
+    if (!alignment) {
+      return {
+        verdict: "uncertain",
+        satisfied: [],
+        missing: [],
+        outOfScope: [],
+        rationale: "The worker did not report an explicit alignment review for this candidate.",
+        gateStatus: "not_reported",
+        correctiveAction: "Require the next task result to report the objective contract alignment explicitly.",
+        correctionAttempted,
+        correctedAfterReview: false,
+        sourceTaskId: latest.task.taskId,
+        sourceCandidateId: latest.candidate.candidateId,
+      };
+    }
+    const correctedAfterReview = alignment.verdict === "aligned" && correctionAttempted;
+    return {
+      ...alignment,
+      gateStatus: alignment.verdict === "aligned"
+        ? "passed"
+        : correctionAttempted
+          ? "blocked"
+          : "correction_requested",
+      correctiveAction: alignment.verdict === "aligned"
+        ? undefined
+        : correctionAttempted
+          ? "Receipt already issued one corrective pass. Further work stays blocked until the missing contract items are resolved."
+          : "Receipt should queue one focused corrective follow-up before promotion.",
+      correctionAttempted,
+      correctedAfterReview,
+      sourceTaskId: latest.task.taskId,
+      sourceCandidateId: latest.candidate.candidateId,
+    };
+  }
+
+  private defaultDeliveryAlignment(
+    state: FactoryState,
+    completion: FactoryTaskCompletionRecord,
+  ): FactoryTaskAlignmentRecord {
+    const contract = this.objectiveContractForState(state);
+    const inferredAligned = completion.remaining.length === 0 && completion.proof.length > 0;
+    return {
+      verdict: inferredAligned ? "aligned" : "uncertain",
+      satisfied: inferredAligned ? contract.acceptanceCriteria : [],
+      missing: inferredAligned ? [] : contract.acceptanceCriteria,
+      outOfScope: [],
+      rationale: inferredAligned
+        ? "The worker did not emit an explicit alignment block, but the controller inferred alignment from proof-backed completion with no remaining work."
+        : "The worker did not emit an explicit alignment block, so the controller could not prove the full objective contract was satisfied.",
+    };
   }
 
   private workerTaskSkillRefs(selectedSkills: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -3348,6 +3485,7 @@ export class FactoryService {
             summary: effect.summary,
             handoff: effect.handoff,
             completion: effect.completion,
+            alignment: effect.alignment,
             checkResults: effect.checkResults,
             scriptsRun: effect.scriptsRun,
             artifactRefs: effect.artifactRefs,
@@ -3549,13 +3687,25 @@ export class FactoryService {
         scriptsRun,
       }),
     );
+    const initialAlignment = state.objectiveMode === "delivery"
+      ? normalizeTaskAlignmentRecord(
+          rawResult.alignment,
+          this.defaultDeliveryAlignment(state, initialCompletion),
+        )
+      : undefined;
 
     if (outcome === "blocked" && !hasStructuredInvestigationReport) {
       await this.commitTaskMemory(
         state,
         task,
         payload.candidateId,
-        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
+        renderDeliveryResultText({
+          summary: effectiveSummary,
+          handoff,
+          scriptsRun,
+          completion: initialCompletion,
+          alignment: initialAlignment,
+        }),
         outcome,
       );
       await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
@@ -3570,6 +3720,7 @@ export class FactoryService {
           summary: effectiveSummary,
           handoff,
           completion: initialCompletion,
+          alignment: initialAlignment,
           checkResults: [],
           scriptsRun,
           artifactRefs: {},
@@ -3599,7 +3750,13 @@ export class FactoryService {
         state,
         task,
         payload.candidateId,
-        renderDeliveryResultText({ summary: effectiveSummary, handoff, scriptsRun, completion: initialCompletion }),
+        renderDeliveryResultText({
+          summary: effectiveSummary,
+          handoff,
+          scriptsRun,
+          completion: initialCompletion,
+          alignment: initialAlignment,
+        }),
         "blocked_isolated_runtime",
       );
       await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
@@ -3614,6 +3771,7 @@ export class FactoryService {
           summary: effectiveSummary,
           handoff,
           completion: initialCompletion,
+          alignment: initialAlignment,
           checkResults,
           scriptsRun,
           artifactRefs: {},
@@ -3774,6 +3932,11 @@ export class FactoryService {
         checkResults,
       }),
     );
+    const deliveryContract = this.objectiveContractForState(state);
+    const deliveryAlignment = normalizeTaskAlignmentRecord(
+      rawResult.alignment,
+      this.defaultDeliveryAlignment(state, deliveryCompletion),
+    );
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
         completion: deliveryCompletion,
@@ -3810,6 +3973,35 @@ export class FactoryService {
     if (controllerResolvedPartial) {
       reviewStatus = "approved";
     }
+    const alignmentCorrectionAttempted = Boolean(
+      task.sourceTaskId
+      || task.prompt.includes(ALIGNMENT_CORRECTION_NOTE_PREFIX),
+    );
+    if (deliveryAlignment.verdict !== "aligned") {
+      const alignmentDetail = [
+        `Objective contract alignment is ${deliveryAlignment.verdict}.`,
+        deliveryAlignment.missing.length > 0
+          ? `Missing: ${deliveryAlignment.missing.join(" | ")}`
+          : undefined,
+        deliveryAlignment.outOfScope.length > 0
+          ? `Out-of-scope: ${deliveryAlignment.outOfScope.join(" | ")}`
+          : undefined,
+        `Rationale: ${deliveryAlignment.rationale}`,
+      ].filter((item): item is string => Boolean(item)).join(" ");
+      candidateSummary = `${candidateSummary} ${alignmentDetail}`.trim();
+      candidateHandoff = `${candidateHandoff}\n\n${alignmentDetail}`.trim();
+      reviewSummary = candidateSummary;
+      reviewHandoff = candidateHandoff;
+      reviewStatus = "changes_requested";
+      plannerOutcome = "changes_requested";
+      if (!alignmentCorrectionAttempted) {
+        await this.addObjectiveNote(payload.objectiveId, renderAlignmentCorrectionNote({
+          taskId: payload.taskId,
+          alignment: deliveryAlignment,
+          contract: deliveryContract,
+        }));
+      }
+    }
     if (failedCheck) {
       const classification = await this.classifyFailedCheck(state, failedCheck, payload.baseCommit);
       const inheritedOnly = classification.inherited;
@@ -3822,10 +4014,22 @@ export class FactoryService {
         : candidateHandoff;
     }
     const reworkBlockedReason = reviewStatus === "changes_requested"
-      ? this.reworkPassCapReason(
-          payload.taskId,
-          state.candidatePassesByTask[payload.taskId] ?? 0,
-          state.policy.budgets.maxCandidatePassesPerTask,
+      ? (
+          deliveryAlignment.verdict !== "aligned" && alignmentCorrectionAttempted
+            ? [
+                `Alignment gate blocked: ${payload.taskId} is still ${deliveryAlignment.verdict} after one corrective pass.`,
+                deliveryAlignment.missing.length > 0
+                  ? `Missing contract items: ${deliveryAlignment.missing.join(" | ")}.`
+                  : undefined,
+                deliveryAlignment.outOfScope.length > 0
+                  ? `Out-of-scope work: ${deliveryAlignment.outOfScope.join(" | ")}.`
+                  : undefined,
+              ].filter((item): item is string => Boolean(item)).join(" ")
+            : this.reworkPassCapReason(
+                payload.taskId,
+                state.candidatePassesByTask[payload.taskId] ?? 0,
+                state.policy.budgets.maxCandidatePassesPerTask,
+              )
         )
       : undefined;
 
@@ -3841,6 +4045,7 @@ export class FactoryService {
         summary: candidateSummary,
         handoff: candidateHandoff,
         completion: effectiveDeliveryCompletion,
+        alignment: deliveryAlignment,
         checkResults,
         scriptsRun,
         artifactRefs: resultRefs,
@@ -3866,6 +4071,7 @@ export class FactoryService {
         handoff: reviewHandoff,
         scriptsRun,
         completion: effectiveDeliveryCompletion,
+        alignment: deliveryAlignment,
       }),
       reviewStatus,
     );
@@ -4821,6 +5027,8 @@ export class FactoryService {
       ? "released"
       : (state.scheduler.slotState ?? "active");
     const tokensUsed = Object.values(state.candidates).reduce((sum, c) => sum + (c.tokensUsed ?? 0), 0);
+    const contract = this.objectiveContractForState(state);
+    const alignment = this.objectiveAlignmentForState(state);
     const card = {
       objectiveId: state.objectiveId,
       title: state.title,
@@ -4855,6 +5063,8 @@ export class FactoryService {
       prNumber: state.integration.prNumber,
       headRefName: state.integration.headRefName,
       baseRefName: state.integration.baseRefName,
+      contract,
+      alignment,
       tokensUsed: tokensUsed > 0 ? tokensUsed : undefined,
       profile: this.objectiveProfileForState(state),
     };
@@ -5524,6 +5734,7 @@ export class FactoryService {
       .slice(0, 20)
       .reverse();
     const profile = this.workerTaskProfile(this.objectiveProfileForState(state));
+    const contract = this.objectiveContractForState(state);
     const [overview, objectiveMemory, integrationMemory, cloudExecutionContext] = await Promise.all([
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, `${state.title}\n${task.title}`, 520),
       this.summarizeScope(`factory/objectives/${state.objectiveId}`, state.title, 360),
@@ -5557,6 +5768,7 @@ export class FactoryService {
       objectiveMode: state.objectiveMode,
       severity: state.severity,
       planning: state.planning,
+      contract,
       cloudExecutionContext: this.compactCloudExecutionContextForPacket(cloudExecutionContext),
       profile,
       task: {
@@ -5992,6 +6204,7 @@ export class FactoryService {
     const repoSkillPaths = await this.collectRepoSkillPaths();
     const memoryScopes = this.memoryScopesForTask(state, task, candidateId, taskPrompt);
     const contextPack = await this.buildTaskContextPack(state, task, candidateId, taskPrompt);
+    const objectiveContract = this.objectiveContractForState(state, contextPack.planning);
     const sharedArtifactRefs = dedupeGraphRefs(contextPack.contextSources.sharedArtifactRefs);
     const contextSummary = this.renderTaskContextSummary(contextPack);
     const contextRefs = dedupeGraphRefs([
@@ -6036,6 +6249,7 @@ export class FactoryService {
         taskId: task.taskId,
       },
       integration: state.integration,
+      contract: objectiveContract,
       memory: {
         scriptPath: files.memoryScriptPath,
         configPath: files.memoryConfigPath,
@@ -6458,6 +6672,7 @@ export class FactoryService {
     const memorySummary = await this.loadMemorySummary(`factory/objectives/${state.objectiveId}/tasks/${task.taskId}`, taskPrompt);
     const validationSection = this.renderTaskValidationSection(state, task);
     const planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now());
+    const objectiveContract = this.objectiveContractForState(state, planningReceipt);
     const manifestPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.manifestPath);
     const contextSummaryPathForPrompt = payload.contextSummaryPath
       ? this.taskPromptPath(payload.workspacePath, payload.contextSummaryPath)
@@ -6495,6 +6710,17 @@ export class FactoryService {
       `## Task Prompt`,
       taskPrompt,
       ``,
+      `## Objective Contract`,
+      `Acceptance criteria:`,
+      objectiveContract.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- none",
+      `Allowed scope:`,
+      objectiveContract.allowedScope.map((item) => `- ${item}`).join("\n") || "- none",
+      `Disallowed scope:`,
+      objectiveContract.disallowedScope.map((item) => `- ${item}`).join("\n") || "- none",
+      `Required checks:`,
+      objectiveContract.requiredChecks.map((item) => `- ${item}`).join("\n") || "- none",
+      `Proof expectation: ${objectiveContract.proofExpectation}`,
+      ``,
       ...renderPlanningReceiptLines(planningReceipt),
       ``,
       `## Dependencies`,
@@ -6522,7 +6748,7 @@ export class FactoryService {
       `Do not run \`${FACTORY_CLI_PREFIX} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
       `The controller handles integration and PR publication after an approved candidate. If the objective prompt mentions publishing, satisfy it here by leaving a clean candidate diff plus proof for the controller handoff.`,
       `Make a short internal plan before the first tool: name the concrete question, the primary evidence path, the stop condition, and the one follow-up check that would change your answer.`,
-      `Runtime compatibility: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
+      `Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
       `Use Codex subagents only for bounded sidecar work such as parsing a captured artifact, checking one secondary evidence path, or verifying a concrete claim.`,
       `Keep this task session as the single owner of the final JSON result. Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.`,
       `Do not fan out broad parallel exploration when one primary evidence path is already producing enough signal to finish the task.`,
@@ -6573,7 +6799,7 @@ export class FactoryService {
       `Write JSON to ${resultPathForPrompt} with:`,
       state.objectiveMode === "investigation"
         ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
-        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null }`,
+        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }, "nextAction": string | null }`,
       `Do not write this file yourself.`,
       `Do not write ${resultPathForPrompt} yourself. Return exactly that JSON object as your final response and the runtime will persist it there.`,
       `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
@@ -6584,7 +6810,7 @@ export class FactoryService {
       `Before you return final JSON, sanity-check that report.scriptsRun statuses match the actual command outcomes and that any artifact-level errors are reflected in outcome, summary, or next steps.`,
       state.objectiveMode === "investigation"
         ? `For investigation tasks, always include the report key and an explicit handoff string for the controller. Use a report object whenever you gathered meaningful evidence; otherwise use null. Always include completion with changed, proof, and remaining arrays. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
-        : `For delivery tasks, keep the envelope small. Always include an explicit handoff string, scriptsRun, and completion. Use [] when no command or small script materially informed the result, and use [] in completion.remaining when nothing is left.`,
+        : `For delivery tasks, keep the envelope small. Always include an explicit handoff string, scriptsRun, completion, and alignment. Use the alignment block to map the result back to the objective contract before you return final JSON.`,
       ``,
       `## Starting Hint`,
       memorySummary || "No durable task memory yet.",

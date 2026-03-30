@@ -124,6 +124,26 @@ export type FactorySelectedObjectiveCard = {
   readonly latestCommitHash?: string;
   readonly prUrl?: string;
   readonly prNumber?: number;
+  readonly contract?: {
+    readonly acceptanceCriteria: ReadonlyArray<string>;
+    readonly allowedScope: ReadonlyArray<string>;
+    readonly disallowedScope: ReadonlyArray<string>;
+    readonly requiredChecks: ReadonlyArray<string>;
+    readonly proofExpectation: string;
+  };
+  readonly alignment?: {
+    readonly verdict: "aligned" | "uncertain" | "drifted";
+    readonly satisfied: ReadonlyArray<string>;
+    readonly missing: ReadonlyArray<string>;
+    readonly outOfScope: ReadonlyArray<string>;
+    readonly rationale: string;
+    readonly gateStatus: "passed" | "correction_requested" | "blocked" | "not_reported";
+    readonly correctiveAction?: string;
+    readonly correctionAttempted: boolean;
+    readonly correctedAfterReview: boolean;
+    readonly sourceTaskId?: string;
+    readonly sourceCandidateId?: string;
+  };
   readonly checks?: ReadonlyArray<string>;
   readonly latestDecisionSummary?: string;
   readonly latestDecisionAt?: number;

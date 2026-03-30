@@ -180,6 +180,11 @@ export const initFactoryWorkbenchBrowser = () => {
     return form instanceof HTMLFormElement ? form : null;
   };
 
+  const composerShell = () => {
+    const node = document.getElementById("factory-workbench-composer-shell");
+    return node instanceof HTMLElement ? node : null;
+  };
+
   const composerStatus = () => {
     const node = document.getElementById("factory-composer-status");
     return node instanceof HTMLElement ? node : null;
@@ -242,6 +247,16 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const workbenchActivityBlock = () => {
     const node = document.getElementById("factory-workbench-block-activity");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchRailScroll = () => {
+    const node = document.getElementById("factory-workbench-rail-scroll");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchFocusScroll = () => {
+    const node = document.getElementById("factory-workbench-focus-scroll");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -341,11 +356,6 @@ export const initFactoryWorkbenchBrowser = () => {
   };
 
   const currentRouteKey = () => workbenchState.desiredRoute.routeKey;
-
-  const composerShell = () => {
-    const node = document.getElementById("factory-workbench-composer-shell");
-    return node instanceof HTMLElement ? node : null;
-  };
 
   const liveShell = () => {
     const node = document.getElementById("factory-chat-live");
@@ -501,6 +511,62 @@ export const initFactoryWorkbenchBrowser = () => {
     shouldStickToBottom = atBottom;
   };
 
+  const captureDocumentScrollState = () => {
+    const scrollingElement = document.scrollingElement;
+    return {
+      top: typeof window.scrollY === "number"
+        ? window.scrollY
+        : (scrollingElement instanceof HTMLElement ? scrollingElement.scrollTop : 0),
+    };
+  };
+
+  const restoreDocumentScrollState = (state: { readonly top: number }) => {
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo({ top: state.top, behavior: "auto" });
+      return;
+    }
+    const scrollingElement = document.scrollingElement;
+    if (scrollingElement instanceof HTMLElement) {
+      scrollingElement.scrollTop = state.top;
+    }
+  };
+
+  const captureWorkbenchPaneScrollState = () => {
+    const panes = [workbenchRailScroll(), workbenchFocusScroll()]
+      .filter((pane): pane is HTMLElement => Boolean(pane))
+      .map((pane) => ({
+        key: pane.getAttribute("data-preserve-scroll-key") || pane.id,
+        top: pane.scrollTop,
+        height: pane.scrollHeight,
+        bottomOffset: Math.max(0, pane.scrollHeight - pane.scrollTop - pane.clientHeight),
+      }));
+    return panes.length > 0 ? panes : null;
+  };
+
+  const restoreWorkbenchPaneScrollState = (
+    state: ReadonlyArray<{
+      readonly key: string;
+      readonly top: number;
+      readonly height: number;
+      readonly bottomOffset: number;
+    }>,
+  ) => {
+    for (const paneState of state) {
+      const selector = `[data-preserve-scroll-key="${paneState.key}"]`;
+      const pane = document.querySelector(selector);
+      if (!(pane instanceof HTMLElement)) continue;
+      const atBottom = paneState.bottomOffset < 120;
+      const nextTop = atBottom
+        ? pane.scrollHeight
+        : Math.max(0, pane.scrollHeight - pane.clientHeight - paneState.bottomOffset);
+      if (typeof pane.scrollTo === "function") {
+        pane.scrollTo({ top: nextTop, behavior: "auto" });
+      } else {
+        pane.scrollTop = nextTop;
+      }
+    }
+  };
+
   const reconcileLiveTranscript = () => {
     const state = currentChatState();
     const pendingRunId = pendingLiveStatus?.runId;
@@ -643,6 +709,38 @@ export const initFactoryWorkbenchBrowser = () => {
     if (!input) return;
     input.style.height = "0px";
     input.style.height = Math.min(Math.max(input.scrollHeight, 120), 260) + "px";
+  };
+
+  const prefillComposerCommand = (command: string) => {
+    const input = chatInput();
+    if (!input) return;
+    input.value = command;
+    const caret = command.length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    autoResizeInput();
+    setExpanded(false);
+    setComposerStatus(command.trim() ? `Draft ready: ${command.trim()}` : "");
+    const shell = composerShell();
+    if (shell && typeof shell.scrollIntoView === "function") {
+      shell.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    input.focus();
+  };
+
+  const composeCommandFromLocation = (location: string): string => {
+    const url = resolveFactoryUrl(location);
+    return url ? (asString(url.searchParams.get("compose")) ?? "") : "";
+  };
+
+  const consumeComposeCommandFromLocation = (location: string) => {
+    const url = resolveFactoryUrl(location);
+    if (!url) return;
+    const command = asString(url.searchParams.get("compose"));
+    if (!command) return;
+    prefillComposerCommand(command);
+    url.searchParams.delete("compose");
+    setHistory(url, "replace");
   };
 
   const fetchHtml = (url: string, signal?: AbortSignal) =>
@@ -849,6 +947,8 @@ export const initFactoryWorkbenchBrowser = () => {
     });
 
   const applyWorkbenchShellSnapshot = (snapshot: WorkbenchShellSnapshot, url: URL) => {
+    const documentScrollState = captureDocumentScrollState();
+    const paneScrollState = captureWorkbenchPaneScrollState();
     if (snapshot.pageTitle) document.title = snapshot.pageTitle;
     const nextRoute = routeStateFromSnapshot(snapshot, url);
     dispatchWorkbenchAction({ type: "route.applied", route: nextRoute });
@@ -884,6 +984,16 @@ export const initFactoryWorkbenchBrowser = () => {
     htmx()?.process?.(currentBackgroundRoot ?? document.body);
     htmx()?.process?.(currentChatRoot ?? document.body);
     scheduleOverlayRender();
+    if (paneScrollState) {
+      window.requestAnimationFrame(() => {
+        restoreWorkbenchPaneScrollState(paneScrollState);
+        restoreDocumentScrollState(documentScrollState);
+      });
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      restoreDocumentScrollState(documentScrollState);
+    });
   };
 
   const handleWorkbenchChatSwap = (target: HTMLElement) => {
@@ -937,10 +1047,14 @@ export const initFactoryWorkbenchBrowser = () => {
     const target = workbenchFragment(kind);
     const path = target?.getAttribute("hx-get");
     if (!target || !path) return Promise.resolve();
+    const documentScrollState = captureDocumentScrollState();
     return fetchHtml(path).then((markup) => {
       if (expectedRouteKey !== currentRouteKey()) return;
       target.innerHTML = markup;
       htmx()?.process?.(target);
+      window.requestAnimationFrame(() => {
+        restoreDocumentScrollState(documentScrollState);
+      });
     });
   };
 
@@ -973,11 +1087,23 @@ export const initFactoryWorkbenchBrowser = () => {
     const target = islandContainer(kind);
     const path = target?.getAttribute("hx-get");
     if (!target || !path) return Promise.resolve();
+    const documentScrollState = captureDocumentScrollState();
+    const paneScrollState = kind === "workbench" ? captureWorkbenchPaneScrollState() : null;
     return fetchHtml(path).then((markup) => {
       if (expectedRouteKey !== currentRouteKey()) return;
       target.innerHTML = markup;
       htmx()?.process?.(target);
       if (kind === "chat") handleWorkbenchChatSwap(target);
+      if (kind === "workbench" && paneScrollState) {
+        window.requestAnimationFrame(() => {
+          restoreWorkbenchPaneScrollState(paneScrollState);
+          restoreDocumentScrollState(documentScrollState);
+        });
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        restoreDocumentScrollState(documentScrollState);
+      });
     });
   };
 
@@ -1195,6 +1321,14 @@ export const initFactoryWorkbenchBrowser = () => {
       backgroundEventSource = null;
       backgroundEventPath = null;
     }
+  };
+
+  const refreshVisibleWorkbench = () => {
+    connectLiveUpdates();
+    const routeKey = currentRouteKey();
+    queueWorkbenchFragmentRefresh("header", 0, routeKey);
+    queueIslandRefresh("workbench", 0, routeKey);
+    queueIslandRefresh("chat", 0, routeKey);
   };
 
   const navigateWithFeedback = (location: string) => {
@@ -1483,6 +1617,29 @@ export const initFactoryWorkbenchBrowser = () => {
   }
 
   document.addEventListener("click", (event) => {
+    const commandTarget = event.target instanceof Element ? event.target.closest("[data-factory-command]") : null;
+    if (commandTarget instanceof HTMLElement) {
+      event.preventDefault();
+      const command = commandTarget.getAttribute("data-factory-command") || "";
+      const focusHref = commandTarget.getAttribute("data-factory-focus-href") || "";
+      const applyCommand = () => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            prefillComposerCommand(command);
+          });
+        });
+      };
+      if (focusHref) {
+        applyInlineLocation(focusHref, "push").catch(() => {
+          // Keep the current shell usable even if the tab switch fails.
+        }).finally(() => {
+          applyCommand();
+        });
+        return;
+      }
+      applyCommand();
+      return;
+    }
     const target = workbenchNavigationTarget(event);
     if (!target || !isInlineWorkbenchLocation(target.location)) return;
     event.preventDefault();
@@ -1510,6 +1667,15 @@ export const initFactoryWorkbenchBrowser = () => {
         // Fall through to browser URL if inline hydration fails.
       });
     });
+    window.addEventListener("focus", refreshVisibleWorkbench);
+    window.addEventListener("pageshow", refreshVisibleWorkbench);
+  }
+
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      refreshVisibleWorkbench();
+    });
   }
 
   document.addEventListener("htmx:afterSwap", (event) => {
@@ -1529,12 +1695,21 @@ export const initFactoryWorkbenchBrowser = () => {
     }
   });
   const bootRoute = readDocumentRouteState();
+  const bootUrl = currentUrl();
   const replayStorage = sessionStorageApi();
   const replay = parseWorkbenchReplay(
     replayStorage?.getItem(replayStorageKey(bootRoute)) ?? null,
   );
   dispatchWorkbenchAction({ type: "boot", route: bootRoute });
-  const replayRoute = mergeReplayRoute(workbenchState.appliedRoute, replay);
+  const replayRoute = mergeReplayRoute(workbenchState.appliedRoute, replay, {
+    preserveExplicitInspectorTab: Boolean(bootUrl?.searchParams.has("inspectorTab")),
+    preserveExplicitDetailTab: Boolean(bootUrl?.searchParams.has("detailTab")),
+    preserveExplicitFilter: Boolean(bootUrl?.searchParams.has("filter")),
+    preserveExplicitFocus: Boolean(
+      bootUrl?.searchParams.has("focusKind")
+      || bootUrl?.searchParams.has("focusId"),
+    ),
+  });
   if (replay && (replayRoute.routeKey !== workbenchState.appliedRoute.routeKey || replay.liveOverlay)) {
     dispatchWorkbenchAction({
       type: "session.replayed",
@@ -1555,4 +1730,5 @@ export const initFactoryWorkbenchBrowser = () => {
   }
   scheduleOverlayRender();
   connectLiveUpdates();
+  consumeComposeCommandFromLocation(String(window.location && window.location.href ? window.location.href : shellPath()));
 };

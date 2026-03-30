@@ -214,11 +214,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   };
 
   const requestedObjectiveId = (req: Request): string | undefined =>
-    optionalTrimmedString(new URL(req.url).searchParams.get("objective"))
-    ?? optionalTrimmedString(new URL(req.url).searchParams.get("thread"));
-
-  const requestedObjectiveAliasId = (req: Request): string | undefined =>
-    optionalTrimmedString(new URL(req.url).searchParams.get("thread"));
+    optionalTrimmedString(new URL(req.url).searchParams.get("objective"));
 
   const requestedChatId = (req: Request): string | undefined =>
     optionalTrimmedString(new URL(req.url).searchParams.get("chat"));
@@ -237,7 +233,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const requestedPanel = (req: Request): FactoryInspectorPanel => {
     const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-    if (panel === "debug") return "overview";
     return isInspectorPanel(panel) ? panel : "overview";
   };
 
@@ -248,7 +243,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
   const requestedPanelParam = (req: Request): FactoryInspectorPanel | undefined => {
     const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-    if (panel === "debug") return "overview";
     return isInspectorPanel(panel) ? panel : undefined;
   };
 
@@ -3039,14 +3033,31 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         : undefined,
       run: input.activeRun,
     };
+    const prioritizeActivity = Boolean(
+      input.activeRun
+      || focus?.active
+      || focus?.status === "running"
+      || focus?.status === "queued",
+    );
 
-    const blocks: FactoryWorkbenchBlockModel[] = [{
+    const blocks: FactoryWorkbenchBlockModel[] = [];
+
+    const hasActivity = (selectedObjective?.timelineGroups?.length ?? 0) > 0 || focus || input.activeRun || activityItems.length > 0;
+    if (hasActivity && prioritizeActivity) {
+      blocks.push({
+        key: "activity",
+        layout: "full",
+        sections: [activitySection],
+      });
+    }
+
+    blocks.push({
       key: "summary",
       layout: "full",
       sections: [summarySection],
-    }];
+    });
 
-    if ((selectedObjective?.timelineGroups?.length ?? 0) > 0 || focus || input.activeRun || activityItems.length > 0) {
+    if (hasActivity && !prioritizeActivity) {
       blocks.push({
         key: "activity",
         layout: "full",
@@ -3195,7 +3206,17 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         ? buildObjectiveNavCards(board.sections.completed, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
-    const detailTab = normalizedWorkbenchDetailTab(input.detailTab, Boolean(selectedObjective));
+    const hasActiveExecution = Boolean(
+      sessionRuntime.activeRun
+      || workbench?.focus?.active
+      || workbench?.focus?.status === "running"
+      || workbench?.focus?.status === "queued",
+    );
+    const detailTab = input.detailTab === "review" || input.detailTab === "queue" || input.detailTab === "action"
+      ? input.detailTab
+      : hasActiveExecution
+        ? "review"
+        : normalizedWorkbenchDetailTab(input.detailTab, Boolean(selectedObjective));
     return {
       activeProfileId: effectiveProfile.id,
       activeProfileLabel: effectiveProfile.label,
@@ -3409,7 +3430,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     params.set("chat", input.chatId);
     if (input.objectiveId) params.set("objective", input.objectiveId);
     if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
-    if (input.detailTab && input.detailTab !== "action") params.set("detailTab", input.detailTab);
+    if (input.detailTab) params.set("detailTab", input.detailTab);
     if (input.filter && input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
     if (input.focusKind && input.focusId) {
       params.set("focusKind", input.focusKind);
@@ -3544,6 +3565,18 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       events: "/factory/events",
     },
     register: (app: Hono) => {
+      app.get("/factory/control", async (c) => {
+        const url = new URL(c.req.raw.url);
+        const location = `/factory${url.search}`;
+        return new Response(null, {
+          status: 303,
+          headers: {
+            Location: location,
+            "Cache-Control": "no-store",
+          },
+        });
+      });
+
       app.get("/factory/workbench", async (c) => wrap(
         async () => {
           const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
@@ -3975,7 +4008,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
           const requestedChat = requestedChatId(c.req.raw) ?? makeFactoryChatId();
           const requestedObjective = requestedObjectiveId(c.req.raw);
-          const requestedObjectiveAlias = requestedObjectiveAliasId(c.req.raw);
           const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
           const requestedDetail = normalizedWorkbenchDetailTab(
             requestedWorkbenchDetailTab(c.req.raw),
@@ -3999,7 +4031,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             || Boolean(requestedObjective)
           ) && requestedProfile !== model.activeProfileId;
           const shouldRedirectForObjective = Boolean(requestedObjective) && requestedObjective !== model.objectiveId;
-          const shouldRedirectForObjectiveAlias = Boolean(requestedObjectiveAlias);
           const shouldRedirectForFocus = (
             requestedFocusKindValue !== undefined
             || requestedFocusIdValue !== undefined
@@ -4015,7 +4046,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             snapshot: (
               shouldRedirectForProfile
               || shouldRedirectForObjective
-              || shouldRedirectForObjectiveAlias
               || shouldRedirectForInspector
               || shouldRedirectForDetail
               || shouldRedirectForFocus
@@ -4054,7 +4084,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
           const requestedFocusIdValue = requestedFocusId(c.req.raw);
           const requestedFilter = requestedWorkbenchFilter(c.req.raw);
-          const requestedObjectiveAlias = requestedObjectiveAliasId(c.req.raw);
           const model = await buildWorkbenchPageModelCached({
             profileId: requestedProfile,
             chatId: requestedChat,
@@ -4070,7 +4099,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             || Boolean(requestedObjective)
           ) && requestedProfile !== model.activeProfileId;
           const shouldRedirectForObjective = Boolean(requestedObjective) && requestedObjective !== model.objectiveId;
-          const shouldRedirectForObjectiveAlias = Boolean(requestedObjectiveAlias);
           const shouldRedirectForFocus = (
             requestedFocusKindValue !== undefined
             || requestedFocusIdValue !== undefined
@@ -4084,7 +4112,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
           if (
             shouldRedirectForProfile
             || shouldRedirectForObjective
-            || shouldRedirectForObjectiveAlias
             || shouldRedirectForInspector
             || shouldRedirectForDetail
             || shouldRedirectForFocus

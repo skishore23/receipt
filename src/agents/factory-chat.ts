@@ -75,6 +75,11 @@ import {
   type FactoryChatContextImports,
   type FactoryChatContextProjection,
 } from "./factory/chat-context";
+import {
+  isObjectiveContinuationBoundary,
+  normalizeFactoryDispatchInput,
+  resolveFactoryDispatchAction,
+} from "./factory/dispatch";
 import { readChatContextProjection, syncChatContextProjectionStream } from "../db/projectors";
 
 export { classifyFactoryResponseStyle, renderFactoryResponseStyleGuidance } from "./factory/chat-context";
@@ -152,6 +157,9 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- If a completed objective already contains the answer in `factory.status`, `factory.receipts`, or `factory.output`, answer directly only when the answer is historical, meta, or clearly not freshness-sensitive.",
   "- If the answer depends on current cloud/account/runtime state and checked-in helpers are available in the current situation or `factory.status`, rerun the best matching helper first via `codex.run` or `factory.dispatch` instead of finalizing from saved results alone.",
   "- If the answer depends on current cloud/account/runtime state and you only have saved evidence, prefer a fresh probe over presenting old results as current.",
+  "- When a thread is already bound to an objective, treat follow-up work as a continuation by default. Use `factory.dispatch` with `{\"action\":\"react\",\"note\":\"...\"}` unless the user explicitly wants a separate objective.",
+  "- If the bound objective is blocked, completed, canceled, or failed and the user wants fresh work, still use `action:\"react\"` with a `note` or `prompt`; the runtime will create a follow-up objective and rebind the thread.",
+  "- Use `action:\"create\"` only when you intentionally want unrelated or explicitly separate work.",
   "- Before `react`, `promote`, `cancel`, or duplicate dispatch, ground the decision in the current situation, receipts, or live output.",
   "- Use delegation only for bounded sidecar work with a clear owner and stop condition. Keep the main chat responsible for the final answer.",
   "- When child work is already active, prefer `codex.status`, `factory.status`, or `factory.output` with `waitForChangeMs` so you wait for real progress instead of tight polling.",
@@ -161,6 +169,7 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- Do not try to steer an in-flight child. If the current attempt is wrong, inspect it, abort it, and react the objective with a clearer note.",
   "- If investigation reports disagree or reconciliation is pending, do not finalize yet. Inspect status/receipts and wait for the objective to align or block.",
   "- Match tool input keys exactly to the documented schema. For example, `codex.run` accepts `{\"prompt\": string, \"timeoutMs\"?: number}`.",
+  "- For `factory.dispatch`, use only `action`, `objectiveId`, `prompt`, `note`, `title`, `objectiveMode`, `severity`, `checks`, `channel`, `profileId`, and `reason`.",
   "",
   "For final answers to the user:",
   "- write plain language, not raw JSON",
@@ -725,6 +734,11 @@ const buildFactorySituation = async (input: {
       lines.push(`Objective: ${detail.title} (${detail.objectiveId})`);
       lines.push(`Status: ${detail.status} · phase ${detail.phase} · integration ${detail.integration.status}`);
       lines.push(`Mode: ${detail.objectiveMode} · severity ${detail.severity}`);
+      lines.push(
+        isObjectiveContinuationBoundary(detail)
+          ? "Continuation rule: this bound objective is terminal or blocked. Historical/meta questions can answer directly, but fresh work should continue the thread by reacting with a note so Factory can create and bind a follow-up objective."
+          : "Continuation rule: this bound objective is still live. Follow-up work should react the current objective in place instead of starting a separate objective.",
+      );
       if (detail.latestDecision?.summary) lines.push(`Latest decision: ${detail.latestDecision.summary}`);
       if (detail.blockedExplanation?.summary) lines.push(`Blocked: ${detail.blockedExplanation.summary}`);
       const planPreview = detail.tasks.slice(0, 6).map((task) =>
@@ -1152,40 +1166,28 @@ const createFactoryDispatchTool = (input: {
   readonly setCurrentObjectiveId: (objectiveId: string | undefined) => void;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const requestedObjectiveId = asString(toolInput.objectiveId);
+    const normalized = normalizeFactoryDispatchInput(toolInput);
+    const requestedObjectiveId = normalized.objectiveId;
     const objectiveId = requestedObjectiveId ?? input.getCurrentObjectiveId();
     const currentObjective = objectiveId
       ? await input.factoryService.getObjective(objectiveId).catch(() => undefined)
       : undefined;
-    let action = asString(toolInput.action)
-      ?? (
-        objectiveId
-        && currentObjective
-        && !currentObjective.archivedAt
-        && !isTerminalObjectiveStatus(currentObjective.status)
-          ? "react"
-          : "create"
-      );
+    let action = resolveFactoryDispatchAction(normalized, objectiveId);
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
     let reused = false;
     let bindingReason: "dispatch_create" | "dispatch_reuse" | "dispatch_update" = "dispatch_update";
     if (action === "create") {
-      const prompt = asString(toolInput.prompt);
+      const prompt = normalized.prompt;
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
       const payload: FactoryObjectiveInput = {
         objectiveId: requestedObjectiveId,
-        title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
+        title: normalized.title ?? deriveObjectiveTitle(prompt),
         prompt,
-        baseHash: asString(toolInput.baseHash),
-        objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
-          ? toolInput.objectiveMode
-          : currentObjective?.objectiveMode,
-        severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
-          && toolInput.severity >= 1 && toolInput.severity <= 5
-          ? toolInput.severity as FactoryObjectiveInput["severity"]
-          : currentObjective?.severity,
-        checks: asStringList(toolInput.checks),
-        channel: asString(toolInput.channel),
+        baseHash: normalized.baseHash,
+        objectiveMode: normalized.objectiveMode ?? currentObjective?.objectiveMode,
+        severity: normalized.severity ?? currentObjective?.severity,
+        checks: normalized.checks,
+        channel: normalized.channel,
         profileId: input.profileId,
         startImmediately: true,
       };
@@ -1193,24 +1195,19 @@ const createFactoryDispatchTool = (input: {
       bindingReason = "dispatch_create";
     } else if (action === "react") {
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
-      const followUpPrompt = asString(toolInput.note) ?? asString(toolInput.prompt);
-      if (currentObjective && (currentObjective.archivedAt || isTerminalObjectiveStatus(currentObjective.status))) {
+      const followUpPrompt = normalized.note ?? normalized.prompt;
+      if (currentObjective && isObjectiveContinuationBoundary(currentObjective)) {
         if (!followUpPrompt) {
           throw new Error("factory.dispatch react on a completed objective requires note or prompt to create a follow-up objective");
         }
         detail = await input.factoryService.createObjective({
-          title: asString(toolInput.title) ?? deriveObjectiveTitle(followUpPrompt),
+          title: normalized.title ?? deriveObjectiveTitle(followUpPrompt),
           prompt: followUpPrompt,
-          baseHash: asString(toolInput.baseHash),
-          objectiveMode: toolInput.objectiveMode === "investigation" || toolInput.objectiveMode === "delivery"
-            ? toolInput.objectiveMode
-            : currentObjective.objectiveMode,
-          severity: typeof toolInput.severity === "number" && Number.isInteger(toolInput.severity)
-            && toolInput.severity >= 1 && toolInput.severity <= 5
-            ? toolInput.severity as FactoryObjectiveInput["severity"]
-            : currentObjective.severity,
-          checks: asStringList(toolInput.checks),
-          channel: asString(toolInput.channel),
+          baseHash: normalized.baseHash,
+          objectiveMode: normalized.objectiveMode ?? currentObjective.objectiveMode,
+          severity: normalized.severity ?? currentObjective.severity,
+          checks: normalized.checks,
+          channel: normalized.channel,
           profileId: input.profileId,
           startImmediately: true,
         });

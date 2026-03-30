@@ -13,6 +13,7 @@ import type {
   FactoryPlanningReceiptRecord,
   FactoryObjectiveSeverity,
   FactoryRebracketRecord,
+  FactoryTaskAlignmentRecord,
   FactoryTaskRecord,
   FactoryTaskCompletionRecord,
   FactoryTaskResultOutcome,
@@ -199,6 +200,7 @@ export type FactoryEvent =
       readonly summary: string;
       readonly handoff: string;
       readonly completion: FactoryTaskCompletionRecord;
+      readonly alignment?: FactoryTaskAlignmentRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
       readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;

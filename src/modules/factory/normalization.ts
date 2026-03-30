@@ -69,7 +69,7 @@ const normalizeCandidateOrder = (
   const ordered = Array.isArray(candidateOrder)
     ? candidateOrder.filter((candidateId): candidateId is string => typeof candidateId === "string" && Boolean(candidates[candidateId]))
     : [];
-  return uniqueStrings([...ordered, ...Object.keys(candidates)]);
+  return uniqueStrings(ordered);
 };
 
 const normalizeWorkflowStatus = (value: unknown): FactoryWorkflowStatus => {
@@ -132,7 +132,7 @@ const normalizeInvestigation = (value: unknown): FactoryState["investigation"] =
     : {};
   const reportOrder = Array.isArray(value.reportOrder)
     ? uniqueStrings(value.reportOrder.filter((taskId): taskId is string => typeof taskId === "string" && Boolean(reports[taskId])))
-    : Object.keys(reports);
+    : [];
   return {
     reports,
     reportOrder,
@@ -152,13 +152,10 @@ export const workflowActiveTaskIds = (state: FactoryState): ReadonlyArray<string
   stringList(state.workflow.activeTaskIds);
 
 export const candidateOrderList = (state: FactoryState): ReadonlyArray<string> =>
-  uniqueStrings([
-    ...stringList(state.candidateOrder),
-    ...Object.keys(state.candidates),
-  ]);
+  stringList(state.candidateOrder);
 
 export const workflowTaskList = (state: FactoryState): ReadonlyArray<FactoryTaskRecord> =>
-  (workflowTaskIds(state).length > 0 ? workflowTaskIds(state) : Object.keys(state.workflow.tasksById))
+  workflowTaskIds(state)
     .map((taskId) => state.workflow.tasksById[taskId])
     .filter((task): task is FactoryTaskRecord => Boolean(task));
 
@@ -302,7 +299,7 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
   ) as Readonly<Record<string, FactoryTaskRecord>>;
   const orderedTaskIds = Array.isArray(currentWorkflow?.taskIds)
     ? currentWorkflow.taskIds.filter((taskId): taskId is string => typeof taskId === "string")
-    : Object.keys(tasksById);
+    : [];
   const taskIds = uniqueExistingTaskIds(orderedTaskIds, tasksById);
   const activeTaskIds = uniqueExistingTaskIds(
     Array.isArray(currentWorkflow?.activeTaskIds)

@@ -109,6 +109,27 @@ export type FactoryExecutionScriptRun = {
 
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
 
+export type FactoryTaskAlignmentVerdict =
+  | "aligned"
+  | "uncertain"
+  | "drifted";
+
+export type FactoryTaskAlignmentRecord = {
+  readonly verdict: FactoryTaskAlignmentVerdict;
+  readonly satisfied: ReadonlyArray<string>;
+  readonly missing: ReadonlyArray<string>;
+  readonly outOfScope: ReadonlyArray<string>;
+  readonly rationale: string;
+};
+
+export type FactoryObjectiveContractRecord = {
+  readonly acceptanceCriteria: ReadonlyArray<string>;
+  readonly allowedScope: ReadonlyArray<string>;
+  readonly disallowedScope: ReadonlyArray<string>;
+  readonly requiredChecks: ReadonlyArray<string>;
+  readonly proofExpectation: string;
+};
+
 export type FactoryTaskCompletionRecord = {
   readonly changed: ReadonlyArray<string>;
   readonly proof: ReadonlyArray<string>;
@@ -308,6 +329,7 @@ export type FactoryCandidateRecord = {
   readonly summary?: string;
   readonly handoff?: string;
   readonly completion?: FactoryTaskCompletionRecord;
+  readonly alignment?: FactoryTaskAlignmentRecord;
   readonly checkResults: ReadonlyArray<FactoryCheckResult>;
   readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly artifactRefs: Readonly<Record<string, GraphRef>>;

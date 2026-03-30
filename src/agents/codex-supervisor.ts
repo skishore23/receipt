@@ -32,6 +32,11 @@ import {
   waitForSnapshotChange,
   type FactoryLiveWaitState,
 } from "./orchestration-utils";
+import {
+  isObjectiveContinuationBoundary,
+  normalizeFactoryDispatchInput,
+  resolveFactoryDispatchAction,
+} from "./factory/dispatch";
 
 export const CODEX_SUPERVISOR_WORKFLOW_ID = "agent-codex-supervisor-v1";
 export const CODEX_SUPERVISOR_WORKFLOW_VERSION = "1.0.0";
@@ -343,34 +348,62 @@ const latestObjectiveByRun = new Map<string, string>();
 const createFactoryDispatchTool = (input: {
   readonly factoryService: FactoryService;
   readonly runId: string;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId);
-    const action = asString(toolInput.action) ?? (objectiveId ? "react" : "create");
+    const normalized = normalizeFactoryDispatchInput(toolInput);
+    const objectiveId = normalized.objectiveId ?? input.getCurrentObjectiveId();
+    const currentObjective = objectiveId
+      ? await input.factoryService.getObjective(objectiveId).catch(() => undefined)
+      : undefined;
+    let action = resolveFactoryDispatchAction(normalized, objectiveId);
     let detail: Awaited<ReturnType<FactoryService["getObjective"]>>;
     if (action === "create") {
-      const prompt = asString(toolInput.prompt);
+      const prompt = normalized.prompt;
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
       const payload: FactoryObjectiveInput = {
-        title: asString(toolInput.title) ?? deriveObjectiveTitle(prompt),
+        title: normalized.title ?? deriveObjectiveTitle(prompt),
         prompt,
-        baseHash: asString(toolInput.baseHash),
-        checks: asStringList(toolInput.checks),
-        channel: asString(toolInput.channel),
-        profileId: asString(toolInput.profileId),
+        baseHash: normalized.baseHash,
+        objectiveMode: normalized.objectiveMode ?? currentObjective?.objectiveMode,
+        severity: normalized.severity ?? currentObjective?.severity,
+        checks: normalized.checks,
+        channel: normalized.channel,
+        profileId: normalized.profileId,
         startImmediately: true,
       };
       detail = await input.factoryService.createObjective(payload);
     } else if (action === "react") {
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
-      await input.factoryService.reactObjective(objectiveId);
-      detail = await input.factoryService.getObjective(objectiveId);
+      const followUpPrompt = normalized.note ?? normalized.prompt;
+      if (currentObjective && isObjectiveContinuationBoundary(currentObjective)) {
+        if (!followUpPrompt) {
+          throw new Error("factory.dispatch react on a completed objective requires note or prompt to create a follow-up objective");
+        }
+        detail = await input.factoryService.createObjective({
+          title: normalized.title ?? deriveObjectiveTitle(followUpPrompt),
+          prompt: followUpPrompt,
+          baseHash: normalized.baseHash,
+          objectiveMode: normalized.objectiveMode ?? currentObjective.objectiveMode,
+          severity: normalized.severity ?? currentObjective.severity,
+          checks: normalized.checks,
+          channel: normalized.channel,
+          profileId: normalized.profileId,
+          startImmediately: true,
+        });
+        action = "create";
+      } else if (followUpPrompt) {
+        detail = await input.factoryService.reactObjectiveWithNote(objectiveId, followUpPrompt);
+      } else {
+        await input.factoryService.reactObjective(objectiveId);
+        detail = await input.factoryService.getObjective(objectiveId);
+      }
     } else if (action === "promote") {
       if (!objectiveId) throw new Error("factory.dispatch promote requires objectiveId");
       detail = await input.factoryService.promoteObjective(objectiveId);
     } else if (action === "cancel") {
       if (!objectiveId) throw new Error("factory.dispatch cancel requires objectiveId");
-      detail = await input.factoryService.cancelObjective(objectiveId, asString(toolInput.reason));
+      detail = await input.factoryService.cancelObjective(objectiveId, normalized.reason);
     } else if (action === "cleanup") {
       if (!objectiveId) throw new Error("factory.dispatch cleanup requires objectiveId");
       detail = await input.factoryService.cleanupObjectiveWorkspaces(objectiveId);
@@ -400,9 +433,10 @@ const createFactoryDispatchTool = (input: {
 const createFactoryStatusTool = (input: {
   readonly factoryService: FactoryService;
   readonly liveWaitState: FactoryLiveWaitState;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId);
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     if (!objectiveId) throw new Error("factory.status requires objectiveId");
     const requestedWaitMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildStatus = async (): Promise<Record<string, unknown>> => {
@@ -451,9 +485,10 @@ const createFactoryStatusTool = (input: {
 const createFactoryOutputTool = (input: {
   readonly factoryService: FactoryService;
   readonly liveWaitState: FactoryLiveWaitState;
+  readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
-    const objectiveId = asString(toolInput.objectiveId);
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     if (!objectiveId) throw new Error("factory.output requires objectiveId");
     const taskId = asString(toolInput.taskId);
     const jobId = asString(toolInput.jobId);
@@ -574,18 +609,21 @@ export const runCodexSupervisor = async (input: CodexSupervisorRunInput): Promis
     ? createFactoryDispatchTool({
       factoryService,
       runId: input.runId,
+      getCurrentObjectiveId,
     })
     : undefined;
   const factoryStatusTool = factoryService
     ? createFactoryStatusTool({
       factoryService,
       liveWaitState: factoryLiveWaitState,
+      getCurrentObjectiveId,
     })
     : undefined;
   const factoryOutputTool = factoryService
     ? createFactoryOutputTool({
       factoryService,
       liveWaitState: factoryLiveWaitState,
+      getCurrentObjectiveId,
     })
     : undefined;
   const capabilities = [

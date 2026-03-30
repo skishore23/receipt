@@ -60,7 +60,7 @@ Use `Factory` when you want to:
 - debug objective runtime behavior
 - use profile-driven orchestration and handoff
 
-There is no separate Hub UI anymore. Factory still reuses `HubGit` as its Git/worktree adapter, but operator interaction now uses `/factory` for chat/thread flow and `/factory/control` for advanced work details. `/factory/chat` remains as a compatibility redirect.
+There is no separate Hub UI anymore. Factory still reuses `HubGit` as its Git/worktree adapter, but operator interaction now uses `/factory` for chat, objective detail, and live workbench state. `GET /factory/control` is only a compatibility redirect to `/factory`.
 Profiles are orchestration lenses over the Factory control plane. They do not receive direct repo read/write tools.
 If a Factory chat session uses direct `codex.run`, that path is a read-only probe; code-changing work still flows through objective-managed worktrees.
 
@@ -189,40 +189,30 @@ This layer chooses among valid actions. It is intentionally narrower than the se
 
 ### Factory route layer
 
-- `src/agents/factory.agent.ts`
+- `src/agents/factory/route.ts`
 
 This is the route/workflow entry, not the durable brain.
 
 It exposes:
 
 - `GET /factory`
-- `GET /factory/events`
-- `GET /factory/island/chat`
-- `GET /factory/island/sidebar`
-- `GET /factory/island/inspector`
-- `GET /factory/chat`
-- `GET /factory/chat/events`
-- `GET /factory/chat/island/chat`
-- `GET /factory/chat/island/sidebar`
-- `GET /factory/chat/island/inspector`
+- `GET /factory/workbench`
 - `GET /factory/control`
-- `GET /factory/control/events`
-- `GET /factory/control/island/rail`
-- `GET /factory/control/island/main`
-- `GET /factory/control/island/inspector`
-- `GET /factory/control/island/live-output`
-- `POST /factory/control/compose`
+- `GET /factory/events`
+- `GET /factory/chat/events`
+- `GET /factory/background/events`
+- `GET /factory/island/workbench/header`
+- `GET /factory/island/workbench/block`
+- `GET /factory/island/workbench`
+- `GET /factory/island/chat`
+- `GET /factory/api/workbench-shell`
+- `GET /factory/new-chat`
+- `POST /factory/compose`
 - `GET /factory/api/objectives`
 - `GET /factory/api/live-output`
-- `POST /factory/api/objectives`
 - `GET /factory/api/objectives/:id`
 - `GET /factory/api/objectives/:id/debug`
 - `GET /factory/api/objectives/:id/receipts`
-- `POST /factory/api/objectives/:id/react`
-- `POST /factory/api/objectives/:id/promote`
-- `POST /factory/api/objectives/:id/cancel`
-- `POST /factory/api/objectives/:id/archive`
-- `POST /factory/api/objectives/:id/cleanup`
 
 ### Git and worker adapters reused by factory
 

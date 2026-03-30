@@ -24,7 +24,7 @@ This document is about the profile layer on top of the Receipt-native Factory co
 
 ## The Short Version
 
-`/factory` is the chat-first orchestration surface where the operator talks to a selected Factory profile and moves between general chat and thread-scoped chat. `/factory/control` is the secondary work-details surface.
+`/factory` is the operator-facing orchestration surface where the user talks to a selected Factory profile and moves between general chat, objective-scoped chat, and live workbench state. `GET /factory/control` is only a compatibility redirect to `/factory`, not a separate surface.
 
 The main `/factory` chat surface is backed by a repo-customizable profile package made of:
 
@@ -484,9 +484,10 @@ sequenceDiagram
   - profile discovery, selection, imports, prompt assembly, resolved hash
 - `src/agents/factory-chat.ts`
   - profile-aware agent runner, tool registry, async orchestration tools
-- `src/agents/factory.agent.ts`
+- `src/agents/factory/route.ts`
   - `/factory` route, profile-aware shell model, UI islands, events
-  - `/factory/control` route, execution focus model, live output, objective-scoped events
+  - `/factory/workbench` and `/factory/control` compatibility redirects
+  - `/factory/background/events`, `/factory/chat/events`, and objective-scoped workbench islands
 - `profiles/generalist/PROFILE.md`
   - current default operator-facing behavior plus embedded policy frontmatter
   - current default capabilities and route hints
@@ -509,7 +510,7 @@ The profile layer is customizable, but the system still keeps strong boundaries:
 
 ## Practical Takeaway
 
-The current `/factory` design is a customizable orchestration shell built around profiles, while `/factory/control` exposes advanced durable state for the selected thread.
+The current `/factory` design is a customizable orchestration shell built around profiles and already includes the live durable state for the selected objective.
 
 If you want to adapt Factory behavior for a team or repo, the first place to customize is not the reducer or the UI. It is the profile layer:
 

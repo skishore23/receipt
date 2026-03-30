@@ -73,7 +73,16 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
   });
 };
 
-const createFactoryService = async (): Promise<{
+const createFactoryService = async (opts?: {
+  readonly taskMode?: "investigation" | "delivery";
+  readonly alignment?: {
+    readonly verdict: "aligned" | "uncertain" | "drifted";
+    readonly satisfied?: ReadonlyArray<string>;
+    readonly missing?: ReadonlyArray<string>;
+    readonly outOfScope?: ReadonlyArray<string>;
+    readonly rationale?: string;
+  };
+}): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
   readonly repoRoot: string;
@@ -96,24 +105,45 @@ const createFactoryService = async (): Promise<{
         await fs.writeFile(input.promptPath, input.prompt, "utf-8");
         await fs.writeFile(input.stdoutPath, "", "utf-8");
         await fs.writeFile(input.stderrPath, "", "utf-8");
-        const raw = JSON.stringify({
-          outcome: "approved",
-          summary: "Investigated the receipt flow and recorded a focused handoff.",
-          handoff: "Use the generated packet summary first, then inspect the timeline if you need finer evidence.",
-          artifacts: [],
-          completion: {
-            status: "done",
-            outcome: "complete",
-            remainingWork: [],
-          },
-          report: {
-            conclusion: "The script test objective completed with a structured investigation result.",
-            evidence: [],
-            scriptsRun: [],
-            disagreements: [],
-            nextSteps: [],
-          },
-        });
+        const raw = opts?.taskMode === "delivery"
+          ? JSON.stringify({
+              outcome: "approved",
+              summary: "Delivered the requested change and reported the alignment result.",
+              handoff: "The delivery task completed with an explicit alignment report for the controller.",
+              artifacts: [],
+              scriptsRun: [],
+              completion: {
+                changed: ["Updated README.md in the task workspace."],
+                proof: ["README.md was updated by the worker stub."],
+                remaining: [],
+              },
+              alignment: {
+                verdict: opts?.alignment?.verdict ?? "aligned",
+                satisfied: opts?.alignment?.satisfied ? [...opts.alignment.satisfied] : ["Implemented the requested delivery change."],
+                missing: opts?.alignment?.missing ? [...opts.alignment.missing] : [],
+                outOfScope: opts?.alignment?.outOfScope ? [...opts.alignment.outOfScope] : [],
+                rationale: opts?.alignment?.rationale ?? "The worker explicitly mapped the delivery result back to the objective contract.",
+              },
+              nextAction: null,
+            })
+          : JSON.stringify({
+              outcome: "approved",
+              summary: "Investigated the receipt flow and recorded a focused handoff.",
+              handoff: "Use the generated packet summary first, then inspect the timeline if you need finer evidence.",
+              artifacts: [],
+              completion: {
+                status: "done",
+                outcome: "complete",
+                remainingWork: [],
+              },
+              report: {
+                conclusion: "The script test objective completed with a structured investigation result.",
+                evidence: [],
+                scriptsRun: [],
+                disagreements: [],
+                nextSteps: [],
+              },
+            });
         await fs.writeFile(input.lastMessagePath, raw, "utf-8");
         return {
           exitCode: 0,
@@ -285,6 +315,57 @@ test("factory CLI investigate exposes the same investigation flow for repair/deb
   expect(payload.summary.whatHappened.length).toBeGreaterThan(0);
   expect(payload.assessment.verdict).toBeTruthy();
   expect(payload.assessment.efficiency).toBeTruthy();
+}, 120_000);
+
+test("factory CLI investigate surfaces contract and alignment state for delivery objectives", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    taskMode: "delivery",
+    alignment: {
+      verdict: "uncertain",
+      satisfied: ["Updated the requested file."],
+      missing: ["Confirm the shipped behavior fully satisfies the delivery objective."],
+      outOfScope: [],
+      rationale: "The worker changed the file but left contract satisfaction uncertain.",
+    },
+  });
+  const created = await service.createObjective({
+    title: "Investigate delivery alignment",
+    prompt: "Apply a small delivery change and record alignment against the objective contract.",
+    severity: 2,
+    checks: [],
+    profileId: "software",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const jsonRun = await execFileAsync(BUN, [
+    CLI_PATH,
+    "factory",
+    "investigate",
+    created.objectiveId,
+    "--data-dir",
+    dataDir,
+    "--repo-root",
+    repoRoot,
+    "--json",
+  ], {
+    cwd: ROOT,
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+
+  const payload = JSON.parse(jsonRun.stdout) as {
+    readonly packetContext?: {
+      readonly summaryText?: string;
+    };
+    readonly assessment: {
+      readonly correctiveSteerIssued?: boolean;
+    };
+  };
+  expect(payload.packetContext?.summaryText).toContain("Objective Contract");
+  expect(payload.assessment.correctiveSteerIssued).toBe(true);
 }, 120_000);
 
 test("factory CLI investigate compact keeps repair sections while dropping verbose agent-run detail", async () => {
@@ -527,4 +608,5 @@ test("factory objective audit persists objective snapshots into dedicated audit 
     entry.text.includes(`[${created.objectiveId}]`)
     && entry.text.includes("Summary")
   )).toBe(true);
+  expect(objectiveAuditMemory.some((entry) => entry.text.includes("alignment="))).toBe(true);
 }, 120_000);

@@ -77,7 +77,7 @@ const inspectorQuery = (model: FactoryInspectorRouteModel, extra?: {
   if (model.mode === "mission-control") params.set("mode", model.mode);
   params.set("profile", model.activeProfileId);
   if (model.chatId) params.set("chat", model.chatId);
-  if (model.objectiveId) params.set("thread", model.objectiveId);
+  if (model.objectiveId) params.set("objective", model.objectiveId);
   if (model.runId) params.set("run", model.runId);
   if (extra?.jobId ?? model.jobId) params.set("job", extra?.jobId ?? model.jobId!);
   const panel = extra?.panel === null ? undefined : (extra?.panel ?? model.panel);

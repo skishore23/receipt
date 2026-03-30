@@ -308,10 +308,10 @@ test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => 
 
     await runtime.execute("jobs", {
       type: "emit",
-      eventId: "legacy-index-only",
+      eventId: "index-only",
       event: {
         type: "job.enqueued",
-        jobId: "legacy_only",
+        jobId: "index_only",
         agentId: "writer",
         lane: "collect",
         payload: { kind: "writer.run" },
@@ -319,7 +319,7 @@ test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => 
       },
     });
 
-    const fromAuthoritative = await queue.getJob("legacy_only");
+    const fromAuthoritative = await queue.getJob("index_only");
     expect(fromAuthoritative).toBe(undefined);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

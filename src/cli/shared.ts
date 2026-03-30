@@ -25,7 +25,6 @@ Commands:
   receipt dst [<prefix>] [--json] [--limit <n>] [--strict]
   receipt fork <run-id|stream> --at <index> [--name <branch-name>]
   receipt inspect <run-id|stream>
-  receipt migrate sqlite [--data-dir <path>] [--db-path <path>] [--force-rebuild]
   receipt jobs [list] [--status queued|leased|running|completed|failed|canceled] [--limit <n>]
   receipt jobs enqueue <agent-id> [--lane chat|collect|steer|follow_up] [--payload-json <json>] [--job-id <id>] [--max-attempts <n>] [--session-key <key>] [--singleton-mode allow|cancel|steer]
   receipt jobs wait <job-id> [--timeout-ms <n>]

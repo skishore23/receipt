@@ -31,6 +31,12 @@ type LongRunExperimentOptions = {
   readonly keepWorkdir?: boolean;
 };
 
+type ExecFileFailure = Error & {
+  readonly code?: number | string | null;
+  readonly stdout?: string;
+  readonly stderr?: string;
+};
+
 export type FactoryLongRunExperimentReport = {
   readonly experimentId: string;
   readonly sourceRepoRoot: string;
@@ -71,30 +77,67 @@ const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> =>
   return stdout.trim();
 };
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const transcriptLabelForAttempt = (label: string, attempt: number): string =>
+  attempt > 1 ? `${label} (attempt ${attempt})` : label;
+
+const isRetryableDbLockFailure = (error: unknown): error is ExecFileFailure => {
+  if (!(error instanceof Error)) return false;
+  const execError = error as ExecFileFailure;
+  const haystacks = [
+    error.message,
+    typeof execError.stdout === "string" ? execError.stdout : "",
+    typeof execError.stderr === "string" ? execError.stderr : "",
+  ];
+  return haystacks.some((value) => value.toLowerCase().includes("database is locked"));
+};
+
 const runCli = async (
   transcript: TranscriptEntry[],
   label: string,
   args: ReadonlyArray<string>,
   env: NodeJS.ProcessEnv,
 ): Promise<TranscriptEntry> => {
-  const startedAt = Date.now();
-  const { stdout, stderr } = await execFileAsync(BUN, [CLI_PATH, ...args], {
-    cwd: ROOT,
-    env,
-    encoding: "utf-8",
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  const entry: TranscriptEntry = {
-    label,
-    argv: args,
-    startedAt,
-    endedAt: Date.now(),
-    exitCode: 0,
-    stdout,
-    stderr,
-  };
-  transcript.push(entry);
-  return entry;
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    const startedAt = Date.now();
+    try {
+      const { stdout, stderr } = await execFileAsync(BUN, [CLI_PATH, ...args], {
+        cwd: ROOT,
+        env,
+        encoding: "utf-8",
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      const entry: TranscriptEntry = {
+        label: transcriptLabelForAttempt(label, attempt),
+        argv: args,
+        startedAt,
+        endedAt: Date.now(),
+        exitCode: 0,
+        stdout,
+        stderr,
+      };
+      transcript.push(entry);
+      return entry;
+    } catch (error) {
+      const execError = error as ExecFileFailure;
+      const entry: TranscriptEntry = {
+        label: transcriptLabelForAttempt(label, attempt),
+        argv: args,
+        startedAt,
+        endedAt: Date.now(),
+        exitCode: typeof execError.code === "number" ? execError.code : null,
+        stdout: typeof execError.stdout === "string" ? execError.stdout : "",
+        stderr: typeof execError.stderr === "string" ? execError.stderr : "",
+      };
+      transcript.push(entry);
+      if (attempt >= 5 || !isRetryableDbLockFailure(error)) throw error;
+      await sleep(attempt * 250);
+    }
+  }
 };
 
 const spawnCli = (

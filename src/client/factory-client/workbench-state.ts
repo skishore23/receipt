@@ -142,7 +142,7 @@ export const workbenchRouteKey = (input: {
   params.set("chat", input.chatId);
   if (input.objectiveId) params.set("objective", input.objectiveId);
   if (input.inspectorTab && input.inspectorTab !== DEFAULT_INSPECTOR_TAB) params.set("inspectorTab", input.inspectorTab);
-  if (input.detailTab && input.detailTab !== DEFAULT_DETAIL_TAB) params.set("detailTab", input.detailTab);
+  if (input.detailTab) params.set("detailTab", input.detailTab);
   if (input.filter && input.filter !== DEFAULT_FILTER) params.set("filter", input.filter);
   if (input.focusKind && input.focusId) {
     params.set("focusKind", input.focusKind);
@@ -354,16 +354,32 @@ export const parseWorkbenchReplay = (
 export const mergeReplayRoute = (
   route: FactoryWorkbenchRouteState,
   replay?: FactoryWorkbenchReplaySnapshot,
+  options?: {
+    readonly preserveExplicitInspectorTab?: boolean;
+    readonly preserveExplicitDetailTab?: boolean;
+    readonly preserveExplicitFilter?: boolean;
+    readonly preserveExplicitFocus?: boolean;
+  },
 ): FactoryWorkbenchRouteState => {
   if (!replay) return route;
   return createWorkbenchRouteState({
     profileId: route.profileId,
     chatId: route.chatId,
     objectiveId: route.objectiveId,
-    inspectorTab: route.inspectorTab === DEFAULT_INSPECTOR_TAB ? replay.route.inspectorTab : route.inspectorTab,
-    detailTab: route.detailTab === DEFAULT_DETAIL_TAB ? replay.route.detailTab : route.detailTab,
-    filter: route.filter === DEFAULT_FILTER ? replay.route.filter : route.filter,
-    focusKind: route.focusKind ?? replay.route.focusKind,
-    focusId: route.focusId ?? replay.route.focusId,
+    inspectorTab: options?.preserveExplicitInspectorTab || route.inspectorTab !== DEFAULT_INSPECTOR_TAB
+      ? route.inspectorTab
+      : replay.route.inspectorTab,
+    detailTab: options?.preserveExplicitDetailTab || route.detailTab !== DEFAULT_DETAIL_TAB
+      ? route.detailTab
+      : replay.route.detailTab,
+    filter: options?.preserveExplicitFilter || route.filter !== DEFAULT_FILTER
+      ? route.filter
+      : replay.route.filter,
+    focusKind: options?.preserveExplicitFocus
+      ? route.focusKind
+      : route.focusKind ?? replay.route.focusKind,
+    focusId: options?.preserveExplicitFocus
+      ? route.focusId
+      : route.focusId ?? replay.route.focusId,
   });
 };

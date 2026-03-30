@@ -437,6 +437,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         summary: event.summary,
         handoff: event.handoff,
         completion: event.completion,
+        alignment: event.alignment,
         checkResults: event.checkResults,
         scriptsRun: event.scriptsRun,
         artifactRefs: event.artifactRefs,

@@ -325,7 +325,7 @@ test("factory runtime: blocked tasks stay blocked instead of spawning mutation f
   expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
   expect(detail.tasks.some((task) => task.title.startsWith("Unblock "))).toBe(false);
   expect(detail.tasks.some((task) => task.title.startsWith("Finish "))).toBe(false);
-  expect(detail.blockedReason ?? "").toMatch(/No runnable tasks remained|blocked/i);
+  expect(detail.blockedReason ?? "").toMatch(/No runnable tasks remained|blocked|Human input requested/i);
 }, 120_000);
 
 test("factory runtime: transient blocked tasks retry once automatically before asking for help", async () => {
@@ -556,7 +556,7 @@ test("factory no-diff discovery tasks integrate as no-op passes and unlock depen
 
   const created = await service.createObjective({
     title: "Locate the Factory header link source",
-    prompt: "Search the repo to find where the /factory page renders the legacy header link and record the file path.",
+    prompt: "Search the repo to find where the /factory page renders the header link and record the file path.",
     checks: ["git status --short"],
   });
   await runObjectiveStartup(service, created.objectiveId);
@@ -572,8 +572,8 @@ test("factory no-diff discovery tasks integrate as no-op passes and unlock depen
       nodeId: "task_02",
       taskId: "task_02",
       taskKind: "planned",
-      title: "Remove the legacy header link",
-      prompt: "Edit the Factory page so the legacy header link is removed.",
+      title: "Remove the header link",
+      prompt: "Edit the Factory page so the header link is removed.",
       workerType: "codex",
       baseCommit: created.baseHash,
       dependsOn: ["task_01"],

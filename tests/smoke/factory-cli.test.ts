@@ -2469,6 +2469,42 @@ test("factory cli: steer and follow-up queue structured live guidance commands",
   }
 }, 120_000);
 
+test("factory cli runtime does not fail unsupported factory chat jobs", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const config = await loadFactoryConfig(repoDir);
+  expect(config).toBeDefined();
+  const runtime = createFactoryCliRuntime(config!);
+  try {
+    await runtime.start();
+    const job = await runtime.queue.enqueue({
+      agentId: "factory",
+      lane: "chat",
+      payload: {
+        kind: "factory.run",
+        stream: "agents/factory/test",
+        runId: "run_factory_cli_unsupported_chat",
+        problem: "How is it today?",
+        profileId: "generalist",
+        chatId: "chat_demo",
+      },
+      maxAttempts: 1,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await runtime.queue.refresh();
+    const current = await runtime.queue.getJob(job.id);
+    expect(current).toBeDefined();
+    expect(current?.status).toBe("queued");
+    expect(current?.error ?? "").not.toContain("No handler for agent 'factory'");
+  } finally {
+    runtime.stop();
+  }
+}, 120_000);
+
 test("factory cli: composer parser handles plain text and slash commands", () => {
   expect(parseComposerDraft("Ship a better objective flow")).toEqual({
     ok: true,

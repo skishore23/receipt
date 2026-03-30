@@ -3,6 +3,7 @@ import type { QueueCommandRecord, QueueJob } from "../adapters/jsonl-queue";
 import type {
   FactoryBudgetState,
   FactoryCandidateRecord,
+  FactoryObjectiveContractRecord,
   FactoryInvestigationReport,
   FactoryInvestigationSynthesisRecord,
   FactoryInvestigationTaskReport,
@@ -17,6 +18,7 @@ import type {
   FactoryObjectiveSlotState,
   FactoryObjectiveStatus,
   FactoryState,
+  FactoryTaskAlignmentRecord,
   FactoryTaskExecutionMode,
   FactoryTaskCompletionRecord,
   FactoryTaskRecord,
@@ -127,6 +129,15 @@ export type FactoryArtifactActivity = {
   readonly bytes: number;
 };
 
+export type FactoryObjectiveAlignmentSummary = FactoryTaskAlignmentRecord & {
+  readonly gateStatus: "passed" | "correction_requested" | "blocked" | "not_reported";
+  readonly correctiveAction?: string;
+  readonly correctionAttempted: boolean;
+  readonly correctedAfterReview: boolean;
+  readonly sourceTaskId?: string;
+  readonly sourceCandidateId?: string;
+};
+
 export type FactoryObjectiveCard = {
   readonly objectiveId: string;
   readonly title: string;
@@ -168,6 +179,8 @@ export type FactoryObjectiveCard = {
   readonly prNumber?: number;
   readonly headRefName?: string;
   readonly baseRefName?: string;
+  readonly contract?: FactoryObjectiveContractRecord;
+  readonly alignment?: FactoryObjectiveAlignmentSummary;
   readonly profile: FactoryObjectiveProfileSnapshot;
 };
 

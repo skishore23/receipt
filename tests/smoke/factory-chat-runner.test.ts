@@ -3165,6 +3165,199 @@ test("factory chat runner: terminal bound objectives create a follow-up objectiv
   expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
 });
 
+test("factory chat runner: legacy follow-up fields react the active bound objective in place", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-legacy-react");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let reacted: { readonly objectiveId: string; readonly message?: string } | undefined;
+  const factoryService = createFactoryServiceStub({
+    reactObjectiveWithNote: async (objectiveId: string, message?: string) => {
+      reacted = { objectiveId, message };
+      return {
+        objectiveId,
+        title: "Objective demo",
+        status: "active",
+        phase: "executing",
+        latestSummary: message ?? "Reacted in place.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "continue the currently bound objective",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ description: "Check current service costs before finalizing." }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Continuing the current objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_dispatch_legacy_react",
+    problem: "Continue the current objective with a cost check.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_demo",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(reacted).toEqual({
+    objectiveId: "objective_demo",
+    message: "Check current service costs before finalizing.",
+  });
+});
+
+test("factory chat runner: legacy completed-objective follow-up fields create and bind a new objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-legacy-followup");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let createdInput: Record<string, unknown> | undefined;
+  const factoryService = createFactoryServiceStub({
+    getObjective: async (objectiveId: string) => ({
+      objectiveId,
+      title: "Completed objective",
+      status: "completed",
+      phase: "completed",
+      objectiveMode: "investigation",
+      severity: 2,
+      latestSummary: "The original objective is already done.",
+      nextAction: "Create a follow-up objective for fresh investigation.",
+      integration: { status: "idle", queuedCandidateIds: [] },
+      latestDecision: undefined,
+      blockedExplanation: undefined,
+      evidenceCards: [],
+      tasks: [],
+    }),
+    createObjective: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return {
+        objectiveId: "objective_followup",
+        title: String(input.title ?? "follow-up"),
+        status: "queued",
+        phase: "queued",
+        latestSummary: String(input.prompt ?? "follow-up"),
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "start the follow-up investigation on the same thread",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({
+          objectiveId: "objective_done",
+          objective: "AWS cost by service: highest vs lowest",
+          task: "Use Cost Explorer to identify the highest-cost service and the lowest non-zero service cost for the last 30 days.",
+          mode: "investigation",
+        }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Started the follow-up objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_dispatch_legacy_followup",
+    problem: "Which AWS service costs the most and which costs the least?",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_done",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(createdInput).toMatchObject({
+    title: "AWS cost by service: highest vs lowest",
+    prompt: "Use Cost Explorer to identify the highest-cost service and the lowest non-zero service cost for the last 30 days.",
+    objectiveMode: "investigation",
+    severity: 2,
+    profileId: "generalist",
+    startImmediately: true,
+  });
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_legacy_followup"));
+  const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
+  const latestBound = boundEvents.at(-1);
+  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_followup");
+  expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
+});
+
 test("factory chat runner: exhausted slices queue an automatic continuation on the same thread with a higher budget", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-slice-continue");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");

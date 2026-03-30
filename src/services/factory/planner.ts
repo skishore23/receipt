@@ -92,6 +92,7 @@ export const planTaskResult = (
     summary: input.candidate.summary,
     handoff: input.candidate.handoff,
     completion: input.candidate.completion,
+    alignment: input.candidate.alignment,
     checkResults: input.candidate.checkResults,
     scriptsRun: input.candidate.scriptsRun,
     artifactRefs: input.candidate.artifactRefs,

@@ -4,6 +4,7 @@ import type {
   FactoryCheckResult,
   FactoryExecutionScriptRun,
   FactoryInvestigationReport,
+  FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
 } from "../../modules/factory";
 
@@ -91,6 +92,28 @@ export const FACTORY_TASK_COMPLETION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["aligned", "uncertain", "drifted"] },
+    satisfied: {
+      type: "array",
+      items: { type: "string" },
+    },
+    missing: {
+      type: "array",
+      items: { type: "string" },
+    },
+    outOfScope: {
+      type: "array",
+      items: { type: "string" },
+    },
+    rationale: { type: "string" },
+  },
+  required: ["verdict", "satisfied", "missing", "outOfScope", "rationale"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -106,9 +129,10 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
+    alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -208,6 +232,30 @@ export const normalizeTaskCompletionRecord = (
   };
 };
 
+export const normalizeTaskAlignmentRecord = (
+  value: unknown,
+  fallback?: FactoryTaskAlignmentRecord,
+): FactoryTaskAlignmentRecord => {
+  const record = isRecord(value) ? value : {};
+  const verdict = record.verdict === "uncertain" || record.verdict === "drifted"
+    ? record.verdict
+    : record.verdict === "aligned"
+      ? "aligned"
+      : (fallback?.verdict ?? "aligned");
+  const satisfied = asReadonlyStringArray(record.satisfied).map((item) => clipText(item, 280) ?? item);
+  const missing = asReadonlyStringArray(record.missing).map((item) => clipText(item, 280) ?? item);
+  const outOfScope = asReadonlyStringArray(record.outOfScope).map((item) => clipText(item, 280) ?? item);
+  return {
+    verdict,
+    satisfied: satisfied.length > 0 ? satisfied : (fallback?.satisfied ?? []),
+    missing: missing.length > 0 ? missing : (fallback?.missing ?? []),
+    outOfScope: outOfScope.length > 0 ? outOfScope : (fallback?.outOfScope ?? []),
+    rationale: clipText(typeof record.rationale === "string" ? record.rationale : undefined, 500)
+      ?? fallback?.rationale
+      ?? "Alignment was not explicitly reported.",
+  };
+};
+
 export const normalizeInvestigationReport = (
   value: unknown,
   summary: string,
@@ -270,6 +318,7 @@ export const renderDeliveryResultText = (input: {
   readonly handoff: string;
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly completion?: FactoryTaskCompletionRecord;
+  readonly alignment?: FactoryTaskAlignmentRecord;
 }): string =>
   [
     renderSection("Summary", [input.summary || "No summary recorded."], false),
@@ -302,6 +351,23 @@ export const renderDeliveryResultText = (input: {
         ? input.completion.remaining
         : ["none"],
       true,
+    ),
+    renderSection(
+      "Alignment",
+      [
+        `Verdict: ${input.alignment?.verdict ?? "aligned"}`,
+        ...(input.alignment?.satisfied.length
+          ? [`Satisfied: ${input.alignment.satisfied.join(" | ")}`]
+          : []),
+        ...(input.alignment?.missing.length
+          ? [`Missing: ${input.alignment.missing.join(" | ")}`]
+          : []),
+        ...(input.alignment?.outOfScope.length
+          ? [`Out of scope: ${input.alignment.outOfScope.join(" | ")}`]
+          : []),
+        input.alignment?.rationale ?? "No explicit alignment rationale recorded.",
+      ],
+      false,
     ),
   ].join("\n\n");
 

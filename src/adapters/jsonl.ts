@@ -5,8 +5,6 @@ import { getReceiptDb, listStreamsByPrefix } from "../db/client";
 import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
 import type { BranchMetaEvent } from "../modules/branch-meta";
 
-export { createStreamLocator } from "./legacy-jsonl";
-
 const BRANCH_META_STREAM = "__meta/branches";
 const BRANCH_META_EVENT = "branch.meta.upsert";
 

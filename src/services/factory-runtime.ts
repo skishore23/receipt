@@ -51,6 +51,26 @@ const isNoRetryError = (err: unknown): boolean => {
 const isTerminalJobStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
+const isRetryableAuditLockError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("database is locked");
+};
+
+const withObjectiveAuditRetry = async <T>(
+  work: () => Promise<T>,
+): Promise<T> => {
+  let attempts = 0;
+  while (true) {
+    try {
+      return await work();
+    } catch (error) {
+      attempts += 1;
+      if (attempts >= 4 || !isRetryableAuditLockError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempts * 150));
+    }
+  }
+};
+
 type LiveGuidanceKind = "steer" | "follow_up" | "mixed";
 
 type LiveGuidanceCommand = {
@@ -229,7 +249,9 @@ export const runFactoryObjectiveAudit = async (input: {
   readonly payload: Record<string, unknown>;
 }): Promise<Record<string, unknown>> => {
   const parsed = parseObjectiveAuditPayload(input.payload);
-  const report = await readFactoryReceiptInvestigation(input.dataDir, input.repoRoot, parsed.objectiveId);
+  const report = await withObjectiveAuditRetry(() =>
+    readFactoryReceiptInvestigation(input.dataDir, input.repoRoot, parsed.objectiveId)
+  );
   const artifacts = objectiveAuditArtifactPaths(input.dataDir, parsed.objectiveId);
   await fs.mkdir(artifacts.root, { recursive: true });
   await fs.writeFile(artifacts.jsonPath, JSON.stringify(report, null, 2), "utf-8");
@@ -246,23 +268,31 @@ export const runFactoryObjectiveAudit = async (input: {
     easyRouteRisk: report.assessment.easyRouteRisk,
     efficiency: report.assessment.efficiency,
     controlChurn: report.assessment.controlChurn,
-    notes: report.assessment.notes.slice(0, 8),
+    notes: [
+      ...report.assessment.notes.slice(0, 6),
+      `alignment=${report.assessment.alignmentVerdict}`,
+      report.assessment.correctiveSteerIssued
+        ? `corrective_steer=issued aligned_after_correction=${report.assessment.alignedAfterCorrection ? "yes" : "no"}`
+        : "corrective_steer=none",
+    ],
     recommendations: report.recommendations.slice(0, 6),
     jsonPath: artifacts.jsonPath,
     textPath: artifacts.textPath,
   });
-  await Promise.all([
-    input.memoryTools.commit({
+  await withObjectiveAuditRetry(async () => {
+    await Promise.all([
+      input.memoryTools.commit({
       scope: `factory/audits/objectives/${parsed.objectiveId}`,
       text: memoryText,
       tags: ["factory", "audit", parsed.objectiveStatus, report.assessment.verdict],
     }),
-    input.memoryTools.commit({
+      input.memoryTools.commit({
       scope: "factory/audits/repo",
       text: `[${parsed.objectiveId}] ${memoryText}`,
       tags: ["factory", "audit", "repo", parsed.objectiveStatus, report.assessment.verdict],
     }),
-  ]);
+    ]);
+  });
 
   return {
     objectiveId: parsed.objectiveId,
@@ -272,6 +302,9 @@ export const runFactoryObjectiveAudit = async (input: {
     easyRouteRisk: report.assessment.easyRouteRisk,
     efficiency: report.assessment.efficiency,
     controlChurn: report.assessment.controlChurn,
+    alignmentVerdict: report.assessment.alignmentVerdict,
+    correctiveSteerIssued: report.assessment.correctiveSteerIssued,
+    alignedAfterCorrection: report.assessment.alignedAfterCorrection,
     jsonPath: artifacts.jsonPath,
     textPath: artifacts.textPath,
   };

@@ -251,7 +251,7 @@ const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   if (input.mode === "mission-control") params.set("mode", input.mode);
   params.set("profile", input.profileId);
   if (input.chatId) params.set("chat", input.chatId);
-  if (input.objectiveId) params.set("thread", input.objectiveId);
+  if (input.objectiveId) params.set("objective", input.objectiveId);
   if (input.runId) params.set("run", input.runId);
   if (input.jobId) params.set("job", input.jobId);
   if (input.panel) params.set("panel", input.panel);

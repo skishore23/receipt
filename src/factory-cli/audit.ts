@@ -12,6 +12,9 @@ type AuditObjectiveSample = {
   readonly easyRouteRisk: FactoryReceiptInvestigation["assessment"]["easyRouteRisk"];
   readonly efficiency: FactoryReceiptInvestigation["assessment"]["efficiency"];
   readonly controlChurn: FactoryReceiptInvestigation["assessment"]["controlChurn"];
+  readonly alignmentVerdict: FactoryReceiptInvestigation["assessment"]["alignmentVerdict"];
+  readonly correctiveSteerIssued: boolean;
+  readonly alignedAfterCorrection: boolean;
   readonly jobs: number;
   readonly tasks: number;
   readonly anomalies: number;
@@ -248,6 +251,9 @@ export const readFactoryReceiptAudit = async (
     easyRouteRisk: report.assessment.easyRouteRisk,
     efficiency: report.assessment.efficiency,
     controlChurn: report.assessment.controlChurn,
+    alignmentVerdict: report.assessment.alignmentVerdict,
+    correctiveSteerIssued: report.assessment.correctiveSteerIssued,
+    alignedAfterCorrection: report.assessment.alignedAfterCorrection,
     jobs: report.jobs.length,
     tasks: report.tasks.length,
     anomalies: report.anomalies.length,
@@ -384,6 +390,7 @@ export const renderFactoryReceiptAuditText = (report: FactoryReceiptAuditReport)
     ...(report.objectives.length > 0
       ? report.objectives.slice(0, 12).map((objective) => [
           `- ${objective.objectiveId} [${objective.status ?? "unknown"}] verdict=${objective.verdict} easy=${objective.easyRouteRisk} efficiency=${objective.efficiency} churn=${objective.controlChurn} jobs=${objective.jobs} tasks=${objective.tasks} anomalies=${objective.anomalies} interventions=${objective.interventions} restarts=${objective.restartCount} course_correction=${objective.courseCorrectionWorked ? "yes" : "no"}`,
+          `  alignment: verdict=${objective.alignmentVerdict} corrective_steer=${objective.correctiveSteerIssued ? "yes" : "no"} aligned_after_correction=${objective.alignedAfterCorrection ? "yes" : "no"}`,
           objective.title ? `  title: ${objective.title}` : "",
           objective.latestSummary ? `  summary: ${truncateInline(objective.latestSummary, 180) ?? objective.latestSummary}` : "",
           objective.recommendations[0] ? `  recommendation: ${objective.recommendations[0]}` : "",

@@ -85,6 +85,13 @@ const createFactoryService = async (opts?: {
   readonly codexOutcome?: "approved" | "changes_requested" | "blocked" | "partial";
   readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error" | "transient_then_success";
   readonly completionRemaining?: ReadonlyArray<string>;
+  readonly alignment?: {
+    readonly verdict?: "aligned" | "uncertain" | "drifted";
+    readonly satisfied?: ReadonlyArray<string>;
+    readonly missing?: ReadonlyArray<string>;
+    readonly outOfScope?: ReadonlyArray<string>;
+    readonly rationale?: string;
+  };
 }): Promise<{
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
@@ -97,6 +104,25 @@ const createFactoryService = async (opts?: {
   const codexOutcome = opts?.codexOutcome ?? "approved";
   const publishMode = opts?.publishMode ?? "success";
   const completionRemaining = opts?.completionRemaining ?? [];
+  const defaultAlignment = {
+    verdict: "aligned" as const,
+    satisfied: [
+      "Implemented the requested delivery change.",
+      completionRemaining.length === 0
+        ? "Left no remaining delivery work in completion.remaining."
+        : "Returned the requested delivery result so policy tests can exercise non-alignment gates explicitly.",
+    ],
+    missing: [] as string[],
+    outOfScope: [] as string[],
+    rationale: "The worker stub is treated as aligned unless a test explicitly asks for uncertain or drifted alignment.",
+  };
+  const alignment = {
+    verdict: opts?.alignment?.verdict ?? defaultAlignment.verdict,
+    satisfied: opts?.alignment?.satisfied ? [...opts.alignment.satisfied] : [...defaultAlignment.satisfied],
+    missing: opts?.alignment?.missing ? [...opts.alignment.missing] : [...defaultAlignment.missing],
+    outOfScope: opts?.alignment?.outOfScope ? [...opts.alignment.outOfScope] : [...defaultAlignment.outOfScope],
+    rationale: opts?.alignment?.rationale ?? defaultAlignment.rationale,
+  };
   const publishRuns = { count: 0 };
   const service = new FactoryService({
     dataDir,
@@ -183,6 +209,7 @@ const createFactoryService = async (opts?: {
                   ? ["Blocked."]
                   : [],
           },
+          alignment,
           nextAction: codexOutcome === "approved"
             ? null
             : codexOutcome === "changes_requested"
@@ -334,11 +361,13 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
 
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
+  expect(prompt).toContain(`"alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }`);
   expect(prompt).toContain(`"handoff": string`);
-  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, and completion.");
+  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, completion, and alignment.");
   expect(schema.required).toContain("handoff");
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
+  expect(schema.required).toContain("alignment");
 });
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
@@ -394,6 +423,13 @@ test("factory policy: objectives record a planning receipt and expose it on deta
 test("factory policy: promotion gate blocks when task completion reports remaining work", async () => {
   const { service, queue } = await createFactoryService({
     completionRemaining: ["Wire the final publish behavior before shipping."],
+    alignment: {
+      verdict: "aligned",
+      satisfied: ["Implemented the requested delivery change."],
+      missing: [],
+      outOfScope: [],
+      rationale: "The worker stayed within scope, but intentionally left remaining work for the promotion gate to catch.",
+    },
   });
 
   const created = await service.createObjective({
@@ -423,6 +459,16 @@ test("factory policy: controller can clear delivery partials when repo checks re
       "Confirm or clean up the untracked `.receipt/codex-home-runtime/` artifact if the controller requires a pristine worktree.",
       "Capture a final clean completion of validation if the orchestration layer needs a terminal success marker.",
     ],
+    alignment: {
+      verdict: "aligned",
+      satisfied: [
+        "Applied the requested delivery change.",
+        "Stayed within the requested delivery scope.",
+      ],
+      missing: [],
+      outOfScope: [],
+      rationale: "The worker completed the requested delivery change; only controller-side validation cleanup remained.",
+    },
   });
 
   const created = await service.createObjective({
@@ -449,6 +495,75 @@ test("factory policy: controller can clear delivery partials when repo checks re
   expect(candidate?.summary ?? "").toContain("Controller verification cleared the partial delivery handoff");
   expect(detail.tasks[0]?.completion?.remaining ?? []).toEqual([]);
   expect(detail.tasks[0]?.completion?.proof ?? []).toContain("Controller reran the configured checks successfully.");
+}, 120_000);
+
+test("factory policy: uncertain delivery alignment queues one corrective follow-up task", async () => {
+  const { service, queue } = await createFactoryService({
+    alignment: {
+      verdict: "uncertain",
+      satisfied: ["Applied the requested delivery change."],
+      missing: ["Confirm the shipped behavior satisfies the requested delivery objective end to end."],
+      outOfScope: [],
+      rationale: "The worker changed the file but did not explicitly confirm the objective contract.",
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Alignment correction objective",
+    prompt: "Apply a small delivery change and explicitly confirm contract alignment.",
+    profileId: "software",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const firstJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(firstJob.payload as FactoryTaskJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const followUpTask = detail.tasks.find((task) => task.taskId !== "task_01");
+  const nextJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  const nextPayload = nextJob.payload as FactoryTaskJobPayload;
+
+  expect(detail.status).toBe("executing");
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "objective.operator.noted"
+    && receipt.summary.includes("Alignment correction for this objective")
+  )).toBe(true);
+  expect(followUpTask?.sourceTaskId).toBe("task_01");
+  expect(nextPayload.taskId).toBe(followUpTask?.taskId);
+  expect(detail.tasks[0]?.status).toBe("superseded");
+}, 120_000);
+
+test("factory policy: unresolved drift after one corrective pass stays blocked", async () => {
+  const { service, queue } = await createFactoryService({
+    alignment: {
+      verdict: "drifted",
+      satisfied: ["Changed the requested file."],
+      missing: ["Implement the requested delivery behavior."],
+      outOfScope: ["Unrequested UI copy cleanup."],
+      rationale: "The worker produced a diff, but it drifted into unrelated work instead of satisfying the requested objective.",
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Alignment drift objective",
+    prompt: "Implement a small delivery change without drifting into unrelated work.",
+    profileId: "software",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const firstJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(firstJob.payload as FactoryTaskJobPayload);
+  const correctiveJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  const correctivePayload = correctiveJob.payload as FactoryTaskJobPayload;
+  expect(correctivePayload.taskId).not.toBe("task_01");
+  await service.runTask(correctivePayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+
+  expect(detail.status).toBe("blocked");
+  expect(detail.blockedReason ?? "").toContain("Alignment gate blocked");
+  expect(detail.blockedReason ?? "").toContain("Out-of-scope work: Unrequested UI copy cleanup.");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote")).toBe(false);
 }, 120_000);
 
 test("factory policy: objectives default to higher parallel capacity and still normalize dispatch policy", async () => {

@@ -5,6 +5,7 @@ import type {
   FactoryCheckResult,
   FactoryExecutionScriptRun,
   FactoryState,
+  FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
   FactoryTaskResultOutcome,
 } from "../../modules/factory";
@@ -39,6 +40,7 @@ export type FactoryTaskResultPlannerInput = {
     readonly summary: string;
     readonly handoff: string;
     readonly completion: FactoryTaskCompletionRecord;
+    readonly alignment?: FactoryTaskAlignmentRecord;
     readonly checkResults: ReadonlyArray<FactoryCheckResult>;
     readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
     readonly artifactRefs: Readonly<Record<string, GraphRef>>;
@@ -99,6 +101,7 @@ export type FactoryPlannerEffect =
       readonly summary: string;
       readonly handoff: string;
       readonly completion: FactoryTaskCompletionRecord;
+      readonly alignment?: FactoryTaskAlignmentRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
       readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;

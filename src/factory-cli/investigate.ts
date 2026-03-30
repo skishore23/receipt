@@ -23,6 +23,14 @@ type InvestigationPacketContext = {
   readonly overview?: string;
   readonly objectiveMemory?: string;
   readonly integrationMemory?: string;
+  readonly contractCriteria: ReadonlyArray<string>;
+  readonly requiredChecks: ReadonlyArray<string>;
+  readonly proofExpectation?: string;
+  readonly alignmentVerdict?: "aligned" | "uncertain" | "drifted";
+  readonly alignmentSatisfied: ReadonlyArray<string>;
+  readonly alignmentMissing: ReadonlyArray<string>;
+  readonly alignmentOutOfScope: ReadonlyArray<string>;
+  readonly alignmentRationale?: string;
   readonly profileSkills: ReadonlyArray<string>;
   readonly selectedHelpers: ReadonlyArray<string>;
   readonly candidateLineage: ReadonlyArray<string>;
@@ -55,6 +63,10 @@ type InvestigationRunAssessment = {
   readonly easyRouteRisk: InvestigationAssessmentLevel;
   readonly efficiency: InvestigationEfficiency;
   readonly controlChurn: InvestigationAssessmentLevel;
+  readonly contractCriteriaCount: number;
+  readonly alignmentVerdict: "aligned" | "uncertain" | "drifted" | "not_reported";
+  readonly correctiveSteerIssued: boolean;
+  readonly alignedAfterCorrection: boolean;
   readonly operatorGuidanceApplied: boolean;
   readonly courseCorrectionWorked: boolean;
   readonly proofPresent: boolean;
@@ -266,10 +278,13 @@ const summarizeContextPack = async (taskRun: InvestigationFocusTaskRun | undefin
   );
   const summaryText = await readTextIfExists(contextSummaryPath);
   const contextPackJson = asRecord(taskRun.contextPack.json);
+  const contract = asRecord(contextPackJson?.contract) ?? asRecord(manifestJson?.contract);
   const memory = asRecord(contextPackJson?.memory);
   const contextSources = asRecord(contextPackJson?.contextSources);
   const helperCatalog = asRecord(contextPackJson?.helperCatalog);
   const objectiveSlice = asRecord(contextPackJson?.objectiveSlice);
+  const resultJson = asRecord(taskRun.resultFile.json);
+  const resultAlignment = asRecord(resultJson?.alignment);
   const candidateLineage = asArray(contextPackJson?.candidateLineage)
     .map((item) => {
       const entry = asRecord(item);
@@ -310,6 +325,16 @@ const summarizeContextPack = async (taskRun: InvestigationFocusTaskRun | undefin
     overview: asString(memory?.overview),
     objectiveMemory: asString(memory?.objective),
     integrationMemory: asString(memory?.integration),
+    contractCriteria: asStringArray(contract?.acceptanceCriteria),
+    requiredChecks: asStringArray(contract?.requiredChecks),
+    proofExpectation: asString(contract?.proofExpectation),
+    alignmentVerdict: resultAlignment?.verdict === "aligned" || resultAlignment?.verdict === "uncertain" || resultAlignment?.verdict === "drifted"
+      ? resultAlignment.verdict
+      : undefined,
+    alignmentSatisfied: asStringArray(resultAlignment?.satisfied),
+    alignmentMissing: asStringArray(resultAlignment?.missing),
+    alignmentOutOfScope: asStringArray(resultAlignment?.outOfScope),
+    alignmentRationale: asString(resultAlignment?.rationale),
     profileSkills: asArray(contextSources?.profileSkillRefs)
       .map((item) => asString(item))
       .filter((item): item is string => Boolean(item)),
@@ -376,6 +401,13 @@ const buildAssessment = (
   const objectiveMode = analysis?.objectiveMode ?? "unknown";
   const proofPresent = proof.length > 0;
   const repoDiffProduced = changed.length > 0;
+  const contractCriteriaCount = packetContext?.contractCriteria.length ?? 0;
+  const alignmentVerdict = packetContext?.alignmentVerdict ?? "not_reported";
+  const correctiveSteerIssued = parsed.timeline.some((item) =>
+    item.type === "objective.operator.noted"
+    && item.summary.includes("Alignment correction for this objective"),
+  );
+  const alignedAfterCorrection = correctiveSteerIssued && alignmentVerdict === "aligned";
   const validationSignals = [...scriptsRun.map((item) => asString(item.command) ?? ""), ...proof]
     .filter(Boolean)
     .join("\n")
@@ -403,6 +435,16 @@ const buildAssessment = (
       easyRouteScore += 2;
       notes.push("Declared validation checks were not reflected in scriptsRun or captured command logs.");
     }
+    if (alignmentVerdict === "not_reported") {
+      easyRouteScore += 1;
+      notes.push("Delivery result did not include an explicit objective-alignment report.");
+    } else if (alignmentVerdict === "uncertain") {
+      easyRouteScore += 2;
+      notes.push("Delivery result reported uncertain objective alignment.");
+    } else if (alignmentVerdict === "drifted") {
+      easyRouteScore += 3;
+      notes.push("Delivery result reported drift from the stated objective contract.");
+    }
   }
 
   if (objectiveMode === "investigation" && success) {
@@ -422,6 +464,20 @@ const buildAssessment = (
   }
   if (interventions.operatorGuidanceApplied) {
     notes.push(`Live operator guidance was applied ${interventions.count} time(s) with ${interventions.restartCount} restart(s).`);
+  }
+  if (contractCriteriaCount > 0) {
+    notes.push(`Objective contract carried ${contractCriteriaCount} acceptance criteria into the worker packet.`);
+  }
+  if (correctiveSteerIssued) {
+    notes.push(alignedAfterCorrection
+      ? "Receipt issued one corrective alignment steer and the final result came back aligned."
+      : "Receipt issued one corrective alignment steer before the final result.");
+  }
+  if (packetContext?.alignmentMissing.length) {
+    notes.push(`Latest alignment report still marked ${packetContext.alignmentMissing.length} missing contract item(s).`);
+  }
+  if (packetContext?.alignmentOutOfScope.length) {
+    notes.push(`Latest alignment report called out ${packetContext.alignmentOutOfScope.length} out-of-scope item(s).`);
   }
 
   const easyRouteRisk: InvestigationAssessmentLevel =
@@ -459,28 +515,33 @@ const buildAssessment = (
   }
 
   const verdict: InvestigationAssessmentVerdict =
-    blocked || easyRouteRisk === "high" || efficiency === "churn-heavy"
+    blocked || easyRouteRisk === "high" || efficiency === "churn-heavy" || alignmentVerdict === "drifted"
       ? "weak"
-      : easyRouteRisk === "medium" || efficiency === "noisy" || dbLockedCount > 0 || workspaceCollisionCount > 0
+      : easyRouteRisk === "medium" || efficiency === "noisy" || dbLockedCount > 0 || workspaceCollisionCount > 0 || alignmentVerdict === "uncertain"
         ? "mixed"
         : "strong";
-  const courseCorrectionWorked = interventions.operatorGuidanceApplied
+  const courseCorrectionWorked = (interventions.operatorGuidanceApplied || correctiveSteerIssued)
     && success
     && repoDiffProduced
     && proofPresent
-    && easyRouteRisk !== "high";
+    && easyRouteRisk !== "high"
+    && alignmentVerdict === "aligned";
 
   return {
     verdict,
     easyRouteRisk,
     efficiency,
     controlChurn,
+    contractCriteriaCount,
+    alignmentVerdict,
+    correctiveSteerIssued,
+    alignedAfterCorrection,
     operatorGuidanceApplied: interventions.operatorGuidanceApplied,
     courseCorrectionWorked,
     proofPresent,
     repoDiffProduced,
     followUpValidation,
-    interventionRequired: interventions.operatorGuidanceApplied,
+    interventionRequired: interventions.operatorGuidanceApplied || correctiveSteerIssued,
     notes: uniqueStrings(notes),
   };
 };
@@ -530,6 +591,9 @@ const buildWhatHappened = (
   }
   if (interventions.count > 0 || interventions.restartCount > 0) {
     bullets.push(`Live operator guidance was applied ${interventions.count} time(s) and restarted the worker ${interventions.restartCount} time(s).`);
+  }
+  if (packetContext?.alignmentVerdict) {
+    bullets.push(`Latest worker alignment verdict: ${packetContext.alignmentVerdict}.`);
   }
   if (packetContext?.summaryPath) {
     bullets.push(`Worker packet summary available at ${packetContext.summaryPath}.`);
@@ -633,6 +697,10 @@ export const renderFactoryReceiptInvestigationText = (
     `Easy route risk: ${report.assessment.easyRouteRisk}`,
     `Efficiency: ${report.assessment.efficiency}`,
     `Control churn: ${report.assessment.controlChurn}`,
+    `Contract criteria: ${report.assessment.contractCriteriaCount}`,
+    `Alignment verdict: ${report.assessment.alignmentVerdict}`,
+    `Corrective steer issued: ${report.assessment.correctiveSteerIssued ? "yes" : "no"}`,
+    `Aligned after correction: ${report.assessment.alignedAfterCorrection ? "yes" : "no"}`,
     `Proof present: ${report.assessment.proofPresent ? "yes" : "no"}`,
     `Repo diff produced: ${report.assessment.repoDiffProduced ? "yes" : "no"}`,
     `Follow-up validation: ${report.assessment.followUpValidation}`,
@@ -656,6 +724,14 @@ export const renderFactoryReceiptInvestigationText = (
     report.inputs.objectivePrompt ? `Objective prompt: ${truncateBlock(report.inputs.objectivePrompt, Math.min(contextChars, compact ? 320 : 520))}` : undefined,
     report.inputs.taskPrompt ? `Focused task prompt: ${truncateBlock(report.inputs.taskPrompt, Math.min(contextChars, compact ? 320 : 520))}` : undefined,
     report.inputs.checks && report.inputs.checks.length > 0 ? `Checks: ${report.inputs.checks.join(", ")}` : "Checks: none",
+    report.packetContext?.contractCriteria.length ? `Contract criteria: ${report.packetContext.contractCriteria.length}` : undefined,
+    ...((report.packetContext?.contractCriteria.slice(0, compact ? 3 : 6).map((item) => `- ${item}`)) ?? []),
+    report.packetContext?.requiredChecks.length ? `Contract checks: ${report.packetContext.requiredChecks.join(", ")}` : undefined,
+    report.packetContext?.proofExpectation ? `Proof expectation: ${report.packetContext.proofExpectation}` : undefined,
+    report.packetContext?.alignmentVerdict ? `Worker alignment verdict: ${report.packetContext.alignmentVerdict}` : undefined,
+    report.packetContext?.alignmentMissing.length ? `Alignment missing: ${report.packetContext.alignmentMissing.join(" | ")}` : undefined,
+    report.packetContext?.alignmentOutOfScope.length ? `Alignment out of scope: ${report.packetContext.alignmentOutOfScope.join(" | ")}` : undefined,
+    report.packetContext?.alignmentRationale ? `Alignment rationale: ${truncateInline(report.packetContext.alignmentRationale, compact ? 180 : 260)}` : undefined,
     report.packetContext?.profileSkills.length ? `Profile skills: ${report.packetContext.profileSkills.join(", ")}` : undefined,
     report.packetContext?.selectedHelpers.length ? `Selected helpers: ${report.packetContext.selectedHelpers.join(" | ")}` : undefined,
     !compact && report.packetContext?.overview ? `Packet overview: ${truncateInline(report.packetContext.overview, 260)}` : undefined,

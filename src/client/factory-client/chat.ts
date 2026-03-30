@@ -434,7 +434,7 @@ export const initFactoryChat = () => {
     currentChatState().objectiveId
     || pendingScope?.objectiveId
     || currentScope?.objectiveId
-    || asString(currentUrl()?.searchParams.get("thread"));
+    || asString(currentUrl()?.searchParams.get("objective"));
 
   const hydrateShellFromDocument = (nextDocument: Document, url: URL) => {
     if (typeof nextDocument.title === "string" && nextDocument.title) {
@@ -561,6 +561,14 @@ export const initFactoryChat = () => {
     });
   };
 
+  const refreshVisibleShell = () => {
+    const search = currentSearch();
+    connectLiveUpdates(search);
+    queueIslandRefresh("chat", 0, search);
+    queueIslandRefresh("sidebar", 0, search);
+    queueIslandRefresh("inspector", 0, search);
+  };
+
   const navigateWithFeedback = (location: string) => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
@@ -626,8 +634,8 @@ export const initFactoryChat = () => {
       url.searchParams.set("chat", state.chatId);
       changed = true;
     }
-    if (state.objectiveId && url.searchParams.get("thread") !== state.objectiveId) {
-      url.searchParams.set("thread", state.objectiveId);
+    if (state.objectiveId && url.searchParams.get("objective") !== state.objectiveId) {
+      url.searchParams.set("objective", state.objectiveId);
       changed = true;
       objectiveChanged = true;
     }
@@ -636,7 +644,7 @@ export const initFactoryChat = () => {
     syncShellRoute(url, "replace");
     const nextProfileId = asString(url.searchParams.get("profile")) || undefined;
     const nextChatId = asString(url.searchParams.get("chat")) || undefined;
-    const nextObjectiveId = asString(url.searchParams.get("thread")) || undefined;
+    const nextObjectiveId = asString(url.searchParams.get("objective")) || undefined;
     if (pendingSubmission?.scope) {
       pendingSubmission = {
         prompt: pendingSubmission.prompt,
@@ -872,6 +880,15 @@ export const initFactoryChat = () => {
       applyInlineLocation(String(window.location && window.location.href ? window.location.href : shellPath()), "replace").catch(() => {
         // Fall through to the browser's current URL if inline hydration fails.
       });
+    });
+    window.addEventListener("focus", refreshVisibleShell);
+    window.addEventListener("pageshow", refreshVisibleShell);
+  }
+
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      refreshVisibleShell();
     });
   }
 

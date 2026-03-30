@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { createHeartbeat, parseHeartbeatSpecsFromEnv } from "../../src/adapters/heartbeat";
 
-test("heartbeat config: parses legacy env heartbeat specs with queue defaults", () => {
+test("heartbeat config: parses env heartbeat specs with queue defaults", () => {
   const specs = parseHeartbeatSpecsFromEnv({
     HEARTBEAT_AGENT_INTERVAL_MS: "5000",
     HEARTBEAT_FACTORY_INTERVAL_MS: "12000",

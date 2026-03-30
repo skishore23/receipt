@@ -63,7 +63,7 @@ export const islandUrl = (kind: "chat" | "sidebar" | "inspector", search: string
 export const buildScope = (url: URL, live?: FactoryLiveScopePayload): LiveScope => ({
   profileId: live?.profileId || asString(url.searchParams.get("profile")) || undefined,
   chatId: live?.chatId || asString(url.searchParams.get("chat")) || undefined,
-  objectiveId: live?.objectiveId || asString(url.searchParams.get("objective")) || asString(url.searchParams.get("thread")) || undefined,
+  objectiveId: live?.objectiveId || asString(url.searchParams.get("objective")) || undefined,
   runId: live?.runId || asString(url.searchParams.get("run")) || undefined,
   jobId: live?.jobId || asString(url.searchParams.get("job")) || undefined,
   search: url.search || "",
@@ -167,7 +167,7 @@ export const composerFeedback = (
     ),
   );
   const hasThread = Boolean(
-    (formAction && formAction.indexOf("thread=") >= 0)
+    (formAction && formAction.indexOf("objective=") >= 0)
     || options?.currentObjectiveId,
   );
   const command = leadingSlashCommand(payload);

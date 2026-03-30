@@ -367,11 +367,11 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} scope task`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} search repo`));
-  expect(promptBody).toMatch(/Always include an explicit handoff string, scriptsRun, and completion\./);
+  expect(promptBody).toMatch(/Always include an explicit handoff string, scriptsRun, completion, and alignment\./);
 
   expect(captured.context).toMatch(/# Factory Task Context Summary/);
   expect(captured.context).toMatch(/## What Matters/);
-  expect(captured.context).toMatch(/## Recent Receipts|## Objective-Wide Receipts/);
+  expect(captured.context).toMatch(/## Objective Contract/);
   expect(captured.objective).toMatch(/Frontier tasks:|Recent objective receipts:/);
   expect(captured.overview).toMatch(/Agent memory \(codex\)|Objective memory|Task memory/);
   expect(captured.scope).toMatch(/task memory: reuse the generated memory script/i);
@@ -379,6 +379,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
 
   const contextSummary = await fs.readFile(String(payload.contextSummaryPath), "utf-8");
   expect(contextSummary).toMatch(/# Factory Task Context Summary/);
+  expect(contextSummary).toMatch(/## Recent Receipts|## Objective-Wide Receipts/);
   expect(contextSummary).toMatch(/## Packet Usage/);
   expect(contextSummary).toMatch(/Open the JSON context pack only when you need exact raw fields, refs, or artifact paths\./);
 

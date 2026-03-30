@@ -150,11 +150,14 @@ Use the CLI for mutations:
 Factory HTTP routes that remain supported:
 
 - `GET /factory`
+- `GET /factory/workbench` redirect to `/factory`
+- `GET /factory/control` redirect to `/factory`
 - `POST /factory/compose`
-- `GET /factory/control`
 - `GET /factory/island/*`
 - `GET /factory/events`
-- `GET /factory/control/events`
+- `GET /factory/chat/events`
+- `GET /factory/background/events`
+- `GET /factory/api/workbench-shell`
 - `GET /factory/api/objectives`
 - `GET /factory/api/objectives/:id`
 - `GET /factory/api/objectives/:id/debug`

@@ -54,16 +54,6 @@ const applyMigrations = (sqlite: Database): void => {
   }
 };
 
-const legacyJsonlPresent = (dataDir: string): boolean => {
-  const manifest = path.join(dataDir, "_streams.json");
-  if (fs.existsSync(manifest)) return true;
-  try {
-    return fs.readdirSync(dataDir).some((entry) => entry.endsWith(".jsonl"));
-  } catch {
-    return false;
-  }
-};
-
 export const resolveReceiptDbPath = (dataDir: string, explicitPath?: string): string =>
   path.resolve(explicitPath?.trim() || process.env.RECEIPT_DB_PATH?.trim() || path.join(dataDir, DEFAULT_DB_FILE));
 
@@ -71,7 +61,6 @@ export const getReceiptDb = (
   dataDir: string,
   options: {
     readonly dbPath?: string;
-    readonly allowLegacyImportHint?: boolean;
   } = {},
 ): ReceiptDb => {
   const dbPath = resolveReceiptDbPath(dataDir, options.dbPath);
@@ -79,13 +68,6 @@ export const getReceiptDb = (
   if (cached) return cached;
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const exists = fs.existsSync(dbPath);
-  if (!exists && !options.allowLegacyImportHint && legacyJsonlPresent(dataDir)) {
-    throw new Error(
-      `legacy JSONL data detected in ${dataDir}. Run 'receipt migrate sqlite --data-dir ${JSON.stringify(dataDir)}' before starting the runtime.`,
-    );
-  }
-
   const sqlite = new Database(dbPath, { create: true });
   applyPragmas(sqlite);
   applyMigrations(sqlite);
@@ -184,9 +166,6 @@ export const listStreamsByPrefix = (db: ReceiptDb, prefix?: string): ReadonlyArr
       .all();
   return rows.map((row) => row.name);
 };
-
-export const hasLegacyJsonlData = (dataDir: string): boolean =>
-  legacyJsonlPresent(dataDir);
 
 export const pollLatestChangeSeq = (db: ReceiptDb): number =>
   Number(

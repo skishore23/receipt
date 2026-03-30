@@ -5,9 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { receipt } from "@receipt/core/chain";
-
-import { jsonlStore as legacyJsonlStore } from "../../src/adapters/legacy-jsonl";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -56,49 +53,6 @@ test("cli: help and jobs commands are available", async () => {
     const jobs = await run(["jobs", "--limit", "1"], env);
     expect(jobs.code).toBe(0);
     expect(jobs.stdout.includes("\"jobs\"")).toBe(true);
-  } finally {
-    await fs.rm(dataDir, { recursive: true, force: true });
-  }
-}, 60_000);
-
-test("cli: legacy jsonl data requires migration and migrate imports the stream into sqlite", async () => {
-  const dataDir = await createTempDir("receipt-cli-migrate");
-  try {
-    const store = legacyJsonlStore<{ readonly type: string }>(dataDir);
-    const stream = "agents/test/runs/run_legacy_cli";
-    const first = receipt(stream, undefined, { type: "seed.alpha" }, 1_000);
-    const second = receipt(stream, first.hash, { type: "seed.beta" }, 2_000);
-    await store.append(first);
-    await store.append(second);
-
-    const before = await run(["trace", stream], {
-      DATA_DIR: dataDir,
-      RECEIPT_DATA_DIR: dataDir,
-    });
-    expect(before.code).toBe(1);
-    expect(before.stderr.includes("legacy JSONL data detected")).toBe(true);
-
-    const migrated = await run(["migrate", "sqlite", "--data-dir", dataDir], {
-      DATA_DIR: dataDir,
-      RECEIPT_DATA_DIR: dataDir,
-    });
-    expect(migrated.code).toBe(0);
-    const migratedPayload = JSON.parse(migrated.stdout) as {
-      readonly ok: boolean;
-      readonly importedReceipts: number;
-      readonly importedStreams: number;
-    };
-    expect(migratedPayload.ok).toBe(true);
-    expect(migratedPayload.importedReceipts).toBe(2);
-    expect(migratedPayload.importedStreams).toBe(1);
-
-    const after = await run(["trace", stream], {
-      DATA_DIR: dataDir,
-      RECEIPT_DATA_DIR: dataDir,
-    });
-    expect(after.code).toBe(0);
-    expect(after.stdout.includes("seed.alpha")).toBe(true);
-    expect(after.stdout.includes("seed.beta")).toBe(true);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }

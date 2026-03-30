@@ -259,10 +259,11 @@ bun run verify
 Start here:
 - [architecture.md](./architecture.md)
 - [docs/api/README.md](./docs/api/README.md)
+- [docs/agent-framework.md](./docs/agent-framework.md)
+- [docs/context-management.md](./docs/context-management.md)
 - [docs/create-agent.md](./docs/create-agent.md)
-- [docs/receipt-coding-runtime.md](./docs/receipt-coding-runtime.md)
-- [docs/receipt-production-rfc.md](./docs/receipt-production-rfc.md)
 - [docs/factory-on-receipt.md](./docs/factory-on-receipt.md)
 - [docs/factory-agent-orchestration.md](./docs/factory-agent-orchestration.md)
 - [docs/factory-profile-orchestration.md](./docs/factory-profile-orchestration.md)
 - [docs/factory-infrastructure-engineer.md](./docs/factory-infrastructure-engineer.md)
+- [docs/factory-self-improvement.md](./docs/factory-self-improvement.md)
