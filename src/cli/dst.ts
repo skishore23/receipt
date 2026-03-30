@@ -4,7 +4,7 @@ import { fold } from "@receipt/core/chain";
 import { createRuntime } from "@receipt/core/runtime";
 import type { Chain } from "@receipt/core/types";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
+import { CONTROL_RECEIPT_TYPES, type ControlReceipt } from "../engine/runtime/control-receipts";
 import { initial as initialAgent, reduce as reduceAgent, type AgentEvent } from "../modules/agent";
 import { buildFactoryProjection, initialFactoryState, reduceFactory, type FactoryEvent } from "../modules/factory";
 import { initial as initialJobState, reduce as reduceJob, type JobEvent, type JobStatus } from "../modules/job";
@@ -142,6 +142,9 @@ const AGENT_EVENT_TYPES = new Set<string>([
   "profile.resolved",
   "profile.handoff",
 ]);
+
+const isControlReceiptType = (type: string): type is ControlReceipt["type"] =>
+  CONTROL_RECEIPT_TYPES.has(type as ControlReceipt["type"]);
 
 const EMPTY_STATUS_COUNTS: SummaryStatusMap = {};
 
@@ -286,7 +289,7 @@ const classifyStream = (stream: string, eventTypes: Readonly<Record<string, numb
   const types = Object.keys(eventTypes);
   if (stream.startsWith("factory/objectives/")) return "factory.objective";
   if (stream === "jobs" || stream.startsWith("jobs/")) return "job";
-  if (types.some((type) => CONTROL_RECEIPT_TYPES.has(type))) return "agent.control";
+  if (types.some(isControlReceiptType)) return "agent.control";
   if (types.length > 0 && types.every((type) => AGENT_EVENT_TYPES.has(type))) return "agent.history";
   return "generic";
 };

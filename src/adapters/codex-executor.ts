@@ -130,7 +130,9 @@ const runtimeBunPathEntries = (env: NodeJS.ProcessEnv): string[] => {
     env.BUN_INSTALL?.trim() ? path.join(env.BUN_INSTALL.trim(), "bin") : undefined,
     env.HOME?.trim() ? path.join(env.HOME.trim(), ".bun", "bin") : undefined,
   ];
-  return [...new Set(candidates.filter((entry): entry is string => Boolean(entry) && fs.existsSync(entry)))];
+  return [...new Set(candidates
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .filter((entry) => fs.existsSync(entry)))];
 };
 
 const normalizePositiveTimeoutMs = (
@@ -380,7 +382,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };
-    const childEnv = {
+    const childEnv: NodeJS.ProcessEnv = {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
     };

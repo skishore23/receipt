@@ -46,6 +46,15 @@ export const initFactoryChat = () => {
   let lastReconciledRunId: string | undefined;
   let streamingReply: StreamingReply | null = null;
 
+  type CurrentChatState = {
+    readonly activeProfileLabel?: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly activeRunId?: string;
+    readonly knownRunIds: ReadonlyArray<string>;
+    readonly terminalRunIds: ReadonlyArray<string>;
+  };
+
   const chatInput = () => {
     const input = document.getElementById("factory-prompt");
     return input instanceof HTMLTextAreaElement ? input : null;
@@ -126,7 +135,7 @@ export const initFactoryChat = () => {
   const currentUrl = () =>
     resolveFactoryUrl(String(window.location && window.location.href ? window.location.href : shellPath()));
 
-  const currentChatState = () => {
+  const currentChatState = (): CurrentChatState => {
     const container = chatContainer();
     const root = container?.firstElementChild;
     if (!(root instanceof HTMLElement)) {

@@ -292,7 +292,7 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
     if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
     throw err;
   });
-  const loaded = await Promise.all(entries.map(async (entry) => {
+  const loaded: Array<FactoryChatProfile | undefined> = await Promise.all(entries.map(async (entry): Promise<FactoryChatProfile | undefined> => {
       const dirPath = path.join(profilesDir, entry);
       const stat = await fs.stat(dirPath).catch((err) => {
         if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
@@ -319,7 +319,7 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
       } satisfies FactoryChatProfile;
     }));
   return loaded
-    .filter((profile): profile is FactoryChatProfile => Boolean(profile))
+    .filter((profile): profile is FactoryChatProfile => profile !== undefined)
     .sort((a, b) => a.id.localeCompare(b.id));
 };
 

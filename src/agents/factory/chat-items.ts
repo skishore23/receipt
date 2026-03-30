@@ -507,7 +507,7 @@ const objectiveHandoffItem = (
     };
   }
   const lines = [
-    `${title} ${event.status === "completed" ? "completed" : `ended ${event.status}`} and handed back to Chat.`,
+    `${title} ended ${event.status} and handed back to Chat.`,
     event.summary,
     event.nextAction ? `Next: ${event.nextAction}` : "",
   ].filter(Boolean);
