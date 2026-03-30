@@ -131,8 +131,8 @@ export const initFactoryChat = () => {
     const root = container?.firstElementChild;
     if (!(root instanceof HTMLElement)) {
       return {
-        knownRunIds: [],
-        terminalRunIds: [],
+        knownRunIds: [] as string[],
+        terminalRunIds: [] as string[],
       };
     }
     return {
@@ -202,8 +202,34 @@ export const initFactoryChat = () => {
     if (streamingRunId && state.terminalRunIds.indexOf(streamingRunId) >= 0) {
       lastReconciledRunId = streamingRunId;
       streamingReply = null;
+    } else if (
+      streamingRunId
+      && pendingRunId !== streamingRunId
+      && pendingScope?.runId !== streamingRunId
+      && currentScope?.runId !== streamingRunId
+      && state.activeRunId !== streamingRunId
+      && state.knownRunIds.indexOf(streamingRunId) < 0
+      && state.terminalRunIds.indexOf(streamingRunId) < 0
+    ) {
+      streamingReply = null;
     }
     scheduleOverlayRender();
+  };
+
+  const acceptsStreamingRun = (runId: string | undefined): boolean => {
+    const scopedObjectiveId = currentChatState().objectiveId
+      || pendingScope?.objectiveId
+      || currentScope?.objectiveId;
+    if (!scopedObjectiveId) return true;
+    if (!runId) return false;
+    if (pendingSubmission?.scope?.runId === runId) return true;
+    if (pendingScope?.runId === runId) return true;
+    if (currentScope?.runId === runId) return true;
+    const state = currentChatState();
+    return state.activeRunId === runId
+      || state.knownRunIds.indexOf(runId) >= 0
+      || state.terminalRunIds.indexOf(runId) >= 0
+      || lastReconciledRunId === runId;
   };
 
   const getSlashContext = (value: string, caret: number) => {
@@ -524,6 +550,7 @@ export const initFactoryChat = () => {
       if (!payload) return;
       const state = currentChatState();
       const runId = payload.runId || pendingScope?.runId || pendingSubmission?.scope?.runId || state.activeRunId || lastReconciledRunId;
+      if (!acceptsStreamingRun(runId)) return;
       const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
       streamingReply = {
         runId,

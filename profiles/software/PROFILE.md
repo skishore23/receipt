@@ -16,6 +16,9 @@
     "skills/factory-run-orchestrator/SKILL.md",
     "skills/factory-helper-authoring/SKILL.md"
   ],
+  "handoffTargets": [
+    "generalist"
+  ],
   "defaultObjectiveMode": "delivery",
   "defaultValidationMode": "repo_profile",
   "defaultTaskExecutionMode": "worktree",

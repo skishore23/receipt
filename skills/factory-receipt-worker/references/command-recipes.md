@@ -32,6 +32,33 @@ Use the mounted packet and memory output instead:
 
 If live objective state is still required, use controller-side inspection instead of task-worktree inspection.
 
+## Repair And Course-Correct
+
+Before retrying a blocked task, reviewing a failed candidate, or deciding whether a failure is inherited, reconstruct the controller-side story first:
+
+- `receipt factory investigate <objectiveId>`
+- `receipt factory investigate <taskId>`
+- `receipt factory investigate <candidateId> --json`
+
+Use this output to answer:
+
+- what happened end-to-end
+- what context the worker actually had
+- how the DAG advanced or stalled
+- what candidate lineage and recent receipts say about the next repair step
+
+For repo-level self-improvement and trend review:
+
+- `receipt factory audit --limit 12`
+- `receipt factory audit --limit 20 --json`
+
+Use this output to answer:
+
+- which recent runs were weak, noisy, or churn-heavy
+- whether the agent likely took the easy route
+- which anomalies dominate across objectives
+- whether shared memory is being polluted with run-specific entries
+
 ## CLI-First Factory Control
 
 Use these when you need to mutate Factory state. Do not rely on `/factory` web forms for operator actions.
@@ -94,6 +121,8 @@ Use `receipt memory ...` when you need durable summaries or exact entries:
 - `receipt memory summarize factory/objectives/<objectiveId>/tasks/<taskId> --query "<term>" --limit 6 --max-chars 1200`
 - `receipt memory summarize factory/objectives/<objectiveId>/candidates/<candidateId> --query "<term>" --limit 6 --max-chars 1200`
 - `receipt memory summarize factory/objectives/<objectiveId>/integration --query "<term>" --limit 6 --max-chars 1200`
+- `receipt memory summarize factory/audits/objectives/<objectiveId> --limit 4 --max-chars 1200`
+- `receipt memory summarize factory/audits/repo --limit 8 --max-chars 1600`
 
 ## Query Order
 

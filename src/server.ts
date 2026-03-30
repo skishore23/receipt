@@ -36,7 +36,7 @@ import { createQueuedBudgetContinuation, parseContinuationDepth } from "./agents
 import { runOrchestrator, normalizeFactoryChatConfig, runFactoryCodexJob } from "./agents/orchestrator";
 import { emitToContinuedRun, resolveContinuedRunTarget } from "./agents/run-target";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime";
-import { FACTORY_CONTROL_AGENT_ID } from "./services/factory-service";
+import { FACTORY_CONTROL_AGENT_ID, type FactoryService } from "./services/factory-service";
 import { loadAgentRoutes } from "./framework/agent-loader";
 import { SseHub } from "./framework/sse-hub";
 import { makeEventId, text } from "./framework/http";
@@ -199,6 +199,59 @@ const agentStreamForJob = (job: { readonly payload: Record<string, unknown> } | 
   return payloadStream;
 };
 
+let queueImpl: JobBackend | undefined;
+let factoryServiceRef: FactoryService | undefined;
+
+const shouldQueueFactoryTaskReconcile = async (objectiveId: string, sourceUpdatedAt: number): Promise<boolean> => {
+  const queue = queueImpl;
+  if (!queue) return true;
+  const recentJobs = await queue.listJobs({ limit: 200 });
+  const relatedControls = recentJobs
+    .filter((job) =>
+      job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.payload.kind === "factory.objective.control"
+      && job.payload.objectiveId === objectiveId)
+    .sort((left, right) =>
+      right.updatedAt - left.updatedAt
+      || right.createdAt - left.createdAt
+      || right.id.localeCompare(left.id)
+    );
+  const latest = relatedControls[0];
+  if (!latest) return true;
+  if (latest.status === "queued" || latest.status === "leased" || latest.status === "running") {
+    return false;
+  }
+  return latest.updatedAt < sourceUpdatedAt;
+};
+
+const isTerminalObjectiveStatus = (status: unknown): boolean =>
+  status === "completed" || status === "blocked" || status === "canceled" || status === "failed";
+
+const shouldQueueFactoryObjectiveAudit = async (objectiveId: string, objectiveUpdatedAt: number): Promise<boolean> => {
+  const queue = queueImpl;
+  if (!queue) return true;
+  const recentJobs = await queue.listJobs({ limit: 200 });
+  const relatedAudits = recentJobs
+    .filter((job) =>
+      job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.payload.kind === "factory.objective.audit"
+      && job.payload.objectiveId === objectiveId)
+    .sort((left, right) =>
+      right.updatedAt - left.updatedAt
+      || right.createdAt - left.createdAt
+      || right.id.localeCompare(left.id)
+    );
+  const latest = relatedAudits[0];
+  if (!latest) return true;
+  if (latest.status === "queued" || latest.status === "leased" || latest.status === "running") {
+    return false;
+  }
+  const latestObjectiveUpdatedAt = typeof latest.payload.objectiveUpdatedAt === "number" && Number.isFinite(latest.payload.objectiveUpdatedAt)
+    ? latest.payload.objectiveUpdatedAt
+    : 0;
+  return latestObjectiveUpdatedAt < objectiveUpdatedAt;
+};
+
 const baseQueue = jsonlQueue({
   runtime: jobRuntime,
   stream: JOB_STREAM,
@@ -231,8 +284,8 @@ const baseQueue = jsonlQueue({
       // Structurally sound auto-recovery for crashed/expired factory jobs
       // We enqueue a control job to reconcile the objective so the orchestrator
       // naturally picks it up, avoiding mutable global state or direct side-effects.
-      if (queue && (job.status === "failed" || job.status === "canceled") && typeof job.payload === "object" && job.payload && job.payload.kind === "factory.task.run") {
-        if (objectiveId) {
+      if ((job.status === "failed" || job.status === "canceled") && typeof job.payload === "object" && job.payload && job.payload.kind === "factory.task.run") {
+        if (objectiveId && await shouldQueueFactoryTaskReconcile(objectiveId, job.updatedAt)) {
           queue.enqueue({
             agentId: "factory-control",
             lane: "collect",
@@ -247,29 +300,57 @@ const baseQueue = jsonlQueue({
           }).catch(console.error);
         }
       }
+
+      if (
+        objectiveId
+        && (job.status === "completed" || job.status === "failed" || job.status === "canceled")
+        && typeof job.payload === "object"
+        && job.payload
+        && job.payload.kind !== "factory.objective.audit"
+      ) {
+        const factoryService = factoryServiceRef;
+        if (factoryService) {
+          const detail = await factoryService.getObjective(objectiveId).catch(() => undefined);
+          if (detail && isTerminalObjectiveStatus(detail.status) && await shouldQueueFactoryObjectiveAudit(objectiveId, detail.updatedAt)) {
+            queue.enqueue({
+              agentId: FACTORY_CONTROL_AGENT_ID,
+              lane: "collect",
+              sessionKey: `factory:audit:${objectiveId}`,
+              singletonMode: "steer",
+              maxAttempts: 1,
+              payload: {
+                kind: "factory.objective.audit",
+                objectiveId,
+                objectiveStatus: detail.status,
+                objectiveUpdatedAt: detail.updatedAt,
+              },
+            }).catch(console.error);
+          }
+        }
+      }
     }
     sse.publish("receipt");
   },
 });
-let queueImpl: JobBackend = baseQueue;
+queueImpl = baseQueue;
 const queue: JobBackend = {
-  enqueue: (input) => queueImpl.enqueue(input),
-  leaseNext: (opts) => queueImpl.leaseNext(opts),
-  leaseJob: (jobId, workerId, leaseMs) => queueImpl.leaseJob(jobId, workerId, leaseMs),
-  heartbeat: (jobId, workerId, leaseMs) => queueImpl.heartbeat(jobId, workerId, leaseMs),
-  progress: (jobId, workerId, result) => queueImpl.progress(jobId, workerId, result),
-  complete: (jobId, workerId, result) => queueImpl.complete(jobId, workerId, result),
-  fail: (jobId, workerId, error, noRetry, result) => queueImpl.fail(jobId, workerId, error, noRetry, result),
-  cancel: (jobId, reason, by) => queueImpl.cancel(jobId, reason, by),
-  queueCommand: (input) => queueImpl.queueCommand(input),
-  consumeCommands: (jobId, filter) => queueImpl.consumeCommands(jobId, filter),
-  getJob: (jobId) => queueImpl.getJob(jobId),
-  listJobs: (opts) => queueImpl.listJobs(opts),
-  waitForJob: (jobId, timeoutMs, pollMs) => queueImpl.waitForJob(jobId, timeoutMs, pollMs),
-  waitForWork: (opts) => queueImpl.waitForWork(opts),
-  notifyWorkAvailable: () => queueImpl.notifyWorkAvailable(),
-  snapshot: () => queueImpl.snapshot(),
-  refresh: () => queueImpl.refresh(),
+  enqueue: (input) => queueImpl!.enqueue(input),
+  leaseNext: (opts) => queueImpl!.leaseNext(opts),
+  leaseJob: (jobId, workerId, leaseMs) => queueImpl!.leaseJob(jobId, workerId, leaseMs),
+  heartbeat: (jobId, workerId, leaseMs) => queueImpl!.heartbeat(jobId, workerId, leaseMs),
+  progress: (jobId, workerId, result) => queueImpl!.progress(jobId, workerId, result),
+  complete: (jobId, workerId, result) => queueImpl!.complete(jobId, workerId, result),
+  fail: (jobId, workerId, error, noRetry, result) => queueImpl!.fail(jobId, workerId, error, noRetry, result),
+  cancel: (jobId, reason, by) => queueImpl!.cancel(jobId, reason, by),
+  queueCommand: (input) => queueImpl!.queueCommand(input),
+  consumeCommands: (jobId, filter) => queueImpl!.consumeCommands(jobId, filter),
+  getJob: (jobId) => queueImpl!.getJob(jobId),
+  listJobs: (opts) => queueImpl!.listJobs(opts),
+  waitForJob: (jobId, timeoutMs, pollMs) => queueImpl!.waitForJob(jobId, timeoutMs, pollMs),
+  waitForWork: (opts) => queueImpl!.waitForWork(opts),
+  notifyWorkAvailable: () => queueImpl!.notifyWorkAvailable(),
+  snapshot: () => queueImpl!.snapshot(),
+  refresh: () => queueImpl!.refresh(),
 };
 
 const enqueueJob = async (job: EnqueueJobInput): Promise<void> => {
@@ -458,6 +539,7 @@ const { service: factoryService } = createFactoryServiceRuntime({
       }
     : undefined,
 });
+factoryServiceRef = factoryService;
 const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService);
 const agentRunner = createAgentRunner({
   defaultAgentId: "agent",
@@ -757,9 +839,11 @@ const jobHandlers = {
     const timeoutMs = typeof payload.timeoutMs === "number" && Number.isFinite(payload.timeoutMs)
       ? Math.max(30_000, Math.min(Math.floor(payload.timeoutMs), 900_000))
       : 180_000;
+    const isTerminalJobStatus = (status: unknown): boolean =>
+      status === "completed" || status === "failed" || status === "canceled";
     const shouldAbort = async (): Promise<boolean> => {
       const latest = await queue.getJob(job.id);
-      return latest?.abortRequested === true;
+      return latest?.abortRequested === true || isTerminalJobStatus(latest?.status);
     };
     const parentRunId = typeof payload.parentRunId === "string" ? payload.parentRunId.trim() : "";
     const parentStream = typeof payload.parentStream === "string" ? payload.parentStream.trim() : "";
@@ -795,7 +879,18 @@ const jobHandlers = {
           const summary = typeof update.summary === "string" ? update.summary : "";
           await emitCodexMerged(summary);
         },
-      }, { shouldAbort });
+      }, {
+        shouldAbort,
+        onChildSpawn: async (update) => {
+          ctx.registerLeaseProcess({
+            pid: update.pid,
+            label: "codex child",
+          });
+        },
+        onChildExit: async () => {
+          ctx.clearLeaseProcess();
+        },
+      });
       await emitCodexMerged(typeof result.summary === "string" ? result.summary : "Codex completed.");
       return { ok: true, result };
     } catch (err) {

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
-import type { CodexExecutor, CodexRunControl, CodexRunInput } from "../adapters/codex-executor";
+import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../adapters/codex-executor";
 import { HubGit, HubGitError } from "../adapters/hub-git";
 import type { MemoryTools } from "../adapters/memory-tools";
 import {
@@ -31,6 +31,7 @@ import {
   type FactoryPlanningReceiptRecord,
   type FactoryExecutionScriptRun,
   type FactoryObjectivePhase,
+  type FactoryObjectiveHandoffStatus,
   type FactoryObjectiveMode,
   type FactoryCheckResult,
   type FactoryCmd,
@@ -39,10 +40,13 @@ import {
   type FactoryObjectiveSeverity,
   type FactoryObjectiveStatus,
   type FactoryState,
+  type FactoryTaskCompletionRecord,
   type FactoryTaskExecutionMode,
   type FactoryTaskResultOutcome,
   type FactoryTaskRecord,
   type FactoryTaskStatus,
+  type FactoryWorkerHandoffOutcome,
+  type FactoryWorkerHandoffScope,
   type FactoryWorkerType,
   type FactoryCandidateStatus,
 } from "../modules/factory";
@@ -93,6 +97,7 @@ import {
   normalizeTaskCompletionRecord,
   renderDeliveryResultText,
   renderInvestigationReportText,
+  renderWorkerHandoffText,
 } from "./factory/result-contracts";
 import {
   resolveFactoryPublishWorkerResult,
@@ -152,6 +157,7 @@ const MAX_CONSECUTIVE_TASK_FAILURES = 5;
 const RETRYABLE_BLOCK_REASON_RE = /\b(factory task failed|lease expired|timed out|timeout|missing structured factory task result|transient|temporary|connection reset|econnreset|spawn|signal|unexpectedly canceled|interrupted)\b/i;
 const NON_RETRYABLE_BLOCK_REASON_RE = /\b(no tracked diff|isolated runtime|cannot run in isolated mode|policy blocked|circuit[- ]broken|integration validation failed)\b/i;
 const HUMAN_INPUT_BLOCK_REASON_RE = /\b(missing (?:dependency |implementation |product |design )?details?|need .*detail|need .*guidance|need .*clarification|choose|which (?:approach|option|api|path)|operator|human|approval|permission denied|access denied|unauthorized|credentials|auth(?:entication|orization)?|forbidden)\b/i;
+const CONTROLLER_RESOLVABLE_DELIVERY_PARTIAL_RE = /\b(final clean completion|clean final termination|terminal success marker|orchestration layer needs|controller requires a pristine worktree|confirm or clean up|codex-home-runtime|\.receipt(?:\/|`)?|pristine worktree)\b/i;
 const AUTONOMOUS_RETRY_MAX_CANDIDATE_PASSES = 1;
 const PUBLISH_TRANSIENT_FAILURE_RE =
   /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
@@ -213,10 +219,102 @@ const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref,
 const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
+const dedupeGraphRefs = (refs: ReadonlyArray<GraphRef>): ReadonlyArray<GraphRef> => {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = `${ref.kind}:${ref.ref}:${ref.label ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+type FactoryLiveGuidanceKind = "steer" | "follow_up" | "mixed";
+
+type FactoryLiveGuidance = {
+  readonly guidance: string;
+  readonly guidanceKind: FactoryLiveGuidanceKind;
+  readonly sourceCommandIds: ReadonlyArray<string>;
+  readonly jobId?: string;
+  readonly appliedAt: number;
+};
+
+const parseFactoryLiveGuidance = (
+  signal: { readonly note?: string; readonly meta?: Record<string, unknown> } | undefined,
+): FactoryLiveGuidance | undefined => {
+  const meta = signal?.meta;
+  const guidance = trimmedString(
+    typeof meta?.guidance === "string"
+      ? meta.guidance
+      : signal?.note,
+  );
+  if (!guidance) return undefined;
+  const guidanceKind = meta?.guidanceKind === "steer" || meta?.guidanceKind === "follow_up" || meta?.guidanceKind === "mixed"
+    ? meta.guidanceKind
+    : "mixed";
+  const sourceCommandIds = Array.isArray(meta?.sourceCommandIds)
+    ? [...new Set(meta.sourceCommandIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0))]
+    : [];
+  const jobId = trimmedString(typeof meta?.jobId === "string" ? meta.jobId : undefined);
+  const appliedAt = typeof meta?.appliedAt === "number" && Number.isFinite(meta.appliedAt)
+    ? meta.appliedAt
+    : Date.now();
+  return {
+    guidance,
+    guidanceKind,
+    sourceCommandIds,
+    jobId,
+    appliedAt,
+  };
+};
+
+const renderLiveOperatorGuidanceSection = (
+  guidanceHistory: ReadonlyArray<FactoryLiveGuidance>,
+): string | undefined => {
+  if (guidanceHistory.length === 0) return undefined;
+  const lines = [
+    "## Live Operator Guidance",
+    ...guidanceHistory.flatMap((item, index) => {
+      const label =
+        item.guidanceKind === "mixed"
+          ? "Live steer/follow-up"
+          : item.guidanceKind === "follow_up"
+            ? "Live follow-up"
+            : "Live steer";
+      return [
+        `${index + 1}. ${label} at ${new Date(item.appliedAt).toISOString()}`,
+        item.guidance,
+      ];
+    }),
+    "",
+  ];
+  return lines.join("\n");
+};
+const dedupeStrings = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
   status === "queued" || status === "leased" || status === "running";
+const LIVE_JOB_STALE_AFTER_MS = 90_000;
+const jobProgressAt = (job: QueueJob | undefined): number | undefined => {
+  const result = isRecord(job?.result) ? job.result : undefined;
+  return typeof result?.progressAt === "number" && Number.isFinite(result.progressAt)
+    ? result.progressAt
+    : undefined;
+};
+const displayLiveJobStatus = (job: QueueJob | undefined, now = Date.now()): string | undefined => {
+  if (!job) return undefined;
+  if (isTerminalJobStatus(job.status)) return job.status;
+  const progressAt = jobProgressAt(job);
+  if (job.status === "running" && typeof progressAt === "number" && now - progressAt >= LIVE_JOB_STALE_AFTER_MS) {
+    return "stalled";
+  }
+  if (job.status === "leased") return "running";
+  return job.status;
+};
+const isDisplayActiveJobStatus = (status?: string): boolean =>
+  status === "queued" || status === "running";
 const INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS = new Set([
   "a",
   "an",
@@ -510,6 +608,17 @@ type FactoryContextObjectiveSlice = {
   readonly integrationMemorySummary?: string;
 };
 
+type FactoryContextAwsExecutionContext = Omit<NonNullable<FactoryCloudExecutionContext["aws"]>, "ec2RegionScope"> & {
+  readonly ec2RegionScope?: Pick<
+    NonNullable<NonNullable<FactoryCloudExecutionContext["aws"]>["ec2RegionScope"]>,
+    "queryableRegions" | "skippedRegions"
+  >;
+};
+
+type FactoryContextCloudExecutionContext = Omit<FactoryCloudExecutionContext, "aws"> & {
+  readonly aws?: FactoryContextAwsExecutionContext;
+};
+
 type FactoryContextPack = {
   readonly objectiveId: string;
   readonly title: string;
@@ -517,7 +626,7 @@ type FactoryContextPack = {
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
   readonly planning?: FactoryPlanningReceiptRecord;
-  readonly cloudExecutionContext?: FactoryCloudExecutionContext;
+  readonly cloudExecutionContext?: FactoryContextCloudExecutionContext;
   readonly profile: FactoryObjectiveProfileSnapshot;
   readonly task: {
     readonly taskId: string;
@@ -542,6 +651,7 @@ type FactoryContextPack = {
     readonly parentCandidateId?: string;
     readonly status: FactoryCandidateStatus;
     readonly summary?: string;
+    readonly handoff?: string;
     readonly headCommit?: string;
     readonly latestReason?: string;
     readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
@@ -828,9 +938,112 @@ export class FactoryService {
       objectiveMemoryScope: `factory/objectives/${state.objectiveId}`,
       integrationMemoryScope: `factory/objectives/${state.objectiveId}/integration`,
       profileSkillRefs: this.objectiveProfileForState(state).selectedSkills,
-      repoSkillPaths,
-      sharedArtifactRefs,
+      repoSkillPaths: dedupeStrings(repoSkillPaths),
+      sharedArtifactRefs: dedupeGraphRefs(sharedArtifactRefs),
     };
+  }
+
+  private compactCloudExecutionContextForPacket(
+    context: FactoryCloudExecutionContext,
+  ): FactoryContextCloudExecutionContext {
+    return {
+      summary: context.summary,
+      availableProviders: context.availableProviders,
+      activeProviders: context.activeProviders,
+      preferredProvider: context.preferredProvider,
+      guidance: context.guidance,
+      aws: context.aws
+        ? {
+            cliPath: context.aws.cliPath,
+            version: context.aws.version,
+            profiles: context.aws.profiles,
+            selectedProfile: context.aws.selectedProfile,
+            defaultRegion: context.aws.defaultRegion,
+            callerIdentity: context.aws.callerIdentity,
+            ec2RegionScope: context.aws.ec2RegionScope
+              ? {
+                  queryableRegions: context.aws.ec2RegionScope.queryableRegions,
+                  skippedRegions: context.aws.ec2RegionScope.skippedRegions,
+                }
+              : undefined,
+          }
+        : undefined,
+      gcp: context.gcp,
+      azure: context.azure,
+    };
+  }
+
+  private renderTaskContextSummary(pack: FactoryContextPack): string {
+    const taskLine = `Task: ${pack.task.taskId} · ${pack.task.title} [${pack.task.status}]`;
+    const selectedHelpers = pack.helperCatalog?.selectedHelpers
+      ?.slice(0, 4)
+      .map((helper) => `- ${helper.id}: ${helper.description}`);
+    const relatedTasks = pack.relatedTasks
+      .slice(0, 8)
+      .map((task) => `- ${task.taskId} [${task.relations.join(", ")}] · ${task.title} [${task.status}]${task.memorySummary ? ` · ${task.memorySummary}` : ""}`);
+    const candidateLineage = pack.candidateLineage
+      .slice(-6)
+      .map((candidate) => `- ${candidate.candidateId} [${candidate.status}]${candidate.summary ? ` · ${candidate.summary}` : ""}${candidate.handoff && candidate.handoff !== candidate.summary ? ` · handoff ${candidate.handoff}` : ""}`);
+    const recentReceipts = pack.recentReceipts
+      .slice(-10)
+      .map((receipt) => `- ${receipt.type}: ${clipText(receipt.summary, 240) ?? receipt.summary}`);
+    const frontierTasks = pack.objectiveSlice.frontierTasks
+      .slice(0, 8)
+      .map((task) => `- ${task.taskId} · ${task.title} [${task.status}]${task.memorySummary ? ` · ${task.memorySummary}` : ""}`);
+    const recentCompleted = pack.objectiveSlice.recentCompletedTasks
+      .slice(0, 6)
+      .map((task) => `- ${task.taskId} · ${task.title} [${task.status}]${task.memorySummary ? ` · ${task.memorySummary}` : ""}`);
+    const objectiveReceipts = pack.objectiveSlice.recentObjectiveReceipts
+      .slice(-8)
+      .map((receipt) => `- ${receipt.type}: ${clipText(receipt.summary, 220) ?? receipt.summary}`);
+    return [
+      "# Factory Task Context Summary",
+      "",
+      `Objective: ${pack.title} (${pack.objectiveId})`,
+      `Mode: ${pack.objectiveMode}`,
+      `Severity: ${pack.severity}`,
+      taskLine,
+      `Profile: ${pack.profile.rootProfileLabel} (${pack.profile.rootProfileId})`,
+      `Runtime: ${pack.task.executionMode}`,
+      `Candidate: ${pack.task.candidateId}`,
+      `Integration: ${pack.integration.status}${pack.integration.lastSummary ? ` · ${pack.integration.lastSummary}` : ""}`,
+      pack.contextSources.profileSkillRefs.length > 0 ? `Profile skills: ${pack.contextSources.profileSkillRefs.join(", ")}` : "",
+      "",
+      "## What Matters",
+      pack.memory.overview ? `Overview: ${pack.memory.overview}` : "",
+      pack.objectiveSlice.objectiveMemorySummary ? `Objective memory: ${pack.objectiveSlice.objectiveMemorySummary}` : "",
+      pack.objectiveSlice.integrationMemorySummary ? `Integration memory: ${pack.objectiveSlice.integrationMemorySummary}` : "",
+      "",
+      selectedHelpers && selectedHelpers.length > 0 ? "## Selected Helpers" : "",
+      ...(selectedHelpers ?? []),
+      "",
+      pack.cloudExecutionContext?.summary ? "## Live Cloud Context" : "",
+      pack.cloudExecutionContext?.summary ?? "",
+      ...(pack.cloudExecutionContext?.guidance ?? []).slice(0, 3).map((item) => `- ${item}`),
+      "",
+      relatedTasks.length > 0 ? "## Related Tasks" : "",
+      ...relatedTasks,
+      "",
+      candidateLineage.length > 0 ? "## Candidate Lineage" : "",
+      ...candidateLineage,
+      "",
+      recentReceipts.length > 0 ? "## Recent Receipts" : "",
+      ...recentReceipts,
+      "",
+      frontierTasks.length > 0 ? "## Objective Frontier" : "",
+      ...frontierTasks,
+      "",
+      recentCompleted.length > 0 ? "## Recent Completed Tasks" : "",
+      ...recentCompleted,
+      "",
+      objectiveReceipts.length > 0 ? "## Objective-Wide Receipts" : "",
+      ...objectiveReceipts,
+      "",
+      "## Packet Usage",
+      "Use this summary first.",
+      "Use the generated memory script for scoped recall.",
+      "Open the JSON context pack only when you need exact raw fields, refs, or artifact paths.",
+    ].filter(Boolean).join("\n");
   }
 
   private workerTaskSkillRefs(selectedSkills: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -1645,14 +1858,15 @@ export class FactoryService {
       const detail = await this.getObjective(objectiveId);
       const task = detail.tasks.find((item) => item.taskId === focusId);
       if (!task) throw new FactoryServiceError(404, "factory task not found");
+      const displayStatus = displayLiveJobStatus(task.job) ?? task.jobStatus ?? task.status;
       return {
         objectiveId,
         focusKind,
         focusId,
         title: task.title,
-        status: task.jobStatus ?? task.status,
-        active: isActiveJobStatus(task.jobStatus),
-        summary: task.latestSummary ?? task.candidate?.summary ?? task.artifactSummary,
+        status: displayStatus,
+        active: isDisplayActiveJobStatus(displayStatus),
+        summary: task.latestSummary ?? task.candidate?.summary ?? task.lastMessage ?? task.stderrTail ?? task.stdoutTail ?? task.artifactSummary,
         taskId: task.taskId,
         candidateId: task.candidateId,
         jobId: task.jobId,
@@ -1704,15 +1918,16 @@ export class FactoryService {
       stdoutTail = await this.readTextTail(optionalTrimmedString(payload.stdoutPath), 900);
       stderrTail = await this.readTextTail(optionalTrimmedString(payload.stderrPath), 600);
     }
+    const displayStatus = displayLiveJobStatus(job) ?? job.status;
 
     return {
       objectiveId,
       focusKind,
       focusId,
       title,
-      status: job.status,
-      active: isActiveJobStatus(job.status),
-      summary: artifactSummary ?? summary,
+      status: displayStatus,
+      active: isDisplayActiveJobStatus(displayStatus),
+      summary: artifactSummary ?? lastMessage ?? stderrTail ?? stdoutTail ?? summary,
       taskId,
       candidateId,
       jobId: job.id,
@@ -1779,12 +1994,23 @@ export class FactoryService {
   async cancelObjective(objectiveId: string, reason?: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     await this.cancelObjectiveTaskJobs(state, reason ?? "factory objective canceled");
-    await this.emitObjective(objectiveId, {
-      type: "objective.canceled",
-      objectiveId,
-      canceledAt: Date.now(),
-      reason,
-    });
+    const canceledAt = Date.now();
+    const summary = reason ? `Objective canceled: ${reason}` : "Objective canceled.";
+    await this.emitObjectiveBatch(objectiveId, [
+      {
+        type: "objective.canceled",
+        objectiveId,
+        canceledAt,
+        reason,
+      },
+      this.buildObjectiveHandoffEvent({
+        state,
+        status: "canceled",
+        summary,
+        blocker: reason,
+        sourceUpdatedAt: canceledAt,
+      }),
+    ]);
     await this.rebalanceObjectiveSlots();
     return this.getObjective(objectiveId);
   }
@@ -1841,6 +2067,40 @@ export class FactoryService {
     return this.queueJobCommand(jobId, {
       command: "abort",
       payload: { reason: optionalTrimmedString(reason) ?? "abort requested" },
+      by,
+    });
+  }
+
+  async queueJobSteer(
+    jobId: string,
+    message: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    const normalized = optionalTrimmedString(message);
+    if (!normalized) throw new FactoryServiceError(400, "steer message required");
+    return this.queueJobCommand(jobId, {
+      command: "steer",
+      payload: {
+        message: normalized,
+        problem: normalized,
+      },
+      by,
+    });
+  }
+
+  async queueJobFollowUp(
+    jobId: string,
+    message: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    const normalized = optionalTrimmedString(message);
+    if (!normalized) throw new FactoryServiceError(400, "follow-up message required");
+    return this.queueJobCommand(jobId, {
+      command: "follow_up",
+      payload: {
+        message: normalized,
+        note: normalized,
+      },
       by,
     });
   }
@@ -1936,7 +2196,7 @@ export class FactoryService {
   private async queueJobCommand(
     jobId: string,
     input: {
-      readonly command: "abort";
+      readonly command: "abort" | "steer" | "follow_up";
       readonly payload?: Record<string, unknown>;
       readonly by?: string;
     },
@@ -2217,6 +2477,14 @@ export class FactoryService {
     const askReason = this.humanDecisionReasonForBlockedTask(state, askTask);
     const basedOn = await this.currentHeadHash(objectiveId);
     try {
+      const blockedAt = Date.now();
+      const blockedEvent = {
+        type: "objective.blocked" as const,
+        objectiveId,
+        reason: askReason,
+        summary: askReason,
+        blockedAt,
+      };
       await this.emitObjectiveBatch(objectiveId, [
         this.runtimeDecisionEvent(
           state,
@@ -2224,13 +2492,14 @@ export class FactoryService {
           askReason,
           { basedOn, frontierTaskIds: [askTask.taskId] },
         ),
-        {
-          type: "objective.blocked",
-          objectiveId,
-          reason: askReason,
-          summary: askReason,
-          blockedAt: Date.now(),
-        },
+        blockedEvent,
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "blocked",
+          summary: blockedEvent.summary,
+          blocker: blockedEvent.reason,
+          sourceUpdatedAt: blockedAt,
+        }),
       ], basedOn);
       return "asked_human";
     } catch (err) {
@@ -2518,13 +2787,28 @@ export class FactoryService {
       const job = await this.loadFreshJob(task.jobId);
       if (!job || !isTerminalJobStatus(job.status)) continue;
       if ((job.status === "failed" || job.status === "canceled") && (task.status === "running" || task.status === "reviewing")) {
-        await this.emitObjective(state.objectiveId, {
-          type: "task.blocked",
-          objectiveId: state.objectiveId,
-          taskId,
-          reason: job.lastError ?? job.canceledReason ?? "factory task failed",
-          blockedAt: Date.now(),
-        });
+        const reason = job.lastError ?? job.canceledReason ?? "factory task failed";
+        const blockedAt = Date.now();
+        await this.emitObjectiveBatch(state.objectiveId, [
+          this.buildWorkerHandoffEvent({
+            objectiveId: state.objectiveId,
+            scope: "task",
+            workerType: task.workerType,
+            taskId,
+            candidateId: task.candidateId,
+            outcome: job.status,
+            summary: reason,
+            handoff: reason,
+            handedOffAt: blockedAt,
+          }),
+          {
+            type: "task.blocked",
+            objectiveId: state.objectiveId,
+            taskId,
+            reason,
+            blockedAt,
+          },
+        ]);
       }
     }
   }
@@ -2745,12 +3029,24 @@ export class FactoryService {
         return "applied";
       }
       case "objective.complete":
-        await this.emitObjective(state.objectiveId, {
-          type: "objective.completed",
-          objectiveId: state.objectiveId,
-          summary: effect.summary,
-          completedAt: Date.now(),
-        });
+        {
+          const completedAt = Date.now();
+          const completedEvent = {
+            type: "objective.completed" as const,
+            objectiveId: state.objectiveId,
+            summary: effect.summary,
+            completedAt,
+          };
+          await this.emitObjectiveBatch(state.objectiveId, [
+            completedEvent,
+            this.buildObjectiveHandoffEvent({
+              state,
+              status: "completed",
+              summary: effect.summary,
+              sourceUpdatedAt: completedAt,
+            }),
+          ]);
+        }
         return "applied";
       case "objective.block":
         if (effect.allowAutonomousNextStep) {
@@ -2758,13 +3054,26 @@ export class FactoryService {
           if (nextStep === "retried") return "retried";
           if (nextStep === "asked_human") return "asked_human";
         }
-        await this.emitObjective(state.objectiveId, {
-          type: "objective.blocked",
-          objectiveId: state.objectiveId,
-          reason: effect.reason,
-          summary: effect.summary,
-          blockedAt: Date.now(),
-        });
+        {
+          const blockedAt = Date.now();
+          const blockedEvent = {
+            type: "objective.blocked" as const,
+            objectiveId: state.objectiveId,
+            reason: effect.reason,
+            summary: effect.summary,
+            blockedAt,
+          };
+          await this.emitObjectiveBatch(state.objectiveId, [
+            blockedEvent,
+            this.buildObjectiveHandoffEvent({
+              state,
+              status: "blocked",
+              summary: effect.summary,
+              blocker: effect.reason,
+              sourceUpdatedAt: blockedAt,
+            }),
+          ]);
+        }
         return "applied";
       default:
         return "applied";
@@ -2795,13 +3104,23 @@ export class FactoryService {
 
     const elapsedBlockedReason = this.derivePolicyBlockedReason(state);
     if (elapsedBlockedReason) {
-      await this.emitObjective(objectiveId, {
-        type: "objective.blocked",
-        objectiveId,
-        reason: elapsedBlockedReason,
-        summary: elapsedBlockedReason,
-        blockedAt: Date.now(),
-      });
+      const blockedAt = Date.now();
+      await this.emitObjectiveBatch(objectiveId, [
+        {
+          type: "objective.blocked",
+          objectiveId,
+          reason: elapsedBlockedReason,
+          summary: elapsedBlockedReason,
+          blockedAt,
+        },
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "blocked",
+          summary: elapsedBlockedReason,
+          blocker: elapsedBlockedReason,
+          sourceUpdatedAt: blockedAt,
+        }),
+      ]);
       await this.rebalanceObjectiveSlots();
       return;
     }
@@ -2909,34 +3228,74 @@ export class FactoryService {
       JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
       "utf-8",
     );
-    const execution = await this.codexExecutor.run({
-      prompt: await this.renderTaskPrompt(state, task, parsed),
-      workspacePath: parsed.workspacePath,
-      promptPath: parsed.promptPath,
-      lastMessagePath: parsed.lastMessagePath,
-      stdoutPath: parsed.stdoutPath,
-      stderrPath: parsed.stderrPath,
-      model: FACTORY_TASK_CODEX_MODEL,
-      jsonOutput: true,
-      outputSchemaPath: resultSchemaPath,
-      completionSignalPath: parsed.lastMessagePath,
-      completionQuietMs: 1_500,
-      reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
-      sandboxMode: sandboxModeForTask(),
-      isolateCodexHome: true,
-      objectiveId: parsed.objectiveId,
-      taskId: parsed.taskId,
-      candidateId: parsed.candidateId,
-      integrationRef: parsed.integrationRef,
-      contextRefs: parsed.contextRefs,
-      skillBundlePaths: parsed.skillBundlePaths,
-      repoSkillPaths: parsed.repoSkillPaths,
-      env: {
-        DATA_DIR: this.dataDir,
-        RECEIPT_DATA_DIR: this.dataDir,
-        PATH: workspaceCommandEnv.path,
-      },
-    }, control);
+    const guidanceHistory: FactoryLiveGuidance[] = [];
+    let restartCount = 0;
+    let execution;
+    while (true) {
+      try {
+        execution = await this.codexExecutor.run({
+          prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
+          workspacePath: parsed.workspacePath,
+          promptPath: parsed.promptPath,
+          lastMessagePath: parsed.lastMessagePath,
+          stdoutPath: parsed.stdoutPath,
+          stderrPath: parsed.stderrPath,
+          model: FACTORY_TASK_CODEX_MODEL,
+          jsonOutput: true,
+          outputSchemaPath: resultSchemaPath,
+          completionSignalPath: parsed.lastMessagePath,
+          completionQuietMs: 1_500,
+          reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
+          sandboxMode: sandboxModeForTask(),
+          isolateCodexHome: true,
+          objectiveId: parsed.objectiveId,
+          taskId: parsed.taskId,
+          candidateId: parsed.candidateId,
+          integrationRef: parsed.integrationRef,
+          contextRefs: parsed.contextRefs,
+          skillBundlePaths: parsed.skillBundlePaths,
+          repoSkillPaths: parsed.repoSkillPaths,
+          env: {
+            DATA_DIR: this.dataDir,
+            RECEIPT_DATA_DIR: this.dataDir,
+            PATH: workspaceCommandEnv.path,
+          },
+        }, control);
+        break;
+      } catch (error) {
+        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+        const guidance = parseFactoryLiveGuidance(error.signal);
+        if (!guidance) throw error;
+        guidanceHistory.push(guidance);
+        restartCount += 1;
+        const restartedAt = Date.now();
+        await this.emitObjectiveBatch(parsed.objectiveId, [
+          {
+            type: "task.intervention.applied",
+            objectiveId: parsed.objectiveId,
+            taskId: parsed.taskId,
+            candidateId: parsed.candidateId,
+            jobId: guidance.jobId ?? parsed.workspaceId,
+            guidance: guidance.guidance,
+            guidanceKind: guidance.guidanceKind,
+            sourceCommandIds: guidance.sourceCommandIds,
+            appliedAt: guidance.appliedAt,
+          },
+          {
+            type: "task.intervention.restarted",
+            objectiveId: parsed.objectiveId,
+            taskId: parsed.taskId,
+            candidateId: parsed.candidateId,
+            jobId: guidance.jobId ?? parsed.workspaceId,
+            guidance: guidance.guidance,
+            guidanceKind: guidance.guidanceKind,
+            sourceCommandIds: guidance.sourceCommandIds,
+            restartCount,
+            restartedAt,
+          },
+        ]);
+      }
+    }
     const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
     await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
     await this.applyTaskWorkerResult(parsed, taskResult);
@@ -2963,8 +3322,13 @@ export class FactoryService {
   private async emitTaskResultPlannerEffects(
     objectiveId: string,
     effects: ReadonlyArray<FactoryPlannerEffect>,
+    opts?: {
+      readonly workerHandoff?: Extract<FactoryEvent, { readonly type: "worker.handoff" }>;
+    },
   ): Promise<void> {
-    const events = effects.flatMap((effect): FactoryEvent[] => {
+    const events = [
+      ...(opts?.workerHandoff ? [opts.workerHandoff] : []),
+      ...effects.flatMap((effect): FactoryEvent[] => {
       switch (effect.type) {
         case "task.block":
           return [{
@@ -3020,8 +3384,98 @@ export class FactoryService {
         default:
           return [];
       }
-    });
+      }),
+    ] satisfies ReadonlyArray<FactoryEvent>;
     await this.emitObjectiveBatch(objectiveId, events);
+  }
+
+  private canAutonomouslyResolveDeliveryPartial(input: {
+    readonly completion: FactoryTaskCompletionRecord;
+    readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+    readonly nextAction?: string;
+    readonly failedCheck?: FactoryCheckResult;
+  }): boolean {
+    if (input.failedCheck) return false;
+    if (input.completion.changed.length === 0) return false;
+    if (input.completion.proof.length === 0) return false;
+    if (input.scriptsRun.some((item) => item.status === "error")) return false;
+    const unresolved = [
+      ...input.completion.remaining,
+      ...(input.nextAction ? [input.nextAction] : []),
+    ]
+      .map((item) => trimmedString(item))
+      .filter((item): item is string => Boolean(item));
+    return unresolved.every((item) => CONTROLLER_RESOLVABLE_DELIVERY_PARTIAL_RE.test(item));
+  }
+
+  private buildWorkerHandoffEvent(input: {
+    readonly objectiveId: string;
+    readonly scope: FactoryWorkerHandoffScope;
+    readonly workerType: FactoryWorkerType;
+    readonly outcome: FactoryWorkerHandoffOutcome;
+    readonly summary: string;
+    readonly handoff: string;
+    readonly handedOffAt: number;
+    readonly taskId?: string;
+    readonly candidateId?: string;
+  }): Extract<FactoryEvent, { readonly type: "worker.handoff" }> {
+    return {
+      type: "worker.handoff",
+      objectiveId: input.objectiveId,
+      scope: input.scope,
+      workerType: input.workerType,
+      outcome: input.outcome,
+      summary: input.summary,
+      handoff: input.handoff,
+      handedOffAt: input.handedOffAt,
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      ...(input.candidateId ? { candidateId: input.candidateId } : {}),
+    };
+  }
+
+  private defaultObjectiveHandoffNextAction(
+    state: FactoryState,
+    status: FactoryObjectiveHandoffStatus,
+  ): string | undefined {
+    if (status === "completed" || status === "canceled") return undefined;
+    if (status === "failed") return "Inspect the failure details, react with guidance, or cancel the objective.";
+    return state.objectiveMode === "investigation"
+      ? "Review the blocking receipt, adjust the investigation, or cancel the objective."
+      : "Review the blocking receipt and react or cancel the objective.";
+  }
+
+  private buildObjectiveHandoffEvent(input: {
+    readonly state: FactoryState;
+    readonly status: FactoryObjectiveHandoffStatus;
+    readonly summary: string;
+    readonly sourceUpdatedAt: number;
+    readonly blocker?: string;
+    readonly nextAction?: string;
+  }): Extract<FactoryEvent, { readonly type: "objective.handoff" }> {
+    const effectiveNextAction = optionalTrimmedString(input.nextAction)
+      ?? this.defaultObjectiveHandoffNextAction(input.state, input.status);
+    const handoffKey = createHash("sha1")
+      .update(JSON.stringify({
+        objectiveId: input.state.objectiveId,
+        status: input.status,
+        summary: input.summary,
+        blocker: input.blocker,
+        nextAction: effectiveNextAction,
+        sourceUpdatedAt: input.sourceUpdatedAt,
+      }))
+      .digest("hex")
+      .slice(0, 16);
+    return {
+      type: "objective.handoff",
+      objectiveId: input.state.objectiveId,
+      title: input.state.title,
+      status: input.status,
+      summary: input.summary,
+      ...(input.blocker ? { blocker: input.blocker } : {}),
+      ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),
+      handoffKey,
+      sourceUpdatedAt: input.sourceUpdatedAt,
+    };
   }
 
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
@@ -3072,9 +3526,21 @@ export class FactoryService {
     const effectiveSummary = forcedPartialFromArtifacts
       ? `${summary}${summary.endsWith(".") ? "" : "."} Captured evidence artifacts recorded command errors, so this investigation remains partial.`
       : summary;
-    const handoff = [nextAction ?? effectiveSummary, workerArtifactSummary, artifactIssueSummary]
+    const explicitHandoff = optionalTrimmedString(rawResult.handoff) ?? nextAction ?? effectiveSummary;
+    const handoff = [explicitHandoff, workerArtifactSummary, artifactIssueSummary]
       .filter(Boolean)
       .join("\n\n") || effectiveSummary;
+    const workerHandoff = this.buildWorkerHandoffEvent({
+      objectiveId: payload.objectiveId,
+      scope: "task",
+      workerType: task.workerType,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      outcome,
+      summary: effectiveSummary,
+      handoff,
+      handedOffAt: completedAt,
+    });
     const initialCompletion = normalizeTaskCompletionRecord(
       rawResult.completion,
       buildDefaultTaskCompletion({
@@ -3084,7 +3550,7 @@ export class FactoryService {
       }),
     );
 
-    if ((outcome === "blocked" || (outcome === "partial" && !isInvestigation)) && !hasStructuredInvestigationReport) {
+    if (outcome === "blocked" && !hasStructuredInvestigationReport) {
       await this.commitTaskMemory(
         state,
         task,
@@ -3115,7 +3581,9 @@ export class FactoryService {
           handoff,
           reviewedAt: completedAt,
         },
-      }));
+      }), {
+        workerHandoff,
+      });
       return;
     }
 
@@ -3157,7 +3625,9 @@ export class FactoryService {
           handoff,
           reviewedAt: completedAt,
         },
-      }));
+      }), {
+        workerHandoff,
+      });
       return;
     }
 
@@ -3176,6 +3646,7 @@ export class FactoryService {
       stdout: fileRef(payload.stdoutPath, "task stdout"),
       stderr: fileRef(payload.stderrPath, "task stderr"),
       lastMessage: fileRef(payload.lastMessagePath, "task last message"),
+      ...(payload.contextSummaryPath ? { contextSummary: fileRef(payload.contextSummaryPath, "task context summary") } : {}),
       contextPack: fileRef(payload.contextPackPath, "task recursive context pack"),
       memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
       memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
@@ -3261,25 +3732,34 @@ export class FactoryService {
         ...baseResultRefs,
         ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
       } satisfies Readonly<Record<string, GraphRef>>;
-      await this.emitObjective(payload.objectiveId, {
-        type: "investigation.reported",
-        objectiveId: payload.objectiveId,
-        taskId: payload.taskId,
-        candidateId: payload.candidateId,
-        outcome,
-        summary: effectiveSummary,
-        handoff,
-        completion: investigationCompletion,
-        report: reportWithChecks,
-        artifactRefs: resultRefs,
-        evidenceCommit: committed?.hash,
-        reportedAt: completedAt,
-      });
+      await this.emitObjectiveBatch(payload.objectiveId, [
+        workerHandoff,
+        {
+          type: "investigation.reported",
+          objectiveId: payload.objectiveId,
+          taskId: payload.taskId,
+          candidateId: payload.candidateId,
+          outcome,
+          summary: effectiveSummary,
+          handoff,
+          completion: investigationCompletion,
+          report: reportWithChecks,
+          artifactRefs: resultRefs,
+          evidenceCommit: committed?.hash,
+          reportedAt: completedAt,
+        },
+      ]);
       await this.commitTaskMemory(
         state,
         task,
         payload.candidateId,
-        renderInvestigationReportText(effectiveSummary, reportWithChecks, investigationCompletion, [resultRefs]),
+        renderInvestigationReportText(
+          effectiveSummary,
+          reportWithChecks,
+          investigationCompletion,
+          [resultRefs],
+          handoff,
+        ),
         outcome === "blocked" || outcome === "partial" ? "investigation_reported_partial" : "investigation_reported",
       );
       return;
@@ -3294,6 +3774,26 @@ export class FactoryService {
         checkResults,
       }),
     );
+    const controllerResolvedPartial = outcome === "partial"
+      && this.canAutonomouslyResolveDeliveryPartial({
+        completion: deliveryCompletion,
+        scriptsRun,
+        nextAction,
+        failedCheck,
+      });
+    const effectiveDeliveryCompletion = controllerResolvedPartial
+      ? {
+          ...deliveryCompletion,
+          proof: [...new Set([...deliveryCompletion.proof, "Controller reran the configured checks successfully."])],
+          remaining: [],
+        } satisfies FactoryTaskCompletionRecord
+      : deliveryCompletion;
+    const controllerResolvedPartialSummary = controllerResolvedPartial
+      ? `${effectiveSummary} Controller verification cleared the partial delivery handoff after rerunning the configured checks.`
+      : effectiveSummary;
+    const controllerResolvedPartialHandoff = controllerResolvedPartial
+      ? `${handoff}\n\nController verification reran the configured checks successfully and resolved the remaining validation/cleanup notes.`
+      : handoff;
 
     const resultRefs = {
       ...baseResultRefs,
@@ -3301,19 +3801,25 @@ export class FactoryService {
     } satisfies Readonly<Record<string, GraphRef>>;
 
     let reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
-      outcome === "changes_requested" ? "changes_requested" : "approved";
-    let reviewSummary = effectiveSummary;
-    let reviewHandoff = handoff;
+      outcome === "changes_requested" || outcome === "partial" ? "changes_requested" : "approved";
+    let reviewSummary = controllerResolvedPartialSummary;
+    let reviewHandoff = controllerResolvedPartialHandoff;
+    let plannerOutcome = controllerResolvedPartial ? "approved" : outcome;
+    let candidateSummary = controllerResolvedPartialSummary;
+    let candidateHandoff = controllerResolvedPartialHandoff;
+    if (controllerResolvedPartial) {
+      reviewStatus = "approved";
+    }
     if (failedCheck) {
       const classification = await this.classifyFailedCheck(state, failedCheck, payload.baseCommit);
       const inheritedOnly = classification.inherited;
-      reviewStatus = inheritedOnly && outcome === "approved" ? "approved" : "changes_requested";
+      reviewStatus = inheritedOnly && plannerOutcome === "approved" ? "approved" : "changes_requested";
       reviewSummary = inheritedOnly
-        ? `${effectiveSummary} (checks only reproduced an inherited failure in ${failedCheck.command})`
+        ? `${candidateSummary} (checks only reproduced an inherited failure in ${failedCheck.command})`
         : `Verification failed: ${failedCheck.command}`;
       reviewHandoff = inheritedOnly
-        ? `${handoff}\n\n${buildInheritedFactoryFailureNote(failedCheck, classification)}`
-        : handoff;
+        ? `${candidateHandoff}\n\n${buildInheritedFactoryFailureNote(failedCheck, classification)}`
+        : candidateHandoff;
     }
     const reworkBlockedReason = reviewStatus === "changes_requested"
       ? this.reworkPassCapReason(
@@ -3326,15 +3832,15 @@ export class FactoryService {
     const plannerInput: FactoryTaskResultPlannerInput = {
       taskId: payload.taskId,
       candidateId: payload.candidateId,
-      outcome,
+      outcome: plannerOutcome,
       workspaceDirty: status.dirty,
       hasFailedCheck: Boolean(failedCheck),
       reworkBlockedReason,
       candidate: {
         headCommit: committed?.hash ?? payload.baseCommit,
-        summary: effectiveSummary,
-        handoff,
-        completion: deliveryCompletion,
+        summary: candidateSummary,
+        handoff: candidateHandoff,
+        completion: effectiveDeliveryCompletion,
         checkResults,
         scriptsRun,
         artifactRefs: resultRefs,
@@ -3348,7 +3854,9 @@ export class FactoryService {
         reviewedAt: completedAt,
       },
     };
-    await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult(plannerInput));
+    await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult(plannerInput), {
+      workerHandoff,
+    });
     await this.commitTaskMemory(
       state,
       task,
@@ -3357,7 +3865,7 @@ export class FactoryService {
         summary: reviewSummary,
         handoff: reviewHandoff,
         scriptsRun,
-        completion: deliveryCompletion,
+        completion: effectiveDeliveryCompletion,
       }),
       reviewStatus,
     );
@@ -3385,53 +3893,115 @@ export class FactoryService {
       if (classification.inherited) {
         const head = await this.git.worktreeStatus(parsed.workspacePath);
         const summary = `Integration checks only reproduced inherited failures for ${parsed.candidateId}.`;
-        await this.emitObjective(parsed.objectiveId, {
-          type: "integration.validated",
-          objectiveId: parsed.objectiveId,
-          candidateId: parsed.candidateId,
-          headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
-          validationResults: results,
-          summary,
-          validatedAt: Date.now(),
-        });
+        const validatedAt = Date.now();
+        await this.emitObjectiveBatch(parsed.objectiveId, [
+          this.buildWorkerHandoffEvent({
+            objectiveId: parsed.objectiveId,
+            scope: "integration_validation",
+            workerType: "integration.validate",
+            candidateId: parsed.candidateId,
+            outcome: "validated",
+            summary,
+            handoff: `${summary} Controller may continue because the failure is inherited.`,
+            handedOffAt: validatedAt,
+          }),
+          {
+            type: "integration.validated",
+            objectiveId: parsed.objectiveId,
+            candidateId: parsed.candidateId,
+            headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
+            validationResults: results,
+            summary,
+            validatedAt,
+          },
+        ]);
         await this.commitIntegrationMemory(
           state,
           parsed.candidateId,
-          `${summary}\n\n${buildInheritedFactoryFailureNote(failed, classification)}`,
-          ["integration", "validated", "inherited_failures"],
+          {
+            summary,
+            handoff: `${summary} Controller may continue because the failure is inherited.`,
+            details: [buildInheritedFactoryFailureNote(failed, classification)],
+            tags: ["integration", "validated", "inherited_failures"],
+          },
         );
         await this.reactObjective(parsed.objectiveId);
         return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
       }
-      await this.commitIntegrationMemory(state, parsed.candidateId, `Integration validation failed: ${failed.command}`, ["integration", "failed"]);
-      await this.emitObjective(parsed.objectiveId, {
-        type: "integration.conflicted",
-        objectiveId: parsed.objectiveId,
-        candidateId: parsed.candidateId,
-        reason: `integration validation failed: ${failed.command}`,
-        conflictedAt: Date.now(),
+      const conflictedAt = Date.now();
+      const reason = `integration validation failed: ${failed.command}`;
+      const blockedSummary = `Integration validation failed for ${parsed.candidateId}. React with the next task attempt once the fix is clear.`;
+      await this.commitIntegrationMemory(state, parsed.candidateId, {
+        summary: reason,
+        handoff: blockedSummary,
+        tags: ["integration", "failed"],
       });
-      await this.emitObjective(parsed.objectiveId, {
-        type: "objective.blocked",
+      const blockedEvent = {
+        type: "objective.blocked" as const,
         objectiveId: parsed.objectiveId,
         reason: `Integration validation failed for ${parsed.candidateId}: ${failed.command}`,
-        summary: `Integration validation failed for ${parsed.candidateId}. React with the next task attempt once the fix is clear.`,
-        blockedAt: Date.now(),
-      });
+        summary: blockedSummary,
+        blockedAt: conflictedAt,
+      };
+      await this.emitObjectiveBatch(parsed.objectiveId, [
+        this.buildWorkerHandoffEvent({
+          objectiveId: parsed.objectiveId,
+          scope: "integration_validation",
+          workerType: "integration.validate",
+          candidateId: parsed.candidateId,
+          outcome: "failed",
+          summary: reason,
+          handoff: blockedSummary,
+          handedOffAt: conflictedAt,
+        }),
+        {
+          type: "integration.conflicted",
+          objectiveId: parsed.objectiveId,
+          candidateId: parsed.candidateId,
+          reason,
+          conflictedAt,
+        },
+        blockedEvent,
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "blocked",
+          summary: blockedSummary,
+          blocker: blockedEvent.reason,
+          sourceUpdatedAt: conflictedAt,
+        }),
+      ]);
       await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "failed" };
     }
     const head = await this.git.worktreeStatus(parsed.workspacePath);
-    await this.emitObjective(parsed.objectiveId, {
-      type: "integration.validated",
-      objectiveId: parsed.objectiveId,
-      candidateId: parsed.candidateId,
-      headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
-      validationResults: results,
-      summary: `Integration checks passed for ${parsed.candidateId}.`,
-      validatedAt: Date.now(),
+    const validatedAt = Date.now();
+    const summary = `Integration checks passed for ${parsed.candidateId}.`;
+    await this.emitObjectiveBatch(parsed.objectiveId, [
+      this.buildWorkerHandoffEvent({
+        objectiveId: parsed.objectiveId,
+        scope: "integration_validation",
+        workerType: "integration.validate",
+        candidateId: parsed.candidateId,
+        outcome: "validated",
+        summary,
+        handoff: `${summary} Controller may continue toward promotion.`,
+        handedOffAt: validatedAt,
+      }),
+      {
+        type: "integration.validated",
+        objectiveId: parsed.objectiveId,
+        candidateId: parsed.candidateId,
+        headCommit: head.head ?? state.integration.headCommit ?? state.baseHash,
+        validationResults: results,
+        summary,
+        validatedAt,
+      },
+    ]);
+    await this.commitIntegrationMemory(state, parsed.candidateId, {
+      summary,
+      handoff: `${summary} Controller may continue toward promotion.`,
+      tags: ["integration", "validated"],
     });
-    await this.commitIntegrationMemory(state, parsed.candidateId, `Integration checks passed for ${parsed.candidateId}.`, ["integration", "validated"]);
     await this.reactObjective(parsed.objectiveId);
     return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
   }
@@ -3583,6 +4153,7 @@ export class FactoryService {
       stderrPath: manifest.stderrPath,
       lastMessagePath: manifest.lastMessagePath,
       manifestPath: manifest.manifestPath,
+      contextSummaryPath: manifest.contextSummaryPath,
       contextPackPath: manifest.contextPackPath,
       memoryScriptPath: manifest.memoryScriptPath,
       memoryConfigPath: manifest.memoryConfigPath,
@@ -3681,21 +4252,36 @@ export class FactoryService {
         reason: message,
         conflictedAt: Date.now(),
       });
-      await this.emitObjective(state.objectiveId, {
-        type: "integration.conflicted",
-        objectiveId: state.objectiveId,
-        candidateId,
-        reason: message,
-        conflictedAt: Date.now(),
-      });
-      await this.emitObjective(state.objectiveId, {
-        type: "objective.blocked",
+      const blockedAt = Date.now();
+      const blockedEvent = {
+        type: "objective.blocked" as const,
         objectiveId: state.objectiveId,
         reason: `Integration merge conflicted for ${candidateId}: ${message}`,
         summary: `Integration merge conflicted for ${candidateId}. React with the next task attempt after deciding how to resolve it.`,
-        blockedAt: Date.now(),
+        blockedAt,
+      };
+      await this.emitObjectiveBatch(state.objectiveId, [
+        {
+          type: "integration.conflicted",
+          objectiveId: state.objectiveId,
+          candidateId,
+          reason: message,
+          conflictedAt: blockedAt,
+        },
+        blockedEvent,
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "blocked",
+          summary: blockedEvent.summary,
+          blocker: blockedEvent.reason,
+          sourceUpdatedAt: blockedAt,
+        }),
+      ]);
+      await this.commitIntegrationMemory(state, candidateId, {
+        summary: `Integration merge conflicted for ${candidateId}: ${message}`,
+        handoff: blockedEvent.summary,
+        tags: ["integration", "conflicted"],
       });
-      await this.commitIntegrationMemory(state, candidateId, `Integration merge conflicted for ${candidateId}: ${message}`, ["integration", "conflicted"]);
       await this.reactObjective(state.objectiveId);
     }
   }
@@ -3739,6 +4325,27 @@ export class FactoryService {
   async runIntegrationPublish(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
     const parsed = this.parseIntegrationPublishPayload(payload);
     const state = await this.getObjectiveState(parsed.objectiveId);
+    const candidate = state.candidates[parsed.candidateId];
+    const candidateTask = candidate ? state.workflow.tasksById[candidate.taskId] : undefined;
+    const chain = await this.runtime.chain(objectiveStream(parsed.objectiveId));
+    const recentContextReceipts = [...chain]
+      .reverse()
+      .filter((receipt) => {
+        const ref = this.receiptTaskOrCandidateId(receipt.body);
+        return ref.candidateId === parsed.candidateId
+          || (candidate?.taskId ? ref.taskId === candidate.taskId : false)
+          || receipt.body.type.startsWith("integration.")
+          || receipt.body.type === "merge.applied"
+          || receipt.body.type === "rebracket.applied";
+      })
+      .slice(0, 12)
+      .reverse()
+      .map((receipt) => `- ${receipt.body.type}: ${this.summarizeReceipt(receipt.body)}`);
+    const [objectiveMemorySummary, integrationMemorySummary, publishMemorySummary] = await Promise.all([
+      this.summarizeScope(`factory/objectives/${parsed.objectiveId}`, state.title, 360),
+      this.summarizeScope(`factory/objectives/${parsed.objectiveId}/integration`, `${state.title}\nintegration`, 320),
+      this.summarizeScope(`factory/objectives/${parsed.objectiveId}/publish`, `${state.title}\npublish`, 260),
+    ]);
 
     const workspaceCommandEnv = await this.ensureWorkspaceCommandEnv(parsed.workspacePath);
     const resultSchemaPath = path.join(path.dirname(parsed.resultPath), "schema.json");
@@ -3761,6 +4368,17 @@ export class FactoryService {
           "## Objective Prompt",
           state.prompt,
           "",
+          "## Context Snapshot",
+          candidateTask ? `Task: ${candidateTask.taskId} · ${candidateTask.title}` : "Task: unknown",
+          candidate?.summary ? `Candidate summary: ${candidate.summary}` : "",
+          candidate?.handoff ? `Candidate handoff: ${candidate.handoff}` : "",
+          state.integration.lastSummary ? `Integration summary: ${state.integration.lastSummary}` : "",
+          objectiveMemorySummary ? `Objective memory: ${objectiveMemorySummary}` : "",
+          integrationMemorySummary ? `Integration memory: ${integrationMemorySummary}` : "",
+          publishMemorySummary ? `Publish memory: ${publishMemorySummary}` : "",
+          recentContextReceipts.length > 0 ? "Recent objective receipts:" : "",
+          ...recentContextReceipts,
+          "",
           "## Publish Contract",
           `Use \`receipt memory summarize factory/objectives/${parsed.objectiveId}\` and \`receipt inspect factory/objectives/${parsed.objectiveId}\` before writing the PR body.`,
           "Inspect `git remote -v`, push the current branch to a GitHub remote (prefer `origin` when present), open the PR with gh, then fetch the final PR metadata from the current branch.",
@@ -3768,7 +4386,7 @@ export class FactoryService {
           "If `git push`, `gh pr create`, or `gh pr view` fail with a transient GitHub or network error, retry the command up to two more times with short backoff. After a failed `gh pr create`, check `gh pr view` once before concluding the PR was not created.",
           "Do not run builds or tests.",
           "Return exactly one JSON object matching this schema:",
-          `{"summary":"short publish summary","prUrl":"https://github.com/...","prNumber":123,"headRefName":"branch-name","baseRefName":"main"}`,
+          `{"summary":"short publish summary","handoff":"explicit publish handoff for the controller","prUrl":"https://github.com/...","prNumber":123,"headRefName":"branch-name","baseRefName":"main"}`,
           "Use null for prNumber, headRefName, or baseRefName only if GitHub does not return them.",
         ].join("\n"),
         workspacePath: parsed.workspacePath,
@@ -3816,25 +4434,53 @@ export class FactoryService {
       }
       await fs.writeFile(parsed.resultPath, JSON.stringify(publishResult, null, 2), "utf-8");
       const summary = publishResult.summary;
-      await this.commitPublishMemory(state, parsed.candidateId, `${summary}\nPR: ${publishResult.prUrl}`, ["publish", "succeeded"]);
-      await this.emitObjective(parsed.objectiveId, {
-        type: "integration.promoted",
-        objectiveId: parsed.objectiveId,
-        candidateId: parsed.candidateId,
-        promotedCommit: state.integration.headCommit ?? state.baseHash,
+      await this.commitPublishMemory(state, parsed.candidateId, {
         summary,
-        prUrl: publishResult.prUrl,
-        prNumber: publishResult.prNumber ?? undefined,
-        headRefName: publishResult.headRefName ?? undefined,
-        baseRefName: publishResult.baseRefName ?? undefined,
-        promotedAt: Date.now(),
+        handoff: publishResult.handoff,
+        details: [
+          `PR: ${publishResult.prUrl}`,
+          publishResult.headRefName ? `Head ref: ${publishResult.headRefName}` : "",
+          publishResult.baseRefName ? `Base ref: ${publishResult.baseRefName}` : "",
+        ].filter(Boolean),
+        tags: ["publish", "succeeded"],
       });
-      await this.emitObjective(parsed.objectiveId, {
-        type: "objective.completed",
-        objectiveId: parsed.objectiveId,
-        summary,
-        completedAt: Date.now(),
-      });
+      const promotedAt = Date.now();
+      await this.emitObjectiveBatch(parsed.objectiveId, [
+        this.buildWorkerHandoffEvent({
+          objectiveId: parsed.objectiveId,
+          scope: "integration_publish",
+          workerType: "integration.publish",
+          candidateId: parsed.candidateId,
+          outcome: "published",
+          summary,
+          handoff: publishResult.handoff,
+          handedOffAt: promotedAt,
+        }),
+        {
+          type: "integration.promoted",
+          objectiveId: parsed.objectiveId,
+          candidateId: parsed.candidateId,
+          promotedCommit: state.integration.headCommit ?? state.baseHash,
+          summary,
+          prUrl: publishResult.prUrl,
+          prNumber: publishResult.prNumber ?? undefined,
+          headRefName: publishResult.headRefName ?? undefined,
+          baseRefName: publishResult.baseRefName ?? undefined,
+          promotedAt,
+        },
+        {
+          type: "objective.completed",
+          objectiveId: parsed.objectiveId,
+          summary,
+          completedAt: promotedAt,
+        },
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "completed",
+          summary,
+          sourceUpdatedAt: promotedAt,
+        }),
+      ]);
       await this.reactObjective(parsed.objectiveId);
       return {
         objectiveId: parsed.objectiveId,
@@ -3845,22 +4491,47 @@ export class FactoryService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const reason = `Publishing failed: ${message}`;
-      await this.commitPublishMemory(state, parsed.candidateId, reason, ["publish", "failed"]);
-      await this.emitObjective(parsed.objectiveId, {
-        type: "integration.conflicted",
-        objectiveId: parsed.objectiveId,
-        candidateId: parsed.candidateId,
-        reason,
-        headCommit: state.integration.headCommit ?? state.baseHash,
-        conflictedAt: Date.now(),
+      await this.commitPublishMemory(state, parsed.candidateId, {
+        summary: reason,
+        handoff: reason,
+        tags: ["publish", "failed"],
       });
-      await this.emitObjective(parsed.objectiveId, {
-        type: "objective.blocked",
+      const blockedAt = Date.now();
+      const blockedEvent = {
+        type: "objective.blocked" as const,
         objectiveId: parsed.objectiveId,
         reason,
         summary: reason,
-        blockedAt: Date.now(),
-      });
+        blockedAt,
+      };
+      await this.emitObjectiveBatch(parsed.objectiveId, [
+        this.buildWorkerHandoffEvent({
+          objectiveId: parsed.objectiveId,
+          scope: "integration_publish",
+          workerType: "integration.publish",
+          candidateId: parsed.candidateId,
+          outcome: "failed",
+          summary: reason,
+          handoff: reason,
+          handedOffAt: blockedAt,
+        }),
+        {
+          type: "integration.conflicted",
+          objectiveId: parsed.objectiveId,
+          candidateId: parsed.candidateId,
+          reason,
+          headCommit: state.integration.headCommit ?? state.baseHash,
+          conflictedAt: blockedAt,
+        },
+        blockedEvent,
+        this.buildObjectiveHandoffEvent({
+          state,
+          status: "blocked",
+          summary: reason,
+          blocker: blockedEvent.reason,
+          sourceUpdatedAt: blockedAt,
+        }),
+      ]);
       await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, status: "failed", message: reason };
     }
@@ -3874,10 +4545,30 @@ export class FactoryService {
       readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
     },
   ): Promise<void> {
+    const candidate = state.candidates[candidateId];
     const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
     const status = await this.git.worktreeStatus(workspace.path);
     const commit = status.head ?? state.integration.headCommit;
     if (!commit) throw new FactoryServiceError(409, "integration branch has no HEAD to promote");
+    const publishSkillPaths = [...new Set([
+      ...(candidate?.taskId ? state.workflow.tasksById[candidate.taskId]?.skillBundlePaths ?? [] : []),
+      path.join(this.git.repoRoot, "skills", "factory-pr-publisher", "SKILL.md"),
+    ])];
+    const publishContextRefs = (() => {
+      const refs = [
+        stateRef(objectiveStream(state.objectiveId), "factory objective stream"),
+        workspaceRef(workspace.path, "integration workspace"),
+        ...(candidate?.taskId ? state.workflow.tasksById[candidate.taskId]?.contextRefs ?? [] : []),
+        ...Object.values(candidate?.artifactRefs ?? {}),
+      ];
+      const seen = new Set<string>();
+      return refs.filter((ref) => {
+        const key = `${ref.kind}:${ref.ref}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    })();
     await this.emitObjectiveBatch(state.objectiveId, [
       ...(opts?.prefixEvents ?? []),
       {
@@ -3900,8 +4591,8 @@ export class FactoryService {
       promptPath: path.join(path.dirname(files.resultPath), "prompt.txt"),
       lastMessagePath: path.join(path.dirname(files.resultPath), "last-message.txt"),
       memoryScope: `factory/objectives/${state.objectiveId}/publish`,
-      contextRefs: [],
-      skillBundlePaths: [path.join(this.git.repoRoot, "skills", "factory-pr-publisher", "SKILL.md")],
+      contextRefs: publishContextRefs,
+      skillBundlePaths: publishSkillPaths,
     };
 
     const created = await this.queue.enqueue({
@@ -3959,7 +4650,8 @@ export class FactoryService {
     const match = [...receipts]
       .reverse()
       .find((receipt) =>
-        receipt.type === "objective.blocked"
+        receipt.type === "objective.handoff"
+        || receipt.type === "objective.blocked"
         || receipt.type === "task.blocked"
         || receipt.type === "integration.conflicted"
         || receipt.type === "candidate.conflicted",
@@ -4016,6 +4708,8 @@ export class FactoryService {
     return receipts
       .filter((receipt) =>
         receipt.type === "rebracket.applied"
+        || receipt.type === "worker.handoff"
+        || receipt.type === "objective.handoff"
         || receipt.type === "investigation.reported"
         || receipt.type === "investigation.synthesized"
         || receipt.type === "task.noop_completed"
@@ -4030,6 +4724,7 @@ export class FactoryService {
       .map((receipt) => ({
         kind:
           receipt.type === "rebracket.applied" ? "decision"
+          : receipt.type === "worker.handoff" || receipt.type === "objective.handoff" ? "decision"
           : receipt.type.startsWith("investigation.") ? "report"
           : receipt.type === "task.noop_completed" ? "report"
           : receipt.type === "merge.applied" ? "merge"
@@ -4037,6 +4732,8 @@ export class FactoryService {
           : "blocked",
         title:
           receipt.type === "rebracket.applied" ? "Latest decision"
+          : receipt.type === "worker.handoff" ? "Worker handoff"
+          : receipt.type === "objective.handoff" ? "Objective handoff"
           : receipt.type === "investigation.reported" ? "Investigation report"
           : receipt.type === "investigation.synthesized" ? "Investigation synthesis"
           : receipt.type === "task.noop_completed" ? "No-op completion"
@@ -4141,6 +4838,7 @@ export class FactoryService {
       archivedAt: state.archivedAt,
       updatedAt: state.updatedAt,
       latestSummary: state.latestSummary,
+      latestHandoff: state.latestHandoff,
       blockedReason: state.blockedReason,
       sourceWarnings: state.sourceWarnings,
       blockedExplanation: needsBlockedReceipts
@@ -4201,6 +4899,7 @@ export class FactoryService {
           workspaceHead: workspaceStatus.head,
           elapsedMs: task?.startedAt ? Math.max(0, Date.now() - task.startedAt) : undefined,
           manifestPath: filePaths?.manifestPath,
+          contextSummaryPath: filePaths?.contextSummaryPath,
           contextPackPath: filePaths?.contextPackPath,
           promptPath: filePaths?.promptPath,
           memoryScriptPath: filePaths?.memoryScriptPath,
@@ -4534,6 +5233,10 @@ export class FactoryService {
         return `Objective released its slot: ${event.reason}`;
       case "task.added":
         return `${event.task.taskId} added: ${event.task.title}`;
+      case "worker.handoff":
+        return `${event.scope} ${event.outcome} handoff: ${event.handoff}`;
+      case "objective.handoff":
+        return `Objective ${event.status} handoff: ${event.summary}`;
       case "task.blocked":
         return `${event.taskId} blocked: ${event.reason}`;
       case "task.unblocked":
@@ -4542,12 +5245,16 @@ export class FactoryService {
         return `${event.taskId} completed with no repo diff: ${event.summary}`;
       case "task.superseded":
         return `${event.taskId} superseded: ${event.reason}`;
+      case "task.intervention.applied":
+        return `${event.taskId} live ${event.guidanceKind} applied: ${event.guidance}`;
+      case "task.intervention.restarted":
+        return `${event.taskId} restarted after live ${event.guidanceKind}: ${event.guidance}`;
       case "candidate.produced":
-        return `${event.candidateId} produced: ${event.summary}`;
+        return `${event.candidateId} produced: ${event.handoff || event.summary}`;
       case "candidate.reviewed":
-        return `${event.candidateId} ${event.status}: ${event.summary}`;
+        return `${event.candidateId} ${event.status}: ${event.handoff || event.summary}`;
       case "investigation.reported":
-        return `${event.taskId} ${event.outcome}: ${event.summary}`;
+        return `${event.taskId} ${event.outcome}: ${event.handoff || event.summary}`;
       case "investigation.synthesized":
         return `investigation synthesized: ${event.summary}`;
       case "candidate.conflicted":
@@ -4583,7 +5290,14 @@ export class FactoryService {
           ? { taskId: event.taskId, candidateId: event.candidateId }
           : { taskId: event.taskId };
       case "task.dispatched":
+      case "task.intervention.applied":
+      case "task.intervention.restarted":
         return { taskId: event.taskId, candidateId: event.candidateId };
+      case "worker.handoff":
+        return {
+          ...(event.taskId ? { taskId: event.taskId } : {}),
+          ...(event.candidateId ? { candidateId: event.candidateId } : {}),
+        };
       case "candidate.created":
         return { taskId: event.candidate.taskId, candidateId: event.candidate.candidateId };
       case "candidate.produced":
@@ -4699,6 +5413,7 @@ export class FactoryService {
           updatedAt: contextPackBuiltAt,
           scriptsRun: undefined,
           summary: undefined,
+          handoff: undefined,
           headCommit: undefined,
           latestReason: undefined,
         } satisfies FactoryCandidateRecord;
@@ -4713,6 +5428,7 @@ export class FactoryService {
         parentCandidateId: candidate.parentCandidateId,
         status: candidate.status,
         summary: candidate.summary,
+        handoff: candidate.handoff,
         headCommit: candidate.headCommit,
         latestReason: candidate.latestReason,
         scriptsRun: candidate.scriptsRun,
@@ -4841,7 +5557,7 @@ export class FactoryService {
       objectiveMode: state.objectiveMode,
       severity: state.severity,
       planning: state.planning,
-      cloudExecutionContext,
+      cloudExecutionContext: this.compactCloudExecutionContextForPacket(cloudExecutionContext),
       profile,
       task: {
         taskId: task.taskId,
@@ -5166,6 +5882,7 @@ export class FactoryService {
     const root = path.join(workspacePath, FACTORY_DATA_DIR);
     return {
       manifestPath: path.join(root, `${taskId}.manifest.json`),
+      contextSummaryPath: path.join(root, `${taskId}.context.md`),
       contextPackPath: path.join(root, `${taskId}.context-pack.json`),
       promptPath: path.join(root, `${taskId}.prompt.md`),
       resultPath: path.join(root, `${taskId}.result.json`),
@@ -5191,6 +5908,7 @@ export class FactoryService {
     const root = path.dirname(files.manifestPath);
     const knownFiles = new Set([
       path.basename(files.manifestPath),
+      path.basename(files.contextSummaryPath),
       path.basename(files.contextPackPath),
       path.basename(files.promptPath),
       path.basename(files.resultPath),
@@ -5252,6 +5970,7 @@ export class FactoryService {
     pinnedBaseCommit?: string,
   ): Promise<{
     readonly manifestPath: string;
+    readonly contextSummaryPath: string;
     readonly contextPackPath: string;
     readonly promptPath: string;
     readonly resultPath: string;
@@ -5273,7 +5992,14 @@ export class FactoryService {
     const repoSkillPaths = await this.collectRepoSkillPaths();
     const memoryScopes = this.memoryScopesForTask(state, task, candidateId, taskPrompt);
     const contextPack = await this.buildTaskContextPack(state, task, candidateId, taskPrompt);
-    const sharedArtifactRefs = contextPack.contextSources.sharedArtifactRefs;
+    const sharedArtifactRefs = dedupeGraphRefs(contextPack.contextSources.sharedArtifactRefs);
+    const contextSummary = this.renderTaskContextSummary(contextPack);
+    const contextRefs = dedupeGraphRefs([
+      ...task.contextRefs,
+      ...sharedArtifactRefs,
+      artifactRef(files.contextSummaryPath, "task context summary"),
+      artifactRef(files.contextPackPath, "recursive context pack"),
+    ]);
     const skillBundle = {
       objectiveId: state.objectiveId,
       taskId: task.taskId,
@@ -5281,7 +6007,7 @@ export class FactoryService {
       workerType: task.workerType,
       profile,
       selectedSkills: profile.selectedSkills,
-      repoSkillPaths,
+      repoSkillPaths: dedupeStrings(repoSkillPaths),
       generatedAt: Date.now(),
     };
     await fs.writeFile(files.skillBundlePath, JSON.stringify(skillBundle, null, 2), "utf-8");
@@ -5316,16 +6042,13 @@ export class FactoryService {
         scopes: memoryScopes,
       },
       context: {
+        summaryPath: files.contextSummaryPath,
         packPath: files.contextPackPath,
       },
       contextSources: contextPack.contextSources,
-      contextRefs: [
-        ...task.contextRefs,
-        ...sharedArtifactRefs,
-        artifactRef(files.contextPackPath, "recursive context pack"),
-      ],
+      contextRefs,
       sharedArtifactRefs,
-      repoSkillPaths,
+      repoSkillPaths: dedupeStrings(repoSkillPaths),
       skillBundlePaths: [files.skillBundlePath],
       traceRefs: [
         stateRef(objectiveStream(state.objectiveId), "factory objective stream"),
@@ -5336,12 +6059,14 @@ export class FactoryService {
       objectiveId: state.objectiveId,
       taskId: task.taskId,
       candidateId,
+      contextSummaryPath: path.basename(files.contextSummaryPath),
       contextPackPath: path.basename(files.contextPackPath),
       defaultQuery: `${state.title}\n${task.title}\n${taskPrompt}`,
       defaultLimit: 6,
       defaultMaxChars: 2400,
       scopes: memoryScopes,
     };
+    await fs.writeFile(files.contextSummaryPath, contextSummary, "utf-8");
     await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
     await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
     await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
@@ -5349,6 +6074,7 @@ export class FactoryService {
     if (process.platform !== "win32") await fs.chmod(files.memoryScriptPath, 0o755);
     return {
       manifestPath: files.manifestPath,
+      contextSummaryPath: files.contextSummaryPath,
       contextPackPath: files.contextPackPath,
       promptPath: files.promptPath,
       resultPath: files.resultPath,
@@ -5357,14 +6083,10 @@ export class FactoryService {
       lastMessagePath: files.lastMessagePath,
       memoryScriptPath: files.memoryScriptPath,
       memoryConfigPath: files.memoryConfigPath,
-      repoSkillPaths,
+      repoSkillPaths: dedupeStrings(repoSkillPaths),
       skillBundlePaths: [files.skillBundlePath],
       sharedArtifactRefs,
-      contextRefs: [
-        ...task.contextRefs,
-        ...sharedArtifactRefs,
-        artifactRef(files.contextPackPath, "recursive context pack"),
-      ],
+      contextRefs,
     };
   }
 
@@ -5542,7 +6264,7 @@ export class FactoryService {
       mode: input.objectiveId
         ? (readOnly ? "read_only_direct_codex_probe" : "direct_codex")
         : (readOnly ? "read_only_repo_probe" : "direct_repo_probe"),
-      cloudExecutionContext,
+      cloudExecutionContext: this.compactCloudExecutionContextForPacket(cloudExecutionContext),
       profile,
       task: {
         taskId: `direct_codex_${input.jobId}`,
@@ -5705,6 +6427,7 @@ export class FactoryService {
     state: FactoryState,
     task: FactoryTaskRecord,
     payload: FactoryTaskJobPayload,
+    guidanceHistory: ReadonlyArray<FactoryLiveGuidance> = [],
   ): Promise<string> {
     const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(payload.profile);
     const taskPrompt = this.effectiveTaskPrompt(state, task);
@@ -5736,9 +6459,21 @@ export class FactoryService {
     const validationSection = this.renderTaskValidationSection(state, task);
     const planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now());
     const manifestPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.manifestPath);
+    const contextSummaryPathForPrompt = payload.contextSummaryPath
+      ? this.taskPromptPath(payload.workspacePath, payload.contextSummaryPath)
+      : undefined;
     const contextPackPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.contextPackPath);
     const memoryScriptPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.memoryScriptPath);
     const resultPathForPrompt = payload.resultPath;
+    const bootstrapTargets = [
+      `AGENTS.md and skills/factory-receipt-worker/SKILL.md`,
+      `Manifest: ${manifestPathForPrompt}`,
+      `Context Pack: ${contextPackPathForPrompt}`,
+      `Memory Script: ${memoryScriptPathForPrompt}`,
+      ...(contextSummaryPathForPrompt ? [`Task Context Summary (quick overview derived from the packet): ${contextSummaryPathForPrompt}`] : []),
+      `Repo skills from the manifest, especially any execution or permissions landscape notes`,
+    ];
+    const liveGuidanceSection = renderLiveOperatorGuidanceSection(guidanceHistory);
     return [
       `# Factory Task`,
       ``,
@@ -5784,6 +6519,8 @@ export class FactoryService {
       state.objectiveMode === "investigation"
         ? `Do not convert a failed query, denied API, or helper error into "zero results". If a primary evidence path errors or stays incomplete, record that command as warning/error and use outcome "partial" or "blocked" instead of "approved".`
         : `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
+      `Do not run \`${FACTORY_CLI_PREFIX} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
+      `The controller handles integration and PR publication after an approved candidate. If the objective prompt mentions publishing, satisfy it here by leaving a clean candidate diff plus proof for the controller handoff.`,
       `Make a short internal plan before the first tool: name the concrete question, the primary evidence path, the stop condition, and the one follow-up check that would change your answer.`,
       `Runtime compatibility: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
       `Use Codex subagents only for bounded sidecar work such as parsing a captured artifact, checking one secondary evidence path, or verifying a concrete claim.`,
@@ -5805,13 +6542,11 @@ export class FactoryService {
       ...validationSection,
       ``,
       `## Bootstrap Context`,
-      `The prompt is bootstrap only. Prefer the packet files and memory script over broad repo exploration.`,
+      `The prompt is bootstrap only. Follow the checked-in worker bootstrap order: manifest, context pack, then memory script.`,
+      `Use the task context summary as a quick overview after the packet, not as a replacement for it.`,
+      `The JSON context pack is part of the primary worker interface. Use it whenever you need exact raw fields, refs, or artifact paths.`,
       `Read, in order:`,
-      `1. AGENTS.md and skills/factory-receipt-worker/SKILL.md`,
-      `2. Manifest: ${manifestPathForPrompt}`,
-      `3. Context Pack: ${contextPackPathForPrompt}`,
-      `4. Memory Script: ${memoryScriptPathForPrompt}`,
-      `5. Repo skills from the manifest, especially any execution or permissions landscape notes`,
+      ...bootstrapTargets.map((item, index) => `${index + 1}. ${item}`),
       `Mounted profile skills for this task:`,
       payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
       `Use only the checked-in repo skills named in this packet. Do not load unrelated global skills from ~/.codex or other home-directory skill folders unless this packet explicitly names them.`,
@@ -5832,20 +6567,24 @@ export class FactoryService {
       `- bun ${memoryScriptPathForPrompt} search repo "${task.title}" 6`,
       `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
       ``,
+      ...(liveGuidanceSection ? [liveGuidanceSection] : []),
       `## Result Contract`,
       `Return exactly one JSON object matching this schema:`,
       `Write JSON to ${resultPathForPrompt} with:`,
       state.objectiveMode === "investigation"
-        ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
-        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null }`,
+        ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null }`
+        : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null }`,
       `Do not write this file yourself.`,
       `Do not write ${resultPathForPrompt} yourself. Return exactly that JSON object as your final response and the runtime will persist it there.`,
       `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
       `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
+      state.objectiveMode === "investigation"
+        ? `For investigation tasks, keep "partial" when primary evidence or access stayed incomplete even after good-faith evidence collection.`
+        : `For delivery tasks, the controller reruns configured repo checks and ignores worktree-local .receipt artifacts. Do not use "partial" solely because .receipt cleanup or terminal output capture was noisy after the requested code change and proof were completed.`,
       `Before you return final JSON, sanity-check that report.scriptsRun statuses match the actual command outcomes and that any artifact-level errors are reflected in outcome, summary, or next steps.`,
       state.objectiveMode === "investigation"
-        ? `For investigation tasks, always include the report key. Use a report object whenever you gathered meaningful evidence; otherwise use null. Always include completion with changed, proof, and remaining arrays. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
-        : `For delivery tasks, keep the envelope small. Always include scriptsRun and completion. Use [] when no command or small script materially informed the result, and use [] in completion.remaining when nothing is left.`,
+        ? `For investigation tasks, always include the report key and an explicit handoff string for the controller. Use a report object whenever you gathered meaningful evidence; otherwise use null. Always include completion with changed, proof, and remaining arrays. Use [] for empty lists and null for detail, summary, status, nextAction, or report when they do not apply.`
+        : `For delivery tasks, keep the envelope small. Always include an explicit handoff string, scriptsRun, and completion. Use [] when no command or small script materially informed the result, and use [] in completion.remaining when nothing is left.`,
       ``,
       `## Starting Hint`,
       memorySummary || "No durable task memory yet.",
@@ -6045,6 +6784,7 @@ export class FactoryService {
       stderrPath: requireNonEmpty(payload.stderrPath, "stderrPath required"),
       lastMessagePath: requireNonEmpty(payload.lastMessagePath, "lastMessagePath required"),
       manifestPath: requireNonEmpty(payload.manifestPath, "manifestPath required"),
+      contextSummaryPath: optionalTrimmedString(payload.contextSummaryPath),
       contextPackPath: requireNonEmpty(payload.contextPackPath, "contextPackPath required"),
       memoryScriptPath: requireNonEmpty(payload.memoryScriptPath, "memoryScriptPath required"),
       memoryConfigPath: requireNonEmpty(payload.memoryConfigPath, "memoryConfigPath required"),
@@ -6088,11 +6828,12 @@ export class FactoryService {
   private async taskPacketPresent(
     payload: Pick<
       FactoryTaskJobPayload,
-      "manifestPath" | "contextPackPath" | "memoryScriptPath" | "memoryConfigPath" | "skillBundlePaths"
+      "manifestPath" | "contextSummaryPath" | "contextPackPath" | "memoryScriptPath" | "memoryConfigPath" | "skillBundlePaths"
     >,
   ): Promise<boolean> {
     const requiredPaths = [
       payload.manifestPath,
+      ...(payload.contextSummaryPath ? [payload.contextSummaryPath] : []),
       payload.contextPackPath,
       payload.memoryScriptPath,
       payload.memoryConfigPath,
@@ -6141,8 +6882,16 @@ export class FactoryService {
       : workspacePath;
     const binDir = path.join(shimRoot, ".receipt", "bin");
     const shimPath = path.join(binDir, process.platform === "win32" ? "receipt.cmd" : "receipt");
-    const { command, args, entryPath } = resolveCliInvocation(import.meta.url);
     await fs.mkdir(binDir, { recursive: true });
+    if (process.platform !== "win32" && workspacePath !== this.git.repoRoot) {
+      const sourceShimPath = path.join(this.git.repoRoot, ".receipt", "bin", "receipt");
+      if (await pathExists(sourceShimPath)) {
+        await fs.copyFile(sourceShimPath, shimPath);
+        await fs.chmod(shimPath, 0o755);
+        return binDir;
+      }
+    }
+    const { command, args, entryPath } = resolveCliInvocation(import.meta.url);
     const body = process.platform === "win32"
       ? [
           "@echo off",
@@ -6234,16 +6983,6 @@ export class FactoryService {
       const byKey = new Map(scopes.map((scope) => [scope.key, scope]));
       await Promise.all([
         this.memoryTools.commit({
-          scope: byKey.get("agent")?.scope ?? `factory/agents/${String(task.workerType)}`,
-          text: `[${state.objectiveId}/${task.taskId}] ${summary}`,
-          tags: ["factory", "agent", String(task.workerType), outcome],
-        }),
-        this.memoryTools.commit({
-          scope: byKey.get("repo")?.scope ?? "factory/repo/shared",
-          text: `[${state.objectiveId}/${task.taskId}] ${summary}`,
-          tags: ["factory", "repo", outcome],
-        }),
-        this.memoryTools.commit({
           scope: byKey.get("objective")?.scope ?? `factory/objectives/${state.objectiveId}`,
           text: `[${task.taskId}] ${summary}`,
           tags: ["factory", task.taskId, outcome],
@@ -6267,21 +7006,30 @@ export class FactoryService {
   private async commitIntegrationMemory(
     state: FactoryState,
     candidateId: string,
-    summary: string,
-    tags: ReadonlyArray<string>,
+    input: {
+      readonly summary: string;
+      readonly handoff: string;
+      readonly details?: ReadonlyArray<string>;
+      readonly tags: ReadonlyArray<string>;
+    },
   ): Promise<void> {
     if (!this.memoryTools) return;
+    const text = renderWorkerHandoffText({
+      summary: input.summary,
+      handoff: input.handoff,
+      details: input.details,
+    });
     try {
       await Promise.all([
         this.memoryTools.commit({
           scope: `factory/objectives/${state.objectiveId}`,
-          text: `[integration/${candidateId}] ${summary}`,
-          tags: ["factory", ...tags],
+          text: `[integration/${candidateId}] ${text}`,
+          tags: ["factory", ...input.tags],
         }),
         this.memoryTools.commit({
           scope: `factory/objectives/${state.objectiveId}/integration`,
-          text: summary,
-          tags: ["factory", ...tags],
+          text,
+          tags: ["factory", ...input.tags],
         }),
       ]);
     } catch {
@@ -6292,26 +7040,35 @@ export class FactoryService {
   private async commitPublishMemory(
     state: FactoryState,
     candidateId: string,
-    summary: string,
-    tags: ReadonlyArray<string>,
+    input: {
+      readonly summary: string;
+      readonly handoff: string;
+      readonly details?: ReadonlyArray<string>;
+      readonly tags: ReadonlyArray<string>;
+    },
   ): Promise<void> {
     if (!this.memoryTools) return;
+    const text = renderWorkerHandoffText({
+      summary: input.summary,
+      handoff: input.handoff,
+      details: input.details,
+    });
     try {
       await Promise.all([
         this.memoryTools.commit({
           scope: `factory/objectives/${state.objectiveId}`,
-          text: `[publish/${candidateId}] ${summary}`,
-          tags: ["factory", ...tags],
+          text: `[publish/${candidateId}] ${text}`,
+          tags: ["factory", ...input.tags],
         }),
         this.memoryTools.commit({
           scope: `factory/objectives/${state.objectiveId}/integration`,
-          text: summary,
-          tags: ["factory", "integration", ...tags],
+          text,
+          tags: ["factory", "integration", ...input.tags],
         }),
         this.memoryTools.commit({
           scope: `factory/objectives/${state.objectiveId}/publish`,
-          text: summary,
-          tags: ["factory", "publish", ...tags],
+          text,
+          tags: ["factory", "publish", ...input.tags],
         }),
       ]);
     } catch {

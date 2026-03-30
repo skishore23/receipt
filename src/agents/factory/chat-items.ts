@@ -507,7 +507,7 @@ const objectiveHandoffItem = (
     };
   }
   const lines = [
-    `${title} ${event.status === "completed" ? "completed" : `ended ${event.status}`} and handed back to Chat.`,
+    `${title} ended ${event.status} and handed back to Chat.`,
     event.summary,
     event.nextAction ? `Next: ${event.nextAction}` : "",
   ].filter(Boolean);
@@ -551,6 +551,34 @@ export const buildChatItemsForRun = (
     }
     if (event.type === "objective.handoff") {
       items.push(objectiveHandoffItem(runId, receipt.hash, event));
+      continue;
+    }
+    if (event.type === "profile.handoff") {
+      const handoffJob = event.nextJobId ? jobsById.get(event.nextJobId) : undefined;
+      const baseCard: FactoryWorkCard = {
+        key: `${runId}-profile-handoff-${receipt.hash}`,
+        title: `Profile handoff to ${profileLabel(event.toProfileId)}`,
+        worker: event.toProfileId,
+        status: handoffJob?.status ?? "queued",
+        summary: event.reason,
+        detail: buildDetail(
+          `From: ${profileLabel(event.fromProfileId)}`,
+          event.objectiveId ? `Objective: ${event.objectiveId}` : undefined,
+          event.chatId ? `Chat: ${event.chatId}` : undefined,
+          event.nextRunId ? `Next run: ${event.nextRunId}` : undefined,
+          event.nextJobId ? `Next job: ${event.nextJobId}` : undefined,
+          event.targetStream ? `Target stream: ${event.targetStream}` : undefined,
+        ),
+        meta: new Date(receipt.ts).toLocaleString(),
+        objectiveId: event.objectiveId,
+        jobId: event.nextJobId,
+        running: !isTerminalJobStatus(handoffJob?.status),
+      };
+      items.push({
+        key: `${runId}-profile-handoff-${receipt.hash}`,
+        kind: "work",
+        card: overlayLiveJobState(baseCard, handoffJob),
+      });
       continue;
     }
     if (event.type === "subagent.merged") {

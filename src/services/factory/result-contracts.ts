@@ -96,6 +96,7 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
   properties: {
     outcome: { type: "string", enum: ["approved", "changes_requested", "blocked", "partial"] },
     summary: { type: "string" },
+    handoff: { type: "string" },
     artifacts: {
       type: "array",
       items: FACTORY_TASK_ARTIFACT_SCHEMA,
@@ -107,7 +108,7 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "artifacts", "scriptsRun", "completion", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -115,12 +116,13 @@ export const FACTORY_PUBLISH_RESULT_SCHEMA = {
   type: "object",
   properties: {
     summary: { type: "string" },
+    handoff: { type: "string" },
     prUrl: { type: "string" },
     prNumber: { type: ["number", "null"] },
     headRefName: { type: ["string", "null"] },
     baseRefName: { type: ["string", "null"] },
   },
-  required: ["summary", "prUrl", "prNumber", "headRefName", "baseRefName"],
+  required: ["summary", "handoff", "prUrl", "prNumber", "headRefName", "baseRefName"],
   additionalProperties: false,
 } as const;
 
@@ -163,6 +165,7 @@ export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
   properties: {
     outcome: FACTORY_TASK_RESULT_SCHEMA.properties.outcome,
     summary: FACTORY_TASK_RESULT_SCHEMA.properties.summary,
+    handoff: FACTORY_TASK_RESULT_SCHEMA.properties.handoff,
     artifacts: FACTORY_TASK_RESULT_SCHEMA.properties.artifacts,
     completion: FACTORY_TASK_RESULT_SCHEMA.properties.completion,
     nextAction: FACTORY_TASK_RESULT_SCHEMA.properties.nextAction,
@@ -171,7 +174,7 @@ export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
       type: ["object", "null"],
     },
   },
-  required: ["outcome", "summary", "artifacts", "completion", "nextAction", "report"],
+  required: ["outcome", "summary", "handoff", "artifacts", "completion", "nextAction", "report"],
   additionalProperties: false,
 } as const;
 
@@ -302,14 +305,29 @@ export const renderDeliveryResultText = (input: {
     ),
   ].join("\n\n");
 
+export const renderWorkerHandoffText = (input: {
+  readonly summary: string;
+  readonly handoff: string;
+  readonly details?: ReadonlyArray<string>;
+}): string =>
+  [
+    renderSection("Summary", [input.summary || "No summary recorded."], false),
+    renderSection("Handoff", [input.handoff || input.summary || "No handoff recorded."], false),
+    ...(input.details?.length
+      ? [renderSection("Details", input.details, true)]
+      : []),
+  ].join("\n\n");
+
 export const renderInvestigationReportText = (
   summary: string,
   report: FactoryInvestigationReport,
   completion?: FactoryTaskCompletionRecord,
   artifactRefs: ReadonlyArray<Readonly<Record<string, GraphRef>>> = [],
+  handoff?: string,
 ): string =>
   [
     renderSection("Conclusion", [report.conclusion || summary || "No conclusion recorded."], false),
+    renderSection("Handoff", [handoff || report.conclusion || summary || "No handoff recorded."], false),
     renderSection(
       "Changed",
       completion?.changed.length

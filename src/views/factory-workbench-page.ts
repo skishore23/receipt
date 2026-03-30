@@ -6,6 +6,7 @@ import {
   esc,
   formatTs,
   ghostButtonClass,
+  iconCheckCircle,
   iconClock,
   iconFactory,
   iconSpark,
@@ -454,23 +455,58 @@ const renderFilterPill = (
   ? "border-primary text-foreground"
   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}">${esc(filter.label)}</a>`;
 
+const objectiveCardStateLabel = (
+  objective: FactoryChatObjectiveNav,
+): string => objective.displayState ?? (titleCaseLabel(objective.phase || objective.status) || "Idle");
+
+const shouldSuppressObjectiveStateBadge = (
+  section: FactoryWorkbenchObjectiveListSectionModel,
+  objective: FactoryChatObjectiveNav,
+): boolean => {
+  const normalizedState = objectiveCardStateLabel(objective).trim().toLowerCase();
+  return (
+    (section.key === "completed" && normalizedState === "completed")
+    || (section.key === "blocked" && normalizedState === "blocked")
+  );
+};
+
+const objectiveCardSelectionBadge = (selected: boolean): string => selected
+  ? `<span class="inline-flex items-center gap-1.5 border border-primary/20 bg-primary/12 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">
+      ${iconCheckCircle("h-3.5 w-3.5")}
+      <span>Selected</span>
+    </span>`
+  : "";
+
 const renderObjectiveCard = (
   routeContext: FactoryWorkbenchRouteContext,
   objective: FactoryChatObjectiveNav,
+  section?: FactoryWorkbenchObjectiveListSectionModel,
 ): string => {
   const summary = truncate(
     objective.summary ?? objective.blockedReason ?? "Objective activity will appear here.",
     objective.selected ? 180 : 120,
   );
-  return `<a href="${objectiveHref(routeContext, objective.objectiveId, undefined, objective.profileId)}" class="block border-l-2 px-3 py-3 transition ${objective.selected
-    ? "border-primary bg-muted/35"
-    : "border-transparent bg-background hover:bg-accent/45"}">
+  const stateLabel = objectiveCardStateLabel(objective);
+  const stateValue = objective.blockedReason ? "blocked" : (objective.displayState ?? objective.phase ?? objective.status);
+  const stateTone = toneForValue(stateValue);
+  const stateBadge = !section || !shouldSuppressObjectiveStateBadge(section, objective)
+    ? badge(stateLabel, stateTone)
+    : "";
+  const selectedBadge = objectiveCardSelectionBadge(objective.selected);
+  const cardClass = objective.selected
+    ? "border border-primary/30 bg-primary/8 ring-1 ring-primary/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+    : "border border-transparent bg-transparent hover:border-border/70 hover:bg-accent/35";
+  const statusTileClass = objective.selected
+    ? "border-primary/20 bg-primary/10"
+    : "border-border/80 bg-background/80";
+  return `<a href="${objectiveHref(routeContext, objective.objectiveId, undefined, objective.profileId)}" data-objective-id="${esc(objective.objectiveId)}" data-selected="${objective.selected ? "true" : "false"}" ${objective.selected ? 'aria-current="page"' : ""} class="block px-2 py-2 transition">
+    <div class="${cardClass} px-4 py-4 transition-colors">
     <div class="flex items-start gap-3">
-      <div class="pt-1">${statusDot(toneForValue(objective.blockedReason ? "blocked" : (objective.phase || objective.status)))}</div>
+      <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center border ${statusTileClass}">${statusDot(stateTone)}</div>
       <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-2">
-          <div class="min-w-0 truncate text-sm font-semibold text-foreground"${tooltipAttr(objective.title)}>${esc(truncate(objective.title, 72))}</div>
-          ${badge(titleCaseLabel(objective.phase || objective.status) || "Idle", toneForValue(objective.phase || objective.status))}
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground"${tooltipAttr(objective.title)}>${esc(truncate(objective.title, 72))}</div>
+          ${(selectedBadge || stateBadge) ? `<div class="flex shrink-0 flex-wrap items-center justify-end gap-2">${selectedBadge}${stateBadge}</div>` : ""}
         </div>
         <div class="mt-1 text-[13px] leading-5 text-muted-foreground [overflow-wrap:anywhere]">${esc(summary)}</div>
         <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
@@ -479,6 +515,7 @@ const renderObjectiveCard = (
           ${objective.updatedAt ? `<span class="inline-flex items-center gap-1 border border-border bg-muted/25 px-2 py-1">${iconClock("h-3 w-3")} ${esc(formatTs(objective.updatedAt))}</span>` : ""}
         </div>
       </div>
+    </div>
     </div>
   </a>`;
 };
@@ -504,6 +541,33 @@ const renderWorkbenchActionButton = (
   }
   const command = action.command ?? "";
   return `<button type="button" onclick="document.getElementById('factory-prompt').value = '${command}'; document.getElementById('factory-prompt').focus();" class="${className}">${esc(action.label)}</button>`;
+};
+
+const renderWorkbenchCommandButton = (
+  label: string,
+  command: string,
+  className = workbenchSecondaryActionClass,
+): string =>
+  `<button type="button" onclick="document.getElementById('factory-prompt').value = '${command}'; document.getElementById('factory-prompt').focus();" class="${className}">${esc(label)}</button>`;
+
+const renderLiveFocusControls = (
+  routeContext: FactoryWorkbenchRouteContext,
+  focus: NonNullable<FactoryWorkbenchSummarySectionModel["focus"] | FactoryWorkbenchActivitySectionModel["focus"]>,
+): string => {
+  const normalizedStatus = focus.status.trim().toLowerCase();
+  if (normalizedStatus !== "running" && normalizedStatus !== "stalled") return "";
+  const buttons = [
+    renderWorkbenchCommandButton("Continue", "/react "),
+    renderWorkbenchCommandButton("Abort Job", "/abort-job ", `${dangerButtonClass} !px-3 !py-1.5 !text-[13px]`),
+  ];
+  if (routeContext.objectiveId) {
+    const chatHref = routeHref(routeContext, {
+      objectiveId: routeContext.objectiveId,
+      inspectorTab: "chat",
+    });
+    buttons.push(`<a href="${esc(chatHref)}" data-factory-href="${esc(chatHref)}" class="${workbenchSecondaryActionClass}">Open Chat</a>`);
+  }
+  return `<div class="mt-3 flex flex-wrap gap-2">${buttons.join("")}</div>`;
 };
 
 const renderLifecycleStrip = (
@@ -626,6 +690,7 @@ const renderSummarySection = (
             ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
           </div>
           <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.focus.summary)}</div>
+          ${renderLiveFocusControls(routeContext, section.focus)}
         </div>` : ""}
       </aside>
     </div>
@@ -640,7 +705,7 @@ const renderObjectiveListSection = (
   return `<section class="border border-border bg-card/70">
   <div class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
     ${pinned ? `<div class="flex min-w-0 flex-1 items-start gap-3">
-      <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary ring-1 ring-primary/20">
+      <span class="flex h-9 w-9 shrink-0 items-center justify-center bg-primary/12 text-primary ring-1 ring-primary/20">
         ${iconSpark("h-4 w-4")}
       </span>
       <div class="min-w-0 flex-1 pt-0.5">
@@ -654,7 +719,7 @@ const renderObjectiveListSection = (
   </div>
   ${section.items.length > 0
     ? `<div class="divide-y divide-border">
-      ${section.items.map((objective) => renderObjectiveCard(routeContext, objective)).join("")}
+      ${section.items.map((objective) => renderObjectiveCard(routeContext, objective, section)).join("")}
     </div>`
     : `<div class="px-4 py-4 text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`}
 </section>`;
@@ -725,7 +790,10 @@ const renderTimelineGroups = (
   }).join("");
 };
 
-const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): string => {
+const renderActivitySection = (
+  section: FactoryWorkbenchActivitySectionModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
   const focusCard = section.focus
     ? `${(section.focus.stdoutTail || section.focus.stderrTail) ? `<div class="grid gap-3 ${section.focus.stdoutTail && section.focus.stderrTail ? "xl:grid-cols-2" : ""}">
         ${section.focus.stdoutTail ? `<section class="border border-border bg-background">
@@ -734,6 +802,9 @@ const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): s
             ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
           </div>
           <pre class="factory-scrollbar min-w-0 max-h-80 overflow-x-hidden overflow-y-auto whitespace-pre-wrap px-4 py-4 text-[12px] leading-6 text-foreground [overflow-wrap:anywhere]">${esc(section.focus.stdoutTail)}</pre>
+          <div class="border-t border-border px-4 py-3">
+            ${renderLiveFocusControls(routeContext, section.focus)}
+          </div>
         </section>` : ""}
         ${section.focus.stderrTail ? `<section class="border border-destructive/30 bg-destructive/5">
           <div class="border-b border-destructive/20 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-destructive">Error Output</div>
@@ -745,6 +816,7 @@ const renderActivitySection = (section: FactoryWorkbenchActivitySectionModel): s
           ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
         </div>
         <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(truncate(section.focus.summary, 120))}</div>
+        ${renderLiveFocusControls(routeContext, section.focus)}
       </div>`}`
     : "";
   const escalationCallout = section.callout
@@ -781,7 +853,7 @@ const renderBlock = (
       case "summary":
         return renderSummarySection(section, routeContext);
       case "activity-list":
-        return renderActivitySection(section);
+        return renderActivitySection(section, routeContext);
       case "objective-list":
       default:
         return renderObjectiveListSection(section, routeContext);
@@ -823,7 +895,7 @@ export const factoryWorkbenchWorkspaceIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
-  const showSummary = isSummaryVisible(workspace.filter);
+  const showSummary = isSummaryVisible(workspace);
   const liveBlocks = workspace.blocks.filter((block) =>
     (block.key === "summary" && showSummary)
     || block.key === "activity"
@@ -1020,15 +1092,15 @@ export const factoryWorkbenchChatIsland = (
   </div>`;
 };
 
-const isSummaryVisible = (filter: FactoryWorkbenchFilterKey): boolean =>
-  filter === "objective.running";
+const isSummaryVisible = (workspace: FactoryWorkbenchWorkspaceModel): boolean =>
+  workspace.filter === "objective.running" || Boolean(workspace.selectedObjective);
 
 export const factoryWorkbenchBlockIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
   blockKey: FactoryWorkbenchBlockModel["key"],
 ): string => {
-  if (blockKey === "summary" && !isSummaryVisible(workspace.filter)) return "";
+  if (blockKey === "summary" && !isSummaryVisible(workspace)) return "";
   const block = workspace.blocks.find((candidate) => candidate.key === blockKey);
   return block ? renderBlock(block, routeContext) : "";
 };

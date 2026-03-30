@@ -2067,6 +2067,18 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
 
   const promotedFile = await fs.readFile(path.join(repoDir, ".receipt", "data", "hub", "worktrees", `factory_integration_${runPayload.objectiveId}`, "CLI_SMOKE.txt"), "utf-8");
   expect(promotedFile).toMatch(/created by stub/);
+  const objectiveAuditPath = path.join(repoDir, ".receipt", "data", "factory", "artifacts", runPayload.objectiveId, "objective.audit.json");
+  const objectiveAudit = JSON.parse(await fs.readFile(objectiveAuditPath, "utf-8")) as {
+    readonly requestedId?: string;
+    readonly links?: {
+      readonly objectiveId?: string;
+    };
+    readonly summary?: {
+      readonly status?: string;
+    };
+  };
+  expect(objectiveAudit.requestedId ?? objectiveAudit.links?.objectiveId).toBe(runPayload.objectiveId);
+  expect(objectiveAudit.summary?.status).toBe("completed");
 
   const inspect = await runCli([
     "factory",
@@ -2229,6 +2241,84 @@ test("factory cli: abort-job queues a structured abort command", async () => {
     const refreshed = await runtime.queue.getJob(job.id);
     expect(refreshed).toBeDefined();
     expect(refreshed?.commands.some((command) => command.command === "abort")).toBe(true);
+  } finally {
+    runtime.stop();
+  }
+}, 120_000);
+
+test("factory cli: steer and follow-up queue structured live guidance commands", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const config = await loadFactoryConfig(repoDir);
+  expect(config).toBeDefined();
+  const runtime = createFactoryCliRuntime(config!);
+  try {
+    const job = await runtime.queue.enqueue({
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId: "objective_demo",
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+        stream: "factory/objectives/objective_demo",
+        runId: "run_factory_cli_live_guidance",
+      },
+      maxAttempts: 1,
+    });
+
+    const steer = await runCli([
+      "factory",
+      "steer",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "Tighten the scope and make the real repo change.",
+    ]);
+    expect(steer.code).toBe(0);
+    const steerPayload = JSON.parse(steer.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: Record<string, unknown> }>;
+      };
+    };
+    expect(steerPayload.action).toBe("steer");
+    expect(steerPayload.jobId).toBe(job.id);
+    expect(steerPayload.commandId.length).toBeGreaterThan(0);
+    expect(steerPayload.job.commands.some((command) =>
+      command.command === "steer" && command.payload?.message === "Tighten the scope and make the real repo change.")).toBe(true);
+
+    const followUp = await runCli([
+      "factory",
+      "follow-up",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "Run validation and include proof in the handoff.",
+    ]);
+    expect(followUp.code).toBe(0);
+    const followPayload = JSON.parse(followUp.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: Record<string, unknown> }>;
+      };
+    };
+    expect(followPayload.action).toBe("follow_up");
+    expect(followPayload.jobId).toBe(job.id);
+    expect(followPayload.commandId.length).toBeGreaterThan(0);
+    expect(followPayload.job.commands.some((command) =>
+      command.command === "follow_up" && command.payload?.message === "Run validation and include proof in the handoff.")).toBe(true);
   } finally {
     runtime.stop();
   }

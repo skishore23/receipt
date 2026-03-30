@@ -13,6 +13,10 @@
     "Keep the operator oriented with concise repo and receipt-backed context"
   ],
   "skills": [],
+  "handoffTargets": [
+    "software",
+    "infrastructure"
+  ],
   "defaultObjectiveMode": "delivery",
   "defaultValidationMode": "repo_profile",
   "allowObjectiveCreation": true

@@ -30,6 +30,7 @@ import {
   factoryStatusCapability,
   jobControlCapability,
   jobsListCapability,
+  profileHandoffCapability,
   repoStatusCapability,
   type AgentToolExecutor,
 } from "./capabilities";
@@ -46,7 +47,7 @@ import {
   resolveFactoryChatProfile,
   type FactoryChatResolvedProfile,
 } from "../services/factory-chat-profiles";
-import type { CodexExecutor, CodexRunControl, CodexRunInput } from "../adapters/codex-executor";
+import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../adapters/codex-executor";
 import type { MemoryTools } from "../adapters/memory-tools";
 import {
   factoryChatCodexArtifactPaths,
@@ -986,6 +987,7 @@ const createCodexStatusTool = (input: {
   readonly profile: FactoryChatResolvedProfile;
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly dataDir?: string;
+  readonly liveWaitState: FactoryLiveWaitState;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const waitForChangeMs = clampWaitMs(toolInput.waitForChangeMs);
@@ -1041,6 +1043,8 @@ const createCodexStatusTool = (input: {
       : [];
     const latest = snapshots[0];
     const activeCount = Number(payload.activeCount ?? 0);
+    const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
+    if (activeCount > 0) input.liveWaitState.surfaced = true;
     const summary = latest
       ? activeCount > 0
         ? `codex active: ${String(latest.jobId)} (${String(latest.status)})`
@@ -1049,7 +1053,7 @@ const createCodexStatusTool = (input: {
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${summary}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
-      pauseBudget: waited.waitedMs > 0 && waited.changed === false,
+      pauseBudget,
     };
   };
 
@@ -1248,6 +1252,93 @@ const createFactoryDispatchTool = (input: {
     };
   };
 
+const createProfileHandoffTool = (input: {
+  readonly queue: JsonlQueue;
+  readonly runId: string;
+  readonly stream: string;
+  readonly repoRoot: string;
+  readonly profileRoot: string;
+  readonly problem: string;
+  readonly profile: FactoryChatResolvedProfile;
+  readonly getCurrentObjectiveId: () => string | undefined;
+  readonly chatId?: string;
+  readonly continuationDepth: number;
+}): AgentToolExecutor =>
+  async (toolInput) => {
+    const targetProfileId = asString(toolInput.profileId);
+    if (!targetProfileId) throw new Error("profile.handoff requires profileId");
+    if (targetProfileId === input.profile.root.id) {
+      throw new Error(`profile.handoff target must differ from the current profile '${input.profile.root.id}'`);
+    }
+    if (!input.profile.handoffTargets.includes(targetProfileId)) {
+      throw new Error(`profile.handoff from '${input.profile.root.id}' to '${targetProfileId}' is not allowed`);
+    }
+    const reason = asString(toolInput.reason);
+    if (!reason) throw new Error("profile.handoff requires reason");
+    await resolveFactoryChatProfile({
+      repoRoot: input.repoRoot,
+      profileRoot: input.profileRoot,
+      requestedId: targetProfileId,
+    });
+    const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
+    const chatId = asString(toolInput.chatId) ?? input.chatId;
+    const targetStream = chatId
+      ? factoryChatSessionStream(input.repoRoot, targetProfileId, chatId)
+      : factoryChatStream(input.repoRoot, targetProfileId, objectiveId);
+    const nextRunId = nextId("run");
+    const created = await input.queue.enqueue({
+      agentId: "factory",
+      lane: "chat",
+      sessionKey: `factory-chat:${targetStream}`,
+      singletonMode: "steer",
+      maxAttempts: 1,
+      payload: {
+        kind: "factory.run",
+        stream: targetStream,
+        runId: nextRunId,
+        problem: [
+          `Profile handoff from ${input.profile.root.id} to ${targetProfileId}.`,
+          `Reason: ${reason}`,
+          input.problem,
+        ].join("\n\n"),
+        profileId: targetProfileId,
+        ...(chatId ? { chatId } : {}),
+        ...(objectiveId ? { objectiveId } : {}),
+        continuationDepth: input.continuationDepth + 1,
+      },
+    });
+    return {
+      output: JSON.stringify({
+        worker: "factory",
+        action: "profile_handoff",
+        status: "queued",
+        summary: `Queued ${targetProfileId} profile handoff.`,
+        fromProfileId: input.profile.root.id,
+        toProfileId: targetProfileId,
+        reason,
+        nextRunId,
+        nextJobId: created.id,
+        targetStream,
+        ...(objectiveId ? { objectiveId } : {}),
+        ...(chatId ? { chatId } : {}),
+      }, null, 2),
+      summary: `Queued ${targetProfileId} profile handoff.`,
+      events: [{
+        type: "profile.handoff",
+        runId: input.runId,
+        agentId: "orchestrator",
+        fromProfileId: input.profile.root.id,
+        toProfileId: targetProfileId,
+        reason,
+        nextRunId,
+        nextJobId: created.id,
+        targetStream,
+        ...(objectiveId ? { objectiveId } : {}),
+        ...(chatId ? { chatId } : {}),
+      }],
+    };
+  };
+
 const createFactoryStatusTool = (input: {
   readonly factoryService: FactoryService;
   readonly getCurrentObjectiveId: () => string | undefined;
@@ -1299,11 +1390,12 @@ const createFactoryStatusTool = (input: {
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? payload.title ?? objectiveId)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
-      pauseBudget: waited.waitedMs > 0 && waited.changed === false,
+      pauseBudget,
     };
   };
 
@@ -1358,11 +1450,12 @@ const createFactoryOutputTool = (input: {
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? `${focusKind} ${focusId}: ${String(payload.status ?? "unknown")}`)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
-      pauseBudget: waited.waitedMs > 0 && waited.changed === false,
+      pauseBudget,
     };
   };
 
@@ -1481,6 +1574,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     profile: resolvedProfile,
     getCurrentObjectiveId,
     dataDir,
+    liveWaitState: factoryLiveWaitState,
   });
   const codexLogsTool = dataDir
     ? createCodexLogsTool({
@@ -1506,6 +1600,18 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     memoryTools: input.memoryTools,
     profile: resolvedProfile,
     dataDir,
+  });
+  const profileHandoffTool = createProfileHandoffTool({
+    queue: input.queue,
+    runId: input.runId,
+    stream: input.stream,
+    repoRoot,
+    profileRoot,
+    problem: input.problem,
+    profile: resolvedProfile,
+    getCurrentObjectiveId,
+    chatId: resolvedChatId,
+    continuationDepth,
   });
   const factoryDispatchTool = createFactoryDispatchTool({
     factoryService,
@@ -1542,6 +1648,9 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     ] : []),
     createCapabilitySpec(jobControlCapability, jobControlTool),
     createCapabilitySpec(codexRunCapability, codexRunTool),
+    createCapabilitySpec(profileHandoffCapability, profileHandoffTool, {
+      isAvailable: () => resolvedProfile.handoffTargets.length > 0,
+    }),
     createCapabilitySpec(factoryDispatchCapability, factoryDispatchTool),
     createCapabilitySpec(factoryStatusCapability, factoryStatusTool),
     createCapabilitySpec(factoryOutputCapability, factoryOutputTool),
@@ -1925,6 +2034,10 @@ export const runFactoryCodexJob = async (input: {
     progressStopped = true;
     await progressLoop;
     await emitProgress();
+
+    if (err instanceof CodexControlSignalError && err.signal.kind === "restart") {
+      throw err;
+    }
 
     const [lastMessage, stdoutTail, stderrTail, repoChangedFiles, finalChangedFileSnapshot] = await Promise.all([
       readTextTail(artifacts.lastMessagePath, 400),

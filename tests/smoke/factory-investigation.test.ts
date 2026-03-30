@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
-import type { CodexExecutorInput, CodexRunControl } from "../../src/adapters/codex-executor";
+import { CodexControlSignalError, type CodexExecutorInput, type CodexRunControl } from "../../src/adapters/codex-executor";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -117,7 +117,7 @@ test("factory investigation: no-diff reports complete without integration and sy
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
       const schema = JSON.parse(await fs.readFile(input.outputSchemaPath!, "utf-8")) as Record<string, unknown>;
-      expect(schema.required).toEqual(["outcome", "summary", "artifacts", "completion", "nextAction", "report"]);
+      expect(schema.required).toEqual(["outcome", "summary", "handoff", "artifacts", "completion", "nextAction", "report"]);
       const report = (schema.properties as Record<string, Record<string, unknown>>).report;
       expect(report.type).toEqual(["object", "null"]);
       expect(report.required).toEqual(["conclusion", "evidence", "scriptsRun", "disagreements", "nextSteps"]);
@@ -128,6 +128,7 @@ test("factory investigation: no-diff reports complete without integration and sy
       const structured = {
         outcome: "approved",
         summary: "Collected the current AWS access posture.",
+        handoff: "Worker completed the access-posture investigation and is handing the report back for synthesis.",
         artifacts: [{ label: "AWS CLI inspection", path: "/tmp/aws-access-posture.json", summary: "Read-only identity details were collected successfully." }],
         completion: {
           changed: ["Captured a structured AWS access posture report."],
@@ -168,6 +169,9 @@ test("factory investigation: no-diff reports complete without integration and sy
   expect(detail.investigation.synthesized?.report.conclusion).toContain("read access");
   expect(detail.investigation.synthesized?.report.scriptsRun).toHaveLength(1);
   expect(detail.investigation.synthesized?.report.evidence.some((item) => item.title === "Check failed" || item.title === "Check passed")).toBe(false);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "worker.handoff" && receipt.taskId === "task_01")).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.handoff")).toBe(true);
+  expect(detail.latestHandoff?.status).toBe("completed");
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.reported")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "candidate.produced")).toBe(false);
@@ -180,6 +184,7 @@ test("factory investigation: blocked structured reports stay non-approvable and 
       const structured = {
         outcome: "blocked",
         summary: "Inventory is incomplete because some AWS read APIs were denied.",
+        handoff: "Worker is handing back a partial investigation with explicit permission gaps for the operator.",
         artifacts: [],
         completion: {
           changed: ["Collected partial AWS inventory findings."],
@@ -219,6 +224,8 @@ test("factory investigation: blocked structured reports stay non-approvable and 
   expect(detail.investigation.reports[0]?.outcome).toBe("blocked");
   expect(detail.investigation.synthesized).toBeUndefined();
   expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.blocked")).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.handoff")).toBe(true);
+  expect(detail.latestHandoff?.status).toBe("blocked");
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.reported")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(false);
 }, 120_000);
@@ -243,6 +250,7 @@ test("factory investigation: approved results downgrade to partial when captured
       const structured = {
         outcome: "approved",
         summary: "No alarming signals were detected in the sampled AWS services.",
+        handoff: "Worker completed the helper-backed investigation and is handing the findings back to the controller.",
         artifacts: [{
           label: "AWS evidence snapshot",
           path: `/workspace/receipt/.receipt/factory/${artifactName}`,
@@ -669,6 +677,7 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.skippedRegions?.[0]?.optInStatus).toBe("not-opted-in");
   expect(parsedContextPack.cloudExecutionContext?.gcp).toBeUndefined();
   expect(parsedContextPack.cloudExecutionContext?.azure).toBeUndefined();
+  expect(contextPack).not.toContain('"regions"');
   expect(contextPack).toContain("Infrastructure profile is AWS-only for now");
   expect(contextPack).toContain("skip 1 not-opted-in regions");
   expect(contextPack).not.toContain("gcloud is available");
@@ -820,6 +829,7 @@ test("factory investigation: infrastructure task packets mount selected checked-
       const raw = JSON.stringify({
         outcome: "approved",
         summary: "Checked-in helpers were available in the task packet.",
+        handoff: "Worker confirmed the helper catalog was mounted and is handing the result back.",
         artifacts: [],
         nextAction: null,
         report: {
@@ -907,6 +917,7 @@ test("factory investigation: IAM user count prompts select the checked-in IAM he
       const raw = JSON.stringify({
         outcome: "approved",
         summary: "IAM helper was selected.",
+        handoff: "Worker confirmed the IAM helper selection and is handing the result back.",
         artifacts: [],
         nextAction: null,
         report: {
@@ -1013,6 +1024,7 @@ test("factory investigation: infrastructure objectives can start from a dirty so
       const raw = JSON.stringify({
         outcome: "approved",
         summary: "Collected bucket count.",
+        handoff: "Worker completed the bucket inventory and is handing the report back.",
         artifacts: [],
         nextAction: null,
         report: {
@@ -1042,3 +1054,135 @@ test("factory investigation: infrastructure objectives can start from a dirty so
   const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
   expect((taskJob?.payload as FactoryTaskJobPayload | undefined)?.executionMode).toBe("worktree");
 });
+
+test("factory investigation: live guidance restarts once, rewrites the prompt, and preserves workspace changes", async () => {
+  let attempts = 0;
+  let guidancePending = true;
+  const { service, queue } = await createFactoryService({
+    seedRepo: async (repoRoot) => {
+      await fs.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({
+        name: "factory-investigation-live-guidance",
+        private: true,
+        scripts: {
+          build: "bun -e \"process.exit(0)\"",
+        },
+      }, null, 2), "utf-8");
+    },
+    codexRun: async (input, control) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await fs.writeFile(path.join(input.workspacePath, "RESTART_MARKER.txt"), "created before restart\n", "utf-8");
+        const signal = await control?.pollSignal?.();
+        expect(signal?.kind).toBe("restart");
+        throw new CodexControlSignalError(signal!, {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          lastMessage: "Restarting after live guidance.",
+        });
+      }
+      expect(await fs.readFile(path.join(input.workspacePath, "RESTART_MARKER.txt"), "utf-8")).toContain("created before restart");
+      expect(input.prompt).toContain("## Live Operator Guidance");
+      expect(input.prompt).toContain("Do not take the easy route.");
+      expect(input.prompt).toContain("Run validation and include proof.");
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Applied the live-guided investigation fix.",
+        handoff: "Live guidance narrowed the task and the rerun completed with proof.",
+        artifacts: [],
+        completion: {
+          changed: ["README.md", "package.json"],
+          proof: ["Workspace marker survived the restart.", "Validation proof was captured."],
+          remaining: [],
+        },
+        nextAction: null,
+        report: {
+          conclusion: "The rerun completed after live operator guidance was applied.",
+          evidence: [{ title: "Restart marker", summary: "The workspace marker survived the restart boundary.", detail: null }],
+          scriptsRun: [{ command: "bun run build", summary: "Validation passed.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
+      return {
+        stdout: raw,
+        stderr: "",
+        lastMessage: raw,
+      };
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate live guidance restart",
+    prompt: "Investigate and implement a small repo fix without losing context across restarts.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: ["bun run build"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload, {
+    pollSignal: async () => {
+      if (!guidancePending) return undefined;
+      guidancePending = false;
+      return {
+          kind: "restart",
+          note: "Do not take the easy route.\n\nRun validation and include proof.",
+          meta: {
+            jobId: taskJob!.id,
+            guidance: "Do not take the easy route.\n\nRun validation and include proof.",
+            guidanceKind: "mixed",
+            sourceCommandIds: ["cmd_steer_01", "cmd_follow_up_01"],
+            appliedAt: 1_234,
+          },
+        };
+    },
+  });
+
+  expect(attempts).toBe(2);
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.applied")).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.restarted")).toBe(true);
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
+  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Applied the live-guided investigation fix.");
+  await expect(fs.readFile(path.join(payload.workspacePath, "RESTART_MARKER.txt"), "utf-8")).resolves.toContain("created before restart");
+}, 120_000);
+
+test("factory investigation: abort signals win over restart handling", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async (_input, control) => {
+      const signal = await control?.pollSignal?.();
+      expect(signal?.kind).toBe("abort");
+      throw new CodexControlSignalError(signal!, {
+        exitCode: 0,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        lastMessage: "Aborted by operator.",
+      });
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Abort live guidance attempt",
+    prompt: "Abort before any restart guidance is applied.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await expect(service.runTask(taskJob!.payload as FactoryTaskJobPayload, {
+    pollSignal: async () => ({ kind: "abort" }),
+  })).rejects.toThrow("codex exec aborted");
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.applied")).toBe(false);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.restarted")).toBe(false);
+}, 120_000);

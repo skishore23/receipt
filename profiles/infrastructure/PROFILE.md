@@ -18,6 +18,9 @@
     "skills/factory-aws-cli-cookbook/SKILL.md",
     "skills/factory-infrastructure-aws/SKILL.md"
   ],
+  "handoffTargets": [
+    "generalist"
+  ],
   "cloudProvider": "aws",
   "defaultObjectiveMode": "investigation",
   "defaultValidationMode": "none",

@@ -498,8 +498,26 @@ export const initFactoryWorkbenchBrowser = () => {
     const runId = streamingReply?.runId;
     if (runId && state.terminalRunIds.indexOf(runId) >= 0) {
       streamingReply = null;
+    } else if (
+      runId
+      && pendingRunId !== runId
+      && state.activeRunId !== runId
+      && state.knownRunIds.indexOf(runId) < 0
+      && state.terminalRunIds.indexOf(runId) < 0
+    ) {
+      streamingReply = null;
     }
     scheduleOverlayRender();
+  };
+
+  const acceptsStreamingRun = (runId: string | undefined): boolean => {
+    if (!workbenchState.appliedRoute.objectiveId) return true;
+    if (!runId) return false;
+    if (pendingLiveStatus?.runId === runId) return true;
+    const state = currentChatState();
+    return state.activeRunId === runId
+      || state.knownRunIds.indexOf(runId) >= 0
+      || state.terminalRunIds.indexOf(runId) >= 0;
   };
 
   const setComposerStatus = (message: string) => {
@@ -1119,9 +1137,10 @@ export const initFactoryWorkbenchBrowser = () => {
       chatEventSource.addEventListener("agent-token", (event) => {
         const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
         if (!payload) return;
-        updatePendingLiveStatus(null, { runId: payload.runId });
         const state = currentChatState();
         const runId = payload.runId || state.activeRunId || streamingReply?.runId;
+        if (!acceptsStreamingRun(runId)) return;
+        updatePendingLiveStatus(null, { runId: payload.runId });
         const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
         streamingReply = {
           runId,

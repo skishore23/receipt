@@ -524,7 +524,7 @@ const renderLiveOutputWorkCard = (card: FactoryWorkCard): string => {
     <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(liveOutputCardSummary(card))}</div>
     ${liveOutputCardSupport(card) ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(liveOutputCardSupport(card)!)}</div>` : ""}
     ${metadata.length > 0 ? `<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-      ${metadata.map((value) => `<span class="rounded-full border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
+      ${metadata.map((value) => `<span class="border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
     </div>` : ""}
     ${(card.artifactSummary || card.stdoutTail || card.stderrTail || card.detail || card.link) ? `<details class="mt-3 border border-border bg-background/70 px-3 py-2">
       <summary class="cursor-pointer list-none text-[11px] font-medium text-muted-foreground hover:text-foreground">More details</summary>

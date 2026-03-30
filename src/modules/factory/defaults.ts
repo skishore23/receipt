@@ -91,6 +91,7 @@ export const initialFactoryState: FactoryState = {
   createdAt: 0,
   updatedAt: 0,
   taskRunsUsed: 0,
+  latestHandoff: undefined,
   candidatePassesByTask: {},
   consecutiveFailuresByTask: {},
   lastDispatchAt: undefined,

@@ -15,8 +15,9 @@ Do this before making code or review claims:
 1. Read the current `.receipt/factory/*.manifest.json`.
 2. Read the current `.receipt/factory/*.context-pack.json`.
 3. Run the generated `.receipt/factory/*.memory.cjs` script for `context` and `objective`.
-4. Treat the mounted packet, recent receipts, and memory output as the worker interface. Do not call `receipt factory inspect` from inside a task worktree unless the runtime explicitly says a safe writable receipt snapshot is mounted.
-5. If the question is about whether Codex status capture itself is broken, reproduce it independently with `receipt factory codex-probe --mode both --json --reply probe-ok` before claiming the status pipeline is failing.
+4. If you need a controller-side reconstruction before reviewing, retrying, or course-correcting, run `receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId>` from the repo root or mounted controller workspace.
+5. Treat the mounted packet, recent receipts, and memory output as the worker interface. Do not call `receipt factory inspect` from inside a task worktree unless the runtime explicitly says a safe writable receipt snapshot is mounted.
+6. If the question is about whether Codex status capture itself is broken, reproduce it independently with `receipt factory codex-probe --mode both --json --reply probe-ok` before claiming the status pipeline is failing.
 
 ## Working Rules
 
@@ -27,6 +28,7 @@ Do this before making code or review claims:
 - Treat the prompt as bootstrap only.
 - Prefer the current objective over broader history.
 - Use repo-shared memory before assuming you need broader cross-objective context.
+- Before asking for a retry or claiming a repair path, prefer `receipt factory investigate ...` so the decision is grounded in actual task, candidate, DAG, and handoff evidence.
 - Do not assume generated repo-profile skills outside the worktree are present or necessary.
 - When checks fail, inspect prior current-objective candidate history before calling a failure inherited.
 - If the evidence is incomplete, say so explicitly instead of guessing.

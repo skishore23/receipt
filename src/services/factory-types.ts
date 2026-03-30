@@ -6,6 +6,7 @@ import type {
   FactoryInvestigationReport,
   FactoryInvestigationSynthesisRecord,
   FactoryInvestigationTaskReport,
+  FactoryObjectiveHandoffRecord,
   FactoryObjectiveMode,
   FactoryNormalizedObjectivePolicy,
   FactoryObjectivePhase,
@@ -105,6 +106,7 @@ export type FactoryTaskView = FactoryTaskRecord & {
   readonly workspaceHead?: string;
   readonly elapsedMs?: number;
   readonly manifestPath?: string;
+  readonly contextSummaryPath?: string;
   readonly contextPackPath?: string;
   readonly promptPath?: string;
   readonly memoryScriptPath?: string;
@@ -139,6 +141,7 @@ export type FactoryObjectiveCard = {
   readonly archivedAt?: number;
   readonly updatedAt: number;
   readonly latestSummary?: string;
+  readonly latestHandoff?: FactoryObjectiveHandoffRecord;
   readonly blockedReason?: string;
   readonly sourceWarnings?: ReadonlyArray<string>;
   readonly tokensUsed?: number;
@@ -336,6 +339,7 @@ export type FactoryTaskJobPayload = {
   readonly stderrPath: string;
   readonly lastMessagePath: string;
   readonly manifestPath: string;
+  readonly contextSummaryPath?: string;
   readonly contextPackPath: string;
   readonly memoryScriptPath: string;
   readonly memoryConfigPath: string;
@@ -381,6 +385,13 @@ export type FactoryObjectiveControlJobPayload = {
   readonly kind: "factory.objective.control";
   readonly objectiveId: string;
   readonly reason: "startup" | "admitted" | "reconcile";
+};
+
+export type FactoryObjectiveAuditJobPayload = {
+  readonly kind: "factory.objective.audit";
+  readonly objectiveId: string;
+  readonly objectiveStatus: string;
+  readonly objectiveUpdatedAt: number;
 };
 
 export type FactoryObjectiveReceiptSummary = {

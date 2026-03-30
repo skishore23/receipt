@@ -27,3 +27,9 @@ export const factoryReceiptsCapability = capabilityDefinition({
   description: capabilityDescriptions["factory.receipts"],
   inputSchema: capabilityInput.factoryReceipts,
 });
+
+export const profileHandoffCapability = capabilityDefinition({
+  id: "profile.handoff",
+  description: capabilityDescriptions["profile.handoff"],
+  inputSchema: capabilityInput.profileHandoff,
+});

@@ -1,0 +1,29 @@
+{
+  "id": "aws_s3_cost_spike",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": [
+    "cost",
+    "billing",
+    "s3",
+    "cost-explorer",
+    "daily",
+    "spike",
+    "investigation",
+    "usage-type",
+    "operation",
+    "region",
+    "linked-account"
+  ],
+  "description": "Investigate S3 cost spikes using Cost Explorer daily granularity, trailing 7-day averages, and breakdowns by usage type, operation, region, and linked account.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile.",
+    "Defaults to a 90-day lookback and identifies days where daily S3 cost exceeds 2x the trailing 7-day average."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --lookback-days 90 --output-dir .receipt/factory/evidence"
+  ]
+}

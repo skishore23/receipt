@@ -7,6 +7,7 @@ import type {
   FactoryExecutionScriptRun,
   FactoryInvestigationReport,
   FactoryNormalizedObjectivePolicy,
+  FactoryObjectiveHandoffStatus,
   FactoryObjectiveMode,
   FactoryObjectiveProfileSnapshot,
   FactoryPlanningReceiptRecord,
@@ -15,6 +16,8 @@ import type {
   FactoryTaskRecord,
   FactoryTaskCompletionRecord,
   FactoryTaskResultOutcome,
+  FactoryWorkerHandoffOutcome,
+  FactoryWorkerHandoffScope,
   FactoryWorkerType,
 } from "./types";
 
@@ -86,6 +89,52 @@ export type FactoryEvent =
       readonly skillBundlePaths: ReadonlyArray<string>;
       readonly contextRefs: ReadonlyArray<GraphRef>;
       readonly startedAt: number;
+    }
+  | {
+      readonly type: "task.intervention.applied";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly jobId: string;
+      readonly guidance: string;
+      readonly guidanceKind: "steer" | "follow_up" | "mixed";
+      readonly sourceCommandIds: ReadonlyArray<string>;
+      readonly appliedAt: number;
+    }
+  | {
+      readonly type: "task.intervention.restarted";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly jobId: string;
+      readonly guidance: string;
+      readonly guidanceKind: "steer" | "follow_up" | "mixed";
+      readonly sourceCommandIds: ReadonlyArray<string>;
+      readonly restartCount: number;
+      readonly restartedAt: number;
+    }
+  | {
+      readonly type: "worker.handoff";
+      readonly objectiveId: string;
+      readonly scope: FactoryWorkerHandoffScope;
+      readonly workerType: FactoryWorkerType;
+      readonly taskId?: string;
+      readonly candidateId?: string;
+      readonly outcome: FactoryWorkerHandoffOutcome;
+      readonly summary: string;
+      readonly handoff: string;
+      readonly handedOffAt: number;
+    }
+  | {
+      readonly type: "objective.handoff";
+      readonly objectiveId: string;
+      readonly title: string;
+      readonly status: FactoryObjectiveHandoffStatus;
+      readonly summary: string;
+      readonly blocker?: string;
+      readonly nextAction?: string;
+      readonly handoffKey: string;
+      readonly sourceUpdatedAt: number;
     }
   | {
       readonly type: "task.review.requested";

@@ -2116,6 +2116,29 @@ test("factory workbench client: chat events stream tokens and refresh the transc
   expect(chatRefreshes).toBeGreaterThan(0);
 });
 
+test("factory workbench client: selected objectives ignore token streams from unrelated runs", async () => {
+  const { chatSource, streaming } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+    beforeBoot: ({ chat }) => {
+      chat.innerHTML = chatMarkup({
+        profileLabel: "Generalist",
+        chatId: "chat_demo",
+        objectiveId: "objective_demo",
+        activeRunId: "run_demo",
+        knownRunIds: ["run_demo"],
+      });
+    },
+  });
+
+  chatSource()?.emit("agent-token", JSON.stringify({ runId: "run_other_objective", delta: "Wrong objective token" }));
+  await flushAsync();
+  expect(stripHtml(streaming.innerHTML)).not.toContain("Wrong objective token");
+
+  chatSource()?.emit("agent-token", JSON.stringify({ runId: "run_demo", delta: "Current objective token" }));
+  await flushAsync();
+  expect(stripHtml(streaming.innerHTML)).toContain("Current objective token");
+});
+
 test("factory workbench client: plain prompts stay chat-first and /obj selects the created objective", async () => {
   let composeCount = 0;
   const { textarea, form, optimistic, status, historyState, locationState, backgroundSource, chatSource, fetchCalls } = await createWorkbenchHarness({

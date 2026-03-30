@@ -120,6 +120,7 @@ import {
   looksLikeConversationalPrompt,
 } from "./page-builders";
 import { describeProfileMarkdown } from "./profile-markdown";
+import { projectAgentRun } from "./run-projection";
 import {
   asString,
   compareJobsByRecency,
@@ -606,6 +607,48 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return withFactoryChatContextImports(chatContext, imports);
   };
 
+  const objectiveIdFromRunChain = (chain: AgentRunChain): string | undefined => {
+    const projection = projectAgentRun(chain);
+    return projection.state.thread?.objectiveId
+      ?? asString(projection.state.config?.extra?.objectiveId)
+      ?? latestObjectiveIdFromRunChains([chain]);
+  };
+
+  const scopeRunTimelineToObjective = (input: {
+    readonly objectiveId?: string;
+    readonly runIds: ReadonlyArray<string>;
+    readonly runChains: ReadonlyArray<AgentRunChain>;
+    readonly jobs?: ReadonlyArray<QueueJob>;
+  }): {
+    readonly runIds: ReadonlyArray<string>;
+    readonly runChains: ReadonlyArray<AgentRunChain>;
+  } => {
+    const objectiveId = input.objectiveId?.trim();
+    if (!objectiveId) return {
+        runIds: input.runIds,
+        runChains: input.runChains,
+      };
+    const objectiveRunIds = new Set<string>(
+      (input.jobs ?? [])
+        .flatMap((job) => jobObjectiveId(job) === objectiveId
+          ? [jobRunId(job), jobParentRunId(job), jobAnyRunId(job)]
+          : [])
+        .filter((runId): runId is string => typeof runId === "string" && runId.trim().length > 0),
+    );
+    const scoped = input.runIds.flatMap((runId, index) => {
+      const chain = input.runChains[index];
+      if (!chain) return [];
+      const runObjectiveId = objectiveIdFromRunChain(chain);
+      if (runObjectiveId && runObjectiveId !== objectiveId) return [];
+      if (!runObjectiveId && !objectiveRunIds.has(runId)) return [];
+      return [{ runId, chain }] as const;
+    });
+    return {
+      runIds: scoped.map((entry) => entry.runId),
+      runChains: scoped.map((entry) => entry.chain),
+    };
+  };
+
   type ObjectiveHandoffView = {
     readonly objectiveId: string;
     readonly title: string;
@@ -623,6 +666,14 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     };
     readonly latestDecisionSummary?: string;
     readonly latestDecisionAt?: number;
+    readonly latestHandoff?: {
+      readonly status: "blocked" | "completed" | "failed" | "canceled";
+      readonly summary: string;
+      readonly blocker?: string;
+      readonly nextAction?: string;
+      readonly handoffKey: string;
+      readonly sourceUpdatedAt: number;
+    };
   };
 
   const objectiveHandoffStatus = (
@@ -651,6 +702,21 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const buildObjectiveHandoffPayload = (
     objective: ObjectiveHandoffView,
   ): Extract<AgentEvent, { readonly type: "objective.handoff" }> | undefined => {
+    if (objective.latestHandoff) {
+      return {
+        type: "objective.handoff",
+        runId: `run_objective_handoff_${objective.objectiveId}_${objective.latestHandoff.handoffKey}`,
+        agentId: "orchestrator",
+        objectiveId: objective.objectiveId,
+        title: objective.title,
+        status: objective.latestHandoff.status,
+        summary: objective.latestHandoff.summary,
+        ...(objective.latestHandoff.blocker ? { blocker: objective.latestHandoff.blocker } : {}),
+        ...(objective.latestHandoff.nextAction ? { nextAction: objective.latestHandoff.nextAction } : {}),
+        handoffKey: objective.latestHandoff.handoffKey,
+        sourceUpdatedAt: objective.latestHandoff.sourceUpdatedAt,
+      };
+    }
     const status = objectiveHandoffStatus(objective);
     if (!status) return undefined;
     const summary = optionalTrimmedString(
@@ -853,18 +919,26 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         || isRelevantShellJob(job, stream, input.objectiveId))
       .sort(compareJobsByRecency)
       .slice(0, 24);
-    const runChains = await Promise.all(
+    const collectedRunChains = await Promise.all(
       runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))),
     );
-    const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
-    const activeRunId = runIds.at(-1);
+    const scopedRunTimeline = scopeRunTimelineToObjective({
+      objectiveId: input.objectiveId,
+      runIds,
+      runChains: collectedRunChains,
+      jobs: scopedJobs,
+    });
+    const scopedRunIds = scopedRunTimeline.runIds;
+    const runChains = scopedRunTimeline.runChains;
+    const runChainsById = new Map(scopedRunIds.map((runId, index) => [runId, runChains[index]!] as const));
+    const activeRunId = scopedRunIds.at(-1);
     const activeRunLineageIds = activeRunId
       ? collectRunLineageIds([activeRunId], runChainsById, scopedJobs)
       : new Set<string>();
     const activeRunJobs = activeRunLineageIds.size > 0
       ? scopedJobs.filter((job) => jobMatchesRunIds(job, activeRunLineageIds))
       : scopedJobs.filter((job) => jobMatchesRunIds(job, new Set([activeRunId].filter(Boolean) as string[])));
-    const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
+    const activeRunIndex = activeRunId ? scopedRunIds.indexOf(activeRunId) : -1;
     const activeRun = activeRunIndex >= 0
       ? summarizeActiveRunCard({
           mode: input.mode,
@@ -880,7 +954,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     return {
       stream,
       scopedJobs,
-      runIds,
+      runIds: scopedRunIds,
       runChains,
       activeRunId,
       activeRun,
@@ -1380,9 +1454,19 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
 
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
-    const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
-    const activeRunId = runIds.at(-1) ?? input.runId;
-    const runChains = await Promise.all(runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])));
+    const requestedRunIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
+    const collectedRunChains = await Promise.all(
+      requestedRunIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])),
+    );
+    const scopedRunTimeline = scopeRunTimelineToObjective({
+      objectiveId: resolvedObjectiveId,
+      runIds: requestedRunIds,
+      runChains: collectedRunChains,
+      jobs,
+    });
+    const runIds = scopedRunTimeline.runIds;
+    const runChains = scopedRunTimeline.runChains;
+    const activeRunId = runIds.at(-1);
     const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
     const conversationByRunId = groupFactoryChatConversationByRunId(sessionChatContext?.conversation);
     const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(
@@ -2375,11 +2459,19 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       : undefined;
     const allRunIds = collectRunIds(indexChain);
     const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
-    const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
-    const activeRunId = runIds.at(-1) ?? input.runId;
-    const runChains = await Promise.all(
-      runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])),
+    const requestedRunIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
+    const collectedRunChains = await Promise.all(
+      requestedRunIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])),
     );
+    const scopedRunTimeline = scopeRunTimelineToObjective({
+      objectiveId: resolvedObjectiveId,
+      runIds: requestedRunIds,
+      runChains: collectedRunChains,
+      jobs,
+    });
+    const runIds = scopedRunTimeline.runIds;
+    const runChains = scopedRunTimeline.runChains;
+    const activeRunId = runIds.at(-1);
     const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
     const selectedObjective = resolvedObjectiveId
       ? await service.getObjective(resolvedObjectiveId).catch((err) => {
@@ -2699,6 +2791,25 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     { key: "objective.completed", label: "Completed", count: workbenchFilterCount(board, "objective.completed"), selected: selected === "objective.completed" },
   ];
 
+  const preferredWorkbenchSelectedObjectiveId = (
+    board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
+    filter: FactoryWorkbenchFilterKey,
+    preferredId?: string,
+  ): string | undefined => {
+    if (preferredId && board.objectives.some((objective) => objective.objectiveId === preferredId)) return preferredId;
+    switch (filter) {
+      case "objective.needs_attention":
+        return board.sections.needs_attention[0]?.objectiveId;
+      case "objective.queued":
+        return board.sections.queued[0]?.objectiveId;
+      case "objective.completed":
+        return board.sections.completed[0]?.objectiveId;
+      case "objective.running":
+      default:
+        return board.sections.active[0]?.objectiveId ?? board.selectedObjectiveId;
+    }
+  };
+
   const buildWorkbenchStats = (input: {
     readonly board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>;
     readonly selectedObjective?: FactorySelectedObjectiveCard;
@@ -2834,6 +2945,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             title: focus.title,
             summary: focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
             status: focus.status,
+            active: focus.active,
+            jobId: focus.jobId,
+            taskId: focus.taskId,
+            candidateId: focus.candidateId,
             lastMessage: focus.lastMessage,
             stdoutTail: focus.stdoutTail,
             stderrTail: focus.stderrTail,
@@ -2913,6 +3028,10 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
               ? objectiveFallbackSummary ?? focus.summary ?? focus.lastMessage ?? "Objective state changed."
               : focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
             status: focus.status,
+            active: focus.active,
+            jobId: focus.jobId,
+            taskId: focus.taskId,
+            candidateId: focus.candidateId,
             lastMessage: focus.lastMessage,
             stdoutTail: focus.stdoutTail,
             stderrTail: focus.stderrTail,
@@ -3004,7 +3123,9 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       selectedObjectiveId: requestedObjectiveId,
       profileId: effectiveProfileId,
     });
-    const resolvedObjectiveId = detail?.objectiveId ?? board.selectedObjectiveId ?? requestedObjectiveId;
+    const resolvedObjectiveId = detail?.objectiveId
+      ?? preferredWorkbenchSelectedObjectiveId(board, input.filter, requestedObjectiveId)
+      ?? requestedObjectiveId;
     const selectedBoardObjective = resolvedObjectiveId
       ? board.objectives.find((objective) => objective.objectiveId === resolvedObjectiveId)
       : undefined;
@@ -3667,7 +3788,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
             agentId: "factory",
             lane: "chat",
             sessionKey: `factory-chat:${stream}`,
-            singletonMode: "allow",
+            singletonMode: "steer",
             maxAttempts: 1,
             payload: {
               kind: "factory.run",

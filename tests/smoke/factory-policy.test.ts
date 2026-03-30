@@ -82,7 +82,7 @@ const latestFactoryJob = async (
 };
 
 const createFactoryService = async (opts?: {
-  readonly codexOutcome?: "approved" | "changes_requested" | "blocked";
+  readonly codexOutcome?: "approved" | "changes_requested" | "blocked" | "partial";
   readonly publishMode?: "success" | "missing_metadata" | "blocked" | "error" | "transient_then_success";
   readonly completionRemaining?: ReadonlyArray<string>;
 }): Promise<{
@@ -116,6 +116,7 @@ const createFactoryService = async (opts?: {
           const publishStructured = publishMode === "missing_metadata"
             ? {
                 summary: "Attempted to publish the PR but the final metadata was incomplete.",
+                handoff: "Publish attempted, but the final PR metadata was incomplete so the controller must block and surface the failure.",
                 prNumber: 17,
                 headRefName: "codex/objective-demo",
                 baseRefName: "main",
@@ -123,6 +124,7 @@ const createFactoryService = async (opts?: {
             : publishMode === "transient_then_success" && publishRuns.count === 1
               ? {
                   summary: "Publish blocked by network access to GitHub: the branch could not be pushed and `gh pr create` failed with `error connecting to api.github.com`.",
+                  handoff: "Publish was blocked by transient GitHub connectivity. Retry the publish worker once before giving up.",
                   prUrl: "",
                   prNumber: null,
                   headRefName: "codex/objective-demo",
@@ -131,6 +133,7 @@ const createFactoryService = async (opts?: {
             : publishMode === "blocked"
               ? {
                   summary: "Publish blocked: could not push the branch or open a GitHub PR from this environment.",
+                  handoff: "Publish could not proceed from this environment. Block the objective and surface the publish failure explicitly.",
                   prUrl: "",
                   prNumber: null,
                   headRefName: null,
@@ -138,6 +141,7 @@ const createFactoryService = async (opts?: {
                 }
             : {
                 summary: "Published PR #17.",
+                handoff: "Publish completed successfully. The objective can transition to completed with the recorded PR metadata.",
                 prUrl: "https://github.com/example/receipt/pull/17",
                 prNumber: 17,
                 headRefName: "codex/objective-demo",
@@ -154,16 +158,27 @@ const createFactoryService = async (opts?: {
             ? "Approved output ready."
             : codexOutcome === "changes_requested"
               ? "Another pass is required."
-              : "Task is blocked.",
+              : codexOutcome === "partial"
+                ? "Task produced a usable diff, but validation capture was incomplete."
+                : "Task is blocked.",
+          handoff: codexOutcome === "approved"
+            ? "Worker completed and is handing the candidate back for review."
+            : codexOutcome === "changes_requested"
+              ? "Worker needs another pass before the objective can continue."
+              : codexOutcome === "partial"
+                ? "Worker completed the requested code change, but validation capture stayed noisy so the controller should decide whether repo-side checks are sufficient."
+                : "Worker is blocked and is handing the blocker back to the controller.",
           artifacts: [],
           scriptsRun: [],
           completion: {
-            changed: codexOutcome === "approved" ? ["Updated POLICY_TEST.txt in the task workspace."] : [],
+            changed: codexOutcome === "approved" || codexOutcome === "partial" ? ["Updated POLICY_TEST.txt in the task workspace."] : [],
             proof: ["POLICY_TEST.txt was written by the worker stub."],
             remaining: completionRemaining.length > 0
               ? [...completionRemaining]
               : codexOutcome === "changes_requested"
                 ? ["Run another pass."]
+                : codexOutcome === "partial"
+                  ? ["Capture a final clean completion of validation if the orchestration layer needs a terminal success marker."]
                 : codexOutcome === "blocked"
                   ? ["Blocked."]
                   : [],
@@ -172,6 +187,8 @@ const createFactoryService = async (opts?: {
             ? null
             : codexOutcome === "changes_requested"
               ? "Run another pass."
+              : codexOutcome === "partial"
+                ? "If needed, rerun validation in a way that yields a clean terminal success marker."
               : "Blocked.",
         };
         const raw = JSON.stringify(structured);
@@ -257,6 +274,25 @@ test("factory policy: task packets tell workers to inspect objective receipts se
   expect(prompt).not.toContain("A later task in this objective owns the broad repo validation suite.");
 });
 
+test("factory policy: delivery task prompts keep publish in the controller lane", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Controller-owned publish lane",
+    prompt: "Ship the fix through a PR after the task is ready.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const prompt = await fs.readFile(String(taskJob.payload.promptPath), "utf-8");
+
+  expect(prompt).toContain("factory promote`, `git push`, or `gh pr create` from this task session.");
+  expect(prompt).toContain("The controller handles integration and PR publication after an approved candidate.");
+});
+
 test("factory policy: validation-owned task packets include the full repo checks", async () => {
   const { service, queue } = await createFactoryService();
 
@@ -298,7 +334,9 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
 
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
-  expect(prompt).toContain("Always include scriptsRun and completion.");
+  expect(prompt).toContain(`"handoff": string`);
+  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, and completion.");
+  expect(schema.required).toContain("handoff");
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
 });
@@ -329,6 +367,7 @@ test("factory policy: investigation task schema keeps scriptsRun inside report a
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
   expect(schema.properties?.scriptsRun).toBeUndefined();
+  expect(schema.required).toContain("handoff");
   expect(schema.required).not.toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(report?.properties?.scriptsRun).toBeTruthy();
@@ -375,6 +414,41 @@ test("factory policy: promotion gate blocks when task completion reports remaini
   expect(detail.blockedReason).toContain("still reports remaining work");
   expect(detail.tasks[0]?.completion?.remaining).toEqual(["Wire the final publish behavior before shipping."]);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "integration.ready_to_promote")).toBe(false);
+}, 120_000);
+
+test("factory policy: controller can clear delivery partials when repo checks resolve validation-only uncertainty", async () => {
+  const { service, queue } = await createFactoryService({
+    codexOutcome: "partial",
+    completionRemaining: [
+      "Confirm or clean up the untracked `.receipt/codex-home-runtime/` artifact if the controller requires a pristine worktree.",
+      "Capture a final clean completion of validation if the orchestration layer needs a terminal success marker.",
+    ],
+  });
+
+  const created = await service.createObjective({
+    title: "Controller-resolved partial objective",
+    prompt: "Apply a small delivery change and let the controller resolve validation-only noise.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const candidate = detail.candidates.find((item) => item.candidateId === "task_01_candidate_01");
+
+  expect(detail.status).toBe("completed");
+  expect(detail.integration.status).toBe("promoted");
+  expect(candidate?.status).toBe("integrated");
+  expect(candidate?.summary ?? "").toContain("Controller verification cleared the partial delivery handoff");
+  expect(detail.tasks[0]?.completion?.remaining ?? []).toEqual([]);
+  expect(detail.tasks[0]?.completion?.proof ?? []).toContain("Controller reran the configured checks successfully.");
 }, 120_000);
 
 test("factory policy: objectives default to higher parallel capacity and still normalize dispatch policy", async () => {
@@ -461,7 +535,7 @@ test("factory objective detail: blocked explanations stay focused on the current
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("blocked");
-  expect(detail.blockedExplanation?.receiptType).toBe("objective.blocked");
+  expect(detail.blockedExplanation?.receiptType).toBe("objective.handoff");
   expect(detail.blockedExplanation?.summary ?? "").not.toContain("Waiting tasks:");
 });
 
@@ -545,6 +619,16 @@ test("factory policy: software delivery objectives auto-publish and expose PR me
   expect(published.integration.status).toBe("promoted");
   expect(published.prUrl).toBe("https://github.com/example/receipt/pull/17");
   expect(published.prNumber).toBe(17);
+  expect(published.recentReceipts.some((receipt) =>
+    receipt.type === "worker.handoff"
+    && receipt.candidateId === "task_01_candidate_01"
+    && /integration_publish published handoff/i.test(receipt.summary)
+  )).toBe(true);
+  expect(published.recentReceipts.some((receipt) =>
+    receipt.type === "objective.handoff"
+    && /objective completed handoff/i.test(receipt.summary)
+  )).toBe(true);
+  expect(published.latestHandoff?.status).toBe("completed");
   expect(published.integration.prUrl).toBe("https://github.com/example/receipt/pull/17");
   expect(published.integration.prNumber).toBe(17);
   expect(debug.prUrl).toBe("https://github.com/example/receipt/pull/17");
@@ -607,6 +691,16 @@ test("factory policy: publish failures block the objective when PR metadata is m
   expect(detail.status).toBe("blocked");
   expect(detail.integration.status).toBe("conflicted");
   expect(detail.prUrl).toBeUndefined();
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "worker.handoff"
+    && receipt.candidateId === "task_01_candidate_01"
+    && /integration_publish failed handoff/i.test(receipt.summary)
+  )).toBe(true);
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "objective.handoff"
+    && /objective blocked handoff/i.test(receipt.summary)
+  )).toBe(true);
+  expect(detail.latestHandoff?.status).toBe("blocked");
   expect(detail.blockedReason ?? "").toContain("factory publish result missing valid prUrl");
 });
 
@@ -823,4 +917,72 @@ test("factory reducer: successful promotion clears stale blocker state", () => {
   expect(state.integration.conflictReason).toBeUndefined();
   expect(state.integration.prUrl).toBe("https://github.com/example/receipt/pull/2");
   expect(state.integration.prNumber).toBe(2);
+});
+
+test("factory reducer: resuming work clears the latest objective handoff", () => {
+  const baseCreatedAt = Date.now();
+  const state = buildState([
+    {
+      type: "objective.created",
+      objectiveId: "objective_resume_handoff",
+      title: "Resume after blocker",
+      prompt: "Continue once the blocker is resolved.",
+      channel: "results",
+      baseHash: "abc1234",
+      checks: ["bun run build"],
+      checksSource: "explicit",
+      profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+      policy: normalizeFactoryObjectivePolicy(),
+      createdAt: baseCreatedAt,
+    },
+    {
+      type: "task.added",
+      objectiveId: "objective_resume_handoff",
+      createdAt: baseCreatedAt + 1,
+      task: {
+        nodeId: "task_01",
+        taskId: "task_01",
+        taskKind: "planned",
+        title: "Resume delivery",
+        prompt: "Pick up the next attempt.",
+        workerType: "codex",
+        baseCommit: "abc1234",
+        dependsOn: [],
+        status: "pending",
+        skillBundlePaths: [],
+        contextRefs: [],
+        artifactRefs: {},
+        createdAt: baseCreatedAt + 1,
+      },
+    },
+    {
+      type: "objective.blocked",
+      objectiveId: "objective_resume_handoff",
+      reason: "Need operator guidance before continuing.",
+      summary: "Need operator guidance before continuing.",
+      blockedAt: baseCreatedAt + 2,
+    },
+    {
+      type: "objective.handoff",
+      objectiveId: "objective_resume_handoff",
+      title: "Resume after blocker",
+      status: "blocked",
+      summary: "Need operator guidance before continuing.",
+      blocker: "Need operator guidance before continuing.",
+      nextAction: "Use /react with the missing guidance.",
+      handoffKey: "handoff_resume_blocked",
+      sourceUpdatedAt: baseCreatedAt + 2,
+    },
+    {
+      type: "task.unblocked",
+      objectiveId: "objective_resume_handoff",
+      taskId: "task_01",
+      readyAt: baseCreatedAt + 3,
+    },
+  ]);
+
+  expect(state.status).toBe("planning");
+  expect(state.blockedReason).toBeUndefined();
+  expect(state.latestHandoff).toBeUndefined();
+  expect(state.workflow.tasksById.task_01?.status).toBe("ready");
 });

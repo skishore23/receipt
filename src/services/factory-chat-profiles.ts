@@ -43,6 +43,7 @@ export type FactoryChatProfile = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly handoffTargets: ReadonlyArray<string>;
   readonly dirPath: string;
   readonly mdPath: string;
   readonly mdBody: string;
@@ -92,6 +93,7 @@ type FactoryChatProfileManifest = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly handoffTargets?: ReadonlyArray<string>;
 };
 
 const REMOVED_MANIFEST_KEYS = new Set([
@@ -99,7 +101,6 @@ const REMOVED_MANIFEST_KEYS = new Set([
   "imports",
   "capabilities",
   "toolAllowlist",
-  "handoffTargets",
   "routeHints",
   "mode",
   "discoveryBudget",
@@ -127,6 +128,7 @@ const FACTORY_TOOL_ALLOWLIST = [
   "codex.logs",
   "job.control",
   "codex.run",
+  "profile.handoff",
   "factory.dispatch",
   "factory.status",
   "factory.output",
@@ -181,6 +183,7 @@ const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): Factor
       ? raw.defaultTaskExecutionMode
       : undefined,
     allowObjectiveCreation: typeof raw.allowObjectiveCreation === "boolean" ? raw.allowObjectiveCreation : undefined,
+    handoffTargets: normalizeStringList(raw.handoffTargets),
     dirPath: "",
     mdPath: "",
     mdBody: "",
@@ -257,6 +260,16 @@ const renderProfileIdentity = (profile: FactoryChatProfile): string | undefined 
   return sections.length > 0 ? sections.join("\n\n") : undefined;
 };
 
+const renderProfileHandoffs = (profile: FactoryChatProfile): string | undefined => {
+  if (profile.handoffTargets.length === 0) return undefined;
+  return [
+    "## Profile Handoffs",
+    `- Allowed handoff targets: ${profile.handoffTargets.join(", ")}`,
+    "- Use `profile.handoff` only when another profile should own the next turn of work.",
+    "- Always make the handoff reason explicit.",
+  ].join("\n");
+};
+
 const renderProfileSoul = (profile: FactoryChatProfile): string | undefined => {
   const soulBody = profile.soulBody?.trim();
   if (!soulBody) return undefined;
@@ -292,7 +305,7 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
     if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
     throw err;
   });
-  const loaded = await Promise.all(entries.map(async (entry) => {
+  const loaded: Array<FactoryChatProfile | undefined> = await Promise.all(entries.map(async (entry): Promise<FactoryChatProfile | undefined> => {
       const dirPath = path.join(profilesDir, entry);
       const stat = await fs.stat(dirPath).catch((err) => {
         if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
@@ -319,7 +332,7 @@ export const discoverFactoryChatProfiles = async (profileRoot: string): Promise<
       } satisfies FactoryChatProfile;
     }));
   return loaded
-    .filter((profile): profile is FactoryChatProfile => Boolean(profile))
+    .filter((profile): profile is FactoryChatProfile => profile !== undefined)
     .sort((a, b) => a.id.localeCompare(b.id));
 };
 
@@ -361,6 +374,7 @@ export const resolveFactoryChatProfile = async (input: {
   const profilePaths = soulPath ? [promptPath, soulPath] : [promptPath];
   const profileSoul = renderProfileSoul(root);
   const profileIdentity = renderProfileIdentity(root);
+  const profileHandoffs = renderProfileHandoffs(root);
   const systemPrompt = [
     "You are the active Factory profile in the product UI.",
     "Answer directly and use Receipt-native tools when needed; do not behave like a wrapper around another assistant.",
@@ -374,6 +388,7 @@ export const resolveFactoryChatProfile = async (input: {
     ...(profileSoul ? [profileSoul, ""] : []),
     renderObjectivePolicy(root, objectivePolicy),
     ...(profileIdentity ? ["", profileIdentity] : []),
+    ...(profileHandoffs ? ["", profileHandoffs] : []),
     "",
     `## Active Profile: ${root.label}`,
     root.mdBody.trim(),
@@ -385,8 +400,10 @@ export const resolveFactoryChatProfile = async (input: {
     imports: [],
     stack: [root],
     capabilities: [],
-    toolAllowlist: [...FACTORY_TOOL_ALLOWLIST],
-    handoffTargets: [],
+    toolAllowlist: root.handoffTargets.length > 0
+      ? [...FACTORY_TOOL_ALLOWLIST]
+      : FACTORY_TOOL_ALLOWLIST.filter((tool) => tool !== "profile.handoff"),
+    handoffTargets: root.handoffTargets,
     skills: root.skills,
     cloudProvider: root.cloudProvider,
     orchestration: {
@@ -407,6 +424,7 @@ export const resolveFactoryChatProfile = async (input: {
       objectivePolicy,
       skills: root.skills,
       cloudProvider: root.cloudProvider,
+      handoffTargets: root.handoffTargets,
     })),
     systemPrompt,
     promptPath,
