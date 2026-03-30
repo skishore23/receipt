@@ -494,10 +494,12 @@ const objectiveHandoffItem = (
   if (event.status === "completed") {
     const nextAction = event.nextAction?.trim();
     const lines = [
+      `${title} finished and is back with Chat.`,
       event.summary,
       nextAction && nextAction !== event.summary && !isGenericCompletedNextAction(nextAction)
         ? `Next: ${nextAction}`
         : "",
+      "Ask a new question in chat, or reopen the objective if you want to keep working from this result.",
     ].filter(Boolean);
     return {
       key: `${runId}-objective-handoff-${hash}`,
@@ -639,8 +641,10 @@ export const buildChatItemsForRun = (
         items.push({
           key: `${runId}-tool-${receipt.hash}`,
           kind: "objective_event",
-          title: inputObj.action === "create" ? "Objective Started" : "Objective Promoted",
-          summary: prior?.summary ?? "Objective updated",
+          title: inputObj.action === "create" ? "Sent To Background" : "Objective Promoted",
+          summary: inputObj.action === "create"
+            ? `${prior?.summary ?? "Objective started."} Chat is free for a new question while this runs in the background.`
+            : (prior?.summary ?? "Objective updated"),
           objectiveId,
         });
       } else {

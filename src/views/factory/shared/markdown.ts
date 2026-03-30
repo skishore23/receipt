@@ -20,6 +20,7 @@ const FACTORY_MARKDOWN_SECTION_HEADINGS = new Set([
 ]);
 
 const FACTORY_MARKDOWN_LIST_MARKER_RE = /^([-*+]|\d+[.)])\s+/;
+const FACTORY_MARKDOWN_KEY_VALUE_RE = /^([A-Z][A-Za-z0-9][A-Za-z0-9 /()&_.'-]{0,47}):\s+(.+)$/;
 
 const nextMeaningfulMarkdownLine = (
   lines: ReadonlyArray<string>,
@@ -129,6 +130,66 @@ const normalizeMarkdownLeadIns = (value: string): string => {
   }).join("\n");
 };
 
+const isKeyValueLine = (
+  value: string,
+): { readonly label: string; readonly body: string } | undefined => {
+  const trimmed = value.trim();
+  if (
+    !trimmed
+    || trimmed.startsWith("#")
+    || trimmed.startsWith("- ")
+    || trimmed.includes("|")
+    || /^\d+[.)]\s+/.test(trimmed)
+  ) {
+    return undefined;
+  }
+  const match = trimmed.match(FACTORY_MARKDOWN_KEY_VALUE_RE);
+  if (!match) return undefined;
+  const [, label, body] = match;
+  if (!label || !body) return undefined;
+  if (body.startsWith("`") && body.endsWith("`")) return { label, body };
+  return { label, body: body.trim() };
+};
+
+const normalizeMarkdownKeyValueBlocks = (value: string): string => {
+  const lines = value.split(/\r?\n/);
+  const normalized: string[] = [];
+  let inFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      inFence = !inFence;
+      normalized.push(line);
+      continue;
+    }
+    if (inFence) {
+      normalized.push(line);
+      continue;
+    }
+    const first = isKeyValueLine(line);
+    if (!first) {
+      normalized.push(line);
+      continue;
+    }
+    const block: Array<{ readonly label: string; readonly body: string }> = [first];
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const candidate = isKeyValueLine(lines[cursor] ?? "");
+      if (!candidate) break;
+      block.push(candidate);
+      cursor += 1;
+    }
+    if (block.length >= 2) {
+      normalized.push(...block.map((entry) => `- **${entry.label}:** ${entry.body}`));
+    } else {
+      normalized.push(`**${first.label}:** ${first.body}`);
+    }
+    index = cursor - 1;
+  }
+  return normalized.join("\n");
+};
+
 const normalizeInlineNumberedLists = (value: string): string => {
   const lines = value.split(/\r?\n/);
   let inFence = false;
@@ -159,8 +220,10 @@ export const normalizeMarkdownForDisplay = (raw: string): string => {
   if (!trimmed) return "";
   return normalizeMarkdownHeadingDepth(
     normalizeInlineNumberedLists(
-      normalizeMarkdownLeadIns(
-        normalizeMarkdownSectionHeadings(trimmed),
+      normalizeMarkdownKeyValueBlocks(
+        normalizeMarkdownLeadIns(
+          normalizeMarkdownSectionHeadings(trimmed),
+        ),
       ),
     ),
   );

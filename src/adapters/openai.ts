@@ -56,6 +56,23 @@ const extractRetryDelayMs = (err: unknown): number | null => {
   return null;
 };
 
+const parseTimeoutMs = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
+
+const structuredRequestTimeoutMs = (): number => {
+  const configured = parseTimeoutMs(process.env.RECEIPT_STRUCTURED_TIMEOUT_MS)
+    ?? parseTimeoutMs(process.env.OPENAI_STRUCTURED_TIMEOUT_MS)
+    ?? parseTimeoutMs(process.env.OPENAI_TIMEOUT_MS)
+    ?? 60_000;
+  return Math.max(100, Math.min(configured, 300_000));
+};
+
 const withRateLimitRetry = async <T>(op: () => Promise<T>): Promise<T> => {
   const maxRetries = Number.parseInt(process.env.OPENAI_MAX_RETRIES ?? "3", 10);
   const baseDelay = Number.parseInt(process.env.OPENAI_RETRY_BASE_MS ?? "500", 10);
@@ -160,6 +177,8 @@ export const llmStructured = async <Schema extends z.ZodTypeAny>(
       text: {
         format: zodTextFormat(opts.schema, opts.schemaName),
       },
+    }, {
+      timeout: structuredRequestTimeoutMs(),
     });
 
     const raw = response.output_text?.trim() ?? "";

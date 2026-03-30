@@ -525,6 +525,70 @@ test("agent fails fast when native structured action fails", async () => {
   }
 });
 
+test("agent fails fast when the structured model call hangs", async () => {
+  const dir = await mkTmp("receipt-agent-structured-timeout");
+  const dataDir = path.join(dir, "data");
+  const workspaceRoot = path.join(dir, "workspace");
+
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.mkdir(workspaceRoot, { recursive: true });
+
+  const runtime = mkRuntime(dataDir);
+  const memoryTools = mkMemoryTools();
+  const delegationTools = mkDelegationTools();
+
+  let structuredCalls = 0;
+  const result = await runAgent({
+    stream: "agents/agent",
+    runId: "structured_timeout",
+    problem: "Do anything useful.",
+    config: {
+      maxIterations: 2,
+      maxToolOutputChars: 2000,
+      memoryScope: "agent",
+      workspace: ".",
+    },
+    runtime,
+    prompts: {
+      system: "",
+      user: {
+        loop: "{{problem}}\\n{{transcript}}\\n{{memory}}\\n{{workspace}}",
+      },
+    },
+    llmText: async () => "unused",
+    llmStructured: async () => {
+      structuredCalls += 1;
+      return await new Promise(() => {});
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools,
+    workspaceRoot,
+    extraConfig: {
+      structuredTimeoutMs: 25,
+    },
+  });
+
+  try {
+    const runChain = await runtime.chain("agents/agent/runs/structured_timeout");
+    const finalStatus = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "run.status" }> } =>
+      receipt.body.type === "run.status"
+    );
+    const failure = runChain.findLast((receipt): receipt is typeof receipt & { body: Extract<AgentEvent, { type: "failure.report" }> } =>
+      receipt.body.type === "failure.report"
+    );
+
+    expect(result.status).toBe("failed");
+    expect(structuredCalls).toBe(1);
+    expect(finalStatus?.body.status).toBe("failed");
+    expect(failure?.body.failure.message ?? "").toContain("structured model call");
+    expect(failure?.body.failure.message ?? "").toContain("timed out");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("agent read tool honors receipt-style start/end aliases", async () => {
   const dir = await mkTmp("receipt-agent-read-alias");
   const dataDir = path.join(dir, "data");

@@ -186,6 +186,42 @@ const isContextOverflow = (err: unknown): boolean => {
   return /context|token|maximum context|input too large|prompt too long/i.test(message);
 };
 
+const parseTimeoutMs = (value: unknown): number | undefined => {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.floor(value);
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+const resolveStructuredDecisionTimeoutMs = (extraConfig?: Readonly<Record<string, unknown>>): number => {
+  const configured = parseTimeoutMs(extraConfig?.structuredTimeoutMs)
+    ?? parseTimeoutMs(process.env.RECEIPT_STRUCTURED_TIMEOUT_MS)
+    ?? parseTimeoutMs(process.env.OPENAI_STRUCTURED_TIMEOUT_MS)
+    ?? parseTimeoutMs(process.env.OPENAI_TIMEOUT_MS)
+    ?? 60_000;
+  return clampNumber(configured, 100, 300_000);
+};
+
+const withTimeout = async <T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> =>
+  await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+
 type ParsedAction =
   | {
       readonly thought: string;
@@ -336,6 +372,7 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
     workflowId,
     workspace: resolvedWorkspaceRoot,
   } as const;
+  const structuredDecisionTimeoutMs = resolveStructuredDecisionTimeoutMs(input.extraConfig);
   const capabilityRegistry = new AgentCapabilityRegistry({
     capabilities: [
       ...createBuiltinAgentCapabilities({
@@ -614,12 +651,16 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
       let invokeCount = 0;
       const invoke = async (promptUser: string) => {
         invokeCount += 1;
-        const result = await input.llmStructured({
-          system: prompts.system,
-          user: promptUser,
-          schema: structuredAgentActionSchema,
-          schemaName: "agent_action",
-        });
+        const result = await withTimeout(
+          input.llmStructured({
+            system: prompts.system,
+            user: promptUser,
+            schema: structuredAgentActionSchema,
+            schemaName: "agent_action",
+          }),
+          structuredDecisionTimeoutMs,
+          `structured model call (iteration ${iteration})`,
+        );
         const stage = invokeCount === 1
           ? `iteration-${iteration}.after_llm`
           : `iteration-${iteration}.after_llm_retry_${invokeCount}`;

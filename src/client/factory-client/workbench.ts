@@ -360,7 +360,7 @@ export const initFactoryWorkbenchBrowser = () => {
     '<div class="flex min-w-0 items-start justify-between gap-2">' +
       '<div class="min-w-0 flex-1">' +
         '<div class="flex flex-wrap items-center gap-2">' +
-          '<span class="text-xs font-semibold text-foreground">Live status</span>' +
+          '<span class="text-xs font-semibold text-foreground">Background handoff</span>' +
           '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + escapeHtml(status.statusLabel) + "</span>" +
         "</div>" +
         '<div class="mt-1 text-xs leading-5 text-muted-foreground">' + escapeHtml(status.summary) + "</div>" +
@@ -944,20 +944,6 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const handleWorkbenchChatSwap = (target: HTMLElement) => {
     const scrollState = captureChatScrollState();
-    const currentObjectiveId = workbenchState.appliedRoute.objectiveId ?? "";
-    const discoveredObjectiveId = target.getAttribute("data-objective-id") || "";
-    if (!currentObjectiveId && discoveredObjectiveId) {
-      const url = currentUrl();
-      if (url) {
-        url.searchParams.set("objective", discoveredObjectiveId);
-        url.searchParams.delete("thread");
-        url.searchParams.delete("focusKind");
-        url.searchParams.delete("focusId");
-        applyInlineLocation(url.href, "replace").catch(() => {
-          navigateWithFeedback(url.href);
-        });
-      }
-    }
     if (pendingOverlayHtml) {
       pendingOverlayHtml = "";
       scheduleOverlayRender();
@@ -1055,7 +1041,7 @@ export const initFactoryWorkbenchBrowser = () => {
     },
     {
       key: "summary",
-      source: "background",
+      source: "chat",
       element: workbenchSummaryBlock,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("summary", delayMs, routeKeyOverride),
     },
@@ -1109,14 +1095,14 @@ export const initFactoryWorkbenchBrowser = () => {
         updatePendingLiveStatus({
           ...pendingLiveStatus,
           statusLabel: "Working",
-          summary: "Factory is running tools and preparing the reply.",
+          summary: "Background work is in progress. You can ask the next question while updates continue here.",
         });
       }
       if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply && pendingLiveStatus.statusLabel === "Queued") {
         updatePendingLiveStatus({
           ...pendingLiveStatus,
           statusLabel: "Starting",
-          summary: "A worker picked up the run and is preparing the first response.",
+          summary: "A worker picked this up and is starting the background run.",
         });
       }
     },
@@ -1360,7 +1346,7 @@ export const initFactoryWorkbenchBrowser = () => {
       updatePendingLiveStatus("optimisticHtml" in feedback && feedback.optimisticHtml
         ? {
             statusLabel: "Queued",
-            summary: "Saving your message and queuing the Factory run.",
+            summary: "Chat accepted this and is handing it to the background.",
           }
         : null);
       scheduleOverlayRender();
@@ -1389,15 +1375,15 @@ export const initFactoryWorkbenchBrowser = () => {
               runId: body.live?.runId || pendingLiveStatus.runId,
               jobId: body.live?.jobId || pendingLiveStatus.jobId,
               summary: body.live?.jobId
-                ? "Run queued. Waiting for a worker to pick it up."
+                ? "Background handoff complete. Waiting for a worker to pick it up."
                 : pendingLiveStatus.summary,
             });
             scheduleOverlayRender();
           }
           if (body.selection?.objectiveId && /^\/(?:obj|new)\b/i.test(payload)) {
             pendingOverlayHtml = `<section class=" border border-primary/30 bg-primary/10 px-3 py-2">
-              <div class="text-xs font-semibold text-primary">Objective started</div>
-              <div class="mt-1 text-xs text-foreground">${escapeHtml(body.selection.objectiveId)}</div>
+              <div class="text-xs font-semibold text-primary">Background handoff acknowledged</div>
+              <div class="mt-1 text-xs text-foreground">Objective ${escapeHtml(body.selection.objectiveId)} is now running. You can ask the next question while it updates on the left.</div>
             </section>`;
             scheduleOverlayRender();
           }

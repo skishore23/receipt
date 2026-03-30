@@ -468,6 +468,7 @@ export type FactoryWorkbenchSummarySectionModel = {
   readonly tokenCount?: string;
   readonly stats: ReadonlyArray<FactoryWorkbenchStatModel>;
   readonly objective?: FactorySelectedObjectiveCard;
+  readonly currentRun?: FactoryLiveRunCard;
   readonly focus?: {
     readonly title: string;
     readonly summary: string;

@@ -2552,17 +2552,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     preferredId?: string,
   ): string | undefined => {
     if (preferredId && board.objectives.some((objective) => objective.objectiveId === preferredId)) return preferredId;
-    switch (filter) {
-      case "objective.needs_attention":
-        return board.sections.needs_attention[0]?.objectiveId;
-      case "objective.queued":
-        return board.sections.queued[0]?.objectiveId;
-      case "objective.completed":
-        return board.sections.completed[0]?.objectiveId;
-      case "objective.running":
-      default:
-        return board.sections.active[0]?.objectiveId ?? board.selectedObjectiveId;
-    }
+    return undefined;
   };
 
   const buildWorkbenchStats = (input: {
@@ -2695,6 +2685,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         filter: input.filter,
       }),
       objective: selectedObjective,
+      currentRun: input.activeRun,
       focus: focus
         ? {
             title: focus.title,
@@ -3041,7 +3032,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
       chatId: input.chatId,
-      objectiveId: input.selectedObjectiveId ?? discoveredObjectiveId,
+      objectiveId: input.selectedObjectiveId,
       runId: runtime.activeRunId,
       knownRunIds: runtime.runIds,
       terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
@@ -3807,7 +3798,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         async () => buildWorkbenchLink({
           profileId: requestedProfileId(c.req.raw) ?? "generalist",
           chatId: makeFactoryChatId(),
-          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
+          inspectorTab: "chat",
           detailTab: requestedWorkbenchDetailTab(c.req.raw) ?? "queue",
           filter: requestedWorkbenchFilter(c.req.raw),
         }),

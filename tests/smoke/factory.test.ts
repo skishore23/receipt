@@ -3118,6 +3118,30 @@ test("factory chat island: promotes parenthetical headings, bolds list lead-ins,
   expect(markup).toContain("<strong>Provide one of:</strong>");
 });
 
+test("factory chat island: formats compact key-value blocks into readable markdown and shows the engineer role", () => {
+  const markup = factoryChatIsland({
+    activeProfileId: "software",
+    activeProfileLabel: "Software",
+    activeProfilePrimaryRole: "Software engineer",
+    items: [{
+      key: "a3",
+      kind: "assistant",
+      body: [
+        "Status: running",
+        "Owner: worker-12",
+        "Next step: validate the failing test and post the diff.",
+      ].join("\n"),
+      meta: "running",
+    }],
+  });
+
+  expect(markup).toContain("Software engineer");
+  expect(markup).not.toContain(">Software<");
+  expect(markup).toContain("<li><strong>Status:</strong> running</li>");
+  expect(markup).toContain("<li><strong>Owner:</strong> worker-12</li>");
+  expect(markup).toContain("<li><strong>Next step:</strong> validate the failing test and post the diff.</li>");
+});
+
 test("factory sidebar island: humanizes objective slot labels and avoids repeating status in the compact meta row", () => {
   const selectedObjective = {
     objectiveId: "objective_waiting",
@@ -3440,12 +3464,13 @@ test("factory route: completed objective still surfaces the terminal summary in 
   expect(body).toContain("No active CloudWatch alarms were present across the 17 queryable regions.");
   expect(body).toContain("Demo objective");
   expect(body).toContain("Completed");
+  expect(body).toContain("Current Run");
   expect(body).toContain("Selected Objective");
   expect(body).toContain("Latest Outcome");
   expect(body).toContain("Next Operator Action");
-  expect(body).toContain("Metrics");
   expect(body).toContain("Start follow-up");
   expect(body).toContain("px-2.5 py-1.5 text-[12px]");
+  expect(body).not.toContain("Metrics");
   expect(body).not.toContain("Bottom Line");
   expect(body).not.toContain("Recommended Action");
 });
@@ -4379,26 +4404,28 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body).toContain("8m");
   expect(body).not.toContain(">Session<");
   expect(body).not.toContain(">Action Required<");
+  expect(body).toContain("Current Run");
   expect(body).toContain("Latest Outcome");
-  expect(body).toContain("Objective Contract");
-  expect(body).toContain("Aligned");
-  expect(body).toContain("Metrics");
   expect(body).toContain("Primary Focus");
   expect(body).toContain("Execution");
   expect(body).toContain("Receipts");
   expect(body).toContain("Overview");
-  expect(body).toContain("Chat");
+  expect(body).toContain("New Chat");
+  expect(body).not.toContain("Objective Chat");
   expect(body).toContain("Live objective");
   expect(body).toContain("Objective Brief");
   expect(body).toContain("Next Operator Action");
-  expect(body).toContain("Employee Profile");
-  expect(body).toContain("PROFILE.md");
-  expect(body).toContain("SOUL.md");
-  expect(body).toContain("Responsibilities");
-  expect(body).toContain("Operating Style");
-  expect(body).toContain("Decision Rules");
-  expect(body).toContain("Runtime progress and Codex logs are pinned on the live board to the left.");
-  expect(body).toContain("Task work is running in the shared thread shell.");
+  expect(body).toContain("Chat handed this work to the background.");
+  expect(body).toContain("Current run updates stay pinned on the left.");
+  expect(body).not.toContain("Objective Contract");
+  expect(body).not.toContain("Aligned");
+  expect(body).not.toContain("Metrics");
+  expect(body).not.toContain("Employee Profile");
+  expect(body).not.toContain("PROFILE.md");
+  expect(body).not.toContain("SOUL.md");
+  expect(body).not.toContain("Responsibilities");
+  expect(body).not.toContain("Operating Style");
+  expect(body).not.toContain("Decision Rules");
   expect(body).toContain('id="factory-workbench-rail-scroll"');
   expect(body).toContain('id="factory-workbench-focus-scroll"');
   expect(body).toContain('data-preserve-scroll-key="rail"');
@@ -4407,10 +4434,10 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body.match(/data-factory-profile-select="true"/g)?.length ?? 0).toBe(1);
   expect(body).toContain('data-inspector-tab="overview"');
   expect(body).toContain('data-refresh-on="sse:profile-board-refresh@300,sse:objective-runtime-refresh@300"');
-  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@320,sse:objective-runtime-refresh@320"');
+  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@320,sse:objective-runtime-refresh@320,sse:agent-refresh@180,sse:job-refresh@180"');
   expect(body).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180"');
   expect(body).toContain('data-route-key="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
-  expect(body).toContain('data-factory-href="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;inspectorTab=chat&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
+  expect(body).toContain('data-factory-href="/factory/new-chat?profile=generalist&amp;inspectorTab=chat&amp;detailTab=action&amp;filter=objective.running"');
   expect(body).not.toContain("objective=objective_done");
 });
 
@@ -4749,7 +4776,7 @@ test("factory route: selected objective chat island excludes runs from other obj
   expect(body).toContain('data-objective-id="objective_b"');
 });
 
-test("factory workbench: completed filter without an explicit objective selects a completed objective for the active profile", async () => {
+test("factory workbench: completed filter without an explicit objective keeps New Chat selected until an objective is opened", async () => {
   const activeObjective = makeRunningWorkbenchObjectiveDetail("objective_live");
   const completedObjective = {
     ...makeStubObjectiveDetail("objective_done"),
@@ -4806,33 +4833,39 @@ test("factory workbench: completed filter without an explicit objective selects 
   const shellResponse = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&detailTab=queue&filter=objective.completed");
   const shell = await shellResponse.json() as { readonly routeKey?: string };
   expect(shellResponse.status).toBe(200);
-  expect(shell.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_done&detailTab=queue&filter=objective.completed");
+  expect(shell.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&detailTab=queue&filter=objective.completed");
 
   const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&detailTab=queue&filter=objective.completed");
   const body = await response.text();
   expect(response.status).toBe(200);
+  expect(body).toContain("Current Run");
   expect(body).toContain("Selected Objective");
+  expect(body).toContain("No objective selected.");
   expect(body).toContain("Completed objective");
-  expect(body).toContain("Completed objective summary.");
-  expect(body).toContain('data-objective-id="objective_done" data-selected="true" aria-current="page"');
-  expect(body).toContain(">Selected<");
+  expect(body).toContain("Badge-free completed card");
+  expect(body).toContain('data-factory-href="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_done&amp;inspectorTab=chat&amp;detailTab=queue&amp;filter=objective.completed"');
+  expect(body).not.toContain('data-objective-id="objective_done" data-selected="true" aria-current="page"');
+  expect(body).not.toContain(">Selected<");
   const badgeFreeCardIndex = body.indexOf("Badge-free completed card");
   expect(badgeFreeCardIndex).toBeGreaterThan(-1);
   expect(body.slice(badgeFreeCardIndex, badgeFreeCardIndex + 240)).not.toContain(">Completed<");
 });
 
-test("factory workbench route: empty state points operators to /obj when no objective is selected", async () => {
+test("factory workbench route: empty state points operators to New Chat and /obj when no objective is selected", async () => {
   const app = createRouteTestApp();
 
   const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo");
   const body = await response.text();
 
   expect(response.status).toBe(200);
+  expect(body).toContain("New Chat");
   expect(body).toContain("/obj");
-  expect(body).toContain("Chat with Factory or use /obj to create an objective.");
+  expect(body).toContain("Ask a new question, or use /obj to create an objective directly.");
+  expect(body).toContain("Current Run");
   expect(body).toContain("Selected Objective");
   expect(body).toContain("No objective selected.");
   expect(body).toContain("Use chat to create a new objective or select one from the queue below.");
+  expect(body).toContain("No objective is selected. Start in New Chat to discuss the work, or select an objective from the queue to reopen its chat.");
   expect(body).toContain('data-detail-tab="queue"');
 });
 
@@ -4958,7 +4991,7 @@ test("factory route: new chat creates an isolated chat session", async () => {
   const response = await app.request("http://receipt.test/factory/new-chat?profile=generalist");
 
   expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+&detailTab=queue$/);
+  expect(response.headers.get("location")).toMatch(/^\/factory\?profile=generalist&chat=chat_[a-z0-9]+_[a-z0-9]+&inspectorTab=chat&detailTab=queue$/);
 });
 
 test("factory route: plain prompts queue a saved chat run without creating an objective", async () => {

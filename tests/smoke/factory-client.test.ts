@@ -220,13 +220,13 @@ const WORKBENCH_BACKGROUND_TRIGGER = "";
 const WORKBENCH_HEADER_TRIGGER = "sse:profile-board-refresh throttle:300ms, sse:objective-runtime-refresh throttle:300ms";
 const WORKBENCH_PROFILE_BOARD_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms";
 const WORKBENCH_RUNTIME_BLOCK_TRIGGER = "sse:objective-runtime-refresh throttle:320ms";
-const WORKBENCH_SHARED_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms, sse:objective-runtime-refresh throttle:320ms";
+const WORKBENCH_SHARED_BLOCK_TRIGGER = "sse:profile-board-refresh throttle:320ms, sse:objective-runtime-refresh throttle:320ms, sse:agent-refresh throttle:180ms, sse:job-refresh throttle:180ms";
 const WORKBENCH_CHAT_DESCRIPTOR = "sse:agent-refresh@180,sse:job-refresh@180";
 const WORKBENCH_BACKGROUND_DESCRIPTOR = "";
 const WORKBENCH_HEADER_DESCRIPTOR = "sse:profile-board-refresh@300,sse:objective-runtime-refresh@300";
 const WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320";
 const WORKBENCH_RUNTIME_BLOCK_DESCRIPTOR = "sse:objective-runtime-refresh@320";
-const WORKBENCH_SHARED_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
+const WORKBENCH_SHARED_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320,sse:agent-refresh@180,sse:job-refresh@180";
 
 const workbenchHeaderPath = (search: string) => `/factory/island/workbench/header${search}`;
 
@@ -1394,7 +1394,7 @@ test("factory workbench client: profile-board and objective-runtime events refre
   await flushAsync(380);
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=activity")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=objectives")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=history")).toHaveLength(1);
@@ -1405,20 +1405,25 @@ test("factory workbench client: profile-board and objective-runtime events refre
   await flushAsync(380);
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(2);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=activity")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=objectives")).toHaveLength(1);
   expect(document.body.scrollTop).toBe(220);
+
+  chatSource()?.emit("profile-board-refresh", "generalist");
+  await flushAsync(380);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(1);
 
   chatSource()?.emit("agent-refresh", "chat_demo");
   await flushAsync(220);
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(2);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
 });
 
 test("factory workbench client: SSE refresh routing follows data-refresh-on declarations", async () => {
-  const { backgroundSource, fetchCalls } = await createWorkbenchHarness({
+  const { chatSource, fetchCalls } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
     beforeBoot: ({
       workbenchHeader,
@@ -1439,7 +1444,7 @@ test("factory workbench client: SSE refresh routing follows data-refresh-on decl
     },
   });
 
-  backgroundSource()?.emit("summary-only", "objective_demo");
+  chatSource()?.emit("summary-only", "objective_demo");
   await flushAsync();
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(1);
@@ -1690,22 +1695,22 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   textarea.selectionStart = textarea.value.length;
   form.dispatchEvent(new MockEvent({ type: "submit", target: form }));
 
-  expect(status.textContent).toBe("Sending to chat...");
-  expect(optimistic.innerHTML).toContain("Sending to chat");
+  expect(status.textContent).toBe("Handing off to the background...");
+  expect(optimistic.innerHTML).toContain("Handing off to background");
   await flushAsync(140);
 
   expect(historyState.pushed).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo");
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&detailTab=action");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo");
-  expect(optimistic.innerHTML).toContain("Run queued. Waiting for a worker to pick it up.");
+  expect(optimistic.innerHTML).toContain("Background handoff complete. Waiting for a worker to pick it up.");
   expect(optimistic.innerHTML).toContain("job_demo");
   expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&detailTab=action")).toBe(true);
 
   chatSource()?.emit("agent-refresh", "run_demo");
   await flushAsync(220);
-  expect(optimistic.innerHTML).toContain("Factory is running tools and preparing the reply.");
+  expect(optimistic.innerHTML).toContain("Background work is in progress. You can ask the next question while updates continue here.");
 
   textarea.value = "/obj Build the new deployment review objective.";
   textarea.selectionStart = textarea.value.length;

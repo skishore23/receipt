@@ -122,17 +122,17 @@ const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "work
   const title = mode === "thread"
     ? "Updating thread"
     : mode === "workbench-chat"
-    ? "Sending to chat"
+    ? "Handing off to background"
     : "Queued thread";
   const detail = mode === "thread"
     ? "Applying your note to this thread..."
     : mode === "workbench-chat"
-    ? "Keeping the operator conversation moving..."
+    ? "Chat is handing this work to the background. You can ask the next question while the run updates on the left."
     : "Creating the thread and starting work...";
   const statusLabel = mode === "thread"
     ? "Updating"
     : mode === "workbench-chat"
-    ? "Chat"
+    ? "Background"
     : "Queued";
   const statusMeta = mode === "thread" ? "Updated just now" : "Queued just now";
   return '<section class="flex justify-end">' +
@@ -207,7 +207,7 @@ export const composerFeedback = (
     return {
       buttonLabel: "Sending...",
       optimisticHtml: renderOptimisticPrompt(payload, "workbench-chat"),
-      status: "Sending to chat...",
+      status: "Handing off to the background...",
     };
   }
   return {

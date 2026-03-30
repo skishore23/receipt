@@ -147,6 +147,9 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.systemPrompt).toContain("You are the active Factory profile in the product UI.");
   expect(resolved.systemPrompt).toContain("Sound human.");
   expect(resolved.systemPrompt).toContain("Use prior transcript, receipts, and memory for facts and context");
+  expect(resolved.systemPrompt).toContain("Format replies for the product chat UI.");
+  expect(resolved.systemPrompt).toContain("Do not dump raw JSON, receipt payloads, or command output into chat");
+  expect(resolved.systemPrompt).toContain("Infrastructure answers should sound like an infra engineer");
   expect(resolved.systemPrompt).toContain("treat that as genuine self-reflection");
   expect(resolved.systemPrompt).toContain("## Personality and Voice");
   expect(resolved.systemPrompt).toContain("evolve with the active profile and relevant skills");

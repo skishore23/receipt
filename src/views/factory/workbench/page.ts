@@ -205,7 +205,7 @@ const workbenchBlockRefreshOn = (
 
 const workbenchComposerPlaceholder = (objectiveId?: string): string => objectiveId
   ? "Chat with Factory, use /obj to create a new objective, or use /react to update the selected objective."
-  : "Chat with Factory or use /obj to create an objective.";
+  : "Ask a new question, or use /obj to create an objective directly.";
 
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
@@ -231,7 +231,7 @@ const workbenchComposerHelperText = (input: {
   readonly selectedObjective?: Pick<FactorySelectedObjectiveCard, "status">;
 }): string => {
   const selected = input.selectedObjective;
-  if (!input.objectiveId && !selected) return "Use /obj to create directly.";
+  if (!input.objectiveId && !selected) return "Ask a new question or use /obj to create directly.";
   if (selected?.status === "blocked") {
     return "Selected objective is blocked. Use /react <guidance> to continue it, /cancel to stop it, or plain text to stay in chat.";
   }
@@ -280,6 +280,7 @@ const objectiveHref = (
   ...input,
   profileId: profileId ?? input.profileId,
   objectiveId,
+  inspectorTab: objectiveId ? "chat" : input.inspectorTab,
   focusKind: focus?.focusKind,
   focusId: focus?.focusId,
 })}`;
@@ -720,17 +721,64 @@ const renderSummarySection = (
   section: FactoryWorkbenchSummarySectionModel,
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
-  if (section.empty || !section.objective) {
-    return `<section class="border border-border bg-card px-5 py-5">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
-      <div class="mt-2 text-lg font-semibold text-foreground">No objective selected.</div>
-      <div class="mt-2 max-w-[68ch] text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
-      <div class="mt-4 border border-border bg-muted/25 px-4 py-3 text-sm leading-6 text-muted-foreground">
-        Use chat to create a new objective with <code>/obj</code> or select one from the queue below.
+  const objective = section.objective;
+  const currentRunStatus = section.focus?.status ?? section.currentRun?.status ?? objective?.status ?? "idle";
+  const currentRunLabel = titleCaseLabel(currentRunStatus) || "Idle";
+  const currentRunTitle = section.focus?.title
+    ?? objective?.title
+    ?? section.currentRun?.lastToolName
+    ?? section.currentRun?.summary
+    ?? (section.currentRun ? `Run ${section.currentRun.runId}` : "No background run in flight");
+  const currentRunSummary = truncate(
+    section.focus?.summary
+      ?? section.focus?.lastMessage
+      ?? section.currentRun?.lastToolSummary
+      ?? section.currentRun?.summary
+      ?? objective?.blockedReason
+      ?? objective?.summary
+      ?? "Send a message from New Chat and the current run will stay pinned here.",
+    180,
+  );
+  const currentRunMeta = [
+    section.currentRun?.runId ? `Run ${section.currentRun.runId}` : undefined,
+    section.currentRun?.updatedAt ? `Updated ${formatTs(section.currentRun.updatedAt)}` : undefined,
+    section.currentRun?.steps?.length
+      ? `${section.currentRun.steps.length} step${section.currentRun.steps.length === 1 ? "" : "s"}`
+      : undefined,
+    objective?.objectiveId ? `Objective ${objective.objectiveId}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const currentRunGuidance = section.currentRun
+    ? objective
+      ? "Chat handed this work to the background. Use New Chat for the next question, or reopen the objective chat from the queue."
+      : "This run is now in the background. You can ask the next question while progress keeps updating here."
+    : objective
+      ? "No task is running right now. Reopen the objective chat from the queue when you want to continue it."
+      : "Start in New Chat to hand work off, or pick an objective from the queue to reopen its chat.";
+  const currentRunCard = `<section class="border border-border bg-muted/25 px-4 py-4">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Current Run</div>
+        <div class="mt-2 text-sm font-semibold leading-6 text-foreground">${esc(currentRunTitle)}</div>
       </div>
+      ${badge(currentRunLabel, toneForValue(currentRunStatus))}
+    </div>
+    <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(currentRunSummary)}</div>
+    <div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(currentRunGuidance)}</div>
+    ${currentRunMeta.length > 0 ? `<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+      ${currentRunMeta.map((value) => `<span class="border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
+    </div>` : ""}
+    ${section.focus ? renderLiveFocusControls(routeContext, section.focus) : ""}
+  </section>`;
+  if (section.empty || !objective) {
+    return `<section class="space-y-4 border border-border bg-card px-5 py-5">
+      ${currentRunCard}
+      <section class="border border-border bg-background px-4 py-4">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
+        <div class="mt-2 text-lg font-semibold text-foreground">No objective selected.</div>
+        <div class="mt-2 max-w-[68ch] text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
+      </section>
     </section>`;
   }
-  const objective = section.objective;
   const displayState = objective.displayState ?? titleCaseLabel(objective.status) ?? "Running";
   const metrics = [
     objective.profileLabel ? `Assignee: ${objective.profileLabel}` : undefined,
@@ -750,6 +798,7 @@ const renderSummarySection = (
   ].filter(Boolean).join("");
   const compactStats = section.stats.slice(0, 4);
   return `<section class="space-y-4 border border-border bg-card px-5 py-5">
+    ${currentRunCard}
     <div class="space-y-4">
       <div class="min-w-0">
         <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
@@ -762,43 +811,29 @@ const renderSummarySection = (
       </div>
       ${actions ? `<div class="flex flex-wrap items-center gap-2">${actions}</div>` : ""}
     </div>
-    <div class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
-      <div class="space-y-3">
+    <div class="grid gap-3 xl:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
+      <section class="space-y-3">
         <section class="border border-border bg-muted/25 px-4 py-3">
-        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Outcome</div>
-        <div class="mt-2 text-sm leading-6 text-foreground">${esc(latestOutcome)}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Outcome</div>
+          <div class="mt-2 text-sm leading-6 text-foreground">${esc(latestOutcome)}</div>
         </section>
         <section class="border border-border bg-muted/25 px-4 py-3">
-        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Next Operator Action</div>
-        <div class="mt-2 text-sm leading-6 text-foreground">${esc(nextOperatorAction)}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Next Operator Action</div>
+          <div class="mt-2 text-sm leading-6 text-foreground">${esc(nextOperatorAction)}</div>
         </section>
-        ${renderLifecycleStrip(objective)}
         ${section.latestDecisionSummary ? `<section class="border border-border bg-muted/25 px-4 py-3">
           <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Decision</div>
           <div class="mt-2 text-sm leading-6 text-foreground">${esc(section.latestDecisionSummary)}</div>
         </section>` : ""}
-        ${renderObjectiveContractSnapshot(objective)}
-      </div>
-      <aside class="space-y-4">
-        <section class="border border-border bg-muted/25 px-4 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Metrics</div>
-          <div class="mt-3 grid gap-2">
-            ${compactStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
-              <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
-              <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
-            </div>`).join("")}
-          </div>
-        </section>
-        ${section.focus ? `<section class="border border-border bg-muted/25 px-4 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Live Focus</div>
-          <div class="mt-2 flex flex-wrap items-center gap-2">
-            <div class="text-sm font-semibold text-foreground">${esc(section.focus.title)}</div>
-            ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
-          </div>
-          <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(section.focus.summary)}</div>
-          ${renderLiveFocusControls(routeContext, section.focus)}
-        </section>` : ""}
-        ${renderObjectiveEvidenceSnapshot(objective)}
+      </section>
+      <aside class="border border-border bg-muted/25 px-4 py-3">
+        <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Snapshot</div>
+        <div class="mt-3 grid gap-2">
+          ${compactStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
+            <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
+          </div>`).join("")}
+        </div>
       </aside>
     </div>
   </section>`;
@@ -977,9 +1012,16 @@ const renderWorkbenchBlockIsland = (
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const projections = workbenchBlockProjections(block);
+  const refreshOn = block.key === "summary"
+    ? [
+        ...workbenchBlockRefreshOn(projections),
+        { event: "agent-refresh", throttleMs: 180 },
+        { event: "job-refresh", throttleMs: 180 },
+      ]
+    : workbenchBlockRefreshOn(projections);
   return `<div id="factory-workbench-block-${esc(block.key)}" class="min-w-0" data-workbench-projections="${esc(projections.join(" "))}" ${liveIslandAttrs({
     path: workbenchBlockPath(routeContext, block.key),
-    refreshOn: workbenchBlockRefreshOn(projections),
+    refreshOn,
   })}>
     ${renderBlock(block, routeContext)}
   </div>`;
@@ -1034,9 +1076,10 @@ export const factoryWorkbenchWorkspaceIsland = (
   const leftDetailTab = workspace.detailTab === "review" ? "review" : "action";
   const activityBlock = workspace.blocks.find((block) => block.key === "activity");
   const summaryBlock = showSummary ? workspace.blocks.find((block) => block.key === "summary") : undefined;
-  const liveBlocks = leftDetailTab === "review"
-    ? (activityBlock ? [activityBlock] : (summaryBlock ? [summaryBlock] : []))
-    : (summaryBlock ? [summaryBlock] : (activityBlock ? [activityBlock] : []));
+  const liveBlocks = [
+    ...(summaryBlock ? [summaryBlock] : []),
+    ...(leftDetailTab === "review" && activityBlock ? [activityBlock] : []),
+  ];
   const feedBlocks = workspace.blocks.filter((block) =>
     block.key !== "summary" && block.key !== "activity",
   );
@@ -1172,11 +1215,9 @@ const renderEmployeeOverviewPanel = (
       ...(objective.secondaryActions ?? []).map((action) => renderWorkbenchActionButton(routeContext, action)),
     ].filter(Boolean).join("")
     : `<a href="${esc(focusHref)}" data-factory-href="${esc(focusHref)}" class="${workbenchPrimaryActionClass}">Message engineer</a>`;
-  const runtimeNote = model.activeRun || model.activeCodex || (model.liveChildren?.length ?? 0) > 0
-    ? `<div class="border border-border bg-muted/25 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
-      Runtime progress and Codex logs are pinned on the live board to the left.
-    </div>`
-    : "";
+  const overviewNote = model.activeRun || model.activeCodex || (model.liveChildren?.length ?? 0) > 0
+    ? "Current run updates stay pinned on the left."
+    : "Pick an objective from the queue when you want its dedicated chat.";
   return `<div class="space-y-4">
     ${objective ? `<section class="border border-border bg-card px-4 py-4">
       <div class="flex items-start justify-between gap-3">
@@ -1194,20 +1235,12 @@ const renderEmployeeOverviewPanel = (
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Next Operator Action</div>
         <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.nextAction ?? "Ask chat for the next step.")}</div>
       </div>
-      ${objective.latestDecisionSummary ? `<div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Latest Decision</div>
-        <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.latestDecisionSummary)}</div>
-      </div>` : ""}
-      ${runtimeNote ? `<div class="mt-3">${runtimeNote}</div>` : ""}
+      <div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(overviewNote)}</div>
       <div class="mt-4 flex flex-wrap gap-2">${actions}</div>
     </section>` : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
-      No objective is selected. Start in chat to discuss the work, or promote a concrete request into tracked execution.
+      No objective is selected. Start in New Chat to discuss the work, or select an objective from the queue to reopen its chat.
       <div class="mt-4">${actions}</div>
     </section>`}
-    ${renderEmployeeProfilePanel(model, {
-      sectionLimit: 6,
-      includeTools: true,
-    })}
   </div>`;
 };
 
@@ -1222,9 +1255,9 @@ export const factoryWorkbenchChatIsland = (
         sectionLabel: "Chat",
         objectiveHref: (objectiveId) => objectiveHref(routeContext, objectiveId),
         emptyState: {
-          title: "Start a conversation.",
-          message: "Use chat to discuss work, ask Factory questions, or use /obj to create an objective directly.",
-          detail: "Objective links created from chat stay clickable and update the workbench without replacing the chat session.",
+          title: "Start a new chat.",
+          message: "Use New Chat to hand off work, ask Factory questions, or use /obj to create an objective directly.",
+          detail: "When work is handed to the background, progress stays pinned on the left and chat stays free for the next question.",
         },
       })}`
     : renderEmployeeOverviewPanel(model, routeContext);
@@ -1234,7 +1267,7 @@ export const factoryWorkbenchChatIsland = (
 };
 
 const isSummaryVisible = (workspace: FactoryWorkbenchWorkspaceModel): boolean =>
-  workspace.filter === "objective.running" || Boolean(workspace.selectedObjective);
+  true;
 
 export const factoryWorkbenchBlockIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
@@ -1319,6 +1352,15 @@ const renderWorkbenchChatHeader = (
     focusId: model.focusId,
     filter: model.filter,
   };
+  const newChatHref = `/factory/new-chat?${new URLSearchParams({
+    profile: model.activeProfileId,
+    inspectorTab: "chat",
+    detailTab: model.detailTab,
+    filter: model.filter,
+  }).toString()}`;
+  const newChatClass = model.inspectorTab === "chat" && !model.objectiveId
+    ? "border-primary/20 bg-primary/10 text-primary"
+    : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground";
   return `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
     <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       ${resolvedRole
@@ -1327,7 +1369,7 @@ const renderWorkbenchChatHeader = (
     </div>
     <div class="flex flex-wrap items-center gap-1.5">
       ${renderInspectorTabLink(routeContext, "overview", "Overview", true)}
-      ${renderInspectorTabLink(routeContext, "chat", "Chat", true)}
+      <a href="${esc(newChatHref)}" data-factory-href="${esc(newChatHref)}" class="inline-flex items-center justify-center border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${newChatClass}">New Chat</a>
       <a href="/receipt" class="inline-flex items-center px-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition hover:text-foreground">Receipts</a>
     </div>
   </div>`;
