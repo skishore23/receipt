@@ -5,9 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { jsonlQueue, type JsonlQueue, type QueueJob } from "../adapters/jsonl-queue";
 import type { FactoryReceiptAuditReport } from "./audit";
 import type { FactoryReceiptInvestigation } from "./investigate";
 import { resolveBunRuntime } from "../lib/runtime-paths";
+import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job";
+import { createRuntime } from "@receipt/core/runtime";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -79,6 +83,47 @@ const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> =>
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+const RESUME_TIMEOUT_MS = 120_000;
+const ACTIVE_JOB_WAIT_TIMEOUT_MS = RESUME_TIMEOUT_MS;
+const ACTIVE_JOB_WAIT_POLL_MS = 400;
+const LIVE_GUIDANCE_WINDOW_MS = 20_000;
+
+const isActiveJobStatus = (status?: string): boolean =>
+  status === "queued" || status === "leased" || status === "running";
+
+const createExperimentQueue = (dataDir: string): JsonlQueue =>
+  jsonlQueue({
+    runtime: createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dataDir),
+      jsonBranchStore(dataDir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    ),
+    stream: "jobs",
+    watchDir: dataDir,
+  });
+
+const isObjectiveTaskJob = (job: QueueJob, objectiveId: string): boolean =>
+  job.payload.kind === "factory.task.run" && job.payload.objectiveId === objectiveId;
+
+export const findActiveObjectiveJobId = (
+  jobs: ReadonlyArray<QueueJob>,
+  objectiveId: string,
+): string | undefined =>
+  jobs.find((job) => isObjectiveTaskJob(job, objectiveId) && isActiveJobStatus(job.status))?.id;
+
+const summarizeRecentObjectiveJobs = (
+  jobs: ReadonlyArray<QueueJob>,
+  objectiveId: string,
+): string | undefined => {
+  const recent = jobs
+    .filter((job) => isObjectiveTaskJob(job, objectiveId))
+    .slice(0, 4)
+    .map((job) => `${job.id}:${job.status}`);
+  return recent.length > 0 ? recent.join(", ") : undefined;
+};
 
 const transcriptLabelForAttempt = (label: string, attempt: number): string =>
   attempt > 1 ? `${label} (attempt ${attempt})` : label;
@@ -203,7 +248,7 @@ const createLongRunCodexStub = async (root: string): Promise<string> => {
     "  if (!hasLiveGuidance) {",
     "    fs.writeFileSync(lastMessagePath, 'Waiting for live operator guidance.\\n', 'utf8');",
     "    process.stdout.write(JSON.stringify({ type: 'turn.started', taskId, summary: 'Waiting for live operator guidance.' }) + '\\n');",
-    "    await sleep(5000);",
+    `    await sleep(${LIVE_GUIDANCE_WINDOW_MS});`,
     "    const fallback = {",
     "      outcome: 'blocked',",
     "      summary: 'Live operator guidance did not arrive before the attempt ended.',",
@@ -293,32 +338,19 @@ const createLongRunCodexStub = async (root: string): Promise<string> => {
 };
 
 const waitForActiveJobId = async (
-  transcript: TranscriptEntry[],
-  env: NodeJS.ProcessEnv,
+  queue: JsonlQueue,
   objectiveId: string,
 ): Promise<string> => {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 30_000) {
-    const inspect = await runCli(transcript, "factory inspect live", [
-      "factory",
-      "inspect",
-      objectiveId,
-      "--panel",
-      "live",
-      "--json",
-      "--repo-root",
-      env.RECEIPT_EXPERIMENT_REPO_ROOT ?? "",
-    ], env);
-    const payload = JSON.parse(inspect.stdout) as {
-      readonly data?: {
-        readonly recentJobs?: ReadonlyArray<{ readonly id: string; readonly status?: string }>;
-      };
-    };
-    const active = payload.data?.recentJobs?.find((job) => job.status === "queued" || job.status === "leased" || job.status === "running");
-    if (active?.id) return active.id;
-    await new Promise((resolve) => setTimeout(resolve, 400));
+  let recentSummary: string | undefined;
+  while (Date.now() - startedAt < ACTIVE_JOB_WAIT_TIMEOUT_MS) {
+    const jobs = await queue.listJobs({ limit: 100 });
+    recentSummary = summarizeRecentObjectiveJobs(jobs, objectiveId);
+    const activeJobId = findActiveObjectiveJobId(jobs, objectiveId);
+    if (activeJobId) return activeJobId;
+    await sleep(ACTIVE_JOB_WAIT_POLL_MS);
   }
-  throw new Error(`Timed out waiting for an active Factory job for ${objectiveId}`);
+  throw new Error(`Timed out waiting for an active Factory job for ${objectiveId}${recentSummary ? ` (${recentSummary})` : ""}`);
 };
 
 const renderExperimentSummaryText = (report: FactoryLongRunExperimentReport): string => {
@@ -410,6 +442,7 @@ export const runFactoryLongRunExperiment = async (
   };
   const objectiveId = created.objectiveId || created.objective?.objectiveId;
   if (!objectiveId) throw new Error("factory create did not return an objectiveId");
+  const queue = createExperimentQueue(dataDir);
 
   const resume = spawnCli("factory resume", [
     "factory",
@@ -420,7 +453,7 @@ export const runFactoryLongRunExperiment = async (
     sandboxRoot,
   ], env);
 
-  const activeJobId = await waitForActiveJobId(transcript, env, objectiveId);
+  const activeJobId = await waitForActiveJobId(queue, objectiveId);
   await new Promise((resolve) => setTimeout(resolve, 150));
   await runCli(transcript, "factory steer", [
     "factory",
@@ -448,8 +481,8 @@ export const runFactoryLongRunExperiment = async (
     new Promise<TranscriptEntry>((_, reject) => {
       const timer = setTimeout(() => {
         resume.child.kill("SIGTERM");
-        reject(new Error("factory resume timed out after 120000ms"));
-      }, 120_000);
+        reject(new Error(`factory resume timed out after ${RESUME_TIMEOUT_MS}ms`));
+      }, RESUME_TIMEOUT_MS);
       resume.child.on("close", () => clearTimeout(timer));
     }),
   ]);

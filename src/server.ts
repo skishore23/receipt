@@ -37,6 +37,7 @@ import { runOrchestrator, normalizeFactoryChatConfig, runFactoryCodexJob } from 
 import { emitToContinuedRun, resolveContinuedRunTarget } from "./agents/run-target";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime";
 import { FACTORY_CONTROL_AGENT_ID, type FactoryService } from "./services/factory-service";
+import { shouldQueueObjectiveAudit, shouldQueueObjectiveControlReconcile } from "./services/factory-job-gates";
 import { loadAgentRoutes } from "./framework/agent-loader";
 import { SseHub } from "./framework/sse-hub";
 import { makeEventId, text } from "./framework/http";
@@ -47,7 +48,7 @@ import { resolveFactoryRuntimeConfig } from "./factory-cli/config";
 import {
   renderFactoryStreamingResetFragment,
   renderFactoryStreamingTokenFragment,
-} from "./views/factory-chat";
+} from "./views/factory/transcript";
 import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "./db/client";
 
 // ============================================================================
@@ -204,24 +205,18 @@ let factoryServiceRef: FactoryService | undefined;
 
 const shouldQueueFactoryTaskReconcile = async (objectiveId: string, sourceUpdatedAt: number): Promise<boolean> => {
   const queue = queueImpl;
-  if (!queue) return true;
-  const recentJobs = await queue.listJobs({ limit: 200 });
-  const relatedControls = recentJobs
-    .filter((job) =>
-      job.agentId === FACTORY_CONTROL_AGENT_ID
-      && job.payload.kind === "factory.objective.control"
-      && job.payload.objectiveId === objectiveId)
-    .sort((left, right) =>
-      right.updatedAt - left.updatedAt
-      || right.createdAt - left.createdAt
-      || right.id.localeCompare(left.id)
-    );
-  const latest = relatedControls[0];
-  if (!latest) return true;
-  if (latest.status === "queued" || latest.status === "leased" || latest.status === "running") {
-    return false;
-  }
-  return latest.updatedAt < sourceUpdatedAt;
+  const factoryService = factoryServiceRef;
+  const [recentJobs, detail] = await Promise.all([
+    queue?.listJobs({ limit: 200 }) ?? Promise.resolve([]),
+    factoryService?.getObjective(objectiveId).catch(() => undefined) ?? Promise.resolve(undefined),
+  ]);
+  return shouldQueueObjectiveControlReconcile({
+    controlAgentId: FACTORY_CONTROL_AGENT_ID,
+    objectiveId,
+    recentJobs,
+    sourceUpdatedAt,
+    objectiveInactive: detail != null && isTerminalObjectiveStatus(detail.status),
+  });
 };
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
@@ -229,27 +224,12 @@ const isTerminalObjectiveStatus = (status: unknown): boolean =>
 
 const shouldQueueFactoryObjectiveAudit = async (objectiveId: string, objectiveUpdatedAt: number): Promise<boolean> => {
   const queue = queueImpl;
-  if (!queue) return true;
-  const recentJobs = await queue.listJobs({ limit: 200 });
-  const relatedAudits = recentJobs
-    .filter((job) =>
-      job.agentId === FACTORY_CONTROL_AGENT_ID
-      && job.payload.kind === "factory.objective.audit"
-      && job.payload.objectiveId === objectiveId)
-    .sort((left, right) =>
-      right.updatedAt - left.updatedAt
-      || right.createdAt - left.createdAt
-      || right.id.localeCompare(left.id)
-    );
-  const latest = relatedAudits[0];
-  if (!latest) return true;
-  if (latest.status === "queued" || latest.status === "leased" || latest.status === "running") {
-    return false;
-  }
-  const latestObjectiveUpdatedAt = typeof latest.payload.objectiveUpdatedAt === "number" && Number.isFinite(latest.payload.objectiveUpdatedAt)
-    ? latest.payload.objectiveUpdatedAt
-    : 0;
-  return latestObjectiveUpdatedAt < objectiveUpdatedAt;
+  return shouldQueueObjectiveAudit({
+    controlAgentId: FACTORY_CONTROL_AGENT_ID,
+    objectiveId,
+    objectiveUpdatedAt,
+    recentJobs: queue ? await queue.listJobs({ limit: 200 }) : [],
+  });
 };
 
 const baseQueue = jsonlQueue({

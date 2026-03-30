@@ -1107,17 +1107,33 @@ const readJob = async (
     asString(asRecord(asRecord(payload.profile)?.objectivePolicy)?.repoRoot),
     `/workspace/${path.basename(repoRoot)}`,
   ]);
-  const resolvePath = (candidate: string | undefined): {
+  const resolvePath = async (candidate: string | undefined): Promise<{
     readonly originalPath?: string;
     readonly resolvedPath?: string;
-  } => rewriteRepoPath(repoRoot, candidate, payloadRoots);
+  }> => {
+    const original = candidate?.trim();
+    if (!original) return {};
+    if (path.isAbsolute(original) && await fileExists(original)) {
+      return { originalPath: original, resolvedPath: original };
+    }
+    return rewriteRepoPath(repoRoot, original, payloadRoots);
+  };
 
-  const manifestPath = resolvePath(asString(payload.manifestPath));
-  const contextPackPath = resolvePath(asString(payload.contextPackPath));
-  const resultPath = resolvePath(asString(payload.resultPath));
-  const lastMessagePath = resolvePath(asString(payload.lastMessagePath));
-  const stdoutPath = resolvePath(asString(payload.stdoutPath));
-  const stderrPath = resolvePath(asString(payload.stderrPath));
+  const [
+    manifestPath,
+    contextPackPath,
+    resultPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+  ] = await Promise.all([
+    resolvePath(asString(payload.manifestPath)),
+    resolvePath(asString(payload.contextPackPath)),
+    resolvePath(asString(payload.resultPath)),
+    resolvePath(asString(payload.lastMessagePath)),
+    resolvePath(asString(payload.stdoutPath)),
+    resolvePath(asString(payload.stderrPath)),
+  ]);
 
   const taskRun = asString(payload.kind) === "factory.task.run"
     ? {

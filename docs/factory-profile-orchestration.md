@@ -69,10 +69,10 @@ Profiles do not replace Factory state. They provide a customizable front door in
 ```mermaid
 flowchart LR
   Operator["Operator"] --> UI["/factory web UI"]
-  UI --> Route["factory route\nsrc/agents/factory.agent.ts"]
+  UI --> Route["factory route\nsrc/agents/factory/route/handlers.ts"]
   Route --> Resolver["profile resolver\nsrc/services/factory-chat-profiles.ts"]
   Resolver --> Profiles["profiles/<id>/PROFILE.md"]
-  Route --> Agent["Factory chat runner\nsrc/agents/factory-chat.ts"]
+  Route --> Agent["Factory chat runner\nsrc/agents/factory/chat/run.ts"]
 
   Agent --> Memory["receipt memory"]
   Agent --> Queue["jobs queue"]
@@ -178,7 +178,7 @@ This gives a clear override shape: imported profiles provide shared behavior, an
 
 ### Factory chat runner
 
-The profile runtime lives in `src/agents/factory-chat.ts`.
+The profile runtime lives in `src/agents/factory/chat/run.ts`.
 
 It wraps the generic Receipt agent runner with Factory-specific behavior:
 
@@ -199,7 +199,7 @@ The loop is intentionally constrained:
 
 ### Factory route and UI
 
-The `/factory` route in `src/agents/factory.agent.ts` turns profile state into the chat shell.
+The `/factory` route in `src/agents/factory/route/handlers.ts` turns profile state into the chat shell.
 
 The current shell exposes:
 
@@ -297,7 +297,7 @@ Those values are emitted into startup receipts so the run can later explain:
 
 Profiles do not get every tool by default. They get only what `toolAllowlist` permits.
 
-The current Factory-specific tools exposed by `src/agents/factory-chat.ts` are:
+The current Factory-specific tools exposed by `src/agents/factory/chat/tools.ts` are:
 
 - `agent.delegate`
 - `agent.status`
@@ -482,9 +482,9 @@ sequenceDiagram
 
 - `src/services/factory-chat-profiles.ts`
   - profile discovery, selection, imports, prompt assembly, resolved hash
-- `src/agents/factory-chat.ts`
+- `src/agents/factory/chat/run.ts`
   - profile-aware agent runner, tool registry, async orchestration tools
-- `src/agents/factory/route.ts`
+- `src/agents/factory/route/handlers.ts`
   - `/factory` route, profile-aware shell model, UI islands, events
   - `/factory/workbench` and `/factory/control` compatibility redirects
   - `/factory/background/events`, `/factory/chat/events`, and objective-scoped workbench islands

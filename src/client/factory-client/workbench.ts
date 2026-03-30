@@ -9,6 +9,10 @@ import {
   renderStreamingReply,
 } from "./live-updates";
 import {
+  createQueuedRefreshRunner,
+  createReactivePushRouter,
+} from "./reactive";
+import {
   DEFAULT_COMMANDS,
   asRecord,
   asString,
@@ -78,49 +82,14 @@ type WorkbenchFragmentKind =
   | "objectives"
   | "history";
 
-type WorkbenchRefreshSpec = {
-  readonly kind: "sse" | "body";
-  readonly event: string;
-  readonly throttleMs?: number;
-};
-
 type WorkbenchRefreshSource = "chat" | "background";
+type WorkbenchRefreshTargetKey = WorkbenchFragmentKind | "chat" | "workbench";
 
 type WorkbenchRefreshTarget = {
+  readonly key: WorkbenchRefreshTargetKey;
   readonly source: WorkbenchRefreshSource;
   readonly element: () => HTMLElement | null;
   readonly queue: (delayMs: number, routeKeyOverride?: string) => void;
-};
-
-const parseWorkbenchRefreshSpec = (value: string): WorkbenchRefreshSpec | undefined => {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "load") return undefined;
-  const descriptorMatch = trimmed.match(/^(sse|body):([^@]+?)(?:@(\d+))?$/i);
-  if (descriptorMatch && descriptorMatch[1] && descriptorMatch[2]) {
-    const throttleMs = descriptorMatch[3] ? Number(descriptorMatch[3]) : undefined;
-    return {
-      kind: descriptorMatch[1].toLowerCase() === "body" ? "body" : "sse",
-      event: descriptorMatch[2].trim(),
-      throttleMs: typeof throttleMs === "number" && Number.isFinite(throttleMs) ? throttleMs : undefined,
-    };
-  }
-  const triggerMatch = trimmed.match(/^sse:([a-z0-9:-]+)(?:\s+throttle:(\d+)ms)?$/i);
-  if (triggerMatch && triggerMatch[1]) {
-    const throttleMs = triggerMatch[2] ? Number(triggerMatch[2]) : undefined;
-    return {
-      kind: "sse",
-      event: triggerMatch[1],
-      throttleMs: typeof throttleMs === "number" && Number.isFinite(throttleMs) ? throttleMs : undefined,
-    };
-  }
-  const bodyMatch = trimmed.match(/^([a-z0-9:-]+)\s+from:body$/i);
-  if (bodyMatch && bodyMatch[1]) {
-    return {
-      kind: "body",
-      event: bodyMatch[1],
-    };
-  }
-  return undefined;
 };
 
 export const initFactoryWorkbenchBrowser = () => {
@@ -128,42 +97,19 @@ export const initFactoryWorkbenchBrowser = () => {
   let isComposing = false;
   let activeCommandIndex = 0;
   let defaultSubmitLabel = "Send";
-  let chatEventSource: EventSource | null = null;
-  let chatEventPath: string | null = null;
-  let backgroundEventSource: EventSource | null = null;
-  let backgroundEventPath: string | null = null;
   let streamingReply: { readonly runId?: string; readonly profileLabel?: string; readonly text: string } | null = null;
-  let refreshTimers: Record<"chat" | "workbench", number> = { chat: 0, workbench: 0 };
-  let refreshInFlight: Record<"chat" | "workbench", boolean> = { chat: false, workbench: false };
-  let refreshQueued: Record<"chat" | "workbench", boolean> = { chat: false, workbench: false };
-  let fragmentRefreshTimers: Record<WorkbenchFragmentKind, number> = {
-    header: 0,
-    summary: 0,
-    activity: 0,
-    objectives: 0,
-    history: 0,
-  };
-  let fragmentRefreshInFlight: Record<WorkbenchFragmentKind, boolean> = {
-    header: false,
-    summary: false,
-    activity: false,
-    objectives: false,
-    history: false,
-  };
-  let fragmentRefreshQueued: Record<WorkbenchFragmentKind, boolean> = {
-    header: false,
-    summary: false,
-    activity: false,
-    objectives: false,
-    history: false,
-  };
   let pendingOverlayHtml = "";
   let pendingLiveStatus: PendingLiveStatus | null = null;
   let navigationRevision = 0;
   let overlayRenderQueued = false;
   let inlineNavigationTarget = "";
   let inlineNavigationAbortController: AbortController | null = null;
-  const bodyRefreshHandlers = new Map<string, (event: Event) => void>();
+  const islandRefreshQueue = createQueuedRefreshRunner<"chat" | "workbench", string>(
+    (kind, routeKeyOverride) => refreshIslandNow(kind, routeKeyOverride ?? currentRouteKey()),
+  );
+  const fragmentRefreshQueue = createQueuedRefreshRunner<WorkbenchFragmentKind, string>(
+    (kind, routeKeyOverride) => refreshWorkbenchFragmentNow(kind, routeKeyOverride ?? currentRouteKey()),
+  );
 
   const chatInput = () => {
     const input = document.getElementById("factory-prompt");
@@ -929,7 +875,7 @@ export const initFactoryWorkbenchBrowser = () => {
     syncRouteBindings(route);
     syncInspectorTabVisibility(route.inspectorTab);
     syncInspectorTabControls(route.inspectorTab);
-    syncBodyRefreshListeners();
+    reactiveRefresh.sync();
     const historyUrl = resolveFactoryUrl(route.routeKey);
     if (historyUrl) setHistory(historyUrl, historyMode);
   };
@@ -979,7 +925,7 @@ export const initFactoryWorkbenchBrowser = () => {
     }
     const currentBackgroundRoot = backgroundRoot();
     const currentChatRoot = chatRoot();
-    connectLiveUpdates();
+    reactiveRefresh.sync();
     htmx()?.process?.(currentWorkbenchHeader ?? document.body);
     htmx()?.process?.(currentBackgroundRoot ?? document.body);
     htmx()?.process?.(currentChatRoot ?? document.body);
@@ -1043,7 +989,7 @@ export const initFactoryWorkbenchBrowser = () => {
     }
   };
 
-  const refreshWorkbenchFragmentNow = (kind: WorkbenchFragmentKind, expectedRouteKey: string) => {
+  function refreshWorkbenchFragmentNow(kind: WorkbenchFragmentKind, expectedRouteKey: string) {
     const target = workbenchFragment(kind);
     const path = target?.getAttribute("hx-get");
     if (!target || !path) return Promise.resolve();
@@ -1056,34 +1002,9 @@ export const initFactoryWorkbenchBrowser = () => {
         restoreDocumentScrollState(documentScrollState);
       });
     });
-  };
+  }
 
-  const queueWorkbenchFragmentRefresh = (
-    kind: WorkbenchFragmentKind,
-    delayMs: number,
-    routeKeyOverride?: string,
-  ) => {
-    if (fragmentRefreshTimers[kind]) window.clearTimeout(fragmentRefreshTimers[kind]);
-    fragmentRefreshTimers[kind] = window.setTimeout(() => {
-      fragmentRefreshTimers[kind] = 0;
-      const expectedRouteKey = typeof routeKeyOverride === "string" ? routeKeyOverride : currentRouteKey();
-      if (fragmentRefreshInFlight[kind]) {
-        fragmentRefreshQueued[kind] = true;
-        return;
-      }
-      fragmentRefreshInFlight[kind] = true;
-      refreshWorkbenchFragmentNow(kind, expectedRouteKey).catch(() => {
-        // Ignore transient fragment failures; the full panel refresh path still exists.
-      }).finally(() => {
-        fragmentRefreshInFlight[kind] = false;
-        if (!fragmentRefreshQueued[kind]) return;
-        fragmentRefreshQueued[kind] = false;
-        queueWorkbenchFragmentRefresh(kind, delayMs, expectedRouteKey);
-      });
-    }, Math.max(0, delayMs));
-  };
-
-  const refreshIslandNow = (kind: "chat" | "workbench", expectedRouteKey: string) => {
+  function refreshIslandNow(kind: "chat" | "workbench", expectedRouteKey: string) {
     const target = islandContainer(kind);
     const path = target?.getAttribute("hx-get");
     if (!target || !path) return Promise.resolve();
@@ -1105,138 +1026,68 @@ export const initFactoryWorkbenchBrowser = () => {
         restoreDocumentScrollState(documentScrollState);
       });
     });
+  }
+
+  const queueWorkbenchFragmentRefresh = (
+    kind: WorkbenchFragmentKind,
+    delayMs: number,
+    routeKeyOverride?: string,
+  ) => {
+    fragmentRefreshQueue.queue(kind, delayMs, routeKeyOverride);
   };
 
   const queueIslandRefresh = (kind: "chat" | "workbench", delayMs: number, routeKeyOverride?: string) => {
-    if (refreshTimers[kind]) window.clearTimeout(refreshTimers[kind]);
-    refreshTimers[kind] = window.setTimeout(() => {
-      refreshTimers[kind] = 0;
-      const expectedRouteKey = typeof routeKeyOverride === "string" ? routeKeyOverride : currentRouteKey();
-      if (refreshInFlight[kind]) {
-        refreshQueued[kind] = true;
-        return;
-      }
-      refreshInFlight[kind] = true;
-      refreshIslandNow(kind, expectedRouteKey).catch(() => {
-        // Ignore transient refresh failures; the next navigation or SSE update can retry.
-      }).finally(() => {
-        refreshInFlight[kind] = false;
-        if (!refreshQueued[kind]) return;
-        refreshQueued[kind] = false;
-        queueIslandRefresh(kind, delayMs, expectedRouteKey);
-      });
-    }, Math.max(0, delayMs));
-  };
-
-  const readWorkbenchRefreshSpecs = (target: Element | null): ReadonlyArray<WorkbenchRefreshSpec> => {
-    if (!(target instanceof HTMLElement)) return [];
-    const descriptor = target.getAttribute("data-refresh-on");
-    const raw = descriptor !== null ? descriptor : target.getAttribute("hx-trigger");
-    if (!raw) return [];
-    return raw
-      .split(",")
-      .map((part) => parseWorkbenchRefreshSpec(part))
-      .flatMap((spec) => spec ? [spec] : []);
+    islandRefreshQueue.queue(kind, delayMs, routeKeyOverride);
   };
 
   const workbenchRefreshTargets = (): ReadonlyArray<WorkbenchRefreshTarget> => [
     {
+      key: "header",
       source: "background",
       element: workbenchHeader,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("header", delayMs, routeKeyOverride),
     },
     {
+      key: "workbench",
       source: "background",
       element: workbenchContainer,
       queue: (delayMs, routeKeyOverride) => queueIslandRefresh("workbench", delayMs, routeKeyOverride),
     },
     {
+      key: "summary",
       source: "background",
       element: workbenchSummaryBlock,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("summary", delayMs, routeKeyOverride),
     },
     {
+      key: "activity",
       source: "background",
       element: workbenchActivityBlock,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("activity", delayMs, routeKeyOverride),
     },
     {
+      key: "objectives",
       source: "background",
       element: workbenchObjectivesBlock,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("objectives", delayMs, routeKeyOverride),
     },
     {
+      key: "history",
       source: "background",
       element: workbenchHistoryBlock,
       queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("history", delayMs, routeKeyOverride),
     },
     {
+      key: "chat",
       source: "chat",
       element: chatContainer,
       queue: (delayMs, routeKeyOverride) => queueIslandRefresh("chat", delayMs, routeKeyOverride),
     },
   ];
 
-  const declaredRefreshEvents = (
-    source: WorkbenchRefreshSource,
-    kind: WorkbenchRefreshSpec["kind"],
-  ): ReadonlyArray<string> => {
-    const events = new Set<string>();
-    for (const target of workbenchRefreshTargets()) {
-      if (target.source !== source) continue;
-      for (const spec of readWorkbenchRefreshSpecs(target.element())) {
-        if (spec.kind !== kind) continue;
-        events.add(spec.event);
-      }
-    }
-    return Array.from(events);
-  };
-
-  const queueDeclaredRefreshes = (
-    source: WorkbenchRefreshSource,
-    eventName: string,
-    kind: WorkbenchRefreshSpec["kind"],
-    routeKeyOverride?: string,
-  ) => {
-    for (const target of workbenchRefreshTargets()) {
-      if (target.source !== source) continue;
-      const spec = readWorkbenchRefreshSpecs(target.element()).find((entry) =>
-        entry.kind === kind && entry.event === eventName);
-      if (!spec) continue;
-      target.queue(spec.throttleMs ?? 0, routeKeyOverride);
-    }
-  };
-
-  const syncBodyRefreshListeners = () => {
-    if (!document.body) return;
-    const activeEvents = new Set<string>();
-    for (const source of ["background", "chat"] as const) {
-      for (const eventName of declaredRefreshEvents(source, "body")) activeEvents.add(eventName);
-    }
-    for (const eventName of activeEvents) {
-      if (bodyRefreshHandlers.has(eventName)) continue;
-      const handler = () => {
-        queueDeclaredRefreshes("background", eventName, "body");
-        queueDeclaredRefreshes("chat", eventName, "body");
-      };
-      document.body.addEventListener(eventName, handler);
-      bodyRefreshHandlers.set(eventName, handler);
-    }
-    for (const [eventName, handler] of Array.from(bodyRefreshHandlers.entries())) {
-      if (activeEvents.has(eventName)) continue;
-      document.body.removeEventListener(eventName, handler);
-      bodyRefreshHandlers.delete(eventName);
-    }
-  };
-
   const resolvedHistoryUrl = (snapshot: WorkbenchShellSnapshot, fallbackUrl: URL): URL => {
     const canonical = snapshot.location ? resolveFactoryUrl(snapshot.location) : null;
     return canonical ?? fallbackUrl;
-  };
-
-  const closeEventSource = (source: EventSource | null) => {
-    if (!source || typeof source.close !== "function") return;
-    source.close();
   };
 
   const chatEventsPath = () => {
@@ -1248,39 +1099,30 @@ export const initFactoryWorkbenchBrowser = () => {
     const node = backgroundRoot();
     return node?.getAttribute("data-events-path") || null;
   };
-
-  const ignoreInit = (event: MessageEvent<string>) => event.data === "init";
-
-  const connectLiveUpdates = () => {
-    if (typeof window.EventSource !== "function") return;
-
-    const nextChatEventsPath = chatEventsPath();
-    if (nextChatEventsPath && (!chatEventSource || chatEventPath !== nextChatEventsPath)) {
-      closeEventSource(chatEventSource);
-      chatEventSource = new window.EventSource(nextChatEventsPath);
-      chatEventPath = nextChatEventsPath;
-      for (const eventName of declaredRefreshEvents("chat", "sse")) {
-        chatEventSource.addEventListener(eventName, (event) => {
-          const message = event as MessageEvent<string>;
-          if (ignoreInit(message)) return;
-          if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
-            updatePendingLiveStatus({
-              ...pendingLiveStatus,
-              statusLabel: "Working",
-              summary: "Factory is running tools and preparing the reply.",
-            });
-          }
-          if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply && pendingLiveStatus.statusLabel === "Queued") {
-            updatePendingLiveStatus({
-              ...pendingLiveStatus,
-              statusLabel: "Starting",
-              summary: "A worker picked up the run and is preparing the first response.",
-            });
-          }
-          queueDeclaredRefreshes("chat", eventName, "sse");
+  const reactiveRefresh = createReactivePushRouter<WorkbenchRefreshSource, WorkbenchRefreshTargetKey, string>({
+    sources: ["background", "chat"],
+    targets: workbenchRefreshTargets,
+    eventPath: (source) => source === "chat" ? chatEventsPath() : backgroundEventsPath(),
+    getScopeKey: currentRouteKey,
+    onSseEvent: ({ eventName }) => {
+      if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
+        updatePendingLiveStatus({
+          ...pendingLiveStatus,
+          statusLabel: "Working",
+          summary: "Factory is running tools and preparing the reply.",
         });
       }
-      chatEventSource.addEventListener("agent-token", (event) => {
+      if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply && pendingLiveStatus.statusLabel === "Queued") {
+        updatePendingLiveStatus({
+          ...pendingLiveStatus,
+          statusLabel: "Starting",
+          summary: "A worker picked up the run and is preparing the first response.",
+        });
+      }
+    },
+    onEventSourceConnected: ({ sourceKey, eventSource }) => {
+      if (sourceKey !== "chat") return;
+      eventSource.addEventListener("agent-token", (event) => {
         const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
         if (!payload) return;
         const state = currentChatState();
@@ -1295,36 +1137,14 @@ export const initFactoryWorkbenchBrowser = () => {
         };
         scheduleOverlayRender();
       });
-      chatEventSource.addEventListener("factory-stream-reset", () => {
+      eventSource.addEventListener("factory-stream-reset", () => {
         clearStreamingReply();
       });
-    } else if (!nextChatEventsPath) {
-      closeEventSource(chatEventSource);
-      chatEventSource = null;
-      chatEventPath = null;
-    }
-
-    const nextBackgroundEventsPath = backgroundEventsPath();
-    if (nextBackgroundEventsPath && (!backgroundEventSource || backgroundEventPath !== nextBackgroundEventsPath)) {
-      closeEventSource(backgroundEventSource);
-      backgroundEventSource = new window.EventSource(nextBackgroundEventsPath);
-      backgroundEventPath = nextBackgroundEventsPath;
-      for (const eventName of declaredRefreshEvents("background", "sse")) {
-        backgroundEventSource.addEventListener(eventName, (event) => {
-          const message = event as MessageEvent<string>;
-          if (ignoreInit(message)) return;
-          queueDeclaredRefreshes("background", eventName, "sse");
-        });
-      }
-    } else if (!nextBackgroundEventsPath) {
-      closeEventSource(backgroundEventSource);
-      backgroundEventSource = null;
-      backgroundEventPath = null;
-    }
-  };
+    },
+  });
 
   const refreshVisibleWorkbench = () => {
-    connectLiveUpdates();
+    reactiveRefresh.sync();
     const routeKey = currentRouteKey();
     queueWorkbenchFragmentRefresh("header", 0, routeKey);
     queueIslandRefresh("workbench", 0, routeKey);
@@ -1729,6 +1549,6 @@ export const initFactoryWorkbenchBrowser = () => {
     applyRouteState(workbenchState.appliedRoute, "none");
   }
   scheduleOverlayRender();
-  connectLiveUpdates();
+  reactiveRefresh.sync();
   consumeComposeCommandFromLocation(String(window.location && window.location.href ? window.location.href : shellPath()));
 };

@@ -109,6 +109,34 @@ const countObjectiveControlJobs = async (
   }).length;
 };
 
+const expectObjectiveReconcileIntent = async (
+  queue: ReturnType<typeof jsonlQueue>,
+  objectiveId: string,
+): Promise<void> => {
+  const controlJob = await findLatestObjectiveJob(queue, objectiveId, "factory.objective.control");
+  expect(controlJob).toBeTruthy();
+  const payload = controlJob!.payload as {
+    readonly kind?: string;
+    readonly objectiveId?: string;
+    readonly reason?: string;
+  };
+  if (payload.reason === "reconcile") return;
+
+  const commands = await queue.consumeCommands(controlJob!.id, ["steer"]);
+  expect(commands.some((command) => {
+    const commandPayload = command.payload as {
+      readonly payload?: {
+        readonly kind?: string;
+        readonly objectiveId?: string;
+        readonly reason?: string;
+      };
+    };
+    return commandPayload.payload?.kind === "factory.objective.control"
+      && commandPayload.payload.objectiveId === objectiveId
+      && commandPayload.payload.reason === "reconcile";
+  })).toBe(true);
+};
+
 test("factory scheduling: queued objectives preserve FIFO order without invoking llm decomposition", async () => {
   const dataDir = await createTempDir("receipt-factory-scheduling-fifo");
   const repoRoot = await createSourceRepo();
@@ -380,6 +408,165 @@ test("factory runtime: transient blocked tasks retry once automatically before a
   )).toBe(true);
   expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("running");
   expect(runs).toBe(1);
+}, 120_000);
+
+test("factory runtime: transient dispatch failures queue reconcile instead of blocking the objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-transient-dispatch");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Transient dispatch recovery objective",
+    prompt: "Retry objective control when dispatch hits a transient lock.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    dispatchTask(
+      state: Awaited<ReturnType<FactoryService["getObjectiveState"]>>,
+      task: Awaited<ReturnType<FactoryService["getObjectiveState"]>>["workflow"]["tasksById"][string],
+      opts?: { readonly expectedPrev?: string; readonly prefixEvents?: ReadonlyArray<unknown> },
+    ): Promise<void>;
+  };
+  const originalDispatchTask = internals.dispatchTask.bind(service);
+  let dispatchAttempts = 0;
+  internals.dispatchTask = async () => {
+    dispatchAttempts += 1;
+    throw new Error("database is locked");
+  };
+  try {
+    await runObjectiveStartup(service, created.objectiveId);
+  } finally {
+    internals.dispatchTask = originalDispatchTask;
+  }
+
+  expect(dispatchAttempts).toBe(1);
+  await expectObjectiveReconcileIntent(queue, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).not.toBe("blocked");
+  expect(detail.blockedReason).toBeUndefined();
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "objective.blocked" || receipt.type === "task.blocked"
+  )).toBe(false);
+}, 120_000);
+
+test("factory runtime: transient integration queue failures reconcile instead of blocking the objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-transient-integration");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Transient integration recovery objective",
+    prompt: "Retry integration queueing when a transient controller failure happens.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    emitObjective(objectiveId: string, event: unknown): Promise<void>;
+    queueIntegration(
+      state: Awaited<ReturnType<FactoryService["getObjectiveState"]>>,
+      candidateId: string,
+      opts?: { readonly expectedPrev?: string; readonly prefixEvents?: ReadonlyArray<unknown> },
+    ): Promise<void>;
+  };
+  await internals.emitObjective(created.objectiveId, {
+    type: "task.ready",
+    objectiveId: created.objectiveId,
+    taskId: "task_01",
+    readyAt: created.createdAt + 4,
+  });
+  await internals.emitObjective(created.objectiveId, {
+    type: "candidate.created",
+    objectiveId: created.objectiveId,
+    createdAt: created.createdAt + 5,
+    candidate: {
+      candidateId: "task_01_candidate_01",
+      taskId: "task_01",
+      status: "planned",
+      baseCommit: created.baseHash,
+      checkResults: [],
+      artifactRefs: {},
+      createdAt: created.createdAt + 5,
+      updatedAt: created.createdAt + 5,
+    },
+  });
+  await internals.emitObjective(created.objectiveId, {
+    type: "candidate.produced",
+    objectiveId: created.objectiveId,
+    candidateId: "task_01_candidate_01",
+    taskId: "task_01",
+    headCommit: created.baseHash,
+    summary: "Produced the candidate.",
+    handoff: "Ready for integration.",
+    completion: {
+      changed: ["Prepared the candidate."],
+      proof: ["Validation is ready for integration."],
+      remaining: [],
+    },
+    checkResults: [],
+    scriptsRun: [],
+    artifactRefs: {},
+    producedAt: created.createdAt + 6,
+  });
+  await internals.emitObjective(created.objectiveId, {
+    type: "task.review.requested",
+    objectiveId: created.objectiveId,
+    taskId: "task_01",
+    reviewRequestedAt: created.createdAt + 6,
+  });
+  await internals.emitObjective(created.objectiveId, {
+    type: "candidate.reviewed",
+    objectiveId: created.objectiveId,
+    candidateId: "task_01_candidate_01",
+    taskId: "task_01",
+    status: "approved",
+    summary: "Approved candidate.",
+    handoff: "Queue for integration.",
+    reviewedAt: created.createdAt + 7,
+  });
+
+  const originalQueueIntegration = internals.queueIntegration.bind(service);
+  let queueAttempts = 0;
+  internals.queueIntegration = async () => {
+    queueAttempts += 1;
+    throw new Error("another git process seems to be running in this repository");
+  };
+  try {
+    await service.reactObjective(created.objectiveId);
+  } finally {
+    internals.queueIntegration = originalQueueIntegration;
+  }
+
+  expect(queueAttempts).toBe(1);
+  await expectObjectiveReconcileIntent(queue, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).not.toBe("blocked");
+  expect(detail.integration.status).not.toBe("conflicted");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "integration.conflicted")).toBe(false);
 }, 120_000);
 
 test("factory runtime: blocked tasks can record an explicit ask-human decision", async () => {

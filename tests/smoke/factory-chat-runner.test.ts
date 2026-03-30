@@ -3165,8 +3165,8 @@ test("factory chat runner: terminal bound objectives create a follow-up objectiv
   expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
 });
 
-test("factory chat runner: legacy follow-up fields react the active bound objective in place", async () => {
-  const dataDir = await createTempDir("receipt-factory-chat-dispatch-legacy-react");
+test("factory chat runner: canonical follow-up note reacts the active bound objective in place", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-react-note");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
@@ -3200,7 +3200,7 @@ test("factory chat runner: legacy follow-up fields react the active bound object
       action: {
         type: "tool",
         name: "factory.dispatch",
-        input: JSON.stringify({ description: "Check current service costs before finalizing." }),
+        input: JSON.stringify({ note: "Check current service costs before finalizing." }),
         text: null,
       },
     },
@@ -3217,7 +3217,7 @@ test("factory chat runner: legacy follow-up fields react the active bound object
 
   const result = await runFactoryChat({
     stream: "agents/factory/demo",
-    runId: "run_dispatch_legacy_react",
+    runId: "run_dispatch_react_note",
     problem: "Continue the current objective with a cost check.",
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
@@ -3247,8 +3247,8 @@ test("factory chat runner: legacy follow-up fields react the active bound object
   });
 });
 
-test("factory chat runner: legacy completed-objective follow-up fields create and bind a new objective", async () => {
-  const dataDir = await createTempDir("receipt-factory-chat-dispatch-legacy-followup");
+test("factory chat runner: canonical completed-objective follow-up fields create and bind a new objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-followup");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
@@ -3299,9 +3299,9 @@ test("factory chat runner: legacy completed-objective follow-up fields create an
         name: "factory.dispatch",
         input: JSON.stringify({
           objectiveId: "objective_done",
-          objective: "AWS cost by service: highest vs lowest",
-          task: "Use Cost Explorer to identify the highest-cost service and the lowest non-zero service cost for the last 30 days.",
-          mode: "investigation",
+          title: "AWS cost by service: highest vs lowest",
+          prompt: "Use Cost Explorer to identify the highest-cost service and the lowest non-zero service cost for the last 30 days.",
+          objectiveMode: "investigation",
         }),
         text: null,
       },
@@ -3319,7 +3319,7 @@ test("factory chat runner: legacy completed-objective follow-up fields create an
 
   const result = await runFactoryChat({
     stream: "agents/factory/demo",
-    runId: "run_dispatch_legacy_followup",
+    runId: "run_dispatch_followup",
     problem: "Which AWS service costs the most and which costs the least?",
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
@@ -3351,7 +3351,7 @@ test("factory chat runner: legacy completed-objective follow-up fields create an
     profileId: "generalist",
     startImmediately: true,
   });
-  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_legacy_followup"));
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_followup"));
   const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
   const latestBound = boundEvents.at(-1);
   expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_followup");

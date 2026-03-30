@@ -1,11 +1,14 @@
 @import "tailwindcss";
 
 @source "../views/ui.ts";
-@source "../views/factory-chat.ts";
 @source "../views/factory-inspector.ts";
 @source "../views/factory-live-steps.ts";
-@source "../views/factory-mission-control.ts";
-@source "../views/factory-workbench-page.ts";
+@source "../views/factory/shared/index.ts";
+@source "../views/factory/shell/index.ts";
+@source "../views/factory/sidebar/index.ts";
+@source "../views/factory/transcript/index.ts";
+@source "../views/factory/workbench/index.ts";
+@source "../views/factory/workbench/page.ts";
 @source "../views/receipt.ts";
 
 @custom-variant dark (&:is(.dark *));

@@ -32,9 +32,11 @@ import { agentRunStream } from "../../src/agents/agent.streams";
 import { projectAgentRun } from "../../src/agents/factory/run-projection";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { factoryChatSessionStream, factoryChatStream } from "../../src/services/factory-chat-profiles";
-import { factoryChatIsland, factoryChatShell, factorySidebarIsland } from "../../src/views/factory-chat";
+import { factoryChatShell } from "../../src/views/factory/shell";
+import { factorySidebarIsland } from "../../src/views/factory/sidebar";
+import { factoryChatIsland } from "../../src/views/factory/workbench";
 import { factoryInspectorIsland } from "../../src/views/factory-inspector";
-import { buildFactoryWorkbenchShellSnapshot, factoryWorkbenchHeaderIsland } from "../../src/views/factory-workbench-page";
+import { buildFactoryWorkbenchShellSnapshot, factoryWorkbenchHeaderIsland } from "../../src/views/factory/workbench/page";
 import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
 import type { FactoryWorkbenchPageModel } from "../../src/views/factory-models";
 import type { BranchStore, Receipt, Store } from "@receipt/core/types";
@@ -2455,15 +2457,15 @@ test("factory chat shell: sidebar and inspector avoid agent-refresh churn", () =
     tasks: taskCards,
   });
 
-  expect(markup).toContain('hx-ext="sse"');
-  expect(markup).toContain('sse-connect="/factory/events?profile=generalist&amp;objective=objective_demo"');
   expect(markup).toContain("sse:agent-refresh throttle:180ms");
   expect(markup).toContain("sse:objective-runtime-refresh throttle:180ms");
   expect(markup).toContain("sse:factory-refresh throttle:180ms");
   expect(markup).toContain("sse:job-refresh throttle:180ms");
   expect(markup).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180,sse:objective-runtime-refresh@180,sse:factory-refresh@180,body:factory:chat-refresh"');
   expect(markup).toContain('data-refresh-on="sse:profile-board-refresh@450,sse:objective-runtime-refresh@450,sse:factory-refresh@450,body:factory:scope-changed"');
-  expect(markup).toContain("/assets/htmx-ext-sse.js");
+  expect(markup).not.toContain('hx-ext="sse"');
+  expect(markup).not.toContain("sse-connect=");
+  expect(markup).not.toContain("/assets/htmx-ext-sse.js");
   expect(markup).toContain('id="factory-chat-streaming"');
   expect(markup).toContain('id="factory-chat-streaming-content"');
   expect(markup).toContain('id="factory-chat-optimistic"');
@@ -2825,7 +2827,7 @@ test("factory chat items: structured supervisor snapshots render as live child s
           jobId: "job_codex_live",
           status: "running",
           task: "Update the chat center panel UI.",
-          latestNote: "Inspecting src/views/factory-chat.ts.",
+          latestNote: "Inspecting src/views/factory/workbench/index.ts.",
         },
         otherRelevant: {
           layoutFixJob: {
@@ -2857,7 +2859,7 @@ test("factory chat items: structured supervisor snapshots render as live child s
     result: {
       worker: "codex",
       status: "running",
-      summary: "Inspecting src/views/factory-chat.ts.",
+      summary: "Inspecting src/views/factory/workbench/index.ts.",
     },
     commands: [],
   };
@@ -2868,7 +2870,7 @@ test("factory chat items: structured supervisor snapshots render as live child s
   expect(waiting && waiting.kind === "system" ? waiting.body : "").toContain("layoutFixJob: job_layout_done is completed");
 
   const childCard = items.find((item) => item.kind === "work" && item.card.jobId === "job_codex_live");
-  expect(childCard && childCard.kind === "work" ? childCard.card.summary : "").toContain("Inspecting src/views/factory-chat.ts.");
+  expect(childCard && childCard.kind === "work" ? childCard.card.summary : "").toContain("Inspecting src/views/factory/workbench/index.ts.");
   expect(items.some((item) => item.kind === "assistant")).toBe(false);
 });
 
@@ -2890,7 +2892,7 @@ test("factory sidebar state: active Codex ignores stale terminal failures", () =
     updatedAt: 2_000,
     result: {
       summary: "Inspecting the active worktree.",
-      lastMessage: "Inspecting src/views/factory-chat.ts.",
+      lastMessage: "Inspecting src/views/factory/workbench/index.ts.",
     },
     commands: [],
   };

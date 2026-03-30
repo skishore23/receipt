@@ -502,6 +502,15 @@ const bodyTriggerEvents = (value: string | null): ReadonlyArray<string> =>
 
 const createHarness = async (options: {
   readonly initialLocation?: string;
+  readonly beforeBoot?: (input: {
+    readonly body: MockElement;
+    readonly liveRoot: MockElement;
+    readonly chat: MockElement;
+    readonly sidebar: MockElement;
+    readonly inspector: MockElement;
+    readonly streaming: MockElement;
+    readonly streamingReset: MockElement;
+  }) => void;
   readonly fetchImpl?: (url: string, init: { readonly body?: FormData }) => Promise<{
     readonly ok: boolean;
     readonly headers: { readonly get: (name: string) => string | null };
@@ -641,6 +650,15 @@ const createHarness = async (options: {
   body.setAttribute("data-factory-mode", initialLocation.searchParams.get("mode") === "mission-control" ? "mission-control" : "default");
   body.setAttribute("data-focus-kind", "");
   body.setAttribute("data-focus-id", "");
+  options.beforeBoot?.({
+    body,
+    liveRoot,
+    chat,
+    sidebar,
+    inspector,
+    streaming,
+    streamingReset,
+  });
 
   const documentListeners = new Map<string, Array<Listener>>();
   const document = {
@@ -1334,6 +1352,35 @@ const createWorkbenchHarness = async (options: {
     chatSource: () => latestSourceFor("/factory/chat/events"),
   };
 };
+
+test("factory chat client: reactive refresh routing follows data-refresh-on declarations", async () => {
+  const { fetchCalls, latestEventSource } = await createHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+    beforeBoot: ({ liveRoot, chat, sidebar, inspector }) => {
+      liveRoot.removeAttribute("hx-ext");
+      liveRoot.removeAttribute("sse-connect");
+      chat.setAttribute("data-refresh-on", "sse:job-refresh@0");
+      sidebar.setAttribute("data-refresh-on", "sse:profile-board-refresh@0");
+      inspector.setAttribute("data-refresh-on", "");
+    },
+  });
+
+  const source = latestEventSource();
+  expect(source?.url).toBe("/factory/events?profile=generalist&chat=chat_demo&objective=objective_demo");
+
+  source?.emit("profile-board-refresh", "generalist");
+  await flushAsync();
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/sidebar?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(1);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo")).toBe(false);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/inspector?profile=generalist&chat=chat_demo&objective=objective_demo")).toBe(false);
+
+  source?.emit("job-refresh", "job_demo");
+  await flushAsync();
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/sidebar?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/inspector?profile=generalist&chat=chat_demo&objective=objective_demo")).toHaveLength(0);
+});
+
 test("factory workbench client: profile-board and objective-runtime events refresh only the matching workbench islands", async () => {
   const { document, backgroundSource, chatSource, fetchCalls } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",

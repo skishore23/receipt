@@ -649,7 +649,7 @@ test("agent bash tool blocks destructive git restore commands from receipt-like 
             action: {
               type: "tool",
               name: "bash",
-              input: "{\"cmd\":\"git checkout -- src/views/factory-chat.ts\"}",
+              input: "{\"cmd\":\"git checkout -- src/views/factory/sidebar/index.ts\"}",
               text: null,
             },
           },

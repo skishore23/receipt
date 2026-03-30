@@ -77,8 +77,8 @@ test("factory helper runtime skills: document helper-first execution and ship se
 test("factory orchestration docs and skills: profiles stay orchestration-only and decisions stay receipt-aware", async () => {
   const profileDoc = await fs.readFile(new URL("../../docs/factory-profile-orchestration.md", import.meta.url), "utf-8");
   const agentDoc = await fs.readFile(new URL("../../docs/factory-agent-orchestration.md", import.meta.url), "utf-8");
+  const factoryCoreDoc = await fs.readFile(new URL("../../docs/factory-on-receipt.md", import.meta.url), "utf-8");
   const orchestratorSkill = await fs.readFile(new URL("../../skills/factory-run-orchestrator/SKILL.md", import.meta.url), "utf-8");
-  const orchestratorPrompt = await fs.readFile(new URL("../../prompts/factory/orchestrator.md", import.meta.url), "utf-8");
 
   expect(profileDoc).toContain("Legacy `repo.read` and `repo.write` capabilities are rejected.");
   expect(profileDoc).toContain("codex.logs");
@@ -87,10 +87,11 @@ test("factory orchestration docs and skills: profiles stay orchestration-only an
   expect(profileDoc).toContain("read-only probe");
   expect(agentDoc).toContain("`codex.run` in Factory chat is now a read-only probe");
   expect(agentDoc).toContain("hand it back to `factory.dispatch`");
+  expect(agentDoc).toContain("deterministic merge/rebracket policy");
+  expect(factoryCoreDoc).toContain("profile-driven chat/supervisor layer");
+  expect(factoryCoreDoc).toContain("deterministic objective rebracketing");
   expect(orchestratorSkill).toContain("factory.receipts");
   expect(orchestratorSkill).toContain("factory.output");
   expect(orchestratorSkill).toContain("codex.logs");
   expect(orchestratorSkill).toContain("read-only probe");
-  expect(orchestratorPrompt).toContain("Ground the choice in the provided receipts, evidence cards, active jobs, and current objective state.");
-  expect(orchestratorPrompt).toContain("Prefer existing active or queued work over duplicate dispatch.");
 });

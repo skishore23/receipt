@@ -23,7 +23,7 @@ This is intentionally narrower than the broader Factory architecture doc. It is 
 
 Factory has two different model-driven roles:
 
-- OpenAI is used for structured planning decisions
+- OpenAI is used for the structured Factory chat/supervisor loop
 - Codex is used as a task worker that edits code inside a task worktree
 
 Everything durable around those model calls is receipt-backed and reducer-driven.
@@ -34,8 +34,7 @@ That means:
 - objective creation returns immediately and a queued factory control job performs repo prep, planning, and the first react pass
 - Factory profiles orchestrate through receipts, status, and dispatch tools instead of direct repo access
 - direct `codex.run` from Factory chat is a read-only probe path
-- OpenAI prepares a repo profile and proposes a task DAG during startup
-- OpenAI can also choose among legal orchestration actions and propose runtime task mutations when enabled
+- objective progression and rebracketing are selected by deterministic service/policy code
 - Codex does not decide the overall workflow; it executes one task at a time inside an isolated Git worktree
 - Git remains the code truth
 - Receipt remains the orchestration truth
@@ -62,7 +61,7 @@ flowchart LR
 
 ### Factory service
 
-The service in `src/services/factory-service.ts` is the execution seam. It:
+The service in `src/services/factory/runtime/base-service.ts` is the execution seam. The top-level factory-service file is only a thin facade. It:
 
 - creates objectives
 - decomposes objectives into tasks
@@ -98,61 +97,17 @@ Factory does not implement Git itself.
 
 Factory uses the existing OpenAI adapter already wired into the server.
 
-In `src/server.ts`, Factory receives `llmStructured` and optionally an OpenAI-backed orchestrator:
+In `src/server.ts`, Factory passes `llmStructured` into the generic agent runner that powers the profile-driven chat/supervisor loop.
 
-- `llmStructured` is passed directly into `FactoryService`
-- `createOpenAiFactoryOrchestrator(...)` is used only when orchestration mode is enabled and `OPENAI_API_KEY` is present
+OpenAI is used for Factory chat turns:
 
-OpenAI is used in three places:
+- selecting one tool call or final answer per iteration
+- inspecting receipts, status, and live output before deciding the next step
+- queuing read-only Codex probes
+- dispatching or reacting tracked Factory objectives through `factory.dispatch`
 
-### 1. Repo preparation and objective planning
-
-When an objective is created, Factory appends `objective.created`, returns immediately, and enqueues one control job with payload kind `factory.objective.control`.
-
-That control job:
-
-- acquires the repo execution slot or leaves the objective queued
-- generates or reuses a shared repo profile
-- asks OpenAI for a structured task decomposition
-- emits plan proposal/adoption receipts
-- then runs the first objective react pass
-
-Repo preparation is visible through:
-
-- `repo.profile.requested`
-- `repo.profile.generated`
-
-Planning is visible through:
-
-- `objective.plan.proposed`
-- `objective.plan.adopted`
-
-If `llmStructured` is available, it requests a structured task DAG:
-
-- schema name: `factory_task_decomposition`
-- output: task titles, prompts, worker type, dependency refs
-
-If decomposition fails, Factory falls back to a single deterministic Codex task.
-
-### 2. Runtime mutation planning
-
-When orchestration is enabled and the policy allows mutation, Factory can ask OpenAI for runtime mutation proposals:
-
-- schema name: `factory_task_mutation_plan`
-- output: actions like split, reassign, update dependencies, unblock, supersede
-
-Those proposals are then normalized and filtered against actual Factory rules before any receipt is emitted.
-
-### 3. Action selection
-
-Once the service computes legal semantic actions, the orchestrator can choose one:
-
-- schema name: `factory_orchestrator_decision`
-- input: objective snapshot, tasks, candidates, integration state, legal actions, current head hash
-- output: `selectedActionId`, `reason`, `confidence`
-
-The current runtime scores these legal actions through the merge/rebracket policy helpers and records the winning decision as `rebracket.applied` with source `runtime`.
-Factory does not yet persist per-candidate merge evidence receipts on the objective stream.
+Objective startup, task dispatch, integration, and rebracketing are not decided by a separate OpenAI orchestrator in the current runtime.
+The current runtime scores legal objective effects through the deterministic merge/rebracket policy helpers and records the winning decision as `rebracket.applied` with source `runtime`.
 
 ## What OpenAI Does Not Do
 
@@ -164,6 +119,7 @@ OpenAI does not:
 - append arbitrary hidden state
 - bypass the reducer
 - skip queue/job lifecycle mechanics
+- act as a separate hidden objective action chooser outside the receipt-backed runtime
 
 Every consequential orchestration decision still becomes receipts.
 
@@ -539,23 +495,19 @@ This is what prevents “task worker directly merged to main” behavior.
 sequenceDiagram
   participant User
   participant Factory
-  participant OpenAI
   participant Queue
   participant Codex
   participant Git
 
   User->>Factory: create objective
-  Factory->>OpenAI: decompose objective (structured)
-  OpenAI-->>Factory: task DAG
-  Factory->>Factory: emit objective/task receipts
+  Factory->>Factory: plan startup state and emit objective/task receipts
   Factory->>Queue: enqueue factory.task.run
   Queue->>Codex: lease task job
   Factory->>Git: create task worktree + packet
   Codex->>Git: edit task worktree
   Codex-->>Factory: result.json
   Factory->>Factory: emit candidate receipts
-  Factory->>OpenAI: choose legal semantic action / mutation plan
-  OpenAI-->>Factory: selected action
+  Factory->>Factory: score legal effects through rebracket policy
   Factory->>Git: merge approved candidate into integration worktree
   Factory->>Queue: enqueue integration validation
   Factory->>Git: fast-forward source on promotion

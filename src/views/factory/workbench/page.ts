@@ -17,17 +17,17 @@ import {
   statusDot,
   toneForValue,
   truncate,
-} from "./ui";
+} from "../../ui";
 import {
   renderFactoryStreamingShell,
   renderFactoryTranscriptSection,
-} from "./factory-chat";
-import { renderFactoryRunSteps } from "./factory-live-steps";
+} from "../transcript";
+import { renderFactoryRunSteps } from "../../factory-live-steps";
 import {
   displayStateTone,
-} from "./factory/supervision";
-import { COMPOSER_COMMANDS } from "../factory-cli/composer";
-import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "./factory-models";
+} from "../supervision";
+import { COMPOSER_COMMANDS } from "../../../factory-cli/composer";
+import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "../../factory-models";
 import type {
   FactoryChatIslandModel,
   FactoryChatProfileNav,
@@ -44,7 +44,7 @@ import type {
   FactoryWorkbenchSectionModel,
   FactoryWorkbenchSummarySectionModel,
   FactoryWorkbenchWorkspaceModel,
-} from "./factory-models";
+} from "../../factory-models";
 
 export type FactoryWorkbenchRouteContext = {
   readonly profileId: string;
@@ -1463,7 +1463,6 @@ export const factoryWorkbenchScaffold = (
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
-  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
 <body data-factory-workbench data-workbench-shell-lazy="true" data-chat-id="${esc(routeContext.chatId)}" data-objective-id="${esc(routeContext.objectiveId ?? "")}" data-focus-kind="${esc(routeContext.focusKind ?? "")}" data-focus-id="${esc(routeContext.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
@@ -1547,7 +1546,6 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
-  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
 <body data-factory-workbench data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">

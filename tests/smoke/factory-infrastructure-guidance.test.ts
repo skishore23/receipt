@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   rewriteInfrastructureTaskPromptForExecution,
   renderInfrastructureTaskExecutionGuidance,
+  taskNeedsCloudExecutionContext,
 } from "../../src/services/factory-infrastructure-guidance";
 import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
 
@@ -65,4 +66,16 @@ test("factory infrastructure guidance: broad multi-service prompts do not keep c
 
   expect(rewritten).not.toContain("Fail fast if any AWS CLI call is denied and report exact error.");
   expect(rewritten).toContain("capture exact per-service AccessDenied results and continue with the remaining allowed services");
+});
+
+test("factory infrastructure guidance: cloud context stays off for local repo work and on for cloud tasks", () => {
+  expect(taskNeedsCloudExecutionContext({
+    taskTitle: "Inspect local git state",
+    taskPrompt: "Inspect only the local git repository state. Do not use network.",
+  })).toBe(false);
+
+  expect(taskNeedsCloudExecutionContext({
+    taskTitle: "Inventory EC2 usage",
+    taskPrompt: "List EC2 and S3 resources for the active AWS account.",
+  })).toBe(true);
 });

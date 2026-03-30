@@ -384,7 +384,7 @@ To support this cleanly, add:
 4. validation commands that prove infra code health without requiring a full production action
 5. optional repo skill files that teach the worker your AWS layout, account map, service boundaries, and deployment rules
 
-If you need stricter AWS guidance in every task packet, the current prompt seam is in `src/services/factory-service.ts`, where Factory renders the task prompt and validation guidance for Codex workers.
+If you need stricter AWS guidance in every task packet, the current prompt seam is in `src/services/factory/prompt-rendering.ts`, where Factory renders the task prompt and validation guidance for Codex workers.
 
 ## Important Current Implementation Caveat
 

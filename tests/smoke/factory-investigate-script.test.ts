@@ -317,6 +317,96 @@ test("factory CLI investigate exposes the same investigation flow for repair/deb
   expect(payload.assessment.efficiency).toBeTruthy();
 }, 120_000);
 
+test("factory CLI investigate prefers real task artifacts over stale repo-root collisions", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Investigate artifact resolution",
+    prompt: "Use factory investigate to reconstruct the task context and result from the live task packet.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const staleArtifactDir = path.join(repoRoot, ".receipt", "factory");
+  await fs.mkdir(staleArtifactDir, { recursive: true });
+  await fs.writeFile(path.join(staleArtifactDir, "task_01.result.json"), JSON.stringify({
+    outcome: "approved",
+    summary: "stale repo-root artifact",
+    artifacts: [],
+    completion: {
+      changed: ["wrong"],
+      proof: ["wrong"],
+      remaining: [],
+    },
+    nextAction: null,
+  }, null, 2), "utf-8");
+
+  const jsonRun = await execFileAsync(BUN, [
+    CLI_PATH,
+    "factory",
+    "investigate",
+    created.objectiveId,
+    "--data-dir",
+    dataDir,
+    "--repo-root",
+    repoRoot,
+    "--json",
+  ], {
+    cwd: ROOT,
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+
+  const payload = JSON.parse(jsonRun.stdout) as {
+    readonly outputs: {
+      readonly result?: {
+        readonly summary?: string;
+      };
+    };
+    readonly packetContext?: {
+      readonly manifestPath?: string;
+      readonly contextPackPath?: string;
+      readonly resultPath?: string;
+      readonly contractCriteria: ReadonlyArray<string>;
+    };
+  };
+  expect(payload.outputs.result?.summary).toBe("Investigated the receipt flow and recorded a focused handoff.");
+  expect(payload.packetContext?.manifestPath?.startsWith(dataDir)).toBe(true);
+  expect(payload.packetContext?.contextPackPath?.startsWith(dataDir)).toBe(true);
+  expect(payload.packetContext?.resultPath?.startsWith(dataDir)).toBe(true);
+  expect(payload.packetContext?.contractCriteria.length).toBeGreaterThan(0);
+}, 120_000);
+
+test("factory task packets omit live cloud context for local repo investigations", async () => {
+  const { service, queue } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Inspect local repo state",
+    prompt: "Inspect only the local git repository state. Do not use network.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const payload = job!.payload as FactoryTaskJobPayload;
+  const contextPack = JSON.parse(await fs.readFile(payload.contextPackPath, "utf-8")) as {
+    readonly cloudExecutionContext?: unknown;
+  };
+  const prompt = await fs.readFile(payload.promptPath, "utf-8");
+
+  expect(contextPack.cloudExecutionContext).toBeUndefined();
+  expect(prompt).not.toContain("## Live Cloud Context");
+}, 120_000);
+
 test("factory CLI investigate surfaces contract and alignment state for delivery objectives", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService({
     taskMode: "delivery",

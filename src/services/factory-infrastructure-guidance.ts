@@ -5,10 +5,19 @@ const HELPER_RUNNER = "skills/factory-helper-runtime/runner.py";
 const INVENTORY_PROMPT_RE = /\b(how many|count|list|show|inventory|enumerate|what are|which)\b/i;
 const COST_PROMPT_RE = /\b(cost|costs|pricing|price|spend)\b/i;
 const AWS_MULTI_SERVICE_RE = /\b(ec2|ebs|snapshot|snapshots|s3|rds|nat|load balancer|load balancers|elb|cloudwatch|eks|elastic ip|elastic ips)\b/gi;
+const CLOUD_CONTEXT_HINT_RE = /\b(?:aws|gcp|azure|cloud\b|ec2|s3|rds|lambda|eks|ecr|ecs|iam|vpc|route53|cloudformation|cloudwatch|bigquery|pubsub|gcloud|google cloud|terraform|kubernetes|k8s|helm)\b/i;
 const FAIL_FAST_DENIED_RE = /fail fast if any aws cli call is denied and report exact error\.?/i;
 
 export const cloudProviderDefaultsToAws = (cloudProvider: string | undefined): boolean =>
   cloudProvider === "aws";
+
+export const taskNeedsCloudExecutionContext = (input: {
+  readonly profileCloudProvider?: string;
+  readonly taskTitle?: string;
+  readonly taskPrompt: string;
+}): boolean =>
+  Boolean(input.profileCloudProvider?.trim())
+  || CLOUD_CONTEXT_HINT_RE.test(`${input.taskTitle ?? ""}\n${input.taskPrompt}`);
 
 const countAwsServiceMentions = (prompt: string): number => {
   const services = new Set(

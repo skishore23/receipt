@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import { findActiveObjectiveJobId } from "../../src/factory-cli/experiment";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
@@ -116,3 +118,22 @@ test("factory experiment: long-run bundle captures live intervention evidence", 
   await expect(fs.readFile(report.investigateTextPath, "utf-8")).resolves.toContain("## Interventions");
   await expect(fs.readFile(report.auditTextPath, "utf-8")).resolves.toContain("course_correction=");
 }, 180_000);
+
+test("factory experiment: active job discovery selects the active objective task job", () => {
+  const activeJobId = findActiveObjectiveJobId([
+    {
+      id: "job_other",
+      agentId: "codex",
+      status: "running",
+      payload: { kind: "factory.task.run", objectiveId: "objective_other", taskId: "task_99" },
+    } as QueueJob,
+    {
+      id: "job_active",
+      agentId: "codex",
+      status: "leased",
+      payload: { kind: "factory.task.run", objectiveId: "objective_demo", taskId: "task_01" },
+    } as QueueJob,
+  ], "objective_demo");
+
+  expect(activeJobId).toBe("job_active");
+});

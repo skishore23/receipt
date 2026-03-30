@@ -387,7 +387,7 @@ const makeWorkbenchSnapshot = () => {
     profile: {
       rootProfileLabel: "Generalist",
       rootProfileId: "generalist",
-      promptPath: "prompts/factory/orchestrator.md",
+      promptPath: "profiles/generalist/PROFILE.md",
       selectedSkills: [],
     },
     policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,

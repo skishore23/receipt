@@ -11,10 +11,11 @@ import {
 } from "./compose-navigation";
 import { parseTokenEventPayload, renderStreamingReply } from "./live-updates";
 import {
-  CHAT_REFRESH_DELAY_MS,
+  createQueuedRefreshRunner,
+  createReactivePushRouter,
+} from "./reactive";
+import {
   DEFAULT_COMMANDS,
-  INSPECTOR_REFRESH_DELAY_MS,
-  SIDEBAR_REFRESH_DELAY_MS,
   asString,
   dispatchBodyEvent,
   parseCommands,
@@ -33,11 +34,6 @@ export const initFactoryChat = () => {
   let isComposing = false;
   let activeCommandIndex = 0;
   let defaultSubmitLabel = "Send";
-  let liveEventSource: EventSource | null = null;
-  let liveEventSearch: string | null = null;
-  let refreshTimers: Record<RefreshKind, number> = { chat: 0, sidebar: 0, inspector: 0 };
-  let refreshInFlight: Record<RefreshKind, boolean> = { chat: false, sidebar: false, inspector: false };
-  let refreshQueued: Record<RefreshKind, boolean> = { chat: false, sidebar: false, inspector: false };
   let navigationRevision = 0;
   let overlayRenderQueued = false;
   let pendingSubmission: PendingSubmission | null = null;
@@ -45,6 +41,9 @@ export const initFactoryChat = () => {
   let currentScope: LiveScope | null = null;
   let lastReconciledRunId: string | undefined;
   let streamingReply: StreamingReply | null = null;
+  const islandRefreshQueue = createQueuedRefreshRunner<RefreshKind, string>(
+    (kind, searchOverride) => refreshIslandNow(kind, searchOverride ?? currentSearch()),
+  );
 
   const chatInput = () => {
     const input = document.getElementById("factory-prompt");
@@ -356,13 +355,6 @@ export const initFactoryChat = () => {
     setComposerCurrentJob(url.searchParams.get("job") || "");
   };
 
-  const closeLiveUpdates = () => {
-    if (!liveEventSource || typeof liveEventSource.close !== "function") return;
-    liveEventSource.close();
-    liveEventSource = null;
-    liveEventSearch = null;
-  };
-
   const fetchHtml = (url: string) =>
     window.fetch(url, {
       method: "GET",
@@ -392,36 +384,76 @@ export const initFactoryChat = () => {
     }
   };
 
-  const refreshIslandNow = (kind: RefreshKind, search: string) =>
-    fetchHtml(islandUrl(kind, search)).then((markup) => {
+  function refreshIslandNow(kind: RefreshKind, search: string) {
+    return fetchHtml(islandUrl(kind, search)).then((markup) => {
       if (search !== currentSearch()) return;
       applyIslandMarkup(kind, markup);
     });
+  }
 
-  const performIslandRefresh = (kind: RefreshKind, search: string) => {
-    if (refreshInFlight[kind]) {
-      refreshQueued[kind] = true;
-      return;
-    }
-    refreshInFlight[kind] = true;
-    refreshIslandNow(kind, search).catch(() => {
-      // Ignore transient island refresh failures; the next event or navigation will retry.
-    }).finally(() => {
-      refreshInFlight[kind] = false;
-      if (!refreshQueued[kind]) return;
-      refreshQueued[kind] = false;
-      queueIslandRefresh(kind, kind === "chat" ? CHAT_REFRESH_DELAY_MS : SIDEBAR_REFRESH_DELAY_MS);
-    });
+  const queueIslandRefresh = (kind: RefreshKind, delayMs: number, searchOverride?: string) => {
+    islandRefreshQueue.queue(kind, delayMs, searchOverride);
   };
 
-  const queueIslandRefresh = (kind: RefreshKind, delay: number, searchOverride?: string) => {
-    if (refreshTimers[kind]) window.clearTimeout(refreshTimers[kind]);
-    refreshTimers[kind] = window.setTimeout(() => {
-      refreshTimers[kind] = 0;
-      const search = typeof searchOverride === "string" ? searchOverride : currentSearch();
-      performIslandRefresh(kind, search);
-    }, delay);
-  };
+  const currentObjectiveScopeId = (): string | undefined =>
+    currentChatState().objectiveId
+    || pendingScope?.objectiveId
+    || currentScope?.objectiveId
+    || asString(currentUrl()?.searchParams.get("objective"));
+
+  const reactiveRefresh = createReactivePushRouter<"shell", RefreshKind, string>({
+    sources: ["shell"],
+    targets: () => [
+      {
+        key: "chat",
+        source: "shell",
+        element: chatContainer,
+        queue: (delayMs, searchOverride) => queueIslandRefresh("chat", delayMs, searchOverride),
+      },
+      {
+        key: "sidebar",
+        source: "shell",
+        element: sidebarContainer,
+        queue: (delayMs, searchOverride) => queueIslandRefresh("sidebar", delayMs, searchOverride),
+      },
+      {
+        key: "inspector",
+        source: "shell",
+        element: inspectorContainer,
+        queue: (delayMs, searchOverride) => queueIslandRefresh("inspector", delayMs, searchOverride),
+      },
+    ],
+    eventPath: () => eventsUrl(currentSearch()),
+    getScopeKey: currentSearch,
+    shouldQueue: ({ targetKey, eventName, event }) => {
+      if (eventName !== "factory-refresh") return true;
+      if (targetKey === "sidebar") return true;
+      const refreshedObjectiveId = asString((event as MessageEvent<string>).data);
+      const activeObjectiveId = currentObjectiveScopeId();
+      if (refreshedObjectiveId) {
+        if (activeObjectiveId && refreshedObjectiveId !== activeObjectiveId) return false;
+        if (!activeObjectiveId && !pendingSubmission) return false;
+      }
+      return true;
+    },
+    onEventSourceConnected: ({ eventSource, path }) => {
+      eventSource.addEventListener("agent-token", (event) => {
+        if (path !== eventsUrl(currentSearch())) return;
+        const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
+        if (!payload) return;
+        const state = currentChatState();
+        const runId = payload.runId || pendingScope?.runId || pendingSubmission?.scope?.runId || state.activeRunId || lastReconciledRunId;
+        if (!acceptsStreamingRun(runId)) return;
+        const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
+        streamingReply = {
+          runId,
+          profileLabel: state.activeProfileLabel || shellTitle()?.textContent || "Assistant",
+          text: previous + payload.delta,
+        };
+        scheduleOverlayRender();
+      });
+    },
+  });
 
   const refreshAllIslands = (search: string) =>
     Promise.all([
@@ -430,140 +462,9 @@ export const initFactoryChat = () => {
       refreshIslandNow("inspector", search),
     ]);
 
-  const currentObjectiveScopeId = (): string | undefined =>
-    currentChatState().objectiveId
-    || pendingScope?.objectiveId
-    || currentScope?.objectiveId
-    || asString(currentUrl()?.searchParams.get("objective"));
-
-  const hydrateShellFromDocument = (nextDocument: Document, url: URL) => {
-    if (typeof nextDocument.title === "string" && nextDocument.title) {
-      document.title = nextDocument.title;
-    }
-    setFocusData(url);
-    const nextTitle = nextDocument.getElementById("factory-shell-title");
-    const currentTitle = shellTitle();
-    if (currentTitle && nextTitle && typeof nextTitle.textContent === "string") {
-      currentTitle.textContent = nextTitle.textContent;
-    }
-    const nextPills = nextDocument.getElementById("factory-shell-status-pills");
-    const currentPills = shellStatusPills();
-    if (currentPills && nextPills && typeof nextPills.innerHTML === "string") {
-      currentPills.innerHTML = nextPills.innerHTML;
-    }
-    const nextPrompt = nextDocument.getElementById("factory-prompt");
-    const input = chatInput();
-    if (input && nextPrompt && typeof nextPrompt.getAttribute === "function") {
-      const placeholder = nextPrompt.getAttribute("placeholder");
-      if (placeholder !== null) input.setAttribute("placeholder", placeholder);
-    }
-    const nextForm = nextDocument.getElementById("factory-composer");
-    const form = composerForm();
-    if (form && nextForm && typeof nextForm.getAttribute === "function") {
-      const action = nextForm.getAttribute("action");
-      if (action) form.action = action;
-    }
-    const nextCurrentJob = nextDocument.getElementById("factory-composer-current-job");
-    const currentJob = composerCurrentJob();
-    if (currentJob) {
-      const nextValue = nextCurrentJob && typeof nextCurrentJob.getAttribute === "function"
-        ? nextCurrentJob.getAttribute("value")
-        : null;
-      currentJob.value = nextValue !== null ? nextValue : "";
-    }
-    const nextChat = nextDocument.getElementById("factory-chat");
-    const currentChat = chatContainer();
-    if (currentChat && nextChat && typeof nextChat.innerHTML === "string") {
-      currentChat.innerHTML = nextChat.innerHTML;
-      const activeProfileLabel = typeof nextChat.getAttribute === "function"
-        ? nextChat.getAttribute("data-active-profile-label")
-        : null;
-      if (activeProfileLabel !== null) currentChat.setAttribute("data-active-profile-label", activeProfileLabel);
-    }
-    const nextSidebar = nextDocument.getElementById("factory-sidebar");
-    const currentSidebar = sidebarContainer();
-    if (currentSidebar && nextSidebar && typeof nextSidebar.innerHTML === "string") {
-      currentSidebar.innerHTML = nextSidebar.innerHTML;
-    }
-    const nextInspector = nextDocument.getElementById("factory-inspector");
-    const currentInspector = inspectorContainer();
-    if (currentInspector && nextInspector && typeof nextInspector.innerHTML === "string") {
-      currentInspector.innerHTML = nextInspector.innerHTML;
-    }
-    reconcileScopeFromChatState(false);
-    reconcileLiveTranscript();
-    if (shouldStickToBottom) {
-      window.requestAnimationFrame(() => {
-        scrollChatToBottom("auto");
-      });
-    }
-  };
-
-  const connectLiveUpdates = (searchOverride?: string) => {
-    if (typeof window.EventSource !== "function") return;
-    const search = typeof searchOverride === "string" ? searchOverride : currentSearch();
-    if (liveEventSource && liveEventSearch === search) return;
-    closeLiveUpdates();
-    liveEventSearch = search;
-    liveEventSource = new window.EventSource(eventsUrl(search));
-    const ignoreInit = (event: MessageEvent<string>) => event.data === "init";
-    liveEventSource.addEventListener("agent-refresh", (event) => {
-      const message = event as MessageEvent<string>;
-      if (ignoreInit(message)) return;
-      queueIslandRefresh("chat", CHAT_REFRESH_DELAY_MS, search);
-    });
-    liveEventSource.addEventListener("job-refresh", (event) => {
-      const message = event as MessageEvent<string>;
-      if (ignoreInit(message)) return;
-      queueIslandRefresh("chat", CHAT_REFRESH_DELAY_MS, search);
-      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
-      queueIslandRefresh("inspector", INSPECTOR_REFRESH_DELAY_MS, search);
-    });
-    liveEventSource.addEventListener("profile-board-refresh", (event) => {
-      const message = event as MessageEvent<string>;
-      if (ignoreInit(message)) return;
-      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
-    });
-    liveEventSource.addEventListener("objective-runtime-refresh", (event) => {
-      const message = event as MessageEvent<string>;
-      if (ignoreInit(message)) return;
-      queueIslandRefresh("chat", CHAT_REFRESH_DELAY_MS, search);
-      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
-      queueIslandRefresh("inspector", INSPECTOR_REFRESH_DELAY_MS, search);
-    });
-    liveEventSource.addEventListener("factory-refresh", (event) => {
-      const message = event as MessageEvent<string>;
-      if (ignoreInit(message)) return;
-      queueIslandRefresh("sidebar", SIDEBAR_REFRESH_DELAY_MS, search);
-      const refreshedObjectiveId = asString(message.data);
-      const activeObjectiveId = currentObjectiveScopeId();
-      if (refreshedObjectiveId) {
-        if (activeObjectiveId && refreshedObjectiveId !== activeObjectiveId) return;
-        if (!activeObjectiveId && !pendingSubmission) return;
-      }
-      queueIslandRefresh("chat", CHAT_REFRESH_DELAY_MS, search);
-      queueIslandRefresh("inspector", INSPECTOR_REFRESH_DELAY_MS, search);
-    });
-    liveEventSource.addEventListener("agent-token", (event) => {
-      if (search !== currentSearch()) return;
-      const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
-      if (!payload) return;
-      const state = currentChatState();
-      const runId = payload.runId || pendingScope?.runId || pendingSubmission?.scope?.runId || state.activeRunId || lastReconciledRunId;
-      if (!acceptsStreamingRun(runId)) return;
-      const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
-      streamingReply = {
-        runId,
-        profileLabel: state.activeProfileLabel || shellTitle()?.textContent || "Assistant",
-        text: previous + payload.delta,
-      };
-      scheduleOverlayRender();
-    });
-  };
-
   const refreshVisibleShell = () => {
     const search = currentSearch();
-    connectLiveUpdates(search);
+    reactiveRefresh.sync();
     queueIslandRefresh("chat", 0, search);
     queueIslandRefresh("sidebar", 0, search);
     queueIslandRefresh("inspector", 0, search);
@@ -598,7 +499,7 @@ export const initFactoryChat = () => {
       };
       scheduleOverlayRender();
     }
-    connectLiveUpdates(nextScope.search);
+    reactiveRefresh.sync();
     const shellUrl = url.pathname + (url.search || "");
     const revision = ++navigationRevision;
     const hydrate = typeof window.DOMParser === "function"
@@ -668,7 +569,7 @@ export const initFactoryChat = () => {
       };
     }
     if ((url.search || "") !== previousSearch) {
-      connectLiveUpdates(url.search || "");
+      reactiveRefresh.sync();
     }
     if (objectiveChanged && refreshObjectiveIslands) {
       dispatchBodyEvent("factory:scope-changed", {
@@ -677,6 +578,69 @@ export const initFactoryChat = () => {
       });
     }
     return true;
+  };
+
+  const hydrateShellFromDocument = (nextDocument: Document, url: URL) => {
+    if (typeof nextDocument.title === "string" && nextDocument.title) {
+      document.title = nextDocument.title;
+    }
+    setFocusData(url);
+    const nextTitle = nextDocument.getElementById("factory-shell-title");
+    const currentTitle = shellTitle();
+    if (currentTitle && nextTitle && typeof nextTitle.textContent === "string") {
+      currentTitle.textContent = nextTitle.textContent;
+    }
+    const nextPills = nextDocument.getElementById("factory-shell-status-pills");
+    const currentPills = shellStatusPills();
+    if (currentPills && nextPills && typeof nextPills.innerHTML === "string") {
+      currentPills.innerHTML = nextPills.innerHTML;
+    }
+    const nextPrompt = nextDocument.getElementById("factory-prompt");
+    const input = chatInput();
+    if (input && nextPrompt && typeof nextPrompt.getAttribute === "function") {
+      const placeholder = nextPrompt.getAttribute("placeholder");
+      if (placeholder !== null) input.setAttribute("placeholder", placeholder);
+    }
+    const nextForm = nextDocument.getElementById("factory-composer");
+    const form = composerForm();
+    if (form && nextForm && typeof nextForm.getAttribute === "function") {
+      const action = nextForm.getAttribute("action");
+      if (action) form.action = action;
+    }
+    const nextCurrentJob = nextDocument.getElementById("factory-composer-current-job");
+    const currentJob = composerCurrentJob();
+    if (currentJob) {
+      const nextValue = nextCurrentJob && typeof nextCurrentJob.getAttribute === "function"
+        ? nextCurrentJob.getAttribute("value")
+        : null;
+      currentJob.value = nextValue !== null ? nextValue : "";
+    }
+    const nextChat = nextDocument.getElementById("factory-chat");
+    const currentChat = chatContainer();
+    if (currentChat && nextChat && typeof nextChat.innerHTML === "string") {
+      currentChat.innerHTML = nextChat.innerHTML;
+      const activeProfileLabel = typeof nextChat.getAttribute === "function"
+        ? nextChat.getAttribute("data-active-profile-label")
+        : null;
+      if (activeProfileLabel !== null) currentChat.setAttribute("data-active-profile-label", activeProfileLabel);
+    }
+    const nextSidebar = nextDocument.getElementById("factory-sidebar");
+    const currentSidebar = sidebarContainer();
+    if (currentSidebar && nextSidebar && typeof nextSidebar.innerHTML === "string") {
+      currentSidebar.innerHTML = nextSidebar.innerHTML;
+    }
+    const nextInspector = nextDocument.getElementById("factory-inspector");
+    const currentInspector = inspectorContainer();
+    if (currentInspector && nextInspector && typeof nextInspector.innerHTML === "string") {
+      currentInspector.innerHTML = nextInspector.innerHTML;
+    }
+    reconcileScopeFromChatState(false);
+    reconcileLiveTranscript();
+    if (shouldStickToBottom) {
+      window.requestAnimationFrame(() => {
+        scrollChatToBottom("auto");
+      });
+    }
   };
 
   const autoResizeInput = () => {
@@ -872,7 +836,7 @@ export const initFactoryChat = () => {
   const initialUrl = currentUrl();
   if (initialUrl) currentScope = buildScope(initialUrl);
   reconcileScopeFromChatState(false);
-  connectLiveUpdates();
+  reactiveRefresh.sync();
   scheduleOverlayRender();
 
   if (typeof window.addEventListener === "function") {

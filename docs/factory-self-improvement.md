@@ -60,7 +60,7 @@ flowchart LR
 
 The first self-improvement mechanism is preventative.
 
-For delivery objectives, Receipt derives an `Objective Contract` from the planning receipt and current objective state in [`src/services/factory-service.ts`](/Users/kishore/receipt/src/services/factory-service.ts).
+For delivery objectives, Receipt derives an `Objective Contract` from the planning receipt and current objective state in [`src/services/factory/runtime/base-service.ts`](/Users/kishore/receipt/src/services/factory/runtime/base-service.ts).
 
 That contract includes:
 
@@ -93,7 +93,7 @@ Receipt keeps this small and text-first. The alignment review is part of the del
 
 ## 3. Controller-Side Alignment Gate
 
-The next self-improvement mechanism is a visible controller gate in [`src/services/factory-service.ts`](/Users/kishore/receipt/src/services/factory-service.ts).
+The next self-improvement mechanism is a visible controller gate in [`src/services/factory/runtime/base-service.ts`](/Users/kishore/receipt/src/services/factory/runtime/base-service.ts).
 
 ### Normal path
 

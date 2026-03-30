@@ -99,8 +99,8 @@ flowchart LR
   subgraph Control["Receipt Control Plane"]
     Runtime["Runtime + JSONL stores"]
     Reducer["Factory reducer\nsrc/modules/factory.ts"]
-    Service["Factory service\nsrc/services/factory-service.ts"]
-    Orchestrator["Factory orchestrator\nvalid action chooser"]
+    Service["Factory runtime\nsrc/services/factory/runtime/base-service.ts"]
+    Orchestrator["Factory chat/supervisor\nentrypoint"]
     Queue["jobs + jobs/<jobId>"]
     Memory["receipt-backed memory scopes"]
     SSE["existing SSE topics"]
@@ -162,7 +162,7 @@ This is the source of truth for objective/task/candidate/integration state.
 
 ### Factory service layer
 
-- `src/services/factory-service.ts`
+- `src/services/factory/runtime/base-service.ts`
 
 This file is the execution seam between the generic runtime and the factory domain.
 
@@ -176,20 +176,21 @@ It does not own durable state. It:
 - normalizes worker results back into receipts
 - runs integration validation and promotion logic
 
-### Factory semantic/orchestrator layer
+### Factory profile-driven chat/supervisor layer
 
 - `src/agents/orchestrator.ts`
-- `prompts/factory/orchestrator.md`
+- `src/agents/factory/chat/run.ts`
+- `profiles/<id>/PROFILE.md`
 
-This layer chooses among valid actions. It is intentionally narrower than the service layer:
+This layer is the user-facing orchestration surface. It is intentionally narrower than the service layer:
 
-- the service computes legal next actions
-- the orchestrator chooses one
-- the chosen action is written back as receipts
+- the active profile and Factory chat loop decide how to inspect, answer, probe, or dispatch
+- the service remains the durable source of objective state
+- the chat layer does not invent hidden state outside receipts, queue state, and memory
 
 ### Factory route layer
 
-- `src/agents/factory/route.ts`
+- `src/agents/factory/route/handlers.ts`
 
 This is the route/workflow entry, not the durable brain.
 
@@ -235,6 +236,7 @@ The following pieces are deterministic and replayable:
 - factory reducer state transitions
 - worktree and Git mechanics in `HubGit`
 - task packet generation and worker result normalization
+- deterministic objective rebracketing through the policy helpers in `src/services/factory/rebracket-policy.ts`
 - integration validation and source promotion mechanics
 
 These pieces should behave the same on replay given the same receipts and Git state.
@@ -243,10 +245,9 @@ These pieces should behave the same on replay given the same receipts and Git st
 
 The following pieces are semantic and model-driven:
 
-- objective decomposition through `llmStructured`
-- factory action selection through `FactoryOrchestrator`
+- profile-driven chat/supervisor turns in `src/agents/factory/chat/run.ts`
 - Codex task execution inside worker worktrees
-- orchestrator prompt policy in `prompts/factory/orchestrator.md`
+- agent-side interpretation of receipts, memory, and operator intent before choosing whether to inspect, probe, or dispatch
 
 The agent layer is allowed to choose from legal actions. It is not allowed to mutate hidden service state.
 
@@ -484,10 +485,10 @@ The durable receipt family currently implemented in `src/modules/factory.ts` inc
 - `candidate.reviewed`
 - `candidate.conflicted`
 
-### Merge/rebracketing evidence
+### Investigation and rebracketing
 
-- `merge.evidence.computed`
-- `merge.candidate.scored`
+- `investigation.reported`
+- `investigation.synthesized`
 - `rebracket.applied`
 - `merge.applied`
 
@@ -496,6 +497,7 @@ The durable receipt family currently implemented in `src/modules/factory.ts` inc
 - `integration.queued`
 - `integration.merging`
 - `integration.validating`
+- `integration.validated`
 - `integration.ready_to_promote`
 - `integration.promoting`
 - `integration.promoted`
@@ -508,6 +510,7 @@ The reducer supports more receipts than the service currently emits.
 ### Fully exercised in the current flow
 
 - `objective.created`
+- `planning.receipt`
 - `task.added`
 - `task.ready`
 - `task.dispatched`
@@ -519,13 +522,14 @@ The reducer supports more receipts than the service currently emits.
 - `candidate.produced`
 - `candidate.reviewed`
 - `candidate.conflicted`
-- `merge.evidence.computed`
-- `merge.candidate.scored`
+- `investigation.reported`
+- `investigation.synthesized`
 - `rebracket.applied`
 - `merge.applied`
 - `integration.queued`
 - `integration.merging`
 - `integration.validating`
+- `integration.validated`
 - `integration.ready_to_promote`
 - `integration.promoting`
 - `integration.promoted`
@@ -556,14 +560,12 @@ Implemented in `FactoryService.createObjective()`.
 
 Flow:
 
-1. Ensure the Git mirror and repo are ready.
-2. Reject uncommitted source state unless an explicit `baseHash` was supplied.
-3. Emit `objective.created`.
-4. Decompose the objective through `llmStructured`, or fall back to a single `codex` task.
-5. Emit one `task.added` receipt per initial task.
-6. Call `reactObjective()` to activate and dispatch work.
+1. Ensure bootstrap is ready and resolve the profile, policy, checks, and base hash.
+2. Emit `objective.created`, the initial slot receipt, and one `task.added` receipt for the initial task.
+3. Emit `planning.receipt` so the current plan shape is visible in projections and debug views.
+4. Start objective startup immediately if the repo slot is available; otherwise enqueue `factory.objective.control`.
 
-The initial decomposition is durable. There is no hidden planner-only pass.
+Objective creation no longer runs a separate decomposition pass. The runtime starts from one durable initial task and grows or reshapes work later through receipt-backed planner effects.
 
 ## Deterministic React Loop
 
@@ -573,10 +575,10 @@ This is the main deterministic control loop.
 
 It does four things:
 
-1. Reconcile finished jobs into task blocking if needed.
-2. Promote `pending` tasks to `ready` when dependencies are satisfied.
-3. Dispatch all ready tasks up to `maxActiveTasks`.
-4. Compute semantic actions and optionally ask the orchestrator to choose one.
+1. Reconcile failed or queued active jobs and stamp circuit-broken tasks when needed.
+2. Collect planner facts, including operator follow-up notes, dispatch capacity, policy blockers, and investigation synthesis readiness.
+3. Generate planner effects through `planObjectiveReact(...)`.
+4. Apply preparation effects immediately, then deterministically score any competing final effects through the rebracket policy before applying the winner.
 
 Important defaults:
 
@@ -584,60 +586,71 @@ Important defaults:
 - multiple ready tasks can dispatch concurrently
 - integration/promotion remain effectively serialized per objective
 
-## Semantic Action Model
+## Planner Effect Model
 
-The semantic action type union in `src/agents/orchestrator.ts` is:
+The live effect union is defined in `src/services/factory/effects.ts`:
 
-- `split_task`
-- `reassign_task`
-- `supersede_task`
-- `queue_integration`
-- `promote_integration`
-- `block_objective`
+- `objective.add_initial_task`
+- `objective.queue_follow_up_task`
+- `task.ready`
+- `task.unblock`
+- `task.block`
+- `task.dispatch`
+- `task.review.request`
+- `task.noop_complete`
+- `candidate.produce`
+- `candidate.review`
+- `integration.queue`
+- `integration.ready_to_promote`
+- `integration.promote`
+- `objective.complete`
+- `objective.block`
 
 Current reality:
 
-- task dispatch is still deterministic and does not go through the orchestrator
-- integration queueing and promotion are always semantic actions
-- runtime task mutation actions are produced when orchestration is enabled and there are mutable `pending`/`ready`/`blocked` tasks
-- mutation actions are emitted only from the structured mutation planner; there is no second heuristic mutation generator
+- `planObjectiveReact(...)` proposes effects from reducer state plus planner facts
+- preparation effects are applied directly inside `reactObjective()`
+- if multiple final effects are available, `selectFactoryRebracketEffect(...)` ranks them deterministically and records `rebracket.applied`
+- there is no separate model-driven mutation planner or OpenAI action chooser in the live runtime
 
 The practical split is:
 
 - scheduling mechanics stay deterministic
-- semantic reshaping and integration choices are receipt-backed orchestrator decisions
+- semantic reshaping and integration choices are receipt-backed runtime decisions
 
-### Orchestrator decision boundary
+### Runtime decision boundary
 
 ```mermaid
 flowchart TD
-  Start["Reducer state"] --> Legal["FactoryService builds legal actions"]
-  Legal --> Evidence["score legal actions via merge/rebracket policy"]
-  Evidence --> Apply["runtime selects one action and emits rebracket.applied"]
-  Apply --> Receipts["emit mutation / integration / promotion receipts"]
+  Start["Reducer state"] --> Facts["collectObjectivePlannerFacts"]
+  Facts --> Plan["planObjectiveReact"]
+  Plan --> Prep["apply preparation effects directly"]
+  Prep --> Evidence["score final effects via merge/rebracket policy"]
+  Evidence --> Apply["emit rebracket.applied and apply the selected effect"]
+  Apply --> Receipts["emit task / integration / objective receipts"]
 ```
 
-## Orchestrator Behavior
+## Runtime Selection Behavior
 
-The orchestrator boundary is intentionally narrow.
+The runtime selection boundary is intentionally narrow.
 
 Input:
 
-- objective metadata
-- current tasks
-- current candidates
-- integration state
-- valid actions
-- `basedOn` head hash
+- current objective state
+- current planner facts
+- current candidate final effects (`task.dispatch`, integration effects, objective complete/block)
+- current `basedOn` head hash when one is available
 
 Output:
 
-- `selectedActionId`
+- the selected effect
+- `selectedActionId` on `rebracket.applied`
 - `reason`
 - `confidence`
 
-The runtime currently scores the legal action set through the merge/rebracket policy helpers, then records the winning decision as `rebracket.applied` with source `runtime`.
-Factory does not yet emit per-candidate `merge.evidence.computed` or `merge.candidate.scored` receipts on the objective stream.
+The runtime currently scores the eligible final-effect set through the merge/rebracket policy helpers, then records the winning decision as `rebracket.applied` with source `runtime`.
+That receipt still uses the historical `selectedActionId` field name, but the choice is now deterministic runtime scoring rather than a model-selected orchestration action.
+Current event types do not include `merge.evidence.computed` or `merge.candidate.scored`; merge progression is captured through `rebracket.applied`, `merge.applied`, and the integration lifecycle receipts.
 There is no separate `fallbackFactoryDecision()` path left in the current implementation.
 
 ## Worker Dispatch Model
@@ -923,7 +936,7 @@ If you want to add more dynamic autonomy, the correct extension point order is:
 1. extend `FactoryEvent` and `reduceFactory()` first
 2. add or tighten selectors/projections in `src/modules/factory.ts`
 3. add deterministic legality checks in `FactoryService`
-4. only then widen the orchestrator action space
+4. only then widen the planner/rebracket effect space
 5. only after that update Hub projections and UI
 
 Do not add:
@@ -931,7 +944,7 @@ Do not add:
 - a second factory state cache
 - a second scheduler
 - a second memory runtime
-- hidden mutable orchestrator state inside routes or workers
+- hidden mutable decision state inside routes or workers
 
 ## Remaining Gaps
 

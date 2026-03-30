@@ -171,7 +171,7 @@ Factory objective state is replayed from the stream:
 
 - `factory/objectives/<objectiveId>`
 
-This stream is produced and consumed by `FactoryService` in `src/services/factory-service.ts` using the reducer in `src/modules/factory.ts`.
+This stream is produced and consumed by `FactoryService` in `src/services/factory/runtime/base-service.ts` using the reducer in `src/modules/factory.ts`.
 
 The stream contains the full control history:
 

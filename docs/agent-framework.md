@@ -63,4 +63,4 @@ Lifecycle uses leases, heartbeats, retries, singleton behavior, and in-flight co
 
 ## First-party modules
 
-- Factory (`src/agents/factory.agent.ts`)
+- Factory (`src/agents/factory/route/handlers.ts`)
