@@ -182,6 +182,24 @@ const renderFocusedArtifacts = (model: FactoryInspectorModel): string => {
   return [packetFiles, extraArtifacts].filter(Boolean).join("");
 };
 
+const renderFocusedOutputDetails = (input: {
+  readonly label: string;
+  readonly value?: string;
+  readonly tone?: "neutral" | "danger";
+}): string => {
+  if (!input.value) return "";
+  const panelClass = input.tone === "danger"
+    ? "border border-destructive/20 bg-destructive/5"
+    : "border border-border bg-background";
+  const textClass = input.tone === "danger"
+    ? "text-destructive"
+    : "text-muted-foreground";
+  return `<details class="${panelClass} px-2.5 py-2">
+    <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.16em] ${textClass}">${esc(input.label)}</summary>
+    <pre class="mt-2 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-5 ${textClass}">${esc(truncate(input.value, 800))}</pre>
+  </details>`;
+};
+
 const renderInspectorRailSummary = (model: FactoryInspectorModel): string => {
   const objective = model.selectedObjective;
   if (!objective) return "";
@@ -283,9 +301,9 @@ const renderFocusedOutput = (model: FactoryInspectorModel, heading: string): str
       </div>
       ${focus.summary ? `<div class="text-xs text-foreground">${esc(focus.summary)}</div>` : ''}
       ${focus.artifactSummary ? `<div class="text-[11px] text-muted-foreground">${esc(focus.artifactSummary)}</div>` : ''}
-      ${focus.lastMessage ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(focus.lastMessage, 800))}</pre>` : ''}
-      ${focus.stdoutTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-background border border-border rounded text-muted-foreground">${esc(truncate(focus.stdoutTail, 800))}</pre>` : ''}
-      ${focus.stderrTail ? `<pre class="mt-1 factory-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] p-2 bg-destructive/10 border border-destructive/20 rounded text-destructive">${esc(truncate(focus.stderrTail, 800))}</pre>` : ''}
+      ${renderFocusedOutputDetails({ label: "Last Message", value: focus.lastMessage })}
+      ${renderFocusedOutputDetails({ label: "Stdout Tail", value: focus.stdoutTail })}
+      ${renderFocusedOutputDetails({ label: "Stderr Tail", value: focus.stderrTail, tone: "danger" })}
     </div>
     ${renderFocusedArtifacts(model)}
   </div>`;

@@ -4197,6 +4197,8 @@ test("factory route: running task workbench renders above the transcript and aut
   expect(body).toContain("Implement mission shell");
   expect(body).toContain("build ok");
   expect(body).toContain("Worker running");
+  expect(body).toContain("lg:sticky lg:top-3 lg:z-10");
+  expect(body).toContain("lg:sticky lg:top-0 lg:z-10");
   expect(body).toContain("Continue");
   expect(body).toContain("Abort Job");
   expect(body).toContain("Open Chat");

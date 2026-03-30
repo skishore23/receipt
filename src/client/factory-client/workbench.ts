@@ -476,6 +476,31 @@ export const initFactoryWorkbenchBrowser = () => {
     scheduleOverlayRender();
   };
 
+  const captureChatScrollState = () => {
+    const scroll = chatScroll();
+    if (!scroll) return null;
+    return {
+      top: scroll.scrollTop,
+      height: scroll.scrollHeight,
+      bottomOffset: Math.max(0, scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+    };
+  };
+
+  const restoreChatScrollState = (state: { readonly top: number; readonly height: number; readonly bottomOffset: number }) => {
+    const scroll = chatScroll();
+    if (!scroll) return;
+    const atBottom = state.bottomOffset < 120;
+    const nextTop = atBottom
+      ? scroll.scrollHeight
+      : Math.max(0, scroll.scrollHeight - scroll.clientHeight - state.bottomOffset);
+    if (typeof scroll.scrollTo === "function") {
+      scroll.scrollTo({ top: nextTop, behavior: "auto" });
+    } else {
+      scroll.scrollTop = nextTop;
+    }
+    shouldStickToBottom = atBottom;
+  };
+
   const reconcileLiveTranscript = () => {
     const state = currentChatState();
     const pendingRunId = pendingLiveStatus?.runId;
@@ -862,6 +887,7 @@ export const initFactoryWorkbenchBrowser = () => {
   };
 
   const handleWorkbenchChatSwap = (target: HTMLElement) => {
+    const scrollState = captureChatScrollState();
     const currentObjectiveId = workbenchState.appliedRoute.objectiveId ?? "";
     const discoveredObjectiveId = target.getAttribute("data-objective-id") || "";
     if (!currentObjectiveId && discoveredObjectiveId) {
@@ -881,15 +907,9 @@ export const initFactoryWorkbenchBrowser = () => {
       scheduleOverlayRender();
     }
     reconcileLiveTranscript();
-    if (!shouldStickToBottom) return;
+    if (!scrollState) return;
     window.requestAnimationFrame(() => {
-      const nextScroll = chatScroll();
-      if (!nextScroll) return;
-      if (typeof nextScroll.scrollTo === "function") {
-        nextScroll.scrollTo({ top: nextScroll.scrollHeight, behavior: "auto" });
-      } else {
-        nextScroll.scrollTop = nextScroll.scrollHeight;
-      }
+      restoreChatScrollState(scrollState);
     });
   };
 
