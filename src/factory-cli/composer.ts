@@ -32,6 +32,14 @@ export type ComposerCommand =
   | {
       readonly type: "abort-job";
       readonly reason?: string;
+    }
+  | {
+      readonly type: "steer";
+      readonly message?: string;
+    }
+  | {
+      readonly type: "follow-up";
+      readonly message?: string;
     };
 
 export type ParsedComposerDraft =
@@ -64,6 +72,8 @@ export const COMPOSER_COMMANDS: ReadonlyArray<ComposerCommandDefinition> = [
   { name: "cleanup", label: "/cleanup", usage: "/cleanup", description: "Clean up the selected objective." },
   { name: "archive", label: "/archive", usage: "/archive", description: "Archive the selected objective." },
   { name: "abort-job", label: "/abort-job", usage: "/abort-job [reason]", description: "Abort the active job.", aliases: ["abortjob"] },
+  { name: "steer", label: "/steer", usage: "/steer <message>", description: "Steer the active job for the selected objective." },
+  { name: "follow-up", label: "/follow-up", usage: "/follow-up <message>", description: "Send follow-up guidance to the active job for the selected objective.", aliases: ["followup", "follow_up"] },
 ] as const;
 
 const COMMAND_LOOKUP = new Map(
@@ -284,6 +294,30 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
         command: {
           type: "abort-job",
           reason: payload || undefined,
+        },
+      };
+    case "steer":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before steering its active job." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "steer",
+          message: payload || undefined,
+        },
+      };
+    case "follow-up":
+    case "followup":
+    case "follow_up":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before sending follow-up guidance to its active job." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "follow-up",
+          message: payload || undefined,
         },
       };
     default:

@@ -14,6 +14,7 @@ export type FactoryObjectiveMutationAction =
   | "archive";
 
 export type FactoryJobMutationAction = "abort";
+export type FactoryJobSteerAction = "steer" | "follow-up";
 
 export type FactoryObjectiveMutationResult = {
   readonly kind: "objective";
@@ -31,9 +32,19 @@ export type FactoryJobMutationResult = {
   readonly commandId: string;
 };
 
+export type FactoryJobGuidanceResult = {
+  readonly kind: "job";
+  readonly action: FactoryJobSteerAction;
+  readonly jobId: string;
+  readonly job: QueueJob;
+  readonly commandId: string;
+  readonly message?: string;
+};
+
 export type FactoryMutationResult =
   | FactoryObjectiveMutationResult
-  | FactoryJobMutationResult;
+  | FactoryJobMutationResult
+  | FactoryJobGuidanceResult;
 
 const activeJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
@@ -216,6 +227,56 @@ export const abortJobMutation = async (
     commandId: queued.command.id,
   };
 };
+
+const queueGuidanceJobCommand = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly jobId: string;
+    readonly command: "steer" | "follow_up";
+    readonly message?: string;
+    readonly by: string;
+  },
+): Promise<FactoryJobGuidanceResult> => {
+  const queued = input.command === "steer"
+    ? await runtime.service.queueJobSteer(input.jobId, input.message, input.by)
+    : await runtime.service.queueJobFollowUp(input.jobId, input.message, input.by);
+  return {
+    kind: "job",
+    action: input.command === "steer" ? "steer" : "follow-up",
+    jobId: input.jobId,
+    job: queued.job,
+    commandId: queued.command.id,
+    ...(input.message ? { message: input.message } : {}),
+  };
+};
+
+export const steerJobMutation = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly jobId: string;
+    readonly message?: string;
+  },
+): Promise<FactoryJobGuidanceResult> =>
+  queueGuidanceJobCommand(runtime, {
+    jobId: input.jobId,
+    command: "steer",
+    message: input.message,
+    by: "factory.cli",
+  });
+
+export const followUpJobMutation = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly jobId: string;
+    readonly message?: string;
+  },
+): Promise<FactoryJobGuidanceResult> =>
+  queueGuidanceJobCommand(runtime, {
+    jobId: input.jobId,
+    command: "follow_up",
+    message: input.message,
+    by: "factory.cli",
+  });
 
 export const requireActiveObjectiveJob = (
   detail: FactoryObjectiveDetail | undefined,

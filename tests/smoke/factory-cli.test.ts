@@ -11,7 +11,7 @@ import { renderToString } from "ink";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
-import { inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
+import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
@@ -2234,6 +2234,77 @@ test("factory cli: abort-job queues a structured abort command", async () => {
   }
 }, 120_000);
 
+test("factory cli: steer and follow-up queue structured guidance commands", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const config = await loadFactoryConfig(repoDir);
+  expect(config).toBeDefined();
+  const runtime = createFactoryCliRuntime(config!);
+  try {
+    const job = await runtime.queue.enqueue({
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.codex.run",
+        objectiveId: "objective_demo",
+        stream: "factory-chat:test",
+        runId: "run_factory_cli_guidance",
+        prompt: "Seed the queue for CLI guidance tests.",
+      },
+      maxAttempts: 1,
+    });
+
+    const steer = await runCli([
+      "factory",
+      "steer",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "refocus the active job",
+    ]);
+    expect(steer.code).toBe(0);
+    const steerPayload = JSON.parse(steer.stdout) as {
+      readonly action: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: { readonly note?: string } }>;
+      };
+    };
+    expect(steerPayload.action).toBe("steer");
+    expect(steerPayload.commandId.length).toBeGreaterThan(0);
+    expect(steerPayload.job.commands.some((command) => command.command === "steer" && command.payload?.note === "refocus the active job")).toBe(true);
+
+    const followUp = await runCli([
+      "factory",
+      "follow-up",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "add follow-up detail",
+    ]);
+    expect(followUp.code).toBe(0);
+    const followUpPayload = JSON.parse(followUp.stdout) as {
+      readonly action: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: { readonly note?: string } }>;
+      };
+    };
+    expect(followUpPayload.action).toBe("follow-up");
+    expect(followUpPayload.commandId.length).toBeGreaterThan(0);
+    expect(followUpPayload.job.commands.some((command) => command.command === "follow_up" && command.payload?.note === "add follow-up detail")).toBe(true);
+  } finally {
+    runtime.stop();
+  }
+}, 120_000);
+
 test("factory cli: composer parser handles plain text and slash commands", () => {
   expect(parseComposerDraft("Ship a better objective flow")).toEqual({
     ok: true,
@@ -2276,6 +2347,20 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       reason: "stop the current worker",
     },
   });
+  expect(parseComposerDraft("/steer refocus the active job", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "steer",
+      message: "refocus the active job",
+    },
+  });
+  expect(parseComposerDraft("/follow-up add follow-up detail", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "follow-up",
+      message: "add follow-up detail",
+    },
+  });
 });
 
 test("factory cli: composer parser marks diagnostic prompts as investigations and adds root-cause guidance", () => {
@@ -2304,6 +2389,19 @@ test("factory cli: composer parser rejects job commands without a selected objec
     ok: false,
     error: "Select an objective before aborting its active job.",
   });
+  expect(parseComposerDraft("/steer refocus the active job")).toEqual({
+    ok: false,
+    error: "Select an objective before steering its active job.",
+  });
+  expect(parseComposerDraft("/follow-up add follow-up detail")).toEqual({
+    ok: false,
+    error: "Select an objective before sending follow-up guidance to its active job.",
+  });
+});
+
+test("factory cli: composer metadata exposes steer and follow-up commands in help surfaces", () => {
+  expect(COMPOSER_COMMANDS.some((command) => command.name === "steer" && command.usage === "/steer <message>")).toBe(true);
+  expect(COMPOSER_COMMANDS.some((command) => command.name === "follow-up" && command.usage === "/follow-up <message>")).toBe(true);
 });
 
 test("factory workbench: shared projection keeps rich task data and defaults focus to the active task", () => {

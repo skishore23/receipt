@@ -1845,6 +1845,30 @@ export class FactoryService {
     });
   }
 
+  async queueJobSteer(
+    jobId: string,
+    message?: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    return this.queueJobCommand(jobId, {
+      command: "steer",
+      payload: message ? { note: optionalTrimmedString(message) ?? message } : undefined,
+      by,
+    });
+  }
+
+  async queueJobFollowUp(
+    jobId: string,
+    message?: string,
+    by = "factory.cli",
+  ): Promise<FactoryQueuedJobCommand> {
+    return this.queueJobCommand(jobId, {
+      command: "follow_up",
+      payload: message ? { note: optionalTrimmedString(message) ?? message } : undefined,
+      by,
+    });
+  }
+
   async resumeObjectives(): Promise<void> {
     await this.queue.refresh();
     await this.reconcileQueuedObjectiveControlJobs();
@@ -1936,7 +1960,7 @@ export class FactoryService {
   private async queueJobCommand(
     jobId: string,
     input: {
-      readonly command: "abort";
+      readonly command: "abort" | "steer" | "follow_up";
       readonly payload?: Record<string, unknown>;
       readonly by?: string;
     },

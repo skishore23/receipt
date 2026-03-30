@@ -19,8 +19,10 @@ import {
   cleanupObjectiveMutation,
   composeObjectiveMutation,
   createObjectiveMutation,
+  followUpJobMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
+  steerJobMutation,
   type FactoryMutationResult,
 } from "./actions";
 import { FactoryTerminalApp, type FactoryAppExit } from "./app";
@@ -1013,6 +1015,28 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const result = await abortJobMutation(runtime, {
           jobId,
           reason: asString(flags, "reason") ?? (trailingReason || undefined),
+        });
+        printMutationResult(result, json);
+        return;
+      }
+      case "steer": {
+        const jobId = args[1];
+        if (!jobId) throw new Error("factory steer requires <job-id>");
+        const trailingMessage = args.slice(2).join(" ").trim();
+        const result = await steerJobMutation(runtime, {
+          jobId,
+          message: asString(flags, "message") ?? (trailingMessage || undefined),
+        });
+        printMutationResult(result, json);
+        return;
+      }
+      case "follow-up": {
+        const jobId = args[1];
+        if (!jobId) throw new Error("factory follow-up requires <job-id>");
+        const trailingMessage = args.slice(2).join(" ").trim();
+        const result = await followUpJobMutation(runtime, {
+          jobId,
+          message: asString(flags, "message") ?? (trailingMessage || undefined),
         });
         printMutationResult(result, json);
         return;
