@@ -1406,6 +1406,21 @@ test("factory client: prompt submit shows optimistic pending transcript immediat
   expect(optimistic.innerHTML).toContain("List the current EC2 instances.");
 });
 
+test("factory client: chat refresh preserves the operator scroll position when they are not at the bottom", async () => {
+  const { chat, scroll } = await createHarness({
+    chatHtml: chatMarkup({ chatId: "chat_scrolled", objectiveId: "objective_scrolled" }),
+  });
+  scroll.scrollTop = 160;
+  scroll.scrollHeight = 980;
+  scroll.clientHeight = 320;
+
+  chat.innerHTML = chatMarkup({ chatId: "chat_scrolled", objectiveId: "objective_scrolled" });
+  chat.dispatchEvent(new MockEvent({ type: "htmx:afterSwap", target: chat }));
+  await flushAsync();
+
+  expect(scroll.scrollTop).toBe(160);
+});
+
 test("factory client: selected-thread submits keep the shell aligned and avoid queueing copy", async () => {
   const { textarea, form, optimistic, status, submit, sidebar, inspector, locationState, historyState } = await createHarness({
     initialLocation: "http://receipt.test/factory?profile=infrastructure&chat=chat_demo&thread=objective_demo&panel=overview",
