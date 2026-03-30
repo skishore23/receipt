@@ -151,7 +151,8 @@ Once the service computes legal semantic actions, the orchestrator can choose on
 - input: objective snapshot, tasks, candidates, integration state, legal actions, current head hash
 - output: `selectedActionId`, `reason`, `confidence`
 
-The current runtime records these decisions directly as `rebracket.applied` with source `runtime`.
+The current runtime scores these legal actions through the merge/rebracket policy helpers and records the winning decision as `rebracket.applied` with source `runtime`.
+Factory does not yet persist per-candidate merge evidence receipts on the objective stream.
 
 ## What OpenAI Does Not Do
 

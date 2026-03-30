@@ -612,7 +612,7 @@ The practical split is:
 ```mermaid
 flowchart TD
   Start["Reducer state"] --> Legal["FactoryService builds legal actions"]
-  Legal --> Evidence["emit merge.evidence.computed / merge.candidate.scored"]
+  Legal --> Evidence["score legal actions via merge/rebracket policy"]
   Evidence --> Apply["runtime selects one action and emits rebracket.applied"]
   Apply --> Receipts["emit mutation / integration / promotion receipts"]
 ```
@@ -636,7 +636,8 @@ Output:
 - `reason`
 - `confidence`
 
-The runtime currently records direct `rebracket.applied` decisions with source `runtime`.
+The runtime currently scores the legal action set through the merge/rebracket policy helpers, then records the winning decision as `rebracket.applied` with source `runtime`.
+Factory does not yet emit per-candidate `merge.evidence.computed` or `merge.candidate.scored` receipts on the objective stream.
 There is no separate `fallbackFactoryDecision()` path left in the current implementation.
 
 ## Worker Dispatch Model

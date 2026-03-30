@@ -122,6 +122,11 @@ import {
   planObjectiveReact,
   planTaskResult,
 } from "./factory/planner";
+import {
+  factoryRebracketReason,
+  selectFactoryRebracketEffect,
+  type FactoryRebracketEffect,
+} from "./factory/rebracket-policy";
 import type {
   FactoryObjectivePlannerFacts,
   FactoryPlannerEffect,
@@ -3079,6 +3084,7 @@ export class FactoryService {
   private async applyObjectiveDispatchEffect(
     state: FactoryState,
     effect: Extract<FactoryPlannerEffect, { readonly type: "task.dispatch" }>,
+    selection?: { readonly actionId: string; readonly reason: string },
   ): Promise<void> {
     const task = state.workflow.tasksById[effect.taskId];
     if (!task) return;
@@ -3089,8 +3095,8 @@ export class FactoryService {
         prefixEvents: [
           this.runtimeDecisionEvent(
             state,
-            `dispatch_${task.taskId}`,
-            `Dispatch ready task ${task.taskId}.`,
+            selection?.actionId ?? `dispatch_${task.taskId}`,
+            selection?.reason ?? factoryRebracketReason(effect),
             { basedOn, frontierTaskIds: [task.taskId] },
           ),
         ],
@@ -3102,19 +3108,8 @@ export class FactoryService {
 
   private async applyObjectiveFinalEffect(
     state: FactoryState,
-    effect: Exclude<
-      FactoryPlannerEffect,
-      { readonly type: "objective.add_initial_task" }
-      | { readonly type: "objective.queue_follow_up_task" }
-      | { readonly type: "task.unblock" }
-      | { readonly type: "task.ready" }
-      | { readonly type: "task.block" }
-      | { readonly type: "task.dispatch" }
-      | { readonly type: "candidate.produce" }
-      | { readonly type: "task.review.request" }
-      | { readonly type: "candidate.review" }
-      | { readonly type: "task.noop_complete" }
-    >,
+    effect: Exclude<FactoryRebracketEffect, { readonly type: "task.dispatch" }>,
+    selection?: { readonly actionId: string; readonly reason: string },
   ): Promise<"applied" | "retried" | "asked_human"> {
     switch (effect.type) {
       case "integration.queue": {
@@ -3125,8 +3120,8 @@ export class FactoryService {
             prefixEvents: [
               this.runtimeDecisionEvent(
                 state,
-                `queue_integration_${effect.candidateId}`,
-                `Queue approved candidate ${effect.candidateId} for integration.`,
+                selection?.actionId ?? `queue_integration_${effect.candidateId}`,
+                selection?.reason ?? factoryRebracketReason(effect),
                 { basedOn, frontierTaskIds: [effect.taskId] },
               ),
             ],
@@ -3154,8 +3149,8 @@ export class FactoryService {
             prefixEvents: [
               this.runtimeDecisionEvent(
                 state,
-                `promote_integration_${effect.candidateId}`,
-                `Promote integrated candidate ${effect.candidateId}.`,
+                selection?.actionId ?? `promote_integration_${effect.candidateId}`,
+                selection?.reason ?? factoryRebracketReason(effect),
                 { basedOn },
               ),
             ],
@@ -3280,21 +3275,19 @@ export class FactoryService {
 
       if (await this.applyObjectivePreparationEffects(state, effects, facts)) continue;
 
-      const dispatch = effects.find((effect) => effect.type === "task.dispatch");
-      if (dispatch) {
-        await this.applyObjectiveDispatchEffect(state, dispatch);
+      const selected = selectFactoryRebracketEffect({
+        state,
+        facts,
+        effects,
+      });
+      if (!selected) break;
+
+      if (selected.effect.type === "task.dispatch") {
+        await this.applyObjectiveDispatchEffect(state, selected.effect, selected);
         continue;
       }
 
-      const finalEffect = effects.find((effect) =>
-        effect.type === "integration.queue"
-        || effect.type === "integration.ready_to_promote"
-        || effect.type === "integration.promote"
-        || effect.type === "objective.complete"
-        || effect.type === "objective.block"
-      );
-      if (!finalEffect) break;
-      const outcome = await this.applyObjectiveFinalEffect(state, finalEffect);
+      const outcome = await this.applyObjectiveFinalEffect(state, selected.effect, selected);
       if (outcome === "retried") {
         await this.reactObjective(objectiveId);
         return;

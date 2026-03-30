@@ -112,8 +112,8 @@ const factoryRebracketPolicy: MergePolicy<FactoryRebracketContext, FactoryRebrac
       : Number.MAX_SAFE_INTEGER;
     return {
       a_dispatch_priority: dispatchPriority,
-      b_effect_order: -((candidate as FactoryRebracketCandidate).meta.effectIndex),
-      c_task_order: -taskIndex,
+      b_task_order: -taskIndex,
+      c_effect_order: -((candidate as FactoryRebracketCandidate).meta.effectIndex),
     };
   },
   choose: (scored) => {
