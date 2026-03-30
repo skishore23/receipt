@@ -44,8 +44,8 @@ Use these when you need to mutate Factory state. Do not rely on `/factory` web f
 - `receipt factory cancel <objectiveId> --reason "<reason>"`
 - `receipt factory cleanup <objectiveId>`
 - `receipt factory archive <objectiveId>`
-- `receipt factory steer <jobId> --problem "<updated direction>"`
-- `receipt factory follow-up <jobId> --note "<extra context>"`
+- `receipt factory steer <jobId> --message "<updated direction>"`
+- `receipt factory follow-up <jobId> --message "<extra context>"`
 - `receipt factory abort-job <jobId> --reason "<reason>"`
 
 ## Codex Status Probe
