@@ -486,7 +486,8 @@ const printFactoryAudit = async (opts: {
   const dataDir = path.resolve(asString(opts.flags, "data-dir") ?? runtime.dataDir);
   const repoRoot = path.resolve(repoRootOverride ?? runtime.repoRoot);
   const limit = parseIntegerFlag(opts.flags, "limit", 12, { min: 1, max: 200 });
-  const report = await readFactoryReceiptAudit(dataDir, repoRoot, limit);
+  const objectiveId = asString(opts.flags, "objective");
+  const report = await readFactoryReceiptAudit(dataDir, repoRoot, limit, objectiveId);
   if (opts.asJson) {
     await printJson(report);
     return;

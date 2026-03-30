@@ -660,6 +660,106 @@ test("factory cli: replay folds a historical infrastructure objective into the c
   expect(payload.tasks.find((task) => task.taskId === "task_01")?.blockedReason).toContain("AccessDeniedException");
 }, 120_000);
 
+test("factory cli: audit supports a targeted objective without changing the recent-window flow", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  const olderObjectiveId = "objective_audit_older";
+  const targetedObjectiveId = "objective_audit_targeted";
+  await seedObjectiveReplay(runtimeConfig.dataDir, olderObjectiveId, [
+    {
+      type: "objective.created",
+      objectiveId: olderObjectiveId,
+      title: "Older audit objective",
+      prompt: "Older objective for audit sampling.",
+      channel: "results",
+      baseHash: "old-base",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "generalist",
+        rootProfileLabel: "Generalist",
+        resolvedProfileHash: "hash-old",
+        promptHash: "prompt-old",
+        promptPath: "profiles/software/PROFILE.md",
+        selectedSkills: [],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    } as FactoryEvent,
+  ]);
+  await seedObjectiveReplay(runtimeConfig.dataDir, targetedObjectiveId, [
+    {
+      type: "objective.created",
+      objectiveId: targetedObjectiveId,
+      title: "Targeted audit objective",
+      prompt: "Targeted objective for audit selection.",
+      channel: "results",
+      baseHash: "target-base",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "generalist",
+        rootProfileLabel: "Generalist",
+        resolvedProfileHash: "hash-target",
+        promptHash: "prompt-target",
+        promptPath: "profiles/software/PROFILE.md",
+        selectedSkills: [],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    } as FactoryEvent,
+  ]);
+
+  const recent = await runCli(["factory", "audit", "--limit", "1", "--json", "--repo-root", repoDir]);
+  expect(recent.code).toBe(0);
+  const recentPayload = JSON.parse(recent.stdout) as {
+    readonly summary: { readonly objectivesAudited: number; readonly sampledObjectiveIds: ReadonlyArray<string> };
+  };
+  expect(recentPayload.summary.objectivesAudited).toBe(1);
+  expect(recentPayload.summary.sampledObjectiveIds).toEqual([targetedObjectiveId]);
+
+  const targeted = await runCli([
+    "factory",
+    "audit",
+    "--objective",
+    targetedObjectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(targeted.code).toBe(0);
+  const targetedPayload = JSON.parse(targeted.stdout) as {
+    readonly summary: { readonly objectivesAudited: number; readonly sampledObjectiveIds: ReadonlyArray<string> };
+    readonly objectives: ReadonlyArray<{ readonly objectiveId: string }>;
+  };
+  expect(targetedPayload.summary.objectivesAudited).toBe(1);
+  expect(targetedPayload.summary.sampledObjectiveIds).toEqual([targetedObjectiveId]);
+  expect(targetedPayload.objectives.map((objective) => objective.objectiveId)).toEqual([targetedObjectiveId]);
+
+  const targetedText = await runCli([
+    "factory",
+    "audit",
+    "--objective",
+    targetedObjectiveId,
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(targetedText.code).toBe(0);
+  expect(targetedText.stdout).toContain(`Targeted objective: ${targetedObjectiveId}`);
+  expect(targetedText.stdout).toContain("Objectives audited: 1");
+}, 120_000);
+
 test("factory cli: replay-chat exposes the historical infrastructure binding path", async () => {
   const repoDir = await createRepo();
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);

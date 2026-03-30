@@ -64,6 +64,7 @@ export type FactoryReceiptAuditReport = {
   readonly dataDir: string;
   readonly repoRoot: string;
   readonly limit: number;
+  readonly targetedObjectiveId?: string;
   readonly summary: AuditSummary;
   readonly objectives: ReadonlyArray<AuditObjectiveSample>;
   readonly anomalyCategories: ReadonlyArray<AuditAnomalyCategory>;
@@ -221,14 +222,19 @@ export const readFactoryReceiptAudit = async (
   dataDir: string,
   repoRoot: string,
   limit = 12,
+  objectiveId?: string,
 ): Promise<FactoryReceiptAuditReport> => {
-  const objectiveIds = recentObjectiveIds(dataDir, limit);
+  const targetedObjectiveId = objectiveId?.trim();
+  const objectiveIds = targetedObjectiveId ? [targetedObjectiveId] : recentObjectiveIds(dataDir, limit);
   const warnings: string[] = [];
   const investigations = await Promise.all(objectiveIds.map(async (objectiveId) => {
     try {
       return await readFactoryReceiptInvestigation(dataDir, repoRoot, objectiveId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (targetedObjectiveId) {
+        throw new Error(`Failed to audit objective ${targetedObjectiveId}: ${message}`);
+      }
       warnings.push(`Failed to audit ${objectiveId}: ${message}`);
       return undefined;
     }
@@ -304,6 +310,7 @@ export const readFactoryReceiptAudit = async (
     dataDir,
     repoRoot,
     limit: safeLimit(limit),
+    ...(targetedObjectiveId ? { targetedObjectiveId } : {}),
     summary,
     objectives: rankedObjectives,
     anomalyCategories,
@@ -320,12 +327,16 @@ const formatCounts = (counts: Readonly<Record<string, number>>): string =>
     .join(", ") || "none";
 
 export const renderFactoryReceiptAuditText = (report: FactoryReceiptAuditReport): string => {
+  const sampledLabel = report.targetedObjectiveId
+    ? `Targeted objective: ${report.targetedObjectiveId}`
+    : `Sampled objectives: ${report.summary.objectivesAudited} (limit ${report.limit})`;
   const lines = [
     "# Factory Receipt Audit",
     "",
     `Repo root: ${report.repoRoot}`,
     `Data dir: ${report.dataDir}`,
-    `Sampled objectives: ${report.summary.objectivesAudited} (limit ${report.limit})`,
+    sampledLabel,
+    report.targetedObjectiveId ? `Objectives audited: ${report.summary.objectivesAudited}` : undefined,
     report.summary.avgDurationMs !== undefined ? `Average duration: ${formatDurationMs(report.summary.avgDurationMs)}` : undefined,
     `Average jobs/objective: ${report.summary.avgJobsPerObjective.toFixed(1)}`,
     `Average tasks/objective: ${report.summary.avgTasksPerObjective.toFixed(1)}`,
