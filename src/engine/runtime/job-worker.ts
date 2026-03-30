@@ -5,9 +5,16 @@
 import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
 import type { JobLane } from "../../modules/job";
 
+export type JobLeaseProcessRegistration = {
+  readonly pid: number;
+  readonly label?: string;
+};
+
 export type JobExecutionContext = {
   readonly workerId: string;
   readonly pullCommands: (types?: ReadonlyArray<"steer" | "follow_up" | "abort">) => Promise<ReadonlyArray<QueueCommandRecord>>;
+  readonly registerLeaseProcess: (process: JobLeaseProcessRegistration) => void;
+  readonly clearLeaseProcess: () => void;
 };
 
 export type JobExecutionResult = {
@@ -33,6 +40,13 @@ export type JobWorkerOptions = {
   readonly onError?: (error: Error) => void;
 };
 
+type ActiveLeaseState = {
+  readonly jobId: string;
+  readonly startedAt: number;
+  nextHeartbeatAt: number;
+  process?: JobLeaseProcessRegistration;
+};
+
 export class JobWorker {
   private readonly queue: JsonlQueue;
   private readonly handlers: Readonly<Record<string, JobHandler>>;
@@ -41,10 +55,13 @@ export class JobWorker {
   private readonly leaseLanes?: ReadonlyArray<JobLane>;
   private readonly idleResyncMs: number;
   private readonly leaseMs: number;
+  private readonly leaseHeartbeatMs: number;
+  private readonly leasePollMs: number;
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
   private readonly active = new Map<string, Promise<void>>();
+  private readonly activeLeases = new Map<string, ActiveLeaseState>();
   private running = false;
 
   constructor(opts: JobWorkerOptions) {
@@ -57,6 +74,8 @@ export class JobWorker {
     );
     this.idleResyncMs = Math.max(1_000, opts.idleResyncMs ?? opts.pollMs ?? 5_000);
     this.leaseMs = Math.max(5_000, opts.leaseMs ?? 30_000);
+    this.leaseHeartbeatMs = Math.max(1_000, Math.floor(this.leaseMs / 3));
+    this.leasePollMs = Math.min(1_000, Math.max(250, Math.floor(this.leaseHeartbeatMs / 4)));
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
     this.onError = opts.onError;
@@ -74,6 +93,9 @@ export class JobWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
+    void this.leaseLoop().catch((err) => {
+      this.reportError(err);
+    });
     void this.loop().catch((err) => {
       this.running = false;
       this.reportError(err);
@@ -82,6 +104,81 @@ export class JobWorker {
 
   stop(): void {
     this.running = false;
+  }
+
+  private async leaseLoop(): Promise<void> {
+    while (this.running) {
+      try {
+        await this.tickLeases();
+      } catch (err) {
+        this.reportError(err);
+      }
+      if (!this.running) break;
+      await new Promise((resolve) => {
+        setTimeout(resolve, this.leasePollMs);
+      });
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      return code === "EPERM";
+    }
+  }
+
+  private registerActiveLease(jobId: string): ActiveLeaseState {
+    const state: ActiveLeaseState = {
+      jobId,
+      startedAt: Date.now(),
+      nextHeartbeatAt: 0,
+    };
+    this.activeLeases.set(jobId, state);
+    return state;
+  }
+
+  private clearActiveLease(jobId: string): void {
+    this.activeLeases.delete(jobId);
+  }
+
+  private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
+    const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
+    if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
+      this.clearActiveLease(state.jobId);
+      return;
+    }
+    state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+  }
+
+  private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
+    this.clearActiveLease(state.jobId);
+    const label = state.process?.label?.trim() || "job child process";
+    const reason = `factory task failed: ${label} exited unexpectedly before the worker completed`;
+    await this.queue.fail(state.jobId, this.workerId, reason, true, {
+      status: "failed",
+      summary: reason,
+    });
+  }
+
+  private async tickLeases(): Promise<void> {
+    const now = Date.now();
+    for (const state of [...this.activeLeases.values()]) {
+      const registeredProcess = state.process;
+      if (registeredProcess && !this.isProcessAlive(registeredProcess.pid)) {
+        await this.failDeadLeaseProcess(state);
+        continue;
+      }
+      if (now < state.nextHeartbeatAt) continue;
+      try {
+        await this.heartbeatLease(state);
+      } catch (err) {
+        this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
+        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+      }
+    }
   }
 
   private async waitForQueueAdvance(sinceVersion: number): Promise<ReturnType<JsonlQueue["snapshot"]>> {
@@ -170,16 +267,13 @@ export class JobWorker {
       return;
     }
 
-    await this.queue.heartbeat(job.id, this.workerId, this.leaseMs);
-    const heartbeatInterval = setInterval(() => {
-      this.queue.heartbeat(job.id, this.workerId, this.leaseMs).catch((err) => {
-        this.reportError(new Error(`Failed to heartbeat job ${job.id}: ${err}`));
-      });
-    }, Math.max(1000, Math.floor(this.leaseMs / 2)));
+    const activeLease = this.registerActiveLease(job.id);
+    await this.heartbeatLease(activeLease);
+    if (!this.activeLeases.has(job.id)) return;
 
     const handler = this.handlers[job.agentId];
     if (!handler) {
-      clearInterval(heartbeatInterval);
+      this.clearActiveLease(job.id);
       await this.queue.fail(job.id, this.workerId, `No handler for agent '${job.agentId}'`, true);
       return;
     }
@@ -188,8 +282,18 @@ export class JobWorker {
       const result = await handler(job, {
         workerId: this.workerId,
         pullCommands,
+        registerLeaseProcess: (process) => {
+          if (!Number.isInteger(process.pid) || process.pid <= 0) return;
+          activeLease.process = {
+            pid: process.pid,
+            label: process.label?.trim() || undefined,
+          };
+        },
+        clearLeaseProcess: () => {
+          activeLease.process = undefined;
+        },
       });
-      clearInterval(heartbeatInterval);
+      this.clearActiveLease(job.id);
       const postAbort = await pullCommands(["abort"]);
       if (postAbort.length > 0) {
         await this.queue.cancel(job.id, "abort requested", this.workerId);
@@ -201,7 +305,7 @@ export class JobWorker {
         await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }
     } catch (err) {
-      clearInterval(heartbeatInterval);
+      this.clearActiveLease(job.id);
       const message = err instanceof Error ? err.message : String(err);
       await this.queue.fail(job.id, this.workerId, message);
     }

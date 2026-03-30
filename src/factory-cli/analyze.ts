@@ -371,6 +371,14 @@ const objectiveEventSummary = (event: FactoryEvent): string => {
       return `${event.taskId} ready`;
     case "task.dispatched":
       return `${event.taskId} dispatched as ${event.candidateId}`;
+    case "task.intervention.applied":
+      return `${event.taskId} live ${event.guidanceKind} applied: ${truncateInline(event.guidance, 220)}`;
+    case "task.intervention.restarted":
+      return `${event.taskId} restarted after live ${event.guidanceKind}: ${truncateInline(event.guidance, 220)}`;
+    case "worker.handoff":
+      return `${event.scope} ${event.outcome} handoff: ${truncateInline(event.handoff)}`;
+    case "objective.handoff":
+      return `Objective ${event.status} handoff: ${truncateInline(event.summary)}`;
     case "task.review.requested":
       return `${event.taskId} review requested`;
     case "task.approved":

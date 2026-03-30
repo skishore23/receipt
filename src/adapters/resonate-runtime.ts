@@ -101,6 +101,8 @@ const executeJob = async (
   return handler(job, {
     workerId,
     pullCommands: async (types) => queue.consumeCommands(job.id, types),
+    registerLeaseProcess: () => undefined,
+    clearLeaseProcess: () => undefined,
   });
 };
 

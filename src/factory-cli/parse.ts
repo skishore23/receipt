@@ -695,6 +695,12 @@ const runEventSummary = (event: AgentEvent): string => {
       return `Bound to ${event.objectiveId} (${event.reason})`;
     case "objective.handoff":
       return `Objective ${event.status}: ${truncateInline(event.summary, 220)}`;
+    case "profile.handoff":
+      return `Handed off from ${event.fromProfileId} to ${event.toProfileId}: ${truncateInline([
+        event.reason,
+        event.nextRunId ? `next run ${event.nextRunId}` : undefined,
+        event.nextJobId ? `next job ${event.nextJobId}` : undefined,
+      ].filter(Boolean).join(" · "), 220)}`;
     case "run.status":
       return `Run ${event.status}${event.note ? `: ${truncateInline(event.note, 220)}` : ""}`;
     case "iteration.started":

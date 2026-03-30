@@ -439,11 +439,12 @@ const createFactoryStatusTool = (input: {
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? payload.title ?? objectiveId)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
-      pauseBudget: waited.waitedMs > 0 && waited.changed === false,
+      pauseBudget,
     };
   };
 
@@ -497,11 +498,12 @@ const createFactoryOutputTool = (input: {
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
       output: JSON.stringify(payload, null, 2),
       summary: `${String(payload.summary ?? `${focusKind} ${focusId}: ${String(payload.status ?? "unknown")}`)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
-      pauseBudget: waited.waitedMs > 0 && waited.changed === false,
+      pauseBudget,
     };
   };
 

@@ -29,6 +29,7 @@ const writeProfile = async (root: string, input: {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: "worktree" | "isolated";
   readonly allowObjectiveCreation?: boolean;
+  readonly handoffTargets?: ReadonlyArray<string>;
   readonly extraManifest?: Record<string, unknown>;
 }): Promise<void> => {
   const dir = path.join(root, "profiles", input.id);
@@ -45,6 +46,7 @@ const writeProfile = async (root: string, input: {
     defaultValidationMode: input.defaultValidationMode,
     defaultTaskExecutionMode: input.defaultTaskExecutionMode,
     allowObjectiveCreation: input.allowObjectiveCreation,
+    handoffTargets: input.handoffTargets,
     ...(input.extraManifest ?? {}),
   };
   await fs.writeFile(
@@ -141,6 +143,7 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.promptPath).toBe("profiles/infrastructure/PROFILE.md");
   expect(resolved.toolAllowlist).toContain("factory.dispatch");
   expect(resolved.toolAllowlist).not.toContain("profile.handoff");
+  expect(resolved.handoffTargets).toEqual([]);
   expect(resolved.systemPrompt).toContain("You are the active Factory profile in the product UI.");
   expect(resolved.systemPrompt).toContain("Sound human.");
   expect(resolved.systemPrompt).toContain("Use prior transcript, receipts, and memory for facts and context");
@@ -177,6 +180,32 @@ test("factory chat profiles: falls back to the default profile without route-hin
 
   expect(resolved.root.id).toBe("generalist");
   expect(resolved.selectionReason).toBe("default");
+});
+
+test("factory chat profiles: explicit handoff targets expose the profile handoff tool", async () => {
+  const profileRoot = await createTempDir("receipt-factory-profile-root");
+  const repoRoot = await createTempDir("receipt-factory-target-repo");
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    handoffTargets: ["software"],
+  });
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+  });
+
+  const resolved = await resolveFactoryChatProfile({
+    repoRoot,
+    profileRoot,
+    requestedId: "generalist",
+  });
+
+  expect(resolved.handoffTargets).toEqual(["software"]);
+  expect(resolved.toolAllowlist).toContain("profile.handoff");
+  expect(resolved.systemPrompt).toContain("## Profile Handoffs");
+  expect(resolved.systemPrompt).toContain("Allowed handoff targets: software");
 });
 
 test("factory chat profiles: rejects removed manifest keys", async () => {
@@ -231,8 +260,11 @@ test("factory chat profiles: checked-in software profile resolves worktree deliv
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("repo_profile");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
   expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
+  expect(resolved.handoffTargets).toEqual(["generalist"]);
+  expect(resolved.toolAllowlist).toContain("profile.handoff");
   expect(resolved.root.soulBody).toContain("strong staff engineer or delivery lead");
   expect(resolved.systemPrompt).toContain("published or clearly blocked");
   expect(resolved.systemPrompt).toContain("## Personality and Voice");
+  expect(resolved.systemPrompt).toContain("## Profile Handoffs");
   expect(resolved.systemPrompt).toContain("PR link");
 });

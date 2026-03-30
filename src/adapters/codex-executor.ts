@@ -39,6 +39,8 @@ export type CodexProgressUpdate = {
   readonly status: "running";
   readonly summary?: string;
   readonly lastMessage?: string;
+  readonly stdoutTail?: string;
+  readonly stderrTail?: string;
   readonly tokensUsed?: number;
   readonly progressAt: number;
   readonly eventType?: string;
@@ -59,12 +61,25 @@ export type CodexRunResult = {
 export type CodexControlSignal = {
   readonly kind: "abort" | "restart";
   readonly note?: string;
+  readonly meta?: Record<string, unknown>;
+};
+
+export type CodexSpawnUpdate = {
+  readonly pid: number;
+  readonly command: string;
+  readonly workspacePath: string;
+  readonly startedAt: number;
 };
 
 export type CodexRunControl = {
   readonly shouldAbort?: () => Promise<boolean>;
   readonly pollSignal?: () => Promise<CodexControlSignal | undefined>;
   readonly onProgress?: (update: CodexProgressUpdate) => Promise<void> | void;
+  readonly onChildSpawn?: (update: CodexSpawnUpdate) => Promise<void> | void;
+  readonly onChildExit?: (update: CodexSpawnUpdate & {
+    readonly exitCode: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }) => Promise<void> | void;
 };
 
 export type CodexExecutor = {
@@ -90,7 +105,7 @@ export class CodexExecutionError extends Error {
   }
 }
 
-class CodexControlSignalError extends Error {
+export class CodexControlSignalError extends Error {
   readonly signal: CodexControlSignal;
   readonly result: CodexRunResult;
 
@@ -130,7 +145,7 @@ const runtimeBunPathEntries = (env: NodeJS.ProcessEnv): string[] => {
     env.BUN_INSTALL?.trim() ? path.join(env.BUN_INSTALL.trim(), "bin") : undefined,
     env.HOME?.trim() ? path.join(env.HOME.trim(), ".bun", "bin") : undefined,
   ];
-  return [...new Set(candidates.filter((entry): entry is string => Boolean(entry) && fs.existsSync(entry)))];
+  return [...new Set(candidates.filter((entry): entry is string => typeof entry === "string" && fs.existsSync(entry)))];
 };
 
 const normalizePositiveTimeoutMs = (
@@ -241,10 +256,27 @@ const asString = (value: unknown): string | undefined =>
 const asNumber = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
+const parseJsonObjectCandidate = (raw: string): Record<string, unknown> | undefined => {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return asRecord(parsed);
+  } catch {
+    return undefined;
+  }
+};
+
 const clipInline = (value: string | undefined, max = 260): string | undefined => {
   const normalized = value?.trim().replace(/\s+/g, " ");
   if (!normalized) return undefined;
   return normalized.length <= max ? normalized : `${normalized.slice(0, max - 3)}...`;
+};
+
+const clipTail = (value: string | undefined, max = 400): string | undefined => {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  return normalized.length <= max ? normalized : `…${normalized.slice(normalized.length - max + 1)}`;
 };
 
 const humanizeEventLabel = (value: string | undefined): string | undefined => {
@@ -380,7 +412,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };
-    const childEnv = {
+    const childEnv: NodeJS.ProcessEnv = {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
     };
@@ -432,6 +464,15 @@ export class LocalCodexExecutor implements CodexExecutor {
           env: childEnv,
           stdio: ["pipe", "pipe", "pipe"],
         });
+        const childStartedAt = Date.now();
+        if (child.pid && control?.onChildSpawn) {
+          void Promise.resolve(control.onChildSpawn({
+            pid: child.pid,
+            command: [this.bin, ...args].join(" "),
+            workspacePath: input.workspacePath,
+            startedAt: childStartedAt,
+          })).catch(() => undefined);
+        }
 
         let stdout = "";
         let stderr = "";
@@ -444,10 +485,13 @@ export class LocalCodexExecutor implements CodexExecutor {
         let progressAt: number | undefined;
         let latestEventType: string | undefined;
         let latestEventText: string | undefined;
+        let latestStructuredLastMessage: string | undefined;
+        let lastStructuredFileMessage: string | undefined;
         let structuredTokensUsed: number | undefined;
         let stdoutJsonBuffer = "";
         let progressFingerprint = "";
         let progressChain = Promise.resolve();
+        let lastMessageWriteChain = Promise.resolve();
         const stdoutFile = fs.createWriteStream(input.stdoutPath, { flags: "a", encoding: "utf-8" });
         const stderrFile = fs.createWriteStream(input.stderrPath, { flags: "a", encoding: "utf-8" });
         const observeOutputActivity = (): void => {
@@ -482,16 +526,36 @@ export class LocalCodexExecutor implements CodexExecutor {
             if (!parsed) continue;
             const update = progressFromCodexJsonEvent(parsed);
             if (!update) continue;
-            progressAt = update.progressAt;
-            latestEventType = update.eventType;
-            if (update.lastMessage) {
-              latestEventText = update.lastMessage;
-            } else if (update.summary && !["Codex started working.", "Codex completed the turn."].includes(update.summary)) {
-              latestEventText = update.summary;
+            const enrichedUpdate: CodexProgressUpdate = {
+              ...update,
+              stdoutTail: clipTail(stdout, 900),
+              stderrTail: clipTail(stderr, 600),
+            };
+            progressAt = enrichedUpdate.progressAt;
+            latestEventType = enrichedUpdate.eventType;
+            if (enrichedUpdate.lastMessage) {
+              latestEventText = enrichedUpdate.lastMessage;
+              latestStructuredLastMessage = enrichedUpdate.lastMessage;
+              if (!input.outputSchemaPath || parseJsonObjectCandidate(enrichedUpdate.lastMessage)) {
+                const nextMessage = enrichedUpdate.lastMessage;
+                lastMessageWriteChain = lastMessageWriteChain
+                  .then(async () => {
+                    const currentMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
+                    const trimmedCurrentMessage = currentMessage.trim();
+                    if (trimmedCurrentMessage && trimmedCurrentMessage !== (lastStructuredFileMessage?.trim() ?? "")) {
+                      return;
+                    }
+                    await fsp.writeFile(input.lastMessagePath, nextMessage, "utf-8");
+                    lastStructuredFileMessage = nextMessage;
+                  })
+                  .catch(() => undefined);
+              }
+            } else if (enrichedUpdate.summary && !["Codex started working.", "Codex completed the turn."].includes(enrichedUpdate.summary)) {
+              latestEventText = enrichedUpdate.summary;
             }
-            if (typeof update.tokensUsed === "number") structuredTokensUsed = update.tokensUsed;
-            lastObservedActivityAt = update.progressAt;
-            emitProgress(update);
+            if (typeof enrichedUpdate.tokensUsed === "number") structuredTokensUsed = enrichedUpdate.tokensUsed;
+            lastObservedActivityAt = enrichedUpdate.progressAt;
+            emitProgress(enrichedUpdate);
           }
         };
 
@@ -620,18 +684,30 @@ export class LocalCodexExecutor implements CodexExecutor {
             if (completionKillTimer) clearTimeout(completionKillTimer);
             if (stallKillTimer) clearTimeout(stallKillTimer);
             try {
+              if (child.pid && control?.onChildExit) {
+                await Promise.resolve(control.onChildExit({
+                  pid: child.pid,
+                  command: [this.bin, ...args].join(" "),
+                  workspacePath: input.workspacePath,
+                  startedAt: childStartedAt,
+                  exitCode: code,
+                  signal,
+                })).catch(() => undefined);
+              }
               if (input.jsonOutput && stdoutJsonBuffer.trim()) {
                 consumeJsonStdout("\n");
               }
               await progressChain;
+              await lastMessageWriteChain;
               await Promise.all([closeStream(stdoutFile), closeStream(stderrFile)]);
               const lastMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
+              const resolvedLastMessage = lastMessage.trim() || latestStructuredLastMessage?.trim() || undefined;
               resolve({
                 exitCode: completionTriggered ? 0 : timedOut ? 124 : code,
                 signal: completionTriggered ? null : signal,
                 stdout,
                 stderr,
-                lastMessage: lastMessage.trim() || undefined,
+                lastMessage: resolvedLastMessage,
                 tokensUsed: structuredTokensUsed ?? extractTokensUsed(stdout, stderr),
                 progressAt,
                 latestEventType,

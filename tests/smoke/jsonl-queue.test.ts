@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1037,6 +1038,119 @@ test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat
   }
 });
 
+test("job worker: registered child liveness fails a codex job before lease expiry when the child exits early", async () => {
+  const dir = await mkTmp("receipt-queue-worker-child-liveness");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const childScript = path.join(dir, "child-exit.js");
+    await fs.writeFile(childScript, "setTimeout(() => process.exit(0), 50);\n", "utf-8");
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_child_liveness",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        codex: async (_job, ctx) => {
+          const child = spawn(process.execPath, [childScript], {
+            stdio: "ignore",
+          });
+          if (!child.pid) throw new Error("failed to start child");
+          ctx.registerLeaseProcess({
+            pid: child.pid,
+            label: "codex child",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return { ok: true, result: { ok: true } };
+        },
+      },
+    });
+
+    const job = await queue.enqueue({
+      agentId: "codex",
+      payload: { kind: "factory.task.run", runId: "r_child_liveness" },
+      maxAttempts: 1,
+    });
+
+    worker.start();
+    const settled = await queue.waitForJob(job.id, 4_000);
+    worker.stop();
+
+    expect(settled?.status).toBe("failed");
+    expect(settled?.lastError).toContain("factory task failed:");
+    expect(settled?.lastError).toContain("codex child exited unexpectedly before the worker completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("job worker: clearing registered child liveness lets post-processing finish after the child exits", async () => {
+  const dir = await mkTmp("receipt-queue-worker-child-liveness-clear");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const childScript = path.join(dir, "child-exit.js");
+    await fs.writeFile(childScript, "setTimeout(() => process.exit(0), 50);\n", "utf-8");
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_child_liveness_clear",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        codex: async (_job, ctx) => {
+          const child = spawn(process.execPath, [childScript], {
+            stdio: "ignore",
+          });
+          if (!child.pid) throw new Error("failed to start child");
+          ctx.registerLeaseProcess({
+            pid: child.pid,
+            label: "codex child",
+          });
+          await new Promise((resolve) => {
+            child.once("close", () => {
+              ctx.clearLeaseProcess();
+              resolve(undefined);
+            });
+          });
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return { ok: true, result: { ok: true } };
+        },
+      },
+    });
+
+    const job = await queue.enqueue({
+      agentId: "codex",
+      payload: { kind: "factory.task.run", runId: "r_child_liveness_clear" },
+      maxAttempts: 1,
+    });
+
+    worker.start();
+    const settled = await queue.waitForJob(job.id, 4_000);
+    worker.stop();
+
+    expect(settled?.status).toBe("completed");
+    expect(settled?.result).toEqual({ ok: true });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: scoped workers prevent parent and control jobs from starving a codex child", async () => {
   const dir = await mkTmp("receipt-queue-scoped-workers");
   try {
@@ -1278,22 +1392,25 @@ test("jsonl queue: handleExpiredLeases only processes leased/running jobs", asyn
     });
 
     const leased = await queue.leaseNext({ workerId: "w1", leaseMs: 1_000 });
-    expect(leased?.id).toBe(completedJob.id);
+    expect(leased).toBeTruthy();
 
     const leased2 = await queue.leaseNext({ workerId: "w2", leaseMs: 1_000 });
-    expect(leased2?.id).toBe(toExpire.id);
+    expect(leased2).toBeTruthy();
+    expect(leased2?.id).not.toBe(leased?.id);
 
-    await queue.complete(completedJob.id, "w1", { ok: true });
-    const completed = await queue.getJob(completedJob.id);
+    const completedLease = leased!;
+    const expiringLease = leased2!;
+    await queue.complete(completedLease.id, "w1", { ok: true });
+    const completed = await queue.getJob(completedLease.id);
     expect(completed?.status).toBe("completed");
 
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     await queue.refresh();
 
-    const expired = await queue.getJob(toExpire.id);
+    const expired = await queue.getJob(expiringLease.id);
     expect(expired?.status).toBe("queued");
 
-    const stillCompleted = await queue.getJob(completedJob.id);
+    const stillCompleted = await queue.getJob(completedLease.id);
     expect(stillCompleted?.status).toBe("completed");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

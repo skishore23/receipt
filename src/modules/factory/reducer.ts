@@ -156,6 +156,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         archivedAt: undefined,
         createdAt: event.createdAt,
         updatedAt: event.createdAt,
+        latestHandoff: undefined,
         taskRunsUsed: 0,
         candidatePassesByTask: {},
         consecutiveFailuresByTask: {},
@@ -243,6 +244,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         }), event.readyAt),
         status: state.status === "blocked" ? "planning" : state.status,
         blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
+        latestHandoff: undefined,
       };
     case "task.dispatched": {
       const currentActive = new Set(state.workflow.activeTaskIds);
@@ -265,10 +267,52 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         ...setActiveTaskIds(next, [...currentActive], event.startedAt),
         status: "executing",
         blockedReason: undefined,
+        latestHandoff: undefined,
         taskRunsUsed: state.taskRunsUsed + 1,
         lastDispatchAt: event.startedAt,
       };
     }
+    case "task.intervention.applied":
+      return {
+        ...updateTask(state, event.taskId, {
+          latestTraceSummary: event.guidance,
+        }),
+        latestSummary: event.guidance,
+        updatedAt: event.appliedAt,
+      };
+    case "task.intervention.restarted":
+      return {
+        ...updateTask(state, event.taskId, {
+          latestTraceSummary: event.guidance,
+        }),
+        latestSummary: event.guidance,
+        updatedAt: event.restartedAt,
+      };
+    case "worker.handoff":
+      return event.taskId
+        ? {
+            ...updateTask(state, event.taskId, {
+              latestTraceSummary: event.handoff,
+            }),
+            updatedAt: event.handedOffAt,
+          }
+        : {
+            ...state,
+            updatedAt: event.handedOffAt,
+          };
+    case "objective.handoff":
+      return {
+        ...state,
+        updatedAt: Math.max(state.updatedAt, event.sourceUpdatedAt),
+        latestHandoff: {
+          status: event.status,
+          summary: event.summary,
+          blocker: event.blocker,
+          nextAction: event.nextAction,
+          handoffKey: event.handoffKey,
+          sourceUpdatedAt: event.sourceUpdatedAt,
+        },
+      };
     case "task.review.requested":
       return setActiveTaskIds(updateTask(state, event.taskId, {
         status: "reviewing",
@@ -365,6 +409,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         }), event.readyAt),
         status: state.status === "blocked" ? "planning" : state.status,
         blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
+        latestHandoff: undefined,
       };
     case "task.superseded": {
       const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);

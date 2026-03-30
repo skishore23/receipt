@@ -25,6 +25,7 @@
     "cli": "bun src/cli.ts",
     "receipt": "bun src/cli.ts",
     "factory": "bun src/cli.ts factory",
+    "factory:investigate": "bun src/cli.ts factory investigate",
     "video:capture": "cd video && bun run capture:ui",
     "video:preview": "cd video && bun run preview",
     "video:render": "cd video && bun run render",

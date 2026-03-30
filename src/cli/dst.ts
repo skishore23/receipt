@@ -286,7 +286,7 @@ const classifyStream = (stream: string, eventTypes: Readonly<Record<string, numb
   const types = Object.keys(eventTypes);
   if (stream.startsWith("factory/objectives/")) return "factory.objective";
   if (stream === "jobs" || stream.startsWith("jobs/")) return "job";
-  if (types.some((type) => CONTROL_RECEIPT_TYPES.has(type))) return "agent.control";
+  if (types.some((type) => CONTROL_RECEIPT_TYPES.has(type as never))) return "agent.control";
   if (types.length > 0 && types.every((type) => AGENT_EVENT_TYPES.has(type))) return "agent.history";
   return "generic";
 };

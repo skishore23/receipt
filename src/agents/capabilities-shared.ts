@@ -131,6 +131,12 @@ export const capabilityInput = {
     task: z.string().optional(),
     timeoutMs: z.number().finite().optional(),
   }).passthrough(),
+  profileHandoff: z.object({
+    profileId: z.string().optional(),
+    reason: z.string().optional(),
+    objectiveId: z.string().optional(),
+    chatId: z.string().optional(),
+  }).passthrough(),
   jobControl: z.object({
     jobId: z.string().optional(),
     command: z.literal("abort").optional(),
@@ -198,6 +204,7 @@ export const capabilityDescriptions = {
   "codex.logs": '{"jobId"?: string} — Inspect Codex child logs and artifact paths for the current session. Without jobId, use the latest Codex child.',
   "codex.status": '{"jobId"?: string, "limit"?: number, "includeCompleted"?: boolean, "waitForChangeMs"?: number} — Inspect Codex child jobs for the current session. With waitForChangeMs, block briefly until state or logs change.',
   "codex.run": '{"prompt": string, "timeoutMs"?: number} — Queue one read-only Codex child probe for repo inspection or evidence-gathering. If a Codex child is already queued/running for this session, reuse it instead of spawning another.',
+  "profile.handoff": '{"profileId": string, "reason": string, "objectiveId"?: string, "chatId"?: string} — Hand the conversation or objective off to another allowed Factory profile and queue the continuation explicitly.',
   "job.control": '{"jobId": string, "command": "abort", "reason"?: string} — Abort a running child job.',
   "factory.dispatch": '{"action"?: "create"|"react"|"promote"|"cancel"|"cleanup"|"archive", "objectiveId"?: string, "prompt"?: string, "note"?: string, "title"?: string, "baseHash"?: string, "objectiveMode"?: "delivery"|"investigation", "severity"?: 1|2|3|4|5, "checks"?: string[], "channel"?: string, "profileId"?: string, "reason"?: string} — Create or operate on a tracked Factory objective.',
   "factory.status": '{"objectiveId"?: string, "waitForChangeMs"?: number} — Inspect objective status, active jobs, recent receipts, and task/integration worktrees. With waitForChangeMs, block briefly until the objective changes.',

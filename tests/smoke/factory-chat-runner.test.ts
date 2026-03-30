@@ -294,6 +294,7 @@ const writeProfile = async (root: string, input: {
     label: input.label,
     default: input.default ?? false,
     skills: [],
+    handoffTargets: input.handoffTargets ?? [],
     defaultObjectiveMode: input.id === "infrastructure" ? "investigation" : "delivery",
     defaultValidationMode: input.id === "infrastructure" ? "none" : "repo_profile",
     allowObjectiveCreation: true,
@@ -1425,7 +1426,7 @@ test("factory chat runner: agent.delegate queues work and agent.status sees the 
   expect(observations.some((event) => "output" in event && event.output.includes('"status": "queued"'))).toBe(true);
 });
 
-test.skip("factory chat runner: profile.handoff queues continuation work on the target profile", async () => {
+test("factory chat runner: profile.handoff queues continuation work on the target profile", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-handoff");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1499,8 +1500,14 @@ test.skip("factory chat runner: profile.handoff queues continuation work on the 
   expect(jobs[0]?.payload.objectiveId).toBe("objective_demo");
   expect(jobs[0]?.payload.stream).toBeTruthy();
   expect(String(jobs[0]?.payload.stream)).toContain("/objectives/objective_demo");
+  expect(String(jobs[0]?.payload.problem)).toContain("Profile handoff from generalist to software.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Reason: Ship the repo fix.");
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_async_handoff"));
+  const handoffEvent = chain.find((receipt) => receipt.body.type === "profile.handoff")?.body;
+  expect(handoffEvent?.type).toBe("profile.handoff");
+  expect(handoffEvent?.toProfileId).toBe("software");
+  expect(handoffEvent && "nextJobId" in handoffEvent ? handoffEvent.nextJobId : undefined).toBe(jobs[0]?.id);
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
   expect(observed && "output" in observed ? observed.output : "").toContain('"toProfileId": "software"');
 });
@@ -1887,6 +1894,131 @@ test("factory chat runner: first factory.output wait is short before later waits
   expect(observations[1]?.waitedMs ?? 0).toBeGreaterThan(observations[0]?.waitedMs ?? 0);
   expect(observations[1]?.changed).toBe(true);
   expect(observations[1]?.status).toBe("completed");
+});
+
+test("factory chat runner: unchanged live waits only pause the budget once per run", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-live-wait-once");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  const llmCalls: string[] = [];
+  const stableTs = 1_700_000_000_000;
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["factory.status"],
+  });
+
+  const actions = [
+    {
+      thought: "wait once without spending the whole budget",
+      action: {
+        type: "tool",
+        name: "factory.status",
+        input: JSON.stringify({ objectiveId: "objective_demo", waitForChangeMs: 60 }),
+        text: null,
+      },
+    },
+    {
+      thought: "wait a second time if the objective is still live",
+      action: {
+        type: "tool",
+        name: "factory.status",
+        input: JSON.stringify({ objectiveId: "objective_demo", waitForChangeMs: 60 }),
+        text: null,
+      },
+    },
+    {
+      thought: "respond",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Should not reach this final step once the wait budget is consumed.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_live_wait_once",
+    problem: "Keep watching the running objective.",
+    profileId: "software",
+    objectiveId: "objective_demo",
+    config: {
+      ...FACTORY_CHAT_DEFAULT_CONFIG,
+      maxIterations: 1,
+    },
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      llmCalls.push(next.action.type === "tool" ? next.action.name ?? "tool" : "final");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    dataDir,
+    factoryService: createFactoryServiceStub({
+      getObjective: async (objectiveId: string) => ({
+        objectiveId,
+        title: "Objective demo",
+        status: "active",
+        phase: "executing",
+        objectiveMode: "delivery",
+        severity: 2,
+        latestSummary: "Still investigating the running objective.",
+        nextAction: "Wait for the current task pass to finish.",
+        integration: {
+          status: "idle",
+          queuedCandidateIds: [],
+        },
+        latestDecision: {
+          summary: "Keep watching the live objective.",
+          at: stableTs,
+          source: "runtime",
+        },
+        blockedExplanation: undefined,
+        evidenceCards: [{
+          kind: "decision",
+          title: "Latest decision",
+          summary: "Keep watching the live objective.",
+          at: stableTs,
+          receiptType: "rebracket.applied",
+        }],
+        tasks: [],
+      }),
+      listObjectiveReceipts: async () => ([
+        {
+          type: "rebracket.applied",
+          hash: "hash_receipt_stable",
+          ts: stableTs,
+          summary: "Keep watching the live objective.",
+        },
+      ]),
+    }) as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.finalResponse).toContain("Stopped after hitting max iterations.");
+  expect(llmCalls).toEqual(["factory.status", "factory.status"]);
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_live_wait_once"));
+  const observations = chain.filter((receipt) =>
+    receipt.body.type === "tool.observed" && receipt.body.tool === "factory.status"
+  );
+  expect(observations).toHaveLength(2);
 });
 
 test.skip("factory chat runner: terminal-objective reads do not consume discovery budget", async () => {

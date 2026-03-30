@@ -8,6 +8,7 @@ import {
 
 export type FactoryPublishResult = {
   readonly summary: string;
+  readonly handoff: string;
   readonly prUrl: string;
   readonly prNumber: number | null;
   readonly headRefName: string | null;
@@ -61,6 +62,7 @@ export const parseJsonObjectCandidate = (raw: string): Record<string, unknown> |
 export const normalizeFactoryPublishResult = (raw: Record<string, unknown>): FactoryPublishResult => {
   const summary = optionalTrimmedString(raw.summary);
   if (!summary) throw new FactoryServiceError(500, "factory publish result missing summary");
+  const handoff = optionalTrimmedString(raw.handoff) ?? summary;
   const prUrl = optionalTrimmedString(raw.prUrl);
   if (!prUrl || !isValidUrl(prUrl)) {
     throw new FactoryServiceError(500, blockerSummary(summary) ?? "factory publish result missing valid prUrl");
@@ -81,6 +83,7 @@ export const normalizeFactoryPublishResult = (raw: Record<string, unknown>): Fac
   if (baseRefName === undefined) throw new FactoryServiceError(500, "factory publish result missing baseRefName");
   return {
     summary,
+    handoff,
     prUrl,
     prNumber,
     headRefName,

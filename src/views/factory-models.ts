@@ -452,6 +452,10 @@ export type FactoryWorkbenchSummarySectionModel = {
     readonly title: string;
     readonly summary: string;
     readonly status: string;
+    readonly active?: boolean;
+    readonly jobId?: string;
+    readonly taskId?: string;
+    readonly candidateId?: string;
     readonly lastMessage?: string;
     readonly stdoutTail?: string;
     readonly stderrTail?: string;
@@ -493,6 +497,10 @@ export type FactoryWorkbenchActivitySectionModel = {
     readonly title: string;
     readonly summary: string;
     readonly status: string;
+    readonly active?: boolean;
+    readonly jobId?: string;
+    readonly taskId?: string;
+    readonly candidateId?: string;
     readonly lastMessage?: string;
     readonly stdoutTail?: string;
     readonly stderrTail?: string;

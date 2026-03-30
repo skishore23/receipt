@@ -629,6 +629,60 @@ test("factory service: objective lists refresh after an external projection writ
   expect(board.sections.needs_attention.some((card) => card.objectiveId === created.objectiveId)).toBe(true);
 });
 
+test("factory service: task live output marks stale Codex work as stalled and surfaces raw stdout", async () => {
+  const dataDir = await createTempDir("receipt-factory-live-output-stalled");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Live output stalled state",
+    prompt: "Show whether the current Codex task is still making progress.",
+    checks: ["git status --short"],
+  });
+
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = (await queue.listJobs({ limit: 20 }))
+    .find((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+  expect(taskJob).toBeDefined();
+  if (!taskJob) throw new Error("expected dispatched task job");
+
+  const workerId = "worker_test:codex";
+  const payload = taskJob.payload as FactoryTaskJobPayload;
+  await queue.leaseJob(taskJob.id, workerId, 900_000);
+  await fs.mkdir(path.dirname(payload.stdoutPath), { recursive: true });
+  await fs.writeFile(
+    payload.stdoutPath,
+    "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n",
+    "utf-8",
+  );
+  await fs.writeFile(payload.stderrPath, "", "utf-8");
+  await fs.writeFile(payload.lastMessagePath, "", "utf-8");
+  await queue.progress(taskJob.id, workerId, {
+    worker: "codex",
+    status: "running",
+    summary: "Codex started working.",
+    progressAt: 1,
+    stdoutTail: "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}",
+  });
+
+  const liveOutput = await service.getObjectiveLiveOutput(created.objectiveId, "task", "task_01");
+
+  expect(liveOutput.status).toBe("stalled");
+  expect(liveOutput.active).toBe(false);
+  expect(liveOutput.stdoutTail).toContain("\"type\":\"thread.started\"");
+  expect(liveOutput.summary).toContain("\"type\":\"turn.started\"");
+});
+
 test("factory service: duplicate objective control enqueues steer onto the existing session job", async () => {
   const dataDir = await createTempDir("receipt-factory-control-steer");
   const repoRoot = await createSourceRepo();
@@ -1984,6 +2038,50 @@ test("factory chat items: completed objective handoffs prioritize the investigat
   expect(handoff && handoff.kind === "assistant" ? handoff.body : "").toContain("Cost Explorer for the last completed calendar month shows EC2 at $651.49 and S3 at $0.98.");
   expect(handoff && handoff.kind === "assistant" ? handoff.body : "").not.toContain("completed and handed back to Chat.");
   expect(handoff && handoff.kind === "assistant" ? handoff.body : "").not.toContain("Next: Investigation is complete.");
+});
+
+test("factory chat items: profile handoffs render a visible continuation card", () => {
+  const runStream = "agents/factory/demo/runs/run_profile_handoff";
+  let prev: string | undefined;
+  const push = (body: AgentEvent, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_profile_handoff",
+      problem: "Fix the sidebar bug.",
+      agentId: "orchestrator",
+    }, 1),
+    push({
+      type: "profile.selected",
+      runId: "run_profile_handoff",
+      profileId: "generalist",
+      agentId: "orchestrator",
+      reason: "default",
+    }, 2),
+    push({
+      type: "profile.handoff",
+      runId: "run_profile_handoff",
+      agentId: "orchestrator",
+      fromProfileId: "generalist",
+      toProfileId: "software",
+      reason: "Ship the repo fix.",
+      nextRunId: "run_software_01",
+      nextJobId: "job_factory_handoff_01",
+      targetStream: "agents/factory/demo/software/objectives/objective_demo",
+      objectiveId: "objective_demo",
+    }, 3),
+  ];
+
+  const items = buildChatItemsForRun("run_profile_handoff", chain, new Map());
+  const handoff = items.find((item) => item.kind === "work" && item.card.title === "Profile handoff to Software");
+
+  expect(handoff && handoff.kind === "work" ? handoff.card.summary : "").toBe("Ship the repo fix.");
+  expect(handoff && handoff.kind === "work" ? handoff.card.jobId : undefined).toBe("job_factory_handoff_01");
+  expect(handoff && handoff.kind === "work" ? handoff.card.detail ?? "" : "").toContain("Next run: run_software_01");
 });
 
 test("factory chat items: factory.output cards render live task output", () => {
@@ -4099,6 +4197,9 @@ test("factory route: running task workbench renders above the transcript and aut
   expect(body).toContain("Implement mission shell");
   expect(body).toContain("build ok");
   expect(body).toContain("Worker running");
+  expect(body).toContain("Continue");
+  expect(body).toContain("Abort Job");
+  expect(body).toContain("Open Chat");
   expect(body).toContain("data-focus-kind=\"task\"");
   expect(body).toContain("data-focus-id=\"task_01\"");
 });
@@ -4601,6 +4702,318 @@ test("factory workbench shell snapshot: returns a canonical route key for client
   expect(snapshot.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_live&focusKind=task&focusId=task_01");
 });
 
+test("factory workbench shell snapshot: selected objective chat excludes runs from other objectives in the same session", async () => {
+  const objectiveA = {
+    ...makeStubObjectiveDetail("objective_a", "job_a"),
+    title: "Objective A",
+    latestSummary: "Objective A summary",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveB = {
+    ...makeStubObjectiveDetail("objective_b", "job_b"),
+    title: "Objective B",
+    latestSummary: "Objective B summary",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveCardA = { ...objectiveA, section: "active" as const };
+  const objectiveCardB = { ...objectiveB, section: "active" as const };
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", "chat_demo");
+  const runAStream = agentRunStream(sessionStream, "run_objective_a");
+  const runBStream = agentRunStream(sessionStream, "run_objective_b");
+  const app = createRouteTestApp({
+    agentEvents: {
+      [sessionStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_a",
+          problem: "Summarize objective A.",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_a",
+          content: "Objective A reply",
+          agentId: "factory",
+        },
+        {
+          type: "problem.set",
+          runId: "run_objective_b",
+          problem: "Summarize objective B.",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_b",
+          content: "Objective B reply",
+          agentId: "factory",
+        },
+      ],
+      [runAStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_a",
+          problem: "Summarize objective A.",
+          agentId: "factory",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_objective_a",
+          objectiveId: "objective_a",
+          chatId: "chat_demo",
+          reason: "startup",
+        },
+        {
+          type: "run.status",
+          runId: "run_objective_a",
+          status: "completed",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_a",
+          content: "Objective A reply",
+          agentId: "factory",
+        },
+      ],
+      [runBStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_b",
+          problem: "Summarize objective B.",
+          agentId: "factory",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_objective_b",
+          objectiveId: "objective_b",
+          chatId: "chat_demo",
+          reason: "startup",
+        },
+        {
+          type: "run.status",
+          runId: "run_objective_b",
+          status: "completed",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_b",
+          content: "Objective B reply",
+          agentId: "factory",
+        },
+      ],
+    },
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [objectiveCardA, objectiveCardB],
+        sections: {
+          needs_attention: [],
+          active: [objectiveCardA, objectiveCardB],
+          queued: [],
+          completed: [],
+        },
+        selectedObjectiveId: "objective_b",
+      }),
+      listObjectives: async () => [
+        objectiveA as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+        objectiveB as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async (objectiveId: string) => objectiveId === "objective_b" ? objectiveB : objectiveA,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_b&inspectorTab=chat");
+  const snapshot = await response.json() as { readonly chatHtml?: string };
+
+  expect(response.status).toBe(200);
+  expect(snapshot.chatHtml).toContain("Objective B reply");
+  expect(snapshot.chatHtml).not.toContain("Objective A reply");
+  expect(snapshot.chatHtml).toContain('data-objective-id="objective_b"');
+});
+
+test("factory route: selected objective chat island excludes runs from other objectives in the same session", async () => {
+  const objectiveA = {
+    ...makeStubObjectiveDetail("objective_a", "job_a"),
+    title: "Objective A",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveB = {
+    ...makeStubObjectiveDetail("objective_b", "job_b"),
+    title: "Objective B",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", "chat_demo");
+  const runAStream = agentRunStream(sessionStream, "run_objective_a");
+  const runBStream = agentRunStream(sessionStream, "run_objective_b");
+  const app = createRouteTestApp({
+    agentEvents: {
+      [sessionStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_a",
+          problem: "Summarize objective A.",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_a",
+          content: "Objective A reply",
+          agentId: "factory",
+        },
+        {
+          type: "problem.set",
+          runId: "run_objective_b",
+          problem: "Summarize objective B.",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_b",
+          content: "Objective B reply",
+          agentId: "factory",
+        },
+      ],
+      [runAStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_a",
+          problem: "Summarize objective A.",
+          agentId: "factory",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_objective_a",
+          objectiveId: "objective_a",
+          chatId: "chat_demo",
+          reason: "startup",
+        },
+        {
+          type: "run.status",
+          runId: "run_objective_a",
+          status: "completed",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_a",
+          content: "Objective A reply",
+          agentId: "factory",
+        },
+      ],
+      [runBStream]: [
+        {
+          type: "problem.set",
+          runId: "run_objective_b",
+          problem: "Summarize objective B.",
+          agentId: "factory",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_objective_b",
+          objectiveId: "objective_b",
+          chatId: "chat_demo",
+          reason: "startup",
+        },
+        {
+          type: "run.status",
+          runId: "run_objective_b",
+          status: "completed",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_objective_b",
+          content: "Objective B reply",
+          agentId: "factory",
+        },
+      ],
+    },
+    service: {
+      listObjectives: async () => [
+        objectiveA as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+        objectiveB as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async (objectiveId: string) => objectiveId === "objective_b" ? objectiveB : objectiveA,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/island/chat?profile=generalist&chat=chat_demo&thread=objective_b&inspectorTab=chat");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("Objective B reply");
+  expect(body).not.toContain("Objective A reply");
+  expect(body).toContain('data-objective-id="objective_b"');
+});
+
+test("factory workbench: completed filter without an explicit objective selects a completed objective for the active profile", async () => {
+  const activeObjective = makeRunningWorkbenchObjectiveDetail("objective_live");
+  const completedObjective = {
+    ...makeStubObjectiveDetail("objective_done"),
+    title: "Completed objective",
+    status: "completed",
+    phase: "completed",
+    scheduler: { slotState: "idle" },
+    latestSummary: "Completed objective summary.",
+    nextAction: "Objective is complete.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    taskCount: 1,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const additionalCompletedObjective = {
+    ...makeStubObjectiveDetail("objective_done_2"),
+    title: "Badge-free completed card",
+    status: "completed",
+    phase: "completed",
+    scheduler: { slotState: "idle" },
+    latestSummary: "Wrapped cleanly without additional operator work.",
+    nextAction: "Archive when ready.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    taskCount: 1,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const activeCard = { ...activeObjective, section: "active" as const };
+  const completedCard = { ...completedObjective, section: "completed" as const };
+  const additionalCompletedCard = { ...additionalCompletedObjective, section: "completed" as const };
+  const app = createRouteTestApp({
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [activeCard, completedCard, additionalCompletedCard],
+        sections: {
+          needs_attention: [],
+          active: [activeCard],
+          queued: [],
+          completed: [completedCard, additionalCompletedCard],
+        },
+        selectedObjectiveId: "objective_live",
+      }),
+      listObjectives: async () => [
+        activeObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+        completedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+        additionalCompletedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async (objectiveId: string) => objectiveId === "objective_done"
+        ? completedObjective
+        : objectiveId === "objective_done_2"
+          ? additionalCompletedObjective
+          : activeObjective,
+    },
+  });
+
+  const shellResponse = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&detailTab=queue&filter=objective.completed");
+  const shell = await shellResponse.json() as { readonly routeKey?: string };
+  expect(shellResponse.status).toBe(200);
+  expect(shell.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_done&detailTab=queue&filter=objective.completed");
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&detailTab=queue&filter=objective.completed");
+  const body = await response.text();
+  expect(response.status).toBe(200);
+  expect(body).toContain("Selected Objective");
+  expect(body).toContain("Completed objective");
+  expect(body).toContain("Completed objective summary.");
+  expect(body).toContain('data-objective-id="objective_done" data-selected="true" aria-current="page"');
+  expect(body).toContain(">Selected<");
+  const badgeFreeCardIndex = body.indexOf("Badge-free completed card");
+  expect(badgeFreeCardIndex).toBeGreaterThan(-1);
+  expect(body.slice(badgeFreeCardIndex, badgeFreeCardIndex + 240)).not.toContain(">Completed<");
+});
+
 test("factory workbench route: empty state points operators to /obj when no objective is selected", async () => {
   const app = createRouteTestApp();
 
@@ -4943,7 +5356,7 @@ test("factory route: plain prompts queue a saved chat run without creating an ob
   expect(queuedInput).toMatchObject({
     agentId: "factory",
     lane: "chat",
-    singletonMode: "allow",
+    singletonMode: "steer",
   });
   expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
     kind: "factory.run",
@@ -5054,7 +5467,7 @@ test("factory route: composer accepts UI chat submissions and returns a chat-cen
   expect(queuedInput).toMatchObject({
     agentId: "factory",
     lane: "chat",
-    singletonMode: "allow",
+    singletonMode: "steer",
   });
   expect((queuedInput?.payload as Record<string, unknown> | undefined)).toMatchObject({
     kind: "factory.run",

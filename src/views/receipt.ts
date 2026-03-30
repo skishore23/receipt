@@ -144,7 +144,7 @@ export const receiptShell = (opts: {
           <div class="text-xs text-muted-foreground truncate">${selected ? esc(selected) : "No stream selected"}</div>
         </div>
 
-        <div class="mt-4 flex flex-wrap items-center gap-2 rounded-[20px] border border-border bg-muted px-4 py-3">
+        <div class="mt-4 flex flex-wrap items-center gap-2 border border-border bg-muted px-4 py-3">
           ${chipLabel("Order")}${orderChips}
           ${chipLabel("Window")}${windowChips}
           ${chipLabel("Depth")}${depthChips}
@@ -193,7 +193,7 @@ export const receiptFoldsHtml = (
   return sorted.map((f) => {
     const active = f.name === selected;
     const borderClass = active ? "border-info/30" : "border-border hover:border-border";
-    return `<a class="block rounded-[18px] border ${borderClass} bg-muted px-3 py-2.5 no-underline transition" href="/receipt?file=${encodeURIComponent(f.name)}&order=${order}&limit=${limit}&depth=${depth}">
+    return `<a class="block border ${borderClass} bg-muted px-3 py-2.5 no-underline transition" href="/receipt?file=${encodeURIComponent(f.name)}&order=${order}&limit=${limit}&depth=${depth}">
       <div class="text-xs font-semibold text-foreground break-all">${esc(f.name)}</div>
       <div class="mt-1 text-[10px] text-muted-foreground">${formatBytes(f.size)} \u00b7 ${formatTime(f.mtime)}</div>
     </a>`;
@@ -222,7 +222,7 @@ export const receiptRecordsHtml = (opts: {
     const summary = receiptSummary(r);
     const rawJson = r.data ? JSON.stringify(r.data, null, 2) : r.raw;
 
-    return `<div class="cursor-pointer rounded-[18px] border border-border bg-muted px-3 py-2.5 transition hover:border-info/25" data-receipt-row data-idx="${idx}">
+    return `<div class="cursor-pointer border border-border bg-muted px-3 py-2.5 transition hover:border-info/25" data-receipt-row data-idx="${idx}">
       <div class="text-[10px] font-semibold uppercase tracking-[0.1em] text-info/80">${esc(type)}</div>
       ${hash ? `<div class="mt-0.5 font-mono text-[10px] text-muted-foreground">${esc(hash)}</div>` : ""}
       ${ts ? `<div class="text-[10px] text-muted-foreground">${esc(ts)}</div>` : ""}

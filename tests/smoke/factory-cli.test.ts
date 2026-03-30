@@ -11,7 +11,7 @@ import { renderToString } from "ink";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
-import { inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
+import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
@@ -658,6 +658,106 @@ test("factory cli: replay folds a historical infrastructure objective into the c
   expect(payload.workflow.blockedTaskIds).toEqual(["task_01"]);
   expect(payload.workflow.pendingTaskIds).toEqual(["task_02"]);
   expect(payload.tasks.find((task) => task.taskId === "task_01")?.blockedReason).toContain("AccessDeniedException");
+}, 120_000);
+
+test("factory cli: audit supports a targeted objective without changing the recent-window flow", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  const olderObjectiveId = "objective_audit_older";
+  const targetedObjectiveId = "objective_audit_targeted";
+  await seedObjectiveReplay(runtimeConfig.dataDir, olderObjectiveId, [
+    {
+      type: "objective.created",
+      objectiveId: olderObjectiveId,
+      title: "Older audit objective",
+      prompt: "Older objective for audit sampling.",
+      channel: "results",
+      baseHash: "old-base",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "generalist",
+        rootProfileLabel: "Generalist",
+        resolvedProfileHash: "hash-old",
+        promptHash: "prompt-old",
+        promptPath: "profiles/software/PROFILE.md",
+        selectedSkills: [],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    } as FactoryEvent,
+  ]);
+  await seedObjectiveReplay(runtimeConfig.dataDir, targetedObjectiveId, [
+    {
+      type: "objective.created",
+      objectiveId: targetedObjectiveId,
+      title: "Targeted audit objective",
+      prompt: "Targeted objective for audit selection.",
+      channel: "results",
+      baseHash: "target-base",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "generalist",
+        rootProfileLabel: "Generalist",
+        resolvedProfileHash: "hash-target",
+        promptHash: "prompt-target",
+        promptPath: "profiles/software/PROFILE.md",
+        selectedSkills: [],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    } as FactoryEvent,
+  ]);
+
+  const recent = await runCli(["factory", "audit", "--limit", "1", "--json", "--repo-root", repoDir]);
+  expect(recent.code).toBe(0);
+  const recentPayload = JSON.parse(recent.stdout) as {
+    readonly summary: { readonly objectivesAudited: number; readonly sampledObjectiveIds: ReadonlyArray<string> };
+  };
+  expect(recentPayload.summary.objectivesAudited).toBe(1);
+  expect(recentPayload.summary.sampledObjectiveIds).toEqual([targetedObjectiveId]);
+
+  const targeted = await runCli([
+    "factory",
+    "audit",
+    "--objective",
+    targetedObjectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(targeted.code).toBe(0);
+  const targetedPayload = JSON.parse(targeted.stdout) as {
+    readonly summary: { readonly objectivesAudited: number; readonly sampledObjectiveIds: ReadonlyArray<string> };
+    readonly objectives: ReadonlyArray<{ readonly objectiveId: string }>;
+  };
+  expect(targetedPayload.summary.objectivesAudited).toBe(1);
+  expect(targetedPayload.summary.sampledObjectiveIds).toEqual([targetedObjectiveId]);
+  expect(targetedPayload.objectives.map((objective) => objective.objectiveId)).toEqual([targetedObjectiveId]);
+
+  const targetedText = await runCli([
+    "factory",
+    "audit",
+    "--objective",
+    targetedObjectiveId,
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(targetedText.code).toBe(0);
+  expect(targetedText.stdout).toContain(`Targeted objective: ${targetedObjectiveId}`);
+  expect(targetedText.stdout).toContain("Objectives audited: 1");
 }, 120_000);
 
 test("factory cli: replay-chat exposes the historical infrastructure binding path", async () => {
@@ -2067,6 +2167,18 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
 
   const promotedFile = await fs.readFile(path.join(repoDir, ".receipt", "data", "hub", "worktrees", `factory_integration_${runPayload.objectiveId}`, "CLI_SMOKE.txt"), "utf-8");
   expect(promotedFile).toMatch(/created by stub/);
+  const objectiveAuditPath = path.join(repoDir, ".receipt", "data", "factory", "artifacts", runPayload.objectiveId, "objective.audit.json");
+  const objectiveAudit = JSON.parse(await fs.readFile(objectiveAuditPath, "utf-8")) as {
+    readonly requestedId?: string;
+    readonly links?: {
+      readonly objectiveId?: string;
+    };
+    readonly summary?: {
+      readonly status?: string;
+    };
+  };
+  expect(objectiveAudit.requestedId ?? objectiveAudit.links?.objectiveId).toBe(runPayload.objectiveId);
+  expect(objectiveAudit.summary?.status).toBe("completed");
 
   const inspect = await runCli([
     "factory",
@@ -2234,6 +2346,84 @@ test("factory cli: abort-job queues a structured abort command", async () => {
   }
 }, 120_000);
 
+test("factory cli: steer and follow-up queue structured live guidance commands", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const config = await loadFactoryConfig(repoDir);
+  expect(config).toBeDefined();
+  const runtime = createFactoryCliRuntime(config!);
+  try {
+    const job = await runtime.queue.enqueue({
+      agentId: "codex",
+      lane: "collect",
+      payload: {
+        kind: "factory.task.run",
+        objectiveId: "objective_demo",
+        taskId: "task_01",
+        candidateId: "task_01_candidate_01",
+        stream: "factory/objectives/objective_demo",
+        runId: "run_factory_cli_live_guidance",
+      },
+      maxAttempts: 1,
+    });
+
+    const steer = await runCli([
+      "factory",
+      "steer",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "Tighten the scope and make the real repo change.",
+    ]);
+    expect(steer.code).toBe(0);
+    const steerPayload = JSON.parse(steer.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: Record<string, unknown> }>;
+      };
+    };
+    expect(steerPayload.action).toBe("steer");
+    expect(steerPayload.jobId).toBe(job.id);
+    expect(steerPayload.commandId.length).toBeGreaterThan(0);
+    expect(steerPayload.job.commands.some((command) =>
+      command.command === "steer" && command.payload?.message === "Tighten the scope and make the real repo change.")).toBe(true);
+
+    const followUp = await runCli([
+      "factory",
+      "follow-up",
+      job.id,
+      "--json",
+      "--repo-root",
+      repoDir,
+      "--message",
+      "Run validation and include proof in the handoff.",
+    ]);
+    expect(followUp.code).toBe(0);
+    const followPayload = JSON.parse(followUp.stdout) as {
+      readonly action: string;
+      readonly jobId: string;
+      readonly commandId: string;
+      readonly job: {
+        readonly commands: ReadonlyArray<{ readonly command: string; readonly payload?: Record<string, unknown> }>;
+      };
+    };
+    expect(followPayload.action).toBe("follow_up");
+    expect(followPayload.jobId).toBe(job.id);
+    expect(followPayload.commandId.length).toBeGreaterThan(0);
+    expect(followPayload.job.commands.some((command) =>
+      command.command === "follow_up" && command.payload?.message === "Run validation and include proof in the handoff.")).toBe(true);
+  } finally {
+    runtime.stop();
+  }
+}, 120_000);
+
 test("factory cli: composer parser handles plain text and slash commands", () => {
   expect(parseComposerDraft("Ship a better objective flow")).toEqual({
     ok: true,
@@ -2276,6 +2466,20 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       reason: "stop the current worker",
     },
   });
+  expect(parseComposerDraft("/steer Tighten the scope", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "steer",
+      message: "Tighten the scope",
+    },
+  });
+  expect(parseComposerDraft("/follow-up Run validation and include proof", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "follow-up",
+      message: "Run validation and include proof",
+    },
+  });
 });
 
 test("factory cli: composer parser marks diagnostic prompts as investigations and adds root-cause guidance", () => {
@@ -2304,6 +2508,19 @@ test("factory cli: composer parser rejects job commands without a selected objec
     ok: false,
     error: "Select an objective before aborting its active job.",
   });
+  expect(parseComposerDraft("/steer tighten the scope")).toEqual({
+    ok: false,
+    error: "Select an objective before steering its active job.",
+  });
+  expect(parseComposerDraft("/follow-up add proof")).toEqual({
+    ok: false,
+    error: "Select an objective before sending follow-up guidance.",
+  });
+});
+
+test("factory cli: composer metadata exposes steer and follow-up commands in help surfaces", () => {
+  expect(COMPOSER_COMMANDS.some((command) => command.name === "steer" && command.usage === "/steer <message>")).toBe(true);
+  expect(COMPOSER_COMMANDS.some((command) => command.name === "follow-up" && command.usage === "/follow-up <message>")).toBe(true);
 });
 
 test("factory workbench: shared projection keeps rich task data and defaults focus to the active task", () => {

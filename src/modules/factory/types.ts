@@ -66,6 +66,33 @@ export type FactoryTaskResultOutcome =
   | "blocked"
   | "partial";
 
+export type FactoryWorkerHandoffScope =
+  | "task"
+  | "integration_validation"
+  | "integration_publish";
+
+export type FactoryWorkerHandoffOutcome =
+  | FactoryTaskResultOutcome
+  | "validated"
+  | "published"
+  | "failed"
+  | "canceled";
+
+export type FactoryObjectiveHandoffStatus =
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export type FactoryObjectiveHandoffRecord = {
+  readonly status: FactoryObjectiveHandoffStatus;
+  readonly summary: string;
+  readonly blocker?: string;
+  readonly nextAction?: string;
+  readonly handoffKey: string;
+  readonly sourceUpdatedAt: number;
+};
+
 export type FactoryProfileCloudProvider = "aws" | "gcp" | "azure";
 
 export type FactoryInvestigationEvidence = {
@@ -345,6 +372,7 @@ export type FactoryState = {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly latestSummary?: string;
+  readonly latestHandoff?: FactoryObjectiveHandoffRecord;
   readonly blockedReason?: string;
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;

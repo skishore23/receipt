@@ -165,6 +165,10 @@ bun run factory
 bun src/cli.ts factory create --prompt "Plan a README refresh"
 bun src/cli.ts factory run --prompt "Update the architecture docs"
 
+# steer or follow up on a live Factory job
+bun src/cli.ts factory steer job_demo --message "Retarget this run to the live-output bug"
+bun src/cli.ts factory follow-up job_demo --message "Keep the receipt links stable"
+
 # inspect jobs and receipts
 bun src/cli.ts jobs --status running --limit 20
 bun src/cli.ts inspect <run-id-or-stream>
@@ -175,6 +179,18 @@ bun src/cli.ts fork <run-id-or-stream> --at 12
 # work with receipt-backed memory
 bun src/cli.ts memory read factory/objectives/<objective-id> --limit 5
 bun src/cli.ts memory search factory/repo/shared --query "integration failure"
+```
+
+The live guidance commands target a Factory-visible job directly:
+
+- `receipt factory steer <job-id> --message "<updated direction>"` retargets the active run when the operator needs to correct the plan.
+- `receipt factory follow-up <job-id> --message "<extra context>"` adds constraints or extra evidence without replacing the original task.
+
+In the Factory chat composer, the same actions are available as slash commands:
+
+```text
+/steer Retarget this run to the live-output bug.
+/follow-up Keep the receipt links stable.
 ```
 
 ## Runtime Modes

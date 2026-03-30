@@ -8,9 +8,11 @@ import {
   cancelObjectiveMutation,
   cleanupObjectiveMutation,
   createObjectiveMutation,
+  followUpJobMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
   requireActiveObjectiveJob,
+  steerJobMutation,
 } from "./actions";
 import { readObjectiveAnalysis, type ObjectiveAnalysis } from "./analyze";
 import type { FactoryCliRuntime } from "./runtime";
@@ -1218,6 +1220,26 @@ export const FactoryTerminalApp = ({
           await abortJobMutation(runtime, {
             jobId: activeJob.id,
             reason: command.reason ?? "abort requested from CLI",
+          });
+        });
+        setDraft("");
+        return;
+      case "steer":
+        await runAction("Sending steer guidance", async () => {
+          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
+          await steerJobMutation(runtime, {
+            jobId: activeJob.id,
+            message: command.message ?? "",
+          });
+        });
+        setDraft("");
+        return;
+      case "follow-up":
+        await runAction("Sending follow-up guidance", async () => {
+          const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
+          await followUpJobMutation(runtime, {
+            jobId: activeJob.id,
+            message: command.message ?? "",
           });
         });
         setDraft("");

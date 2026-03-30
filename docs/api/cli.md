@@ -197,8 +197,8 @@ receipt factory run --profile infrastructure --objective-mode investigation --se
 receipt factory compose --objective objective_demo --prompt "Tighten the next pass and keep receipts concise."
 receipt factory inspect objective_demo --panel report
 receipt factory react objective_demo --message "Advance using the latest operator note."
-receipt factory steer job_demo --problem "Retarget this run to the live-output bug."
-receipt factory follow-up job_demo --note "Keep the receipt links stable."
+receipt factory steer job_demo --message "Retarget this run to the live-output bug."
+receipt factory follow-up job_demo --message "Keep the receipt links stable."
 receipt factory abort-job job_demo --reason "cancel stale run"
 ```
 

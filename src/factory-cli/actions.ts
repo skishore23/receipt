@@ -13,7 +13,7 @@ export type FactoryObjectiveMutationAction =
   | "cleanup"
   | "archive";
 
-export type FactoryJobMutationAction = "abort";
+export type FactoryJobMutationAction = "abort" | "steer" | "follow_up";
 
 export type FactoryObjectiveMutationResult = {
   readonly kind: "objective";
@@ -211,6 +211,40 @@ export const abortJobMutation = async (
   return {
     kind: "job",
     action: "abort",
+    jobId: input.jobId,
+    job: queued.job,
+    commandId: queued.command.id,
+  };
+};
+
+export const steerJobMutation = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly jobId: string;
+    readonly message: string;
+  },
+): Promise<FactoryJobMutationResult> => {
+  const queued = await runtime.service.queueJobSteer(input.jobId, input.message);
+  return {
+    kind: "job",
+    action: "steer",
+    jobId: input.jobId,
+    job: queued.job,
+    commandId: queued.command.id,
+  };
+};
+
+export const followUpJobMutation = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly jobId: string;
+    readonly message: string;
+  },
+): Promise<FactoryJobMutationResult> => {
+  const queued = await runtime.service.queueJobFollowUp(input.jobId, input.message);
+  return {
+    kind: "job",
+    action: "follow_up",
     jobId: input.jobId,
     job: queued.job,
     commandId: queued.command.id,

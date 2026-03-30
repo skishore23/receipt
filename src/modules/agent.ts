@@ -247,6 +247,11 @@ export type AgentEvent =
       readonly fromProfileId: string;
       readonly toProfileId: string;
       readonly reason: string;
+      readonly nextRunId?: string;
+      readonly nextJobId?: string;
+      readonly targetStream?: string;
+      readonly objectiveId?: string;
+      readonly chatId?: string;
     };
 
 export type AgentCmd = {

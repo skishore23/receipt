@@ -320,6 +320,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
       readonly scopes: Array<{ key: string }>;
     };
     readonly context: {
+      readonly summaryPath?: string;
       readonly packPath: string;
     };
     readonly contextSources: {
@@ -340,6 +341,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
   ]);
   expect(manifest.memory.scriptPath).toBe(payload.memoryScriptPath);
   expect(manifest.memory.configPath).toBe(payload.memoryConfigPath);
+  expect(manifest.context.summaryPath).toBe(payload.contextSummaryPath);
   expect(manifest.context.packPath).toBe(payload.contextPackPath);
   expect(manifest.contextSources.repoSharedMemoryScope).toBe("factory/repo/shared");
   expect(manifest.sharedArtifactRefs.length).toBeGreaterThanOrEqual(2);
@@ -352,7 +354,11 @@ test("factory worker packets expose a layered memory script for bounded recall a
   const promptBody = await fs.readFile(payload.promptPath, "utf-8");
   expect(promptBody).toMatch(/The prompt is bootstrap only\./);
   expect(promptBody).toMatch(/AGENTS\.md and skills\/factory-receipt-worker\/SKILL\.md/);
+  expect(promptBody).toMatch(/Follow the checked-in worker bootstrap order: manifest, context pack, then memory script\./);
+  expect(promptBody).toMatch(/Context Pack:/);
+  expect(promptBody).toMatch(/Task Context Summary \(quick overview derived from the packet\):/);
   expect(promptBody).toMatch(new RegExp(payload.manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  expect(promptBody).toMatch(new RegExp(String(payload.contextSummaryPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(new RegExp(payload.contextPackPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(/Do not call `.+ factory inspect` from inside this task worktree\./);
   expect(promptBody).not.toMatch(new RegExp(`receipt factory inspect ${created.objectiveId} --json --panel debug`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -361,15 +367,20 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} scope task`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} search repo`));
-  expect(promptBody).toMatch(/Always include scriptsRun and completion\./);
+  expect(promptBody).toMatch(/Always include an explicit handoff string, scriptsRun, and completion\./);
 
-  expect(captured.context).toMatch(/Objective: Scripted memory objective/);
-  expect(captured.context).toMatch(/Dependencies:|Candidate lineage:|Recent receipts:/);
-  expect(captured.context).toMatch(/Objective frontier:|Objective-wide receipts:/);
+  expect(captured.context).toMatch(/# Factory Task Context Summary/);
+  expect(captured.context).toMatch(/## What Matters/);
+  expect(captured.context).toMatch(/## Recent Receipts|## Objective-Wide Receipts/);
   expect(captured.objective).toMatch(/Frontier tasks:|Recent objective receipts:/);
   expect(captured.overview).toMatch(/Agent memory \(codex\)|Objective memory|Task memory/);
   expect(captured.scope).toMatch(/task memory: reuse the generated memory script/i);
   expect(captured.search).toMatch(/shared fact: promotion must wait for green integration/i);
+
+  const contextSummary = await fs.readFile(String(payload.contextSummaryPath), "utf-8");
+  expect(contextSummary).toMatch(/# Factory Task Context Summary/);
+  expect(contextSummary).toMatch(/## Packet Usage/);
+  expect(contextSummary).toMatch(/Open the JSON context pack only when you need exact raw fields, refs, or artifact paths\./);
 
   const contextPack = JSON.parse(await fs.readFile(payload.contextPackPath, "utf-8")) as {
     readonly profile: { readonly rootProfileId: string; readonly promptPath: string };
@@ -403,11 +414,23 @@ test("factory worker packets expose a layered memory script for bounded recall a
     scope: `factory/objectives/${created.objectiveId}/tasks/${task!.taskId}`,
     limit: 10,
   });
+  const agentMemory = await memoryTools.read({
+    scope: "factory/agents/codex",
+    limit: 10,
+  });
+  const repoSharedMemory = await memoryTools.read({
+    scope: "factory/repo/shared",
+    limit: 10,
+  });
   expect(taskMemory.some((entry) => entry.text.includes("worker durable note from script"))).toBeTruthy();
   expect(taskMemory.some((entry) =>
     entry.text.includes("Scripts Run\n- ok: bun ")
     && entry.text.includes(`${path.basename(payload.memoryScriptPath)} context 1800`)
   )).toBeTruthy();
+  expect(agentMemory.some((entry) => entry.text.includes("agent guidance: prefer compact recall over raw transcript expansion"))).toBeTruthy();
+  expect(agentMemory.some((entry) => entry.text.includes("Used the generated memory script to recall and store bounded context."))).toBeFalsy();
+  expect(repoSharedMemory.some((entry) => entry.text.includes("shared fact: promotion must wait for green integration"))).toBeTruthy();
+  expect(repoSharedMemory.some((entry) => entry.text.includes("Used the generated memory script to recall and store bounded context."))).toBeFalsy();
 
   const after = await service.getObjective(created.objectiveId);
   const afterTask = after.tasks.find((item) => item.taskId === task!.taskId);
@@ -435,6 +458,7 @@ test("factory investigation synthesis commits a sectioned operator report to obj
       const raw = JSON.stringify({
         outcome: "approved",
         summary: "Collected the current AWS account inventory evidence.",
+        handoff: "Inventory evidence is complete. Synthesis should focus on scope, anomalies, and whether deeper service-specific attribution is still needed.",
         artifacts: [{
           label: "Inventory snapshot",
           path: path.join(input.workspacePath, ".receipt", "factory", "inventory.json"),
@@ -507,6 +531,7 @@ test("factory investigation synthesis commits a sectioned operator report to obj
   });
   const richReport = objectiveMemory.find((entry) =>
     entry.text.includes("Conclusion\n")
+    && entry.text.includes("Handoff\nInventory evidence is complete.")
     && entry.text.includes("Evidence\n- AWS identity:")
     && entry.text.includes("Scripts Run\n- ok: bash .receipt/factory/task_01_inventory.sh")
     && entry.text.includes("Artifacts\n-")
@@ -514,6 +539,12 @@ test("factory investigation synthesis commits a sectioned operator report to obj
     && entry.text.includes("Next Steps\n- Escalate only if deeper service-specific attribution is required."),
   );
   expect(richReport).toBeTruthy();
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "investigation.reported"
+    && receipt.summary.includes("Inventory evidence is complete.")
+  )).toBe(true);
 }, 120_000);
 
 test("factory publish commits PR metadata to objective, integration, and publish memory", async () => {
@@ -532,6 +563,7 @@ test("factory publish commits PR metadata to objective, integration, and publish
       if (input.taskId === "publish") {
         const raw = JSON.stringify({
           summary: "Published PR #42 for the software objective.",
+          handoff: "Publish completed successfully. The controller can close the objective with PR #42.",
           prUrl: "https://github.com/example/receipt/pull/42",
           prNumber: 42,
           headRefName: "codex/software-objective",
@@ -550,6 +582,7 @@ test("factory publish commits PR metadata to objective, integration, and publish
       const raw = JSON.stringify({
         outcome: "approved",
         summary: "Implemented the software change and prepared it for integration.",
+        handoff: "Candidate is ready for integration and publish with the software change plus the recorded proof.",
         artifacts: [],
         scriptsRun: [{
           command: "git status --short",
@@ -606,7 +639,15 @@ test("factory publish commits PR metadata to objective, integration, and publish
 
   const publishJob = await findObjectiveJob(queue, created.objectiveId, "factory.integration.publish");
   expect(publishJob).toBeTruthy();
-  await service.runIntegrationPublish(publishJob!.payload as FactoryIntegrationPublishJobPayload);
+  const publishPayload = publishJob!.payload as FactoryIntegrationPublishJobPayload;
+  expect(publishPayload.contextRefs.length).toBeGreaterThan(0);
+  expect(publishPayload.skillBundlePaths.length).toBeGreaterThan(1);
+  await service.runIntegrationPublish(publishPayload);
+  const publishPrompt = await fs.readFile(publishPayload.promptPath, "utf-8");
+  expect(publishPrompt).toContain("## Context Snapshot");
+  expect(publishPrompt).toContain("Candidate handoff: Candidate is ready for integration and publish with the software change plus the recorded proof.");
+  expect(publishPrompt).toContain("Recent objective receipts:");
+  expect(publishPrompt).toContain("candidate.reviewed:");
 
   const objectiveMemory = await memoryTools.read({
     scope: `factory/objectives/${created.objectiveId}`,
@@ -627,10 +668,12 @@ test("factory publish commits PR metadata to objective, integration, and publish
   )).toBeTruthy();
   expect(integrationMemory.some((entry) =>
     entry.text.includes("Published PR #42 for the software objective.")
+    && entry.text.includes("Handoff\nPublish completed successfully. The controller can close the objective with PR #42.")
     && entry.text.includes("https://github.com/example/receipt/pull/42")
   )).toBeTruthy();
   expect(publishMemory.some((entry) =>
     entry.text.includes("Published PR #42 for the software objective.")
+    && entry.text.includes("Handoff\nPublish completed successfully. The controller can close the objective with PR #42.")
     && entry.text.includes("https://github.com/example/receipt/pull/42")
   )).toBeTruthy();
 }, 120_000);
@@ -721,5 +764,7 @@ test("factory publish failures still commit durable blocker notes to publish mem
   });
 
   expect(publishMemory.some((entry) => entry.text.includes("gh pr create failed: permission denied"))).toBeTruthy();
+  expect(publishMemory.some((entry) => entry.text.includes("Handoff\nPublishing failed: gh pr create failed: permission denied"))).toBeTruthy();
   expect(integrationMemory.some((entry) => entry.text.includes("Publishing failed: gh pr create failed: permission denied"))).toBeTruthy();
+  expect(integrationMemory.some((entry) => entry.text.includes("Handoff\nPublishing failed: gh pr create failed: permission denied"))).toBeTruthy();
 }, 120_000);
