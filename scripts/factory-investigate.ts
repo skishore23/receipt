@@ -9,6 +9,7 @@ import {
 type ParsedArgs = {
   readonly targetId?: string;
   readonly json: boolean;
+  readonly compact: boolean;
   readonly timelineLimit?: number;
   readonly contextChars?: number;
   readonly dataDir?: string;
@@ -23,6 +24,7 @@ const usage = (): string => [
   "",
   "Flags:",
   "  --json                 Print structured JSON instead of text",
+  "  --compact              Print a shorter repair-oriented text summary",
   "  --timeline-limit <n>   Limit rendered timeline items in text mode",
   "  --context-chars <n>    Limit rendered context block size in text mode",
   "  --data-dir <path>      Override receipt data dir",
@@ -41,6 +43,7 @@ const parseNumberFlag = (value: string | undefined, flag: string): number => {
 const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {
   let targetId: string | undefined;
   let json = false;
+  let compact = false;
   let timelineLimit: number | undefined;
   let contextChars: number | undefined;
   let dataDir: string | undefined;
@@ -51,6 +54,10 @@ const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {
     const arg = argv[index]!;
     if (arg === "--json") {
       json = true;
+      continue;
+    }
+    if (arg === "--compact") {
+      compact = true;
       continue;
     }
     if (arg === "--timeline-limit") {
@@ -91,6 +98,7 @@ const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {
   return {
     targetId,
     json,
+    compact,
     timelineLimit,
     contextChars,
     dataDir,
@@ -120,6 +128,7 @@ const main = async (): Promise<void> => {
   }
 
   process.stdout.write(`${renderFactoryReceiptInvestigationText(report, {
+    compact: parsed.compact,
     timelineLimit: parsed.timelineLimit,
     contextChars: parsed.contextChars,
   })}\n`);

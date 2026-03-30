@@ -287,6 +287,58 @@ test("factory CLI investigate exposes the same investigation flow for repair/deb
   expect(payload.assessment.efficiency).toBeTruthy();
 }, 120_000);
 
+test("factory CLI investigate compact keeps repair sections while dropping verbose agent-run detail", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Investigate compact CLI output",
+    prompt: "Use factory investigate compact mode to summarize the task context and repair path.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const fullRun = await execFileAsync(BUN, [
+    CLI_PATH,
+    "factory",
+    "investigate",
+    created.objectiveId,
+    "--data-dir",
+    dataDir,
+    "--repo-root",
+    repoRoot,
+  ], {
+    cwd: ROOT,
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const compactRun = await execFileAsync(BUN, [
+    CLI_PATH,
+    "factory",
+    "investigate",
+    created.objectiveId,
+    "--compact",
+    "--data-dir",
+    dataDir,
+    "--repo-root",
+    repoRoot,
+  ], {
+    cwd: ROOT,
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+
+  expect(compactRun.stdout).toContain("## What Happened");
+  expect(compactRun.stdout).toContain("## Assessment");
+  expect(compactRun.stdout).toContain("## DAG Flow");
+  expect(compactRun.stdout).not.toContain("## Agent Runs");
+  expect(compactRun.stdout.length).toBeLessThan(fullRun.stdout.length);
+}, 120_000);
+
 test("factory CLI investigate keeps large JSON reports parseable when stdout is piped", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService();
   const longPrompt = `Explain the objective in detail.\n${"Long context line.\n".repeat(12_000)}`;

@@ -91,6 +91,7 @@ export type FactoryReceiptInvestigation = {
 export type FactoryReceiptInvestigationRenderOptions = {
   readonly timelineLimit?: number;
   readonly contextChars?: number;
+  readonly compact?: boolean;
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
@@ -114,6 +115,20 @@ const truncateBlock = (value: string | undefined, max = 2_400): string | undefin
   const normalized = value?.trim();
   if (!normalized) return undefined;
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}…`;
+};
+
+const excerptBlock = (value: string | undefined, input: {
+  readonly maxChars: number;
+  readonly maxLines: number;
+}): string | undefined => {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  const lines = normalized
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .slice(0, input.maxLines);
+  return truncateBlock(lines.join("\n"), input.maxChars);
 };
 
 const uniqueStrings = (values: ReadonlyArray<string | undefined>): ReadonlyArray<string> =>
@@ -566,8 +581,31 @@ export const renderFactoryReceiptInvestigationText = (
   report: FactoryReceiptInvestigation,
   opts: FactoryReceiptInvestigationRenderOptions = {},
 ): string => {
-  const timelineLimit = Math.max(1, opts.timelineLimit ?? 40);
-  const contextChars = Math.max(400, opts.contextChars ?? 2_400);
+  const compact = opts.compact === true;
+  const timelineLimit = Math.max(1, opts.timelineLimit ?? (compact ? 12 : 20));
+  const contextChars = Math.max(200, opts.contextChars ?? (compact ? 700 : 1_200));
+  const contextExcerpt = excerptBlock(report.packetContext?.summaryText, {
+    maxChars: contextChars,
+    maxLines: compact ? 8 : 14,
+  });
+  const taskLines = report.tasks.length > 0
+    ? report.tasks
+      .slice(0, compact ? 4 : report.tasks.length)
+      .map((task) =>
+        `- ${renderTaskLine(task, undefined)}${task.latestSummary ? ` :: ${truncateInline(task.latestSummary, 140)}` : ""}`)
+    : ["- none"];
+  const candidateLines = report.candidates.length > 0
+    ? report.candidates
+      .slice(0, compact ? 4 : report.candidates.length)
+      .map((candidate) =>
+        `- ${candidate.candidateId} [${candidate.status}] task=${candidate.taskId}${candidate.tokensUsed ? ` tokens=${candidate.tokensUsed}` : ""}${candidate.summary ? ` :: ${truncateInline(candidate.summary, 140)}` : ""}`)
+    : ["- none"];
+  const jobLines = report.jobs.length > 0
+    ? report.jobs
+      .slice(0, compact ? 5 : report.jobs.length)
+      .map((job) =>
+        `- ${job.jobId} [${job.status}] ${job.payloadKind ?? "unknown"}${job.payloadTaskId ? ` task=${job.payloadTaskId}` : ""}${job.payloadCandidateId ? ` candidate=${job.payloadCandidateId}` : ""}${job.lastError ? ` :: ${truncateInline(job.lastError, 140)}` : ""}`)
+    : ["- none"];
   const lines = [
     "# Factory Receipt Investigation",
     "",
@@ -615,25 +653,25 @@ export const renderFactoryReceiptInvestigationText = (
       : ["- none"]),
     "",
     "## Context",
-    report.inputs.objectivePrompt ? `Objective prompt: ${report.inputs.objectivePrompt}` : undefined,
-    report.inputs.taskPrompt ? `Focused task prompt: ${report.inputs.taskPrompt}` : undefined,
+    report.inputs.objectivePrompt ? `Objective prompt: ${truncateBlock(report.inputs.objectivePrompt, Math.min(contextChars, compact ? 320 : 520))}` : undefined,
+    report.inputs.taskPrompt ? `Focused task prompt: ${truncateBlock(report.inputs.taskPrompt, Math.min(contextChars, compact ? 320 : 520))}` : undefined,
     report.inputs.checks && report.inputs.checks.length > 0 ? `Checks: ${report.inputs.checks.join(", ")}` : "Checks: none",
     report.packetContext?.profileSkills.length ? `Profile skills: ${report.packetContext.profileSkills.join(", ")}` : undefined,
     report.packetContext?.selectedHelpers.length ? `Selected helpers: ${report.packetContext.selectedHelpers.join(" | ")}` : undefined,
-    report.packetContext?.overview ? `Packet overview: ${truncateBlock(report.packetContext.overview, contextChars)}` : undefined,
-    report.packetContext?.objectiveMemory ? `Objective memory: ${truncateBlock(report.packetContext.objectiveMemory, contextChars)}` : undefined,
-    report.packetContext?.integrationMemory ? `Integration memory: ${truncateBlock(report.packetContext.integrationMemory, contextChars)}` : undefined,
-    report.packetContext?.summaryText ? "Context summary:" : undefined,
-    report.packetContext?.summaryText ? truncateBlock(report.packetContext.summaryText, contextChars) : undefined,
+    !compact && report.packetContext?.overview ? `Packet overview: ${truncateInline(report.packetContext.overview, 260)}` : undefined,
+    !compact && report.packetContext?.objectiveMemory ? `Objective memory: ${truncateInline(report.packetContext.objectiveMemory, 260)}` : undefined,
+    !compact && report.packetContext?.integrationMemory ? `Integration memory: ${truncateInline(report.packetContext.integrationMemory, 260)}` : undefined,
+    contextExcerpt ? "Context summary excerpt:" : undefined,
+    contextExcerpt,
     report.packetContext?.summaryPath ? `Context summary path: ${report.packetContext.summaryPath}` : undefined,
     report.packetContext?.manifestPath ? `Manifest path: ${report.packetContext.manifestPath}` : undefined,
     report.packetContext?.contextPackPath ? `Context pack path: ${report.packetContext.contextPackPath}` : undefined,
     report.packetContext?.resultPath ? `Result path: ${report.packetContext.resultPath}` : undefined,
     report.packetContext?.lastMessagePath ? `Last message path: ${report.packetContext.lastMessagePath}` : undefined,
-    report.packetContext?.candidateLineage.length ? "Candidate lineage:" : undefined,
-    ...(report.packetContext?.candidateLineage.slice(0, 8).map((item) => `- ${item}`) ?? []),
-    report.packetContext?.recentReceipts.length ? "Recent worker receipts:" : undefined,
-    ...(report.packetContext?.recentReceipts.slice(0, 10).map((item) => `- ${item}`) ?? []),
+    !compact && report.packetContext?.candidateLineage.length ? "Candidate lineage:" : undefined,
+    ...(!compact ? (report.packetContext?.candidateLineage.slice(0, 8).map((item) => `- ${item}`) ?? []) : []),
+    !compact && report.packetContext?.recentReceipts.length ? "Recent worker receipts:" : undefined,
+    ...(!compact ? (report.packetContext?.recentReceipts.slice(0, 8).map((item) => `- ${item}`) ?? []) : []),
     "",
     "## DAG Flow",
     report.dag.lines.length > 0 ? undefined : "- No task DAG was available.",
@@ -642,28 +680,21 @@ export const renderFactoryReceiptInvestigationText = (
     ...(report.dag.edges.length > 0 ? report.dag.edges.map((edge) => `- ${edge}`) : []),
     "",
     "## Tasks",
-    ...(report.tasks.length > 0
-      ? report.tasks.map((task) =>
-          `- ${renderTaskLine(task, undefined)}${task.latestSummary ? ` :: ${truncateInline(task.latestSummary, 140)}` : ""}`)
-      : ["- none"]),
+    ...taskLines,
     "",
     "## Candidates",
-    ...(report.candidates.length > 0
-      ? report.candidates.map((candidate) =>
-          `- ${candidate.candidateId} [${candidate.status}] task=${candidate.taskId}${candidate.tokensUsed ? ` tokens=${candidate.tokensUsed}` : ""}${candidate.summary ? ` :: ${truncateInline(candidate.summary, 140)}` : ""}`)
-      : ["- none"]),
+    ...candidateLines,
     "",
     "## Jobs",
-    ...(report.jobs.length > 0
-      ? report.jobs.map((job) =>
-          `- ${job.jobId} [${job.status}] ${job.payloadKind ?? "unknown"}${job.payloadTaskId ? ` task=${job.payloadTaskId}` : ""}${job.payloadCandidateId ? ` candidate=${job.payloadCandidateId}` : ""}${job.lastError ? ` :: ${truncateInline(job.lastError, 140)}` : ""}`)
-      : ["- none"]),
-    "",
-    "## Agent Runs",
-    ...(report.agentRuns.length > 0
-      ? report.agentRuns.map((run) =>
-          `- ${run.runId} [${run.status}] iter=${run.iterations} tools=${run.toolCalls} errors=${run.toolErrors}${run.finalResponsePreview ? ` :: ${truncateInline(run.finalResponsePreview, 140)}` : ""}`)
-      : ["- none"]),
+    ...jobLines,
+    ...(!compact ? [
+      "",
+      "## Agent Runs",
+      ...(report.agentRuns.length > 0
+        ? report.agentRuns.map((run) =>
+            `- ${run.runId} [${run.status}] iter=${run.iterations} tools=${run.toolCalls} errors=${run.toolErrors}${run.finalResponsePreview ? ` :: ${truncateInline(run.finalResponsePreview, 140)}` : ""}`)
+        : ["- none"]),
+    ] : []),
     "",
     "## Anomalies",
     ...(report.anomalies.length > 0

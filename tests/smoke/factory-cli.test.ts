@@ -13,6 +13,7 @@ import { createRuntime } from "@receipt/core/runtime";
 import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
 import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
+import { renderObjectivePanelText } from "../../src/factory-cli/format";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
 import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent } from "../../src/modules/agent";
@@ -73,13 +74,16 @@ const createRepo = async (opts: {
   return repoDir;
 };
 
-const createCodexStub = async (): Promise<string> => {
+const createCodexStub = async (opts: {
+  readonly taskDelayMs?: number;
+} = {}): Promise<string> => {
   const dir = await createTempDir("receipt-factory-cli-codex");
   const nodeBody = [
     "const fs = require('node:fs');",
     "const path = require('node:path');",
     "const args = process.argv.slice(2);",
     "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
     "(async () => {",
     "  const workspace = args[args.indexOf('--cd') + 1];",
     "  const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
@@ -102,6 +106,7 @@ const createCodexStub = async (): Promise<string> => {
     "    process.stdout.write(`${raw}\\n`);",
     "    return;",
     "  }",
+    `  if (${Math.max(0, opts.taskDelayMs ?? 0)} > 0) await sleep(${Math.max(0, opts.taskDelayMs ?? 0)});`,
     "  if (taskId === 'task_02') {",
     "    const packageJsonPath = path.join(workspace, 'package.json');",
     "    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));",
@@ -586,6 +591,18 @@ const makeWorkbenchSnapshot = () => {
     },
   };
 };
+
+test("factory cli: text panels lead with active and next task summaries", () => {
+  const snapshot = makeWorkbenchSnapshot();
+  const tasksText = renderObjectivePanelText(snapshot.detail as never, snapshot.live as never, snapshot.debug as never, "tasks");
+  const liveText = renderObjectivePanelText(snapshot.detail as never, snapshot.live as never, snapshot.debug as never, "live");
+
+  expect(tasksText).toContain("active=task_01 [running] Implement workbench shell");
+  expect(tasksText).toContain("next=task_02 [ready] Follow-up validation");
+  expect(tasksText).toContain("counts=total:2 active:1 ready:1 blocked:0");
+  expect(liveText).toContain("focus=task_01 [running] Implement workbench shell");
+  expect(liveText).toContain("signal=Rendering the CLI workbench.");
+});
 
 test("factory cli: init writes config and board snapshot stays clean", async () => {
   const repoDir = await createRepo();
@@ -2145,6 +2162,7 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
     console.log(run.stderr);
   }
   expect(run.code).toBe(0);
+  expect(run.stdout).not.toContain("obj=");
   const lines = run.stdout.split("\n");
   const jsonString = lines.slice(lines.findIndex(line => line.trim() === "{")).join("\n");
   let runPayload;
@@ -2203,6 +2221,33 @@ test("factory cli: run promotes changes and inspect exposes debug data", async (
   expect(inspectPayload.panel).toBe("debug");
   expect(inspectPayload.data.lastJobs.length >= 1).toBeTruthy();
 }, 120_000);
+
+test("factory cli: attached run prints compact progress without waiting spam", async () => {
+  const repoDir = await createRepo();
+  const codexStub = await createCodexStub({ taskDelayMs: 2_200 });
+  const env = {
+    RECEIPT_CODEX_BIN: codexStub,
+  };
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir], env);
+  expect(init.code).toBe(0);
+
+  const run = await runCli([
+    "factory",
+    "run",
+    "--repo-root",
+    repoDir,
+    "--title",
+    "Slow smoke file",
+    "--prompt",
+    "Create a smoke file and keep the repository green.",
+  ], env);
+
+  expect(run.code).toBe(0);
+  expect(run.stdout).not.toContain("waiting...");
+  expect(run.stdout).toContain("phase=");
+  expect(run.stdout).toContain("task=");
+}, 30_000);
 
 test("factory cli: create, compose, and react expose structured mutation results", async () => {
   const repoDir = await createRepo();

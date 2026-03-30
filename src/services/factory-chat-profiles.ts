@@ -19,6 +19,14 @@ const normalizeStringList = (value: unknown): ReadonlyArray<string> =>
 export type FactoryChatProfileObjectiveMode = "delivery" | "investigation";
 export type FactoryChatTaskExecutionMode = "worktree" | "isolated";
 export type FactoryChatCloudProvider = "aws" | "gcp" | "azure";
+export type FactoryChatProfileOrchestration = {
+  readonly executionMode?: "interactive" | "supervisor";
+  readonly discoveryBudget?: number;
+  readonly suspendOnAsyncChild?: boolean;
+  readonly allowPollingWhileChildRunning?: boolean;
+  readonly finalWhileChildRunning?: "allow" | "waiting_message" | "reject";
+  readonly childDedupe?: "none" | "by_run_and_prompt";
+};
 
 export type FactoryChatResolvedObjectivePolicy = {
   readonly allowedWorkerTypes: ReadonlyArray<string>;
@@ -43,6 +51,7 @@ export type FactoryChatProfile = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly orchestration?: FactoryChatProfileOrchestration;
   readonly handoffTargets: ReadonlyArray<string>;
   readonly dirPath: string;
   readonly mdPath: string;
@@ -65,11 +74,12 @@ export type FactoryChatResolvedProfile = {
   readonly skills: ReadonlyArray<string>;
   readonly cloudProvider?: FactoryChatCloudProvider;
   readonly orchestration: {
-    readonly executionMode: "interactive";
-    readonly suspendOnAsyncChild: false;
-    readonly allowPollingWhileChildRunning: true;
-    readonly finalWhileChildRunning: "allow";
-    readonly childDedupe: "none";
+    readonly executionMode: "interactive" | "supervisor";
+    readonly discoveryBudget?: number;
+    readonly suspendOnAsyncChild: boolean;
+    readonly allowPollingWhileChildRunning: boolean;
+    readonly finalWhileChildRunning: "allow" | "waiting_message" | "reject";
+    readonly childDedupe: "none" | "by_run_and_prompt";
   };
   readonly objectivePolicy: FactoryChatResolvedObjectivePolicy;
   readonly selectionReason: "requested" | "default";
@@ -93,6 +103,14 @@ type FactoryChatProfileManifest = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly orchestration?: {
+    readonly executionMode?: "interactive" | "supervisor";
+    readonly discoveryBudget?: number;
+    readonly suspendOnAsyncChild?: boolean;
+    readonly allowPollingWhileChildRunning?: boolean;
+    readonly finalWhileChildRunning?: "allow" | "waiting_message" | "reject";
+    readonly childDedupe?: "none" | "by_run_and_prompt";
+  };
   readonly handoffTargets?: ReadonlyArray<string>;
 };
 
@@ -108,7 +126,6 @@ const REMOVED_MANIFEST_KEYS = new Set([
   "allowPollingWhileChildRunning",
   "finalWhileChildRunning",
   "childDedupe",
-  "orchestration",
   "objective",
   "objectivePolicy",
 ]);
@@ -183,6 +200,23 @@ const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): Factor
       ? raw.defaultTaskExecutionMode
       : undefined,
     allowObjectiveCreation: typeof raw.allowObjectiveCreation === "boolean" ? raw.allowObjectiveCreation : undefined,
+    orchestration: (() => {
+      const orchestration = raw.orchestration;
+      if (!orchestration || typeof orchestration !== "object" || Array.isArray(orchestration)) return undefined;
+      const value = orchestration as Record<string, unknown>;
+      return {
+        executionMode: value.executionMode === "interactive" || value.executionMode === "supervisor" ? value.executionMode : undefined,
+        discoveryBudget: typeof value.discoveryBudget === "number" && Number.isFinite(value.discoveryBudget)
+          ? Math.max(0, Math.floor(value.discoveryBudget))
+          : undefined,
+        suspendOnAsyncChild: typeof value.suspendOnAsyncChild === "boolean" ? value.suspendOnAsyncChild : undefined,
+        allowPollingWhileChildRunning: typeof value.allowPollingWhileChildRunning === "boolean" ? value.allowPollingWhileChildRunning : undefined,
+        finalWhileChildRunning: value.finalWhileChildRunning === "allow" || value.finalWhileChildRunning === "waiting_message" || value.finalWhileChildRunning === "reject"
+          ? value.finalWhileChildRunning
+          : undefined,
+        childDedupe: value.childDedupe === "none" || value.childDedupe === "by_run_and_prompt" ? value.childDedupe : undefined,
+      };
+    })(),
     handoffTargets: normalizeStringList(raw.handoffTargets),
     dirPath: "",
     mdPath: "",
@@ -407,11 +441,12 @@ export const resolveFactoryChatProfile = async (input: {
     skills: root.skills,
     cloudProvider: root.cloudProvider,
     orchestration: {
-      executionMode: "interactive",
-      suspendOnAsyncChild: false,
-      allowPollingWhileChildRunning: true,
-      finalWhileChildRunning: "allow",
-      childDedupe: "none",
+      executionMode: root.orchestration?.executionMode ?? "interactive",
+      discoveryBudget: root.orchestration?.discoveryBudget,
+      suspendOnAsyncChild: root.orchestration?.suspendOnAsyncChild ?? false,
+      allowPollingWhileChildRunning: root.orchestration?.allowPollingWhileChildRunning ?? true,
+      finalWhileChildRunning: root.orchestration?.finalWhileChildRunning ?? "allow",
+      childDedupe: root.orchestration?.childDedupe ?? "none",
     },
     objectivePolicy,
     selectionReason: requested ? "requested" : "default",
@@ -425,6 +460,7 @@ export const resolveFactoryChatProfile = async (input: {
       skills: root.skills,
       cloudProvider: root.cloudProvider,
       handoffTargets: root.handoffTargets,
+      orchestration: root.orchestration,
     })),
     systemPrompt,
     promptPath,

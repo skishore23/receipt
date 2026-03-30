@@ -298,6 +298,14 @@ const writeProfile = async (root: string, input: {
     defaultObjectiveMode: input.id === "infrastructure" ? "investigation" : "delivery",
     defaultValidationMode: input.id === "infrastructure" ? "none" : "repo_profile",
     allowObjectiveCreation: true,
+    orchestration: {
+      executionMode: input.orchestration?.executionMode ?? input.mode,
+      discoveryBudget: input.orchestration?.discoveryBudget ?? input.discoveryBudget,
+      suspendOnAsyncChild: input.orchestration?.suspendOnAsyncChild ?? input.suspendOnAsyncChild,
+      allowPollingWhileChildRunning: input.orchestration?.allowPollingWhileChildRunning ?? input.allowPollingWhileChildRunning,
+      finalWhileChildRunning: input.orchestration?.finalWhileChildRunning ?? input.finalWhileChildRunning,
+      childDedupe: input.orchestration?.childDedupe ?? input.childDedupe,
+    },
   };
   await fs.writeFile(
     path.join(dir, "PROFILE.md"),
@@ -793,7 +801,7 @@ test("factory chat runner: finalizer rewrites premature completion text while a 
   expect(result.finalResponse).not.toContain("already complete and healthy");
 });
 
-test.skip("factory chat runner: active supervisor only monitors healthy objective-backed codex work", async () => {
+test("factory chat runner: active supervisor only monitors healthy objective-backed codex work", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-healthy");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -916,7 +924,7 @@ test.skip("factory chat runner: active supervisor only monitors healthy objectiv
   expect(refreshed?.commands).toHaveLength(0);
 });
 
-test.skip("factory chat runner: active supervisor steers a stalled objective-backed codex task once without duplicates", async () => {
+test("factory chat runner: active supervisor steers a stalled objective-backed codex task once without duplicates", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-steer");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1048,7 +1056,7 @@ test.skip("factory chat runner: active supervisor steers a stalled objective-bac
   expect(commands[0]?.payload.problem).toContain("task_04 (Synthesize consumption insights and recommendations)");
 });
 
-test.skip("factory chat runner: active supervisor follows up on historical infrastructure-style access gaps instead of spinning", async () => {
+test("factory chat runner: active supervisor follows up on historical infrastructure-style access gaps instead of spinning", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-follow-up");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1195,7 +1203,7 @@ test.skip("factory chat runner: active supervisor follows up on historical infra
   expect(followUps[0]?.payload.note).toContain("task_04 (Synthesize consumption insights and actionable recommendations)");
 });
 
-test.skip("factory chat runner: active supervisor aborts a repeatedly stalled child and re-enters objective control", async () => {
+test("factory chat runner: active supervisor aborts a repeatedly stalled child and re-enters objective control", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-abort");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1586,7 +1594,7 @@ test("factory chat runner: agent.status rejects the current factory job id", asy
   expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("cannot target the current factory job");
 });
 
-test.skip("factory chat runner: software profile rejects a third discovery step before delivery starts", async () => {
+test("factory chat runner: software profile rejects a third discovery step before delivery starts", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-discovery-budget");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1682,7 +1690,7 @@ test.skip("factory chat runner: software profile rejects a third discovery step 
   expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Profile discovery budget exhausted");
 });
 
-test.skip("factory chat runner: blocking monitor polls do not consume discovery budget while a child is running", async () => {
+test("factory chat runner: blocking monitor polls do not consume discovery budget while a child is running", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-monitor-budget");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -2021,7 +2029,7 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
   expect(observations).toHaveLength(2);
 });
 
-test.skip("factory chat runner: terminal-objective reads do not consume discovery budget", async () => {
+test("factory chat runner: terminal-objective reads do not consume discovery budget", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-terminal-read-budget");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -2273,7 +2281,7 @@ test("factory chat runner: factory.output infers the single task from objectiveI
   expect(outputObservation?.body.output ?? "").toContain("Captured the only task output.");
 });
 
-test.skip("factory chat runner: software profile rejects follow-up polling while a codex child is still active", async () => {
+test("factory chat runner: software profile rejects follow-up polling while a codex child is still active", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-child-poll-guard");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -2436,7 +2444,7 @@ test("factory chat runner: finalizer rewrites premature software success text wh
   expect(result.finalResponse).not.toContain("already complete and validated");
 });
 
-test.skip("factory chat runner: active-monitor software policy keeps polling and preserves the operator response while child work runs", async () => {
+test("factory chat runner: active-monitor software policy keeps polling and preserves the operator response while child work runs", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-active-monitor");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");

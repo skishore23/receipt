@@ -932,6 +932,8 @@ const createAsyncDelegateTool = (input: {
 const createJobStatusTool = (input: {
   readonly queue: JsonlQueue;
   readonly currentJobId?: string;
+  readonly profile: FactoryChatResolvedProfile;
+  readonly consumeDiscoveryBudget?: () => void;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const jobId = asString(toolInput.jobId);
@@ -939,8 +941,18 @@ const createJobStatusTool = (input: {
     if (jobId === input.currentJobId) {
       throw new Error("agent.status cannot target the current factory job; use the child jobId returned by codex.run or agent.delegate");
     }
+    input.consumeDiscoveryBudget?.();
     const job = await input.queue.getJob(jobId);
     if (!job) throw new Error(`job ${jobId} not found`);
+    if (
+      job.agentId === "codex"
+      && job.status !== "completed"
+      && job.status !== "failed"
+      && job.status !== "canceled"
+      && input.profile.orchestration.allowPollingWhileChildRunning === false
+    ) {
+      throw new Error("Profile child work is already running");
+    }
     const snapshot = normalizeJobSnapshot(job);
     return {
       output: JSON.stringify(snapshot, null, 2),
@@ -954,6 +966,7 @@ const createJobsListTool = (input: {
   readonly profile: FactoryChatResolvedProfile;
   readonly runId: string;
   readonly getCurrentObjectiveId: () => string | undefined;
+  readonly consumeDiscoveryBudget?: () => void;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const limit = typeof toolInput.limit === "number" && Number.isFinite(toolInput.limit)
@@ -962,6 +975,7 @@ const createJobsListTool = (input: {
     const includeCompleted = toolInput.includeCompleted === true;
     const statusFilter = asString(toolInput.status);
     const objectiveId = input.getCurrentObjectiveId();
+    input.consumeDiscoveryBudget?.();
     const jobs = await input.queue.listJobs({ limit: 120 });
     const filtered = jobs
       .filter((job) => jobMatchesProfileContext(job, {
@@ -1341,8 +1355,11 @@ const createProfileHandoffTool = (input: {
 
 const createFactoryStatusTool = (input: {
   readonly factoryService: FactoryService;
+  readonly queue: JsonlQueue;
+  readonly profile: FactoryChatResolvedProfile;
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly liveWaitState: FactoryLiveWaitState;
+  readonly supervisorConfig: FactorySupervisorConfig;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
@@ -1360,6 +1377,11 @@ const createFactoryStatusTool = (input: {
         worker: "factory",
         action: "status",
         ...summary,
+        activeJobId: debug.activeJobs[0]?.id,
+        activeTaskId: detail.tasks.find((task) => task.status === "running")?.taskId,
+        activeTaskTitle: detail.tasks.find((task) => task.status === "running")?.title,
+        nextTaskId: detail.tasks.find((task) => task.status === "pending")?.taskId,
+        nextTaskTitle: detail.tasks.find((task) => task.status === "pending")?.title,
         latestDecision: detail.latestDecision,
         blockedExplanation: detail.blockedExplanation,
         evidenceCards: Array.isArray(detail.evidenceCards) ? detail.evidenceCards.slice(-8) : [],
@@ -1383,13 +1405,74 @@ const createFactoryStatusTool = (input: {
       || asString(initial.status) === "executing"
       || (Array.isArray(initial.activeJobs) && initial.activeJobs.length > 0)
     );
-    const waitForChangeMs = effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
+    const waitForChangeMs = input.profile.orchestration.executionMode === "supervisor"
+      ? requestedWaitMs
+      : effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
     const waited = waitForChangeMs > 0 && live
       ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus)
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const initialActiveJobId = asString((initial as Record<string, unknown>).activeJobId);
+    const maybeActiveJobId = asString((payload as Record<string, unknown>).activeJobId) ?? initialActiveJobId;
+    if (maybeActiveJobId && input.profile.orchestration.executionMode === "supervisor") {
+      const currentTaskId = asString((payload as Record<string, unknown>).activeTaskId);
+      const currentTaskTitle = asString((payload as Record<string, unknown>).activeTaskTitle);
+      const nextTaskId = asString((payload as Record<string, unknown>).nextTaskId);
+      const nextTaskTitle = asString((payload as Record<string, unknown>).nextTaskTitle);
+      const liveOutput = await input.factoryService
+        .getObjectiveLiveOutput(objectiveId, "task", currentTaskId ?? maybeActiveJobId)
+        .catch(() => undefined);
+      const liveSummary = [
+        asString(liveOutput?.stderrTail),
+        asString(liveOutput?.summary),
+        asString(liveOutput?.lastMessage),
+        asString(liveOutput?.stdoutTail),
+      ].filter(Boolean).join("\n");
+      const steerAfterMs = input.supervisorConfig.steerAfterMs ?? 0;
+      const abortAfterMs = input.supervisorConfig.abortAfterMs ?? 0;
+      if (/(AccessDenied|not authorized|forbidden)/i.test(liveSummary) && (nextTaskId || currentTaskId)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "follow_up",
+          payload: {
+            note: [
+              "partial investigation report",
+              "exact denied services/actions",
+              nextTaskId && nextTaskTitle
+                ? `${nextTaskId} (${nextTaskTitle})`
+                : (currentTaskId && currentTaskTitle ? `${currentTaskId} (${currentTaskTitle})` : currentTaskId),
+            ].join("; "),
+          },
+        });
+      }
+      if (waited.waitedMs >= steerAfterMs && currentTaskId && isSupervisorStallSummary(liveSummary)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "steer",
+          payload: {
+            problem: [
+              `Focus only on ${currentTaskId}${currentTaskTitle ? `: ${currentTaskTitle}` : ""}.`,
+              nextTaskId && nextTaskTitle ? `${nextTaskId} (${nextTaskTitle})` : undefined,
+            ].filter(Boolean).join(" "),
+          },
+        });
+      }
+      if (currentTaskId && abortAfterMs > 0 && waited.waitedMs >= abortAfterMs && isSupervisorStallSummary(liveSummary)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "abort",
+          payload: {
+            reason: `child stalled beyond ${abortAfterMs}ms`,
+          },
+        });
+        await input.factoryService.reactObjective(objectiveId).catch(() => undefined);
+      }
+    }
     const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
@@ -1401,8 +1484,11 @@ const createFactoryStatusTool = (input: {
 
 const createFactoryOutputTool = (input: {
   readonly factoryService: FactoryService;
+  readonly queue: JsonlQueue;
+  readonly profile: FactoryChatResolvedProfile;
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly liveWaitState: FactoryLiveWaitState;
+  readonly supervisorConfig: FactorySupervisorConfig;
 }): AgentToolExecutor =>
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
@@ -1443,13 +1529,54 @@ const createFactoryOutputTool = (input: {
     });
     const initial = await buildOutput();
     const live = initial.active === true;
-    const waitForChangeMs = effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
+    const waitForChangeMs = input.profile.orchestration.executionMode === "supervisor"
+      ? requestedWaitMs
+      : effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
     const waited = waitForChangeMs > 0 && live
       ? await waitForSnapshotChange(initial, waitForChangeMs, buildOutput)
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
+    const maybeActiveJobId = asString(payload.jobId) ?? asString(payload.focusId);
+    if (maybeActiveJobId && input.profile.orchestration.executionMode === "supervisor") {
+      const currentTask = asString(payload.taskId) ?? focusId;
+      const liveSummary = [
+        String(payload.stderrTail ?? ""),
+        String(payload.summary ?? ""),
+        String(payload.lastMessage ?? ""),
+        String(payload.stdoutTail ?? ""),
+      ].filter(Boolean).join("\n");
+      if (/(AccessDenied|not authorized|forbidden)/i.test(liveSummary)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "follow_up",
+          payload: {
+            note: ["partial investigation report", "exact denied services/actions", currentTask].join("; "),
+          },
+        });
+      } else if (waited.changed === false && waited.waitedMs >= (input.supervisorConfig.steerAfterMs ?? 0) && isSupervisorStallSummary(liveSummary)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "steer",
+          payload: {
+            problem: `Focus only on ${currentTask}.`,
+          },
+        });
+      } else if (waited.changed === false && waited.waitedMs >= (input.supervisorConfig.abortAfterMs ?? 0) && isSupervisorStallSummary(liveSummary)) {
+        await queueSupervisorCommandOnce({
+          queue: input.queue,
+          jobId: maybeActiveJobId,
+          command: "abort",
+          payload: {
+            reason: `child stalled beyond ${(input.supervisorConfig.abortAfterMs ?? 0)}ms`,
+          },
+        });
+        await input.factoryService.reactObjective(objectiveId).catch(() => undefined);
+      }
+    }
     const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
@@ -1492,6 +1619,41 @@ const createFactoryReceiptsTool = (input: {
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
+
+type FactorySupervisorConfig = {
+  readonly steerAfterMs?: number;
+  readonly abortAfterMs?: number;
+};
+
+const readSupervisorConfig = (value: unknown): FactorySupervisorConfig => {
+  const record = asRecord(value)?.supervisor as Record<string, unknown> | undefined;
+  if (!record) return {};
+  return {
+    steerAfterMs: clampWaitMs(record.steerAfterMs),
+    abortAfterMs: clampWaitMs(record.abortAfterMs),
+  };
+};
+
+const queueSupervisorCommandOnce = async (input: {
+  readonly queue: JsonlQueue;
+  readonly jobId: string;
+  readonly command: "steer" | "follow_up" | "abort";
+  readonly payload: Record<string, unknown>;
+}): Promise<boolean> => {
+  const job = await input.queue.getJob(input.jobId);
+  if (!job) return false;
+  if (job.commands.some((command) => command.command === input.command)) return false;
+  const queued = await input.queue.queueCommand({
+    jobId: input.jobId,
+    command: input.command,
+    payload: input.payload,
+    by: "factory.chat",
+  });
+  return Boolean(queued);
+};
+
+const isSupervisorStallSummary = (value: string): boolean =>
+  /no progress yet|still waiting|stalled|waiting|canceled|failed|blocked/i.test(value);
 
 export const normalizeFactoryChatConfig = (input: Partial<FactoryChatRunConfig>): FactoryChatRunConfig =>
   normalizeAgentConfig({
@@ -1544,6 +1706,16 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
       : profileMemoryScope(repoKey, resolvedProfile.root.id))
     : input.config.memoryScope;
   const factoryLiveWaitState: FactoryLiveWaitState = { surfaced: false };
+  const supervisorConfig = readSupervisorConfig(input.extraConfig);
+  const discoveryBudget = resolvedProfile.orchestration.discoveryBudget;
+  let discoveryUsed = 0;
+  const consumeDiscoveryBudget = (): void => {
+    if (discoveryBudget === undefined) return;
+    discoveryUsed += 1;
+    if (discoveryUsed > discoveryBudget) {
+      throw new Error("Profile discovery budget exhausted");
+    }
+  };
   const dataDir = input.dataDir;
   const factoryService = input.factoryService;
   const agentDelegateTool = createAsyncDelegateTool({
@@ -1558,6 +1730,8 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   const agentStatusTool = createJobStatusTool({
     queue: input.queue,
     currentJobId: input.control?.jobId,
+    profile: resolvedProfile,
+    consumeDiscoveryBudget,
   });
   const jobsListTool = createJobsListTool({
     queue: input.queue,
@@ -1565,6 +1739,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     stream: input.stream,
     profile: resolvedProfile,
     getCurrentObjectiveId,
+    consumeDiscoveryBudget,
   });
   const repoStatusTool = createRepoStatusTool(repoRoot);
   const codexStatusTool = createCodexStatusTool({
@@ -1625,13 +1800,19 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   });
   const factoryStatusTool = createFactoryStatusTool({
     factoryService,
+    queue: input.queue,
+    profile: resolvedProfile,
     getCurrentObjectiveId,
     liveWaitState: factoryLiveWaitState,
+    supervisorConfig,
   });
   const factoryOutputTool = createFactoryOutputTool({
     factoryService,
+    queue: input.queue,
+    profile: resolvedProfile,
     getCurrentObjectiveId,
     liveWaitState: factoryLiveWaitState,
+    supervisorConfig,
   });
   const factoryReceiptsTool = createFactoryReceiptsTool({
     factoryService,

@@ -52,7 +52,7 @@ import {
 } from "./experiment";
 import { createFactoryCliRuntime } from "./runtime";
 import { terminalTheme } from "./theme";
-import type { FactoryObjectivePanel } from "./view-model";
+import { truncate, type FactoryObjectivePanel } from "./view-model";
 import { readObjectiveAnalysis, renderObjectiveAnalysisText } from "./analyze";
 import { readFactoryParsedRun, renderFactoryParsedRunText } from "./parse";
 import { loadFactoryHelperCatalog, runFactoryHelper } from "../services/factory-helper-catalog";
@@ -129,6 +129,56 @@ const formatDurationMs = (durationMs: number): string => {
   const minutes = Math.floor(durationMs / 60_000);
   const seconds = Math.round((durationMs % 60_000) / 1_000);
   return `${minutes}m ${seconds}s`;
+};
+
+const normalizeInline = (value: string | undefined): string | undefined =>
+  value?.replace(/\s+/g, " ").trim() || undefined;
+
+const renderObjectiveWaitLine = (opts: {
+  readonly objectiveId: string;
+  readonly detail: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]>>;
+  readonly live?: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["buildLiveProjection"]>>;
+  readonly auditStatus: "idle" | "queued" | "running" | "completed" | "failed";
+}): { readonly key: string; readonly line: string } => {
+  const activeTask = opts.live?.activeTasks[0]
+    ?? opts.detail.tasks.find((task) => task.status === "running" || task.status === "reviewing");
+  const nextTask = opts.detail.tasks.find((task) =>
+    task.taskId !== activeTask?.taskId && (task.status === "ready" || task.status === "pending"),
+  );
+  const signal = normalizeInline(
+    activeTask?.lastMessage
+    ?? activeTask?.stderrTail
+    ?? activeTask?.stdoutTail
+    ?? opts.detail.nextAction
+    ?? opts.detail.latestSummary,
+  );
+  const taskLabel = activeTask
+    ? `${activeTask.taskId.slice(-2)}(${(activeTask.jobStatus ?? activeTask.status).slice(0, 3)})`
+    : opts.detail.tasks.length > 0
+      ? opts.detail.tasks.map((task) => `${task.taskId.slice(-2)}(${task.status.slice(0, 3)})`).join(",")
+      : "none";
+  const nextLabel = activeTask && nextTask ? `${nextTask.taskId.slice(-2)}(${nextTask.status.slice(0, 3)})` : undefined;
+  const line = [
+    `obj=${opts.objectiveId.slice(-6)}`,
+    `phase=${opts.detail.phase}`,
+    `int=${opts.detail.integration.status}`,
+    `audit=${opts.auditStatus}`,
+    `task=${taskLabel}`,
+    nextLabel ? `next=${nextLabel}` : undefined,
+    signal ? `live=${truncate(signal, 84)}` : undefined,
+  ].filter(Boolean).join(" ");
+  const key = JSON.stringify([
+    opts.detail.status,
+    opts.detail.phase,
+    opts.detail.integration.status,
+    opts.auditStatus,
+    activeTask?.taskId,
+    activeTask?.jobStatus ?? activeTask?.status,
+    nextTask?.taskId,
+    signal,
+    opts.detail.updatedAt,
+  ]);
+  return { key, line };
 };
 
 const printSetupSummary = (opts: {
@@ -471,9 +521,10 @@ const printFactoryInvestigation = async (opts: {
     await printJson(report);
     return;
   }
-  const timelineLimit = parseIntegerFlag(opts.flags, "timeline-limit", 40, { min: 1, max: 1_000 });
-  const contextChars = parseIntegerFlag(opts.flags, "context-chars", 2_400, { min: 400, max: 20_000 });
-  console.log(renderFactoryReceiptInvestigationText(report, { timelineLimit, contextChars }));
+  const compact = parseBooleanFlag(opts.flags, "compact");
+  const timelineLimit = parseIntegerFlag(opts.flags, "timeline-limit", compact ? 12 : 20, { min: 1, max: 1_000 });
+  const contextChars = parseIntegerFlag(opts.flags, "context-chars", compact ? 700 : 1_200, { min: 200, max: 20_000 });
+  console.log(renderFactoryReceiptInvestigationText(report, { timelineLimit, contextChars, compact }));
 };
 
 const printFactoryAudit = async (opts: {
@@ -725,12 +776,32 @@ const runInteractiveFactoryApp = async (opts: {
 const waitForObjectiveTerminal = async (
   runtime: ReturnType<typeof createFactoryCliRuntime>,
   objectiveId: string,
+  opts: {
+    readonly quiet?: boolean;
+  } = {},
 ): Promise<FactoryAppExit> => {
   let terminalObservedAt: number | undefined;
+  let lastPrintedKey: string | undefined;
+  let lastPrintedAt = 0;
+  let ttyWidth = 0;
+  const quiet = opts.quiet === true;
   while (true) {
-    const detail = await runtime.service.getObjective(objectiveId);
+    const [detail, live] = await Promise.all([
+      runtime.service.getObjective(objectiveId),
+      runtime.service.buildLiveProjection(objectiveId).catch(() => undefined),
+    ]);
     let auditStatus = await objectiveAuditStatus(runtime, objectiveId);
-    console.log(`waiting... obj=${objectiveId.slice(-6)} status=${detail.status} int=${detail.integration.status} audit=${auditStatus} cands=${detail.candidates.length} tasks=${detail.tasks.map(t => `${t.taskId.slice(-2)}(${t.status.slice(0, 3)})`).join(",")}`);
+    const progress = renderObjectiveWaitLine({ objectiveId, detail, live, auditStatus });
+    if (!quiet) {
+      if (process.stdout.isTTY) {
+        ttyWidth = Math.max(ttyWidth, progress.line.length);
+        process.stdout.write(`\r${progress.line.padEnd(ttyWidth, " ")}`);
+      } else if (progress.key !== lastPrintedKey || Date.now() - lastPrintedAt >= 10_000) {
+        console.log(progress.line);
+        lastPrintedKey = progress.key;
+        lastPrintedAt = Date.now();
+      }
+    }
     const terminal =
       detail.status === "completed" ? { code: 0, reason: "completed" as const, objectiveId } :
       detail.status === "failed" ? { code: 1, reason: "failed" as const, objectiveId } :
@@ -749,8 +820,12 @@ const waitForObjectiveTerminal = async (
         terminalObservedAt ??= Date.now();
       } else if (auditStatus === "idle") {
         terminalObservedAt ??= Date.now();
-        if (Date.now() - terminalObservedAt >= 2_000) return terminal;
+        if (Date.now() - terminalObservedAt >= 2_000) {
+          if (!quiet && process.stdout.isTTY) process.stdout.write("\n");
+          return terminal;
+        }
       } else {
+        if (!quiet && process.stdout.isTTY) process.stdout.write("\n");
         return terminal;
       }
     } else {
@@ -986,7 +1061,7 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           profileId: asString(flags, "profile"),
         });
         if (json || !isInteractiveTerminal()) {
-          const result = await waitForObjectiveTerminal(runtime, created.objectiveId);
+          const result = await waitForObjectiveTerminal(runtime, created.objectiveId, { quiet: json });
           await printObjectiveSnapshot(runtime, created.objectiveId, undefined, json);
           process.exitCode = result.code;
           return;

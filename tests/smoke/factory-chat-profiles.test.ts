@@ -208,6 +208,38 @@ test("factory chat profiles: explicit handoff targets expose the profile handoff
   expect(resolved.systemPrompt).toContain("Allowed handoff targets: software");
 });
 
+test("factory chat profiles: nested orchestration settings are accepted and resolved", async () => {
+  const profileRoot = await createTempDir("receipt-factory-profile-root");
+  const repoRoot = await createTempDir("receipt-factory-target-repo");
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    extraManifest: {
+      orchestration: {
+        executionMode: "supervisor",
+        discoveryBudget: 2,
+        suspendOnAsyncChild: false,
+        allowPollingWhileChildRunning: false,
+        finalWhileChildRunning: "waiting_message",
+        childDedupe: "by_run_and_prompt",
+      },
+    },
+  });
+
+  const resolved = await resolveFactoryChatProfile({
+    repoRoot,
+    profileRoot,
+    requestedId: "software",
+  });
+
+  expect(resolved.orchestration.executionMode).toBe("supervisor");
+  expect(resolved.orchestration.discoveryBudget).toBe(2);
+  expect(resolved.orchestration.allowPollingWhileChildRunning).toBe(false);
+  expect(resolved.orchestration.finalWhileChildRunning).toBe("waiting_message");
+  expect(resolved.orchestration.childDedupe).toBe("by_run_and_prompt");
+});
+
 test("factory chat profiles: rejects removed manifest keys", async () => {
   const profileRoot = await createTempDir("receipt-factory-profile-root");
   const repoRoot = await createTempDir("receipt-factory-target-repo");

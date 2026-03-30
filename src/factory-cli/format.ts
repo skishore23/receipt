@@ -89,6 +89,11 @@ export const renderObjectivePanelText = (
   debug: FactoryDebugProjection,
   panel: FactoryObjectivePanel,
 ): string => {
+  const activeTask = detail.tasks.find((task) => task.status === "running" || task.status === "reviewing");
+  const nextTask = detail.tasks.find((task) =>
+    task.taskId !== activeTask?.taskId && (task.status === "ready" || task.status === "pending"),
+  );
+  const blockedCount = detail.tasks.filter((task) => task.status === "blocked").length;
   switch (panel) {
     case "overview":
       return section("Overview", [
@@ -102,15 +107,21 @@ export const renderObjectivePanelText = (
         .map((entry) => section(entry.title, entry.lines.map((line) => line.startsWith("- ") ? line : entry.title === "Conclusion" || entry.title === "Report" ? line : `- ${line}`)))
         .join("\n\n");
     case "tasks":
-      return section("Tasks", detail.tasks.length
-        ? detail.tasks.map((task) => [
+      return section("Tasks", [
+        `active=${activeTask ? `${activeTask.taskId} [${activeTask.status}] ${truncate(activeTask.title, 80)}` : "none"}`,
+        `next=${nextTask ? `${nextTask.taskId} [${nextTask.status}] ${truncate(nextTask.title, 80)}` : "none"}`,
+        `counts=total:${detail.tasks.length} active:${detail.activeTaskCount} ready:${detail.readyTaskCount} blocked:${blockedCount}`,
+        ...(detail.tasks.length ? [""] : []),
+        ...(detail.tasks.length
+          ? detail.tasks.map((task) => [
           `${task.taskId} [${task.status}] ${task.title}`,
           `  worker=${task.workerType} kind=${task.taskKind} candidate=${task.candidateId ?? "none"} job=${task.jobStatus ?? "none"}`,
           `  dependsOn=${task.dependsOn.join(", ") || "none"} workspace=${task.workspaceExists ? `${task.workspaceDirty ? "dirty" : "clean"} ${task.workspacePath ?? ""}` : "missing"}`,
           task.latestSummary ? `  summary=${truncate(task.latestSummary, 180)}` : undefined,
           task.blockedReason ? `  blocked=${truncate(task.blockedReason, 180)}` : undefined,
         ].filter((line): line is string => Boolean(line)).join("\n"))
-        : ["(no tasks)"]);
+          : ["(no tasks)"]),
+      ]);
     case "candidates":
       return section("Candidates", detail.candidates.length
         ? detail.candidates.map((candidate) => [
@@ -133,14 +144,19 @@ export const renderObjectivePanelText = (
         )
         : ["(no activity)"]);
     case "live":
-      return section("Live", live.activeTasks.length
-        ? live.activeTasks.map((task) => [
+      return section("Live", [
+        `focus=${live.activeTasks[0] ? `${live.activeTasks[0].taskId} [${live.activeTasks[0].jobStatus ?? live.activeTasks[0].status}] ${truncate(live.activeTasks[0].title, 80)}` : "none"}`,
+        `signal=${truncate(live.activeTasks[0]?.lastMessage ?? live.activeTasks[0]?.stderrTail ?? live.activeTasks[0]?.stdoutTail ?? detail.nextAction ?? "none", 180)}`,
+        ...(live.activeTasks.length > 0 ? [""] : []),
+        ...(live.activeTasks.length
+          ? live.activeTasks.map((task) => [
           `${task.taskId} [${task.jobStatus ?? task.status}] ${task.title}`,
           task.lastMessage ? `  last=${truncate(task.lastMessage, 180)}` : undefined,
           task.stdoutTail ? `  stdout=${truncate(task.stdoutTail, 180)}` : undefined,
           task.stderrTail ? `  stderr=${truncate(task.stderrTail, 180)}` : undefined,
         ].filter((line): line is string => Boolean(line)).join("\n"))
-        : ["(no active task output)"]);
+          : ["(no active task output)"]),
+      ]);
     case "debug":
       return section("Debug", [
         `next=${truncate(debug.nextAction, 180) || "none"}`,
