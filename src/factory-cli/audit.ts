@@ -3,6 +3,7 @@ import {
   readFactoryReceiptInvestigation,
   type FactoryReceiptInvestigation,
 } from "./investigate";
+import type { AuditRecommendation } from "./analyze";
 
 type AuditObjectiveSample = {
   readonly objectiveId: string;
@@ -21,7 +22,7 @@ type AuditObjectiveSample = {
   readonly interventions: number;
   readonly restartCount: number;
   readonly courseCorrectionWorked: boolean;
-  readonly recommendations: ReadonlyArray<string>;
+  readonly recommendations: ReadonlyArray<AuditRecommendation>;
   readonly latestSummary?: string;
   readonly durationMs?: number;
 };
@@ -185,19 +186,10 @@ const buildImprovements = (
   memoryHygiene: AuditMemoryHygiene,
 ): ReadonlyArray<string> => {
   const verdicts = asCountRecord(objectives.map((objective) => objective.verdict));
-  const easyRoute = asCountRecord(objectives.map((objective) => objective.easyRouteRisk));
-  const efficiency = asCountRecord(objectives.map((objective) => objective.efficiency));
-  const controlChurn = asCountRecord(objectives.map((objective) => objective.controlChurn));
   const improvements: string[] = [];
 
   if ((verdicts.weak ?? 0) > 0) {
-    improvements.push(`${verdicts.weak}/${objectives.length} audited objective(s) landed in a weak verdict; use this report as a follow-up queue, not just a postmortem.`);
-  }
-  if ((easyRoute.high ?? 0) > 0) {
-    improvements.push(`${easyRoute.high} objective(s) showed high easy-route risk; require proof/evidence metadata before approving delivery or investigation results.`);
-  }
-  if ((efficiency["churn-heavy"] ?? 0) > 0 || (controlChurn.high ?? 0) > 0) {
-    improvements.push(`Control/runtime churn is still a top source of poor runs; continue coalescing objective-control work and prioritize lease-stability fixes.`);
+    improvements.push(`${verdicts.weak}/${objectives.length} audited objective(s) landed in a weak verdict.`);
   }
 
   const topAnomaly = anomalyCategories[0];
@@ -205,17 +197,17 @@ const buildImprovements = (
     improvements.push(`Most common anomaly across the audit window: ${topAnomaly.category} (${topAnomaly.count}).`);
   }
 
+  const allRecs = objectives.flatMap((o) => o.recommendations);
+  const highConfidence = allRecs.filter((r) => r.confidence === "high");
+  if (highConfidence.length > 0) {
+    improvements.push(`${highConfidence.length} high-confidence recommendation(s) from LLM audit analysis.`);
+  }
+
   if (memoryHygiene.repoSharedRunScopedEntries > 0) {
-    improvements.push(`Repo shared memory still contains ${memoryHygiene.repoSharedRunScopedEntries} run-specific entries; shared memory should stay promotion-only and reusable.`);
+    improvements.push(`Repo shared memory still contains ${memoryHygiene.repoSharedRunScopedEntries} run-specific entries.`);
   }
   if (memoryHygiene.agentRunScopedEntries > 0) {
-    improvements.push(`Agent memory still contains ${memoryHygiene.agentRunScopedEntries} run-specific entries; keep worker-specific heuristics, not per-objective conclusions, in that scope.`);
-  }
-  if (memoryHygiene.taskEntries > 0 && memoryHygiene.taskEntriesWithHandoff < memoryHygiene.taskEntries) {
-    improvements.push(`Task memory handoff coverage is ${memoryHygiene.taskEntriesWithHandoff}/${memoryHygiene.taskEntries}; keep sectioned handoff text as the default durable format.`);
-  }
-  if (memoryHygiene.integrationEntries > 0 && memoryHygiene.integrationEntriesWithHandoff < memoryHygiene.integrationEntries) {
-    improvements.push(`Integration memory handoff coverage is ${memoryHygiene.integrationEntriesWithHandoff}/${memoryHygiene.integrationEntries}; promotion memory should stay controller-readable.`);
+    improvements.push(`Agent memory still contains ${memoryHygiene.agentRunScopedEntries} run-specific entries.`);
   }
 
   return [...new Set(improvements)];
@@ -393,7 +385,7 @@ export const renderFactoryReceiptAuditText = (report: FactoryReceiptAuditReport)
           `  alignment: verdict=${objective.alignmentVerdict} corrective_steer=${objective.correctiveSteerIssued ? "yes" : "no"} aligned_after_correction=${objective.alignedAfterCorrection ? "yes" : "no"}`,
           objective.title ? `  title: ${objective.title}` : "",
           objective.latestSummary ? `  summary: ${truncateInline(objective.latestSummary, 180) ?? objective.latestSummary}` : "",
-          objective.recommendations[0] ? `  recommendation: ${objective.recommendations[0]}` : "",
+          objective.recommendations[0] ? `  recommendation: ${objective.recommendations[0].summary}` : "",
         ].filter(Boolean).join("\n"))
       : ["- none"]),
     ...(report.warnings.length > 0
