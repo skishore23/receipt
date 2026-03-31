@@ -165,6 +165,7 @@ export type AgentEvent =
       readonly title: string;
       readonly status: "blocked" | "completed" | "failed" | "canceled";
       readonly summary: string;
+      readonly output?: string;
       readonly blocker?: string;
       readonly nextAction?: string;
       readonly handoffKey: string;

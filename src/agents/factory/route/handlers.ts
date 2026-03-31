@@ -412,6 +412,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly latestHandoff?: {
       readonly status: "blocked" | "completed" | "failed" | "canceled";
       readonly summary: string;
+      readonly output?: string;
       readonly blocker?: string;
       readonly nextAction?: string;
       readonly handoffKey: string;
@@ -454,6 +455,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         title: objective.title,
         status: objective.latestHandoff.status,
         summary: objective.latestHandoff.summary,
+        ...(objective.latestHandoff.output ? { output: objective.latestHandoff.output } : {}),
         ...(objective.latestHandoff.blocker ? { blocker: objective.latestHandoff.blocker } : {}),
         ...(objective.latestHandoff.nextAction ? { nextAction: objective.latestHandoff.nextAction } : {}),
         handoffKey: objective.latestHandoff.handoffKey,

@@ -3072,6 +3072,9 @@ export class FactoryServiceBase {
       case "objective.complete":
         {
           const completedAt = Date.now();
+          const output = state.objectiveMode === "investigation"
+            ? this.buildInvestigationOutput(state)
+            : undefined;
           const completedEvent = {
             type: "objective.completed" as const,
             objectiveId: state.objectiveId,
@@ -3084,6 +3087,7 @@ export class FactoryServiceBase {
               state,
               status: "completed",
               summary: effect.summary,
+              output,
               sourceUpdatedAt: completedAt,
             }),
           ]);
@@ -3434,6 +3438,7 @@ export class FactoryServiceBase {
     readonly state: FactoryState;
     readonly status: FactoryObjectiveHandoffStatus;
     readonly summary: string;
+    readonly output?: string;
     readonly sourceUpdatedAt: number;
     readonly blocker?: string;
     readonly nextAction?: string;
@@ -3457,6 +3462,7 @@ export class FactoryServiceBase {
       title: input.state.title,
       status: input.status,
       summary: input.summary,
+      ...(input.output ? { output: input.output } : {}),
       ...(input.blocker ? { blocker: input.blocker } : {}),
       ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),
       handoffKey,
@@ -5227,6 +5233,15 @@ export class FactoryServiceBase {
       disagreements: [...new Set(reports.flatMap((report) => report.report.disagreements))],
       nextSteps: [...new Set(reports.flatMap((report) => report.report.nextSteps))],
     };
+  }
+
+  private buildInvestigationOutput(state: FactoryState): string | undefined {
+    const report = state.investigation.synthesized?.report
+      ?? this.buildFinalInvestigationReport(state);
+    const details = report.evidence
+      .map((e) => e.detail ?? e.summary)
+      .filter(Boolean);
+    return details.length > 0 ? details.join("\n\n") : undefined;
   }
 
   private buildInvestigationSynthesis(
