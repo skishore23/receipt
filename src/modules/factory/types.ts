@@ -300,6 +300,7 @@ export type FactoryTaskRecord = {
   readonly workerType: FactoryWorkerType;
   readonly executionMode?: FactoryTaskExecutionMode;
   readonly sourceTaskId?: string;
+  readonly splitDepth?: number;
   readonly baseCommit: string;
   readonly latestSummary?: string;
   readonly latestTraceSummary?: string;

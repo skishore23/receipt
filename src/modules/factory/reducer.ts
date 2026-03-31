@@ -751,6 +751,16 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         archivedAt: state.archivedAt ?? event.archivedAt,
         updatedAt: event.archivedAt,
       };
+    case "monitor.checkpoint":
+      return {
+        ...state,
+        updatedAt: event.evaluatedAt,
+      };
+    case "monitor.intervention":
+      return {
+        ...state,
+        updatedAt: event.interventionAt,
+      };
     default: {
       const _never: never = event;
       return _never;

@@ -22,6 +22,12 @@ import type {
   FactoryWorkerType,
 } from "./types";
 
+export type MonitorCheckpointAction =
+  | { readonly kind: "continue" }
+  | { readonly kind: "steer"; readonly guidance: string }
+  | { readonly kind: "split"; readonly subtasks: ReadonlyArray<{ readonly title: string; readonly prompt: string; readonly dependsOn?: ReadonlyArray<string> }> }
+  | { readonly kind: "abort"; readonly reason: string };
+
 export type FactoryEvent =
   | {
       readonly type: "objective.created";
@@ -352,6 +358,26 @@ export type FactoryEvent =
       readonly type: "objective.archived";
       readonly objectiveId: string;
       readonly archivedAt: number;
+    }
+  | {
+      readonly type: "monitor.checkpoint";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly jobId: string;
+      readonly checkpoint: number;
+      readonly assessment: "progressing" | "stalled" | "off_track" | "failing";
+      readonly reasoning: string;
+      readonly action: MonitorCheckpointAction;
+      readonly evaluatedAt: number;
+    }
+  | {
+      readonly type: "monitor.intervention";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly jobId: string;
+      readonly interventionKind: "steer" | "split" | "abort";
+      readonly detail: string;
+      readonly interventionAt: number;
     };
 
 export type FactoryCmd = {
