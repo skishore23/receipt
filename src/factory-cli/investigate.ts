@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { readFactoryParsedRun, type FactoryParsedRun } from "./parse";
+import type { AuditRecommendation } from "./analyze";
 
 type InvestigationFocusTaskRun = FactoryParsedRun["taskRuns"][number];
 type InvestigationTask = NonNullable<FactoryParsedRun["objectiveAnalysis"]>["tasks"][number];
@@ -95,7 +96,7 @@ export type FactoryReceiptInvestigation = {
   readonly jobs: ReadonlyArray<InvestigationJob>;
   readonly agentRuns: ReadonlyArray<InvestigationAgentRun>;
   readonly anomalies: ReadonlyArray<InvestigationAnomaly>;
-  readonly recommendations: ReadonlyArray<string>;
+  readonly recommendations: ReadonlyArray<AuditRecommendation>;
   readonly interventions: InvestigationInterventions;
   readonly assessment: InvestigationRunAssessment;
 };
@@ -780,7 +781,8 @@ export const renderFactoryReceiptInvestigationText = (
     "",
     "## Recommendations",
     ...(report.recommendations.length > 0
-      ? report.recommendations.map((item) => `- ${item}`)
+      ? report.recommendations.map((item) =>
+          `- [${item.confidence}] ${item.summary} · scope=${item.scope} · patterns=${item.anomalyPatterns.join(",")}`)
       : ["- none"]),
     "",
     `## Timeline (first ${Math.min(timelineLimit, report.timeline.length)} of ${report.timeline.length})`,
