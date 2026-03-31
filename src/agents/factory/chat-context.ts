@@ -200,12 +200,16 @@ export const projectFactoryChatContextFromReceipts = (input: {
       ? "user"
       : body.type === "response.finalized"
         ? "assistant"
-        : undefined;
+        : body.type === "objective.handoff"
+          ? "assistant" as const
+          : undefined;
     const text = body.type === "problem.set"
       ? asString(body.problem)
       : body.type === "response.finalized"
         ? asString(body.content)
-        : undefined;
+        : body.type === "objective.handoff"
+          ? asString(body.output ?? body.summary)
+          : undefined;
     if (!role || !text) continue;
     const key = `${role}:${body.runId}:${normalizeForGrouping(text)}`;
     const ref = toSourceRef(receipt);
