@@ -156,14 +156,10 @@ const objectiveAuditArtifactPaths = (dataDir: string, objectiveId: string): {
 const AuditRecommendationSchema = z.object({
   recommendations: z.array(z.object({
     summary: z.string(),
-    anomalyPatterns: z.array(z.string()),
-    scope: z.string(),
-    confidence: z.enum(["low", "medium", "high"]),
     suggestedFix: z.string(),
+    autoFix: z.boolean(),
   })),
 });
-
-const AUTOFIX_PATTERN_THRESHOLD = 5;
 
 const generateAuditRecommendations = async (
   report: FactoryReceiptInvestigation,
@@ -180,7 +176,7 @@ const generateAuditRecommendations = async (
     `Easy route risk: ${report.assessment.easyRouteRisk}`,
     ...report.assessment.notes.slice(0, 8).map((n) => `- ${n}`),
   ].join("\n");
-  const recentPatterns = recentAuditEntries
+  const recentHistory = recentAuditEntries
     .slice(0, 10)
     .map((e) => e.text.slice(0, 300))
     .join("\n---\n");
@@ -193,10 +189,8 @@ const generateAuditRecommendations = async (
         "Generate concrete, actionable recommendations for code improvements.",
         "Each recommendation must include:",
         "- summary: what to fix (one sentence)",
-        "- anomalyPatterns: normalized pattern keys that this addresses (e.g. 'repeated_control_job', 'lease_expired', 'iteration_budget_exhausted')",
-        "- scope: specific file paths or system areas affected",
-        "- confidence: 'high' only if the fix is well-understood and scoped, 'medium' if reasonable but needs verification, 'low' if speculative",
-        "- suggestedFix: concrete description of the code change needed",
+        "- suggestedFix: concrete description of the code change (file paths, logic changes)",
+        "- autoFix: true ONLY if the fix is well-understood, narrowly scoped, and the same pattern has appeared multiple times in recent audit history. false otherwise.",
         "Look at cross-run patterns in the recent audit history to identify recurring issues.",
         "Do not generate recommendations for external/infrastructure issues (API rate limits, permission denials) unless a code-level mitigation exists.",
         "Return an empty array if no actionable recommendations exist.",
@@ -212,7 +206,7 @@ const generateAuditRecommendations = async (
         anomalySummary || "none",
         "",
         "## Recent Audit History (cross-run patterns)",
-        recentPatterns || "none",
+        recentHistory || "none",
       ].join("\n"),
       schema: AuditRecommendationSchema,
       schemaName: "AuditRecommendations",
@@ -221,23 +215,6 @@ const generateAuditRecommendations = async (
   } catch {
     return [];
   }
-};
-
-const clusterAnomalyPatterns = (
-  recentEntries: ReadonlyArray<{ readonly text: string }>,
-): ReadonlyMap<string, number> => {
-  const counts = new Map<string, number>();
-  for (const entry of recentEntries) {
-    const patternsMatch = entry.text.match(/patterns=([^\s\n]+)/g);
-    if (!patternsMatch) continue;
-    for (const match of patternsMatch) {
-      const patterns = match.replace("patterns=", "").split(",").filter(Boolean);
-      for (const pattern of patterns) {
-        counts.set(pattern, (counts.get(pattern) ?? 0) + 1);
-      }
-    }
-  }
-  return counts;
 };
 
 const parseObjectiveAuditPayload = (payload: Record<string, unknown>): FactoryObjectiveAuditJobPayload => {
@@ -288,7 +265,7 @@ const renderObjectiveAuditMemoryText = (input: {
     "Recommendations",
     ...(input.recommendations.length > 0
       ? input.recommendations.map((r) =>
-          `- [${r.confidence}] scope=${r.scope} patterns=${r.anomalyPatterns.join(",")} ${r.summary}`)
+          `- ${r.summary}${r.autoFix ? " [auto-fix]" : ""}`)
       : ["- none"]),
     ...(input.autoFixObjectiveId
       ? ["", "Auto-fix", `- Triggered: ${input.autoFixObjectiveId} (delivery, severity 1)`]
@@ -368,31 +345,19 @@ export const runFactoryObjectiveAudit = async (input: {
   // Generate LLM recommendations
   const recommendations = await generateAuditRecommendations(report, recentAuditEntries);
 
-  // Cluster anomaly patterns from recent audits
-  const patternCounts = clusterAnomalyPatterns(recentAuditEntries);
-
-  // Check auto-fix threshold: pattern count >= 5 AND confidence = high
+  // Auto-fix: create a delivery objective if the LLM flagged a recommendation for auto-fix
   let autoFixObjectiveId: string | undefined;
   if (input.factoryService) {
-    const qualifyingRec = recommendations.find((rec) =>
-      rec.confidence === "high"
-      && rec.anomalyPatterns.some((p) => (patternCounts.get(p) ?? 0) >= AUTOFIX_PATTERN_THRESHOLD)
-    );
-    if (qualifyingRec) {
+    const autoFixRec = recommendations.find((rec) => rec.autoFix);
+    if (autoFixRec) {
       try {
         const objective = await input.factoryService.createObjective({
-          title: qualifyingRec.summary.slice(0, 96),
+          title: autoFixRec.summary.slice(0, 96),
           prompt: [
-            `Auto-fix triggered by recurring audit pattern.`,
-            ``,
-            `## Recommendation`,
-            qualifyingRec.suggestedFix,
-            ``,
-            `## Scope`,
-            qualifyingRec.scope,
-            ``,
-            `## Anomaly Patterns (${qualifyingRec.anomalyPatterns.join(", ")})`,
-            ...qualifyingRec.anomalyPatterns.map((p) => `- ${p}: ${patternCounts.get(p) ?? 0} occurrences`),
+            "Auto-fix triggered by audit recommendation.",
+            "",
+            "## What to fix",
+            autoFixRec.suggestedFix,
           ].join("\n"),
           objectiveMode: "delivery",
           severity: 1,

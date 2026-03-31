@@ -256,10 +256,8 @@ export type ObjectiveAnalysis = {
 
 export type AuditRecommendation = {
   readonly summary: string;
-  readonly anomalyPatterns: ReadonlyArray<string>;
-  readonly scope: string;
-  readonly confidence: "low" | "medium" | "high";
   readonly suggestedFix: string;
+  readonly autoFix: boolean;
 };
 
 type ToolMetricAccumulator = {

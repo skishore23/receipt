@@ -782,7 +782,7 @@ export const renderFactoryReceiptInvestigationText = (
     "## Recommendations",
     ...(report.recommendations.length > 0
       ? report.recommendations.map((item) =>
-          `- [${item.confidence}] ${item.summary} · scope=${item.scope} · patterns=${item.anomalyPatterns.join(",")}`)
+          `- ${item.summary}${item.autoFix ? " [auto-fix]" : ""}`)
       : ["- none"]),
     "",
     `## Timeline (first ${Math.min(timelineLimit, report.timeline.length)} of ${report.timeline.length})`,

@@ -198,9 +198,9 @@ const buildImprovements = (
   }
 
   const allRecs = objectives.flatMap((o) => o.recommendations);
-  const highConfidence = allRecs.filter((r) => r.confidence === "high");
-  if (highConfidence.length > 0) {
-    improvements.push(`${highConfidence.length} high-confidence recommendation(s) from LLM audit analysis.`);
+  const autoFixCount = allRecs.filter((r) => r.autoFix).length;
+  if (autoFixCount > 0) {
+    improvements.push(`${autoFixCount} auto-fix recommendation(s) from LLM audit analysis.`);
   }
 
   if (memoryHygiene.repoSharedRunScopedEntries > 0) {
