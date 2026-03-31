@@ -422,3 +422,15 @@ export type FactoryObjectiveReceiptQuery = {
   readonly candidateId?: string;
   readonly types?: ReadonlyArray<string>;
 };
+
+export type FactoryMonitorJobPayload = {
+  readonly kind: "factory.task.monitor";
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly codexJobId: string;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
+  readonly taskPrompt: string;
+  readonly splitDepth: number;
+};
