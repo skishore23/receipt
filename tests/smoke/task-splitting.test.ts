@@ -98,9 +98,15 @@ test("splitTask supersedes parent and creates subtasks with correct splitDepth",
     expect(task.sourceTaskId).toBe(parentTaskId);
   }
 
-  // Second task should depend on first new task
+  // Second task should depend on first new task (resolved from index "0")
   const secondTask = newTasks[1];
   expect(secondTask.dependsOn.length).toBe(1);
+  expect(secondTask.dependsOn[0]).toBe(newTasks[0].taskId);
+
+  // Third task should depend on second new task (resolved from index "1")
+  const thirdTask = newTasks[2];
+  expect(thirdTask.dependsOn.length).toBe(1);
+  expect(thirdTask.dependsOn[0]).toBe(newTasks[1].taskId);
 });
 
 test("splitTask at depth 2 is the maximum", async () => {

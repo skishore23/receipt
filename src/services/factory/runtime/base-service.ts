@@ -1715,15 +1715,14 @@ export class FactoryServiceBase {
       });
     }
 
-    // Create subtask records
-    const subtaskIds: string[] = [];
+    // Pre-compute all subtask IDs so forward references work
+    const subtaskIds = subtasks.map((_, i) => taskOrdinalId(baseOrdinal + i));
     for (let i = 0; i < subtasks.length; i++) {
       const sub = subtasks[i];
-      const taskId = taskOrdinalId(baseOrdinal + i);
-      subtaskIds.push(taskId);
+      const taskId = subtaskIds[i];
       const dependsOn = (sub.dependsOn ?? []).map((indexStr) => {
         const idx = parseInt(indexStr, 10);
-        if (Number.isFinite(idx) && idx >= 0 && idx < subtaskIds.length) {
+        if (Number.isFinite(idx) && idx >= 0 && idx < subtaskIds.length && idx !== i) {
           return subtaskIds[idx];
         }
         return indexStr;
