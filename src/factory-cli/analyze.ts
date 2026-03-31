@@ -251,7 +251,15 @@ export type ObjectiveAnalysis = {
     };
   };
   readonly anomalies: ReadonlyArray<AnalysisAnomaly>;
-  readonly recommendations: ReadonlyArray<string>;
+  readonly recommendations: ReadonlyArray<AuditRecommendation>;
+};
+
+export type AuditRecommendation = {
+  readonly summary: string;
+  readonly anomalyPatterns: ReadonlyArray<string>;
+  readonly scope: string;
+  readonly confidence: "low" | "medium" | "high";
+  readonly suggestedFix: string;
 };
 
 type ToolMetricAccumulator = {
@@ -866,33 +874,7 @@ const addAnomaly = (items: AnalysisAnomaly[], anomaly: AnalysisAnomaly): void =>
   items.push(anomaly);
 };
 
-const buildRecommendations = (anomalies: ReadonlyArray<AnalysisAnomaly>): ReadonlyArray<string> => {
-  const recommendations = new Set<string>();
-  for (const anomaly of anomalies) {
-    if (anomaly.kind === "tool_error" && anomaly.summary.includes("factory.output requires focusKind/focusId")) {
-      recommendations.add("Teach `factory.output` to infer a single active or nonterminal task automatically; when the objective is genuinely ambiguous, pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
-    }
-    if (anomaly.summary.includes("/usr/src/cli.ts")) {
-      recommendations.add("Stop assuming `/usr/src/cli.ts` exists inside worker containers. Resolve the checked-in Receipt entrypoint from the mounted workspace or use the direct AWS CLI path already present in the task prompt.");
-    }
-    if (anomaly.kind === "repeated_control_job") {
-      recommendations.add("Deduplicate `factory.objective.control` enqueues for the same objective session key, or switch the queue behavior so repeated reconcile attempts coalesce instead of piling up.");
-    }
-    if (anomaly.kind === "cross_objective_run") {
-      recommendations.add("Reset objective-bound run routing when follow-up objectives are created. A run stream under one objective should not carry a different objective binding in `thread.bound` or `run.configured.extra.objectiveId`.");
-    }
-    if (anomaly.summary.includes("no tracked diff")) {
-      recommendations.add("Before creating another task attempt, check whether the previous attempt already integrated the only diff. If nothing changed, surface a terminal 'already applied' outcome instead of a blocked rerun.");
-    }
-    if (anomaly.summary.includes("api.github.com") || anomaly.summary.toLowerCase().includes("publish failed")) {
-      recommendations.add("Separate transient publish/network failures from integration conflicts in the UI. Report the publish job failure directly and preserve the already-integrated candidate state.");
-    }
-    if (anomaly.kind === "repeated_live_output_poll") {
-      recommendations.add("When one child is clearly active, keep the same `factory.output` focus and use `waitForChangeMs` instead of tight re-polling or bouncing between output and status tools.");
-    }
-  }
-  return [...recommendations];
-};
+const buildRecommendations = (_anomalies: ReadonlyArray<AnalysisAnomaly>): ReadonlyArray<AuditRecommendation> => [];
 
 export const readObjectiveAnalysis = async (
   dataDir: string,
