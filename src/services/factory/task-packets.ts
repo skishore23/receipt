@@ -134,6 +134,7 @@ export type FactoryContextPack = {
     readonly overview?: string;
     readonly objective?: string;
     readonly integration?: string;
+    readonly repoAudit?: string;
   };
   readonly investigation: {
     readonly reports: ReadonlyArray<FactoryInvestigationTaskReport>;
@@ -350,6 +351,7 @@ export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
     pack.memory.overview ? `Overview: ${pack.memory.overview}` : "",
     pack.objectiveSlice.objectiveMemorySummary ? `Objective memory: ${pack.objectiveSlice.objectiveMemorySummary}` : "",
     pack.objectiveSlice.integrationMemorySummary ? `Integration memory: ${pack.objectiveSlice.integrationMemorySummary}` : "",
+    pack.memory.repoAudit ? `Recent audit signals: ${pack.memory.repoAudit}` : "",
     "",
     "## Objective Contract",
     `Acceptance criteria: ${pack.contract.acceptanceCriteria.length}`,

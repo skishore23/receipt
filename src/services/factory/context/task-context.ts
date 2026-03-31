@@ -414,7 +414,7 @@ export const buildFactoryTaskContextPack = async (
     taskTitle: task.title,
     taskPrompt,
   });
-  const [overview, objectiveMemory, integrationMemory, cloudExecutionContext] = await Promise.all([
+  const [overview, objectiveMemory, integrationMemory, repoAuditMemory, cloudExecutionContext] = await Promise.all([
     summarizeFactoryMemoryScope({
       memoryTools: deps.memoryTools,
       scope: `factory/objectives/${state.objectiveId}`,
@@ -434,6 +434,13 @@ export const buildFactoryTaskContextPack = async (
       scope: `factory/objectives/${state.objectiveId}/integration`,
       query: `${state.title}\nintegration`,
       maxChars: 360,
+      operation: "summarize-scope",
+    }),
+    summarizeFactoryMemoryScope({
+      memoryTools: deps.memoryTools,
+      scope: "factory/audits/repo",
+      query: `${state.title}\n${task.title}`,
+      maxChars: 400,
       operation: "summarize-scope",
     }),
     includeCloudExecutionContext
@@ -506,6 +513,7 @@ export const buildFactoryTaskContextPack = async (
       overview,
       objective: objectiveMemory,
       integration: integrationMemory,
+      repoAudit: repoAuditMemory,
     },
     investigation: {
       reports: state.investigation.reportOrder
