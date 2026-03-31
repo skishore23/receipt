@@ -1685,6 +1685,74 @@ export class FactoryServiceBase {
     return state;
   }
 
+  async splitTask(
+    objectiveId: string,
+    parentTaskId: string,
+    subtasks: ReadonlyArray<{ readonly title: string; readonly prompt: string; readonly dependsOn?: ReadonlyArray<string> }>,
+  ): Promise<void> {
+    const MAX_SPLIT_DEPTH = 2;
+    const state = await this.getObjectiveState(objectiveId);
+    const parentTask = state.workflow.tasksById[parentTaskId];
+    if (!parentTask) throw new FactoryServiceError(404, `task ${parentTaskId} not found`);
+    const currentDepth = parentTask.splitDepth ?? 0;
+    if (currentDepth >= MAX_SPLIT_DEPTH) {
+      throw new FactoryServiceError(409, `Cannot split task ${parentTaskId}: maximum split depth (${MAX_SPLIT_DEPTH}) reached`);
+    }
+
+    const basedOn = await this.currentHeadHash(objectiveId);
+    const now = Date.now();
+    const baseOrdinal = this.nextTaskOrdinal(state);
+    const events: FactoryEvent[] = [];
+
+    // Supersede parent
+    if (parentTask.status !== "integrated" && parentTask.status !== "superseded") {
+      events.push({
+        type: "task.superseded",
+        objectiveId,
+        taskId: parentTaskId,
+        reason: "Split by monitor into subtasks.",
+        supersededAt: now,
+      });
+    }
+
+    // Create subtask records
+    const subtaskIds: string[] = [];
+    for (let i = 0; i < subtasks.length; i++) {
+      const sub = subtasks[i];
+      const taskId = taskOrdinalId(baseOrdinal + i);
+      subtaskIds.push(taskId);
+      const dependsOn = (sub.dependsOn ?? []).map((indexStr) => {
+        const idx = parseInt(indexStr, 10);
+        if (Number.isFinite(idx) && idx >= 0 && idx < subtaskIds.length) {
+          return subtaskIds[idx];
+        }
+        return indexStr;
+      });
+
+      const taskRecord = this.createObjectiveTaskRecord({
+        objectiveId,
+        title: sub.title,
+        prompt: sub.prompt,
+        workerType: parentTask.workerType,
+        executionMode: parentTask.executionMode ?? this.objectiveProfileForState(state).objectivePolicy.defaultTaskExecutionMode,
+        baseCommit: parentTask.baseCommit,
+        createdAt: now + 1 + i,
+        taskId,
+        sourceTaskId: parentTaskId,
+        basedOn,
+      });
+
+      events.push({
+        type: "task.added",
+        objectiveId,
+        task: { ...taskRecord, splitDepth: currentDepth + 1, dependsOn },
+        createdAt: now + 1 + i,
+      });
+    }
+
+    await this.emitObjectiveBatch(objectiveId, events, basedOn);
+  }
+
   private async getObjectiveStateAtHead(objectiveId: string, headHash?: string): Promise<FactoryState> {
     if (!headHash) return this.getObjectiveState(objectiveId);
     await this.ensureBootstrap();
