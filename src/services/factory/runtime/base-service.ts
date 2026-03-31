@@ -78,6 +78,9 @@ import {
   buildFactoryPlanningReceipt,
   planningReceiptFingerprint,
 } from "../planning";
+import { runMonitorCheckpoint } from "../monitor-job";
+import { MonitorCheckpointResultSchema } from "../monitor-checkpoint";
+import { llmStructured } from "../../../adapters/openai";
 import {
   factoryPromotionGateBlockedReason,
   factoryTaskCompletionForTask,
@@ -557,6 +560,7 @@ import {
   type FactoryIntegrationJobPayload,
   type FactoryIntegrationPublishJobPayload,
   type FactoryObjectiveControlJobPayload,
+  type FactoryMonitorJobPayload,
   type FactoryObjectiveReceiptSummary,
   type FactoryObjectiveReceiptQuery,
   FACTORY_PROFILE_SUMMARY,
@@ -1750,6 +1754,128 @@ export class FactoryServiceBase {
     }
 
     await this.emitObjectiveBatch(objectiveId, events, basedOn);
+  }
+
+  async runMonitorJob(
+    payload: Record<string, unknown>,
+    control: { shouldAbort: () => Promise<boolean> },
+  ): Promise<Record<string, unknown>> {
+    const CHECKPOINT_INTERVAL_MS = 30 * 60 * 1_000;
+    const monitorPayload = payload as unknown as FactoryMonitorJobPayload;
+    let checkpoint = 0;
+    const startedAt = Date.now();
+
+    while (true) {
+      // Wait for checkpoint interval
+      await new Promise((resolve) => setTimeout(resolve, CHECKPOINT_INTERVAL_MS));
+
+      // Check if codex job is still running
+      const codexJob = await this.queue.getJob(monitorPayload.codexJobId);
+      if (!codexJob || isTerminalJobStatus(codexJob.status)) {
+        return { status: "codex_job_completed", checkpoints: checkpoint };
+      }
+
+      if (await control.shouldAbort()) {
+        return { status: "monitor_aborted", checkpoints: checkpoint };
+      }
+
+      checkpoint += 1;
+      const elapsedMs = Date.now() - startedAt;
+
+      const result = await runMonitorCheckpoint({
+        stdoutPath: monitorPayload.stdoutPath,
+        stderrPath: monitorPayload.stderrPath,
+        taskPrompt: monitorPayload.taskPrompt,
+        elapsedMs,
+        checkpoint,
+        evaluateLlm: async (prompt) => {
+          const llmResult = await llmStructured({
+            system: prompt.system,
+            user: prompt.user,
+            schema: MonitorCheckpointResultSchema,
+            schemaName: "MonitorCheckpointResult",
+          });
+          return llmResult.parsed;
+        },
+      });
+
+      // Emit checkpoint receipt
+      await this.emitObjective(monitorPayload.objectiveId, {
+        type: "monitor.checkpoint",
+        objectiveId: monitorPayload.objectiveId,
+        taskId: monitorPayload.taskId,
+        jobId: monitorPayload.codexJobId,
+        checkpoint,
+        assessment: result.assessment,
+        reasoning: result.reasoning,
+        action: result.action,
+        evaluatedAt: Date.now(),
+      });
+
+      // Act on result
+      if (result.action.kind === "continue") {
+        continue;
+      }
+
+      if (result.action.kind === "steer") {
+        await this.emitObjective(monitorPayload.objectiveId, {
+          type: "monitor.intervention",
+          objectiveId: monitorPayload.objectiveId,
+          taskId: monitorPayload.taskId,
+          jobId: monitorPayload.codexJobId,
+          interventionKind: "steer",
+          detail: result.action.guidance,
+          interventionAt: Date.now(),
+        });
+        await this.queue.queueCommand({
+          jobId: monitorPayload.codexJobId,
+          command: "steer",
+          payload: { message: result.action.guidance },
+        });
+        continue;
+      }
+
+      if (result.action.kind === "split") {
+        await this.emitObjective(monitorPayload.objectiveId, {
+          type: "monitor.intervention",
+          objectiveId: monitorPayload.objectiveId,
+          taskId: monitorPayload.taskId,
+          jobId: monitorPayload.codexJobId,
+          interventionKind: "split",
+          detail: `Splitting into ${result.action.subtasks.length} subtasks`,
+          interventionAt: Date.now(),
+        });
+        await this.queue.queueCommand({
+          jobId: monitorPayload.codexJobId,
+          command: "abort",
+          payload: {},
+        });
+        await this.splitTask(
+          monitorPayload.objectiveId,
+          monitorPayload.taskId,
+          result.action.subtasks,
+        );
+        return { status: "split", checkpoints: checkpoint, subtasks: result.action.subtasks.length };
+      }
+
+      if (result.action.kind === "abort") {
+        await this.emitObjective(monitorPayload.objectiveId, {
+          type: "monitor.intervention",
+          objectiveId: monitorPayload.objectiveId,
+          taskId: monitorPayload.taskId,
+          jobId: monitorPayload.codexJobId,
+          interventionKind: "abort",
+          detail: result.action.reason,
+          interventionAt: Date.now(),
+        });
+        await this.queue.queueCommand({
+          jobId: monitorPayload.codexJobId,
+          command: "abort",
+          payload: {},
+        });
+        return { status: "aborted", checkpoints: checkpoint, reason: result.action.reason };
+      }
+    }
   }
 
   private async getObjectiveStateAtHead(objectiveId: string, headHash?: string): Promise<FactoryState> {
@@ -4352,6 +4478,29 @@ export class FactoryServiceBase {
       payload,
     });
     this.sse.publish("jobs", created.id);
+
+    // Dispatch monitor job alongside codex task
+    const monitorJobId = `job_factory_monitor_${state.objectiveId}_${task.taskId}_${candidateId}`;
+    const monitorPayload: FactoryMonitorJobPayload = {
+      kind: "factory.task.monitor",
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      candidateId,
+      codexJobId: jobId,
+      stdoutPath: manifest.stdoutPath,
+      stderrPath: manifest.stderrPath,
+      taskPrompt: task.prompt,
+      splitDepth: task.splitDepth ?? 0,
+    };
+    await this.queue.enqueue({
+      jobId: monitorJobId,
+      agentId: "codex",
+      lane: "collect",
+      sessionKey: `factory:monitor:${state.objectiveId}:${task.taskId}`,
+      singletonMode: "allow",
+      maxAttempts: 1,
+      payload: monitorPayload,
+    });
   }
 
   private async queueIntegration(

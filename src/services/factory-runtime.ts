@@ -454,6 +454,19 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
   },
   codex: async (job, ctx) => {
     try {
+      if (job.payload.kind === "factory.task.monitor") {
+        const result = await service.runMonitorJob(
+          job.payload as Record<string, unknown>,
+          {
+            shouldAbort: async () => {
+              const latest = await service.queue.getJob(job.id);
+              return latest?.abortRequested === true || isTerminalJobStatus(latest?.status);
+            },
+          },
+        );
+        return { ok: true, result };
+      }
+
       const result = job.payload.kind === "factory.task.run"
         ? await service.runTask(job.payload, {
           shouldAbort: async () => {
