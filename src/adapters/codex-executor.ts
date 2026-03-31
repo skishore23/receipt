@@ -396,7 +396,7 @@ export class LocalCodexExecutor implements CodexExecutor {
       || "codex";
     this.timeoutMs = Math.max(
       30_000,
-      opts.timeoutMs ?? Number(process.env.RECEIPT_CODEX_TIMEOUT_MS ?? process.env.HUB_CODEX_TIMEOUT_MS ?? 900_000),
+      opts.timeoutMs ?? Number(process.env.RECEIPT_CODEX_TIMEOUT_MS ?? process.env.HUB_CODEX_TIMEOUT_MS ?? 1_800_000),
     );
     this.stallTimeoutMs = normalizePositiveTimeoutMs(
       opts.stallTimeoutMs ?? process.env.RECEIPT_CODEX_STALL_TIMEOUT_MS ?? process.env.HUB_CODEX_STALL_TIMEOUT_MS,
