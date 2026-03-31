@@ -495,7 +495,7 @@ const objectiveHandoffItem = (
     const nextAction = event.nextAction?.trim();
     const lines = [
       `${title} finished and is back with Chat.`,
-      event.summary,
+      event.output ?? event.summary,
       nextAction && nextAction !== event.summary && !isGenericCompletedNextAction(nextAction)
         ? `Next: ${nextAction}`
         : "",
