@@ -15,7 +15,8 @@ import {
 } from "../adapters/memory-tools";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import type { QueueJob } from "../adapters/jsonl-queue";
-import { embed } from "../adapters/openai";
+import { embed, llmStructured } from "../adapters/openai";
+import { z } from "zod";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobHandler } from "../engine/runtime/job-worker";
 import type { SseHub } from "../framework/sse-hub";
@@ -26,7 +27,9 @@ import { runFactoryCodexJob } from "../agents/factory-chat";
 import {
   readFactoryReceiptInvestigation,
   renderFactoryReceiptInvestigationText,
+  type FactoryReceiptInvestigation,
 } from "../factory-cli/investigate";
+import type { AuditRecommendation } from "../factory-cli/analyze";
 
 export type FactoryQueue = JobBackend;
 export type FactoryJobRuntime = ReturnType<typeof createRuntime<JobCmd, JobEvent, JobState>>;
@@ -150,6 +153,93 @@ const objectiveAuditArtifactPaths = (dataDir: string, objectiveId: string): {
   };
 };
 
+const AuditRecommendationSchema = z.object({
+  recommendations: z.array(z.object({
+    summary: z.string(),
+    anomalyPatterns: z.array(z.string()),
+    scope: z.string(),
+    confidence: z.enum(["low", "medium", "high"]),
+    suggestedFix: z.string(),
+  })),
+});
+
+const AUTOFIX_PATTERN_THRESHOLD = 5;
+
+const generateAuditRecommendations = async (
+  report: FactoryReceiptInvestigation,
+  recentAuditEntries: ReadonlyArray<{ readonly text: string }>,
+): Promise<ReadonlyArray<AuditRecommendation>> => {
+  const anomalySummary = report.anomalies
+    .slice(0, 20)
+    .map((a) => `- [${a.severity}] ${a.summary}`)
+    .join("\n");
+  const assessmentSummary = [
+    `Verdict: ${report.assessment.verdict}`,
+    `Efficiency: ${report.assessment.efficiency}`,
+    `Control churn: ${report.assessment.controlChurn}`,
+    `Easy route risk: ${report.assessment.easyRouteRisk}`,
+    ...report.assessment.notes.slice(0, 8).map((n) => `- ${n}`),
+  ].join("\n");
+  const recentPatterns = recentAuditEntries
+    .slice(0, 10)
+    .map((e) => e.text.slice(0, 300))
+    .join("\n---\n");
+  const whatHappened = report.summary.whatHappened?.join("\n") ?? "";
+
+  try {
+    const result = await llmStructured({
+      system: [
+        "You are an expert software reliability engineer analyzing Factory objective audit reports.",
+        "Generate concrete, actionable recommendations for code improvements.",
+        "Each recommendation must include:",
+        "- summary: what to fix (one sentence)",
+        "- anomalyPatterns: normalized pattern keys that this addresses (e.g. 'repeated_control_job', 'lease_expired', 'iteration_budget_exhausted')",
+        "- scope: specific file paths or system areas affected",
+        "- confidence: 'high' only if the fix is well-understood and scoped, 'medium' if reasonable but needs verification, 'low' if speculative",
+        "- suggestedFix: concrete description of the code change needed",
+        "Look at cross-run patterns in the recent audit history to identify recurring issues.",
+        "Do not generate recommendations for external/infrastructure issues (API rate limits, permission denials) unless a code-level mitigation exists.",
+        "Return an empty array if no actionable recommendations exist.",
+      ].join("\n"),
+      user: [
+        "## Current Objective Audit",
+        whatHappened,
+        "",
+        "## Assessment",
+        assessmentSummary,
+        "",
+        "## Anomalies",
+        anomalySummary || "none",
+        "",
+        "## Recent Audit History (cross-run patterns)",
+        recentPatterns || "none",
+      ].join("\n"),
+      schema: AuditRecommendationSchema,
+      schemaName: "AuditRecommendations",
+    });
+    return result.parsed.recommendations;
+  } catch {
+    return [];
+  }
+};
+
+const clusterAnomalyPatterns = (
+  recentEntries: ReadonlyArray<{ readonly text: string }>,
+): ReadonlyMap<string, number> => {
+  const counts = new Map<string, number>();
+  for (const entry of recentEntries) {
+    const patternsMatch = entry.text.match(/patterns=([^\s\n]+)/g);
+    if (!patternsMatch) continue;
+    for (const match of patternsMatch) {
+      const patterns = match.replace("patterns=", "").split(",").filter(Boolean);
+      for (const pattern of patterns) {
+        counts.set(pattern, (counts.get(pattern) ?? 0) + 1);
+      }
+    }
+  }
+  return counts;
+};
+
 const parseObjectiveAuditPayload = (payload: Record<string, unknown>): FactoryObjectiveAuditJobPayload => {
   if (payload.kind !== "factory.objective.audit") {
     throw new Error("invalid factory objective audit payload");
@@ -177,7 +267,8 @@ const renderObjectiveAuditMemoryText = (input: {
   readonly efficiency: string;
   readonly controlChurn: string;
   readonly notes: ReadonlyArray<string>;
-  readonly recommendations: ReadonlyArray<string>;
+  readonly recommendations: ReadonlyArray<AuditRecommendation>;
+  readonly autoFixObjectiveId?: string;
   readonly jsonPath: string;
   readonly textPath: string;
 }): string => {
@@ -195,7 +286,13 @@ const renderObjectiveAuditMemoryText = (input: {
     ...(input.notes.length > 0 ? input.notes.map((item) => `- ${item}`) : ["- none"]),
     "",
     "Recommendations",
-    ...(input.recommendations.length > 0 ? input.recommendations.map((item) => `- ${item}`) : ["- none"]),
+    ...(input.recommendations.length > 0
+      ? input.recommendations.map((r) =>
+          `- [${r.confidence}] scope=${r.scope} patterns=${r.anomalyPatterns.join(",")} ${r.summary}`)
+      : ["- none"]),
+    ...(input.autoFixObjectiveId
+      ? ["", "Auto-fix", `- Triggered: ${input.autoFixObjectiveId} (delivery, severity 1)`]
+      : []),
     "",
     "Artifacts",
     `- JSON: ${input.jsonPath}`,
@@ -247,6 +344,7 @@ export const runFactoryObjectiveAudit = async (input: {
   readonly repoRoot: string;
   readonly memoryTools: MemoryTools;
   readonly payload: Record<string, unknown>;
+  readonly factoryService?: FactoryService;
 }): Promise<Record<string, unknown>> => {
   const parsed = parseObjectiveAuditPayload(input.payload);
   const report = await withObjectiveAuditRetry(() =>
@@ -260,6 +358,53 @@ export const runFactoryObjectiveAudit = async (input: {
     renderFactoryReceiptInvestigationText(report, { timelineLimit: 20, contextChars: 1_600 }),
     "utf-8",
   );
+
+  // Read recent audit entries for cross-run patterns
+  const recentAuditEntries = await input.memoryTools.read({
+    scope: "factory/audits/repo",
+    limit: 20,
+  }).catch(() => []);
+
+  // Generate LLM recommendations
+  const recommendations = await generateAuditRecommendations(report, recentAuditEntries);
+
+  // Cluster anomaly patterns from recent audits
+  const patternCounts = clusterAnomalyPatterns(recentAuditEntries);
+
+  // Check auto-fix threshold: pattern count >= 5 AND confidence = high
+  let autoFixObjectiveId: string | undefined;
+  if (input.factoryService) {
+    const qualifyingRec = recommendations.find((rec) =>
+      rec.confidence === "high"
+      && rec.anomalyPatterns.some((p) => (patternCounts.get(p) ?? 0) >= AUTOFIX_PATTERN_THRESHOLD)
+    );
+    if (qualifyingRec) {
+      try {
+        const objective = await input.factoryService.createObjective({
+          title: qualifyingRec.summary.slice(0, 96),
+          prompt: [
+            `Auto-fix triggered by recurring audit pattern.`,
+            ``,
+            `## Recommendation`,
+            qualifyingRec.suggestedFix,
+            ``,
+            `## Scope`,
+            qualifyingRec.scope,
+            ``,
+            `## Anomaly Patterns (${qualifyingRec.anomalyPatterns.join(", ")})`,
+            ...qualifyingRec.anomalyPatterns.map((p) => `- ${p}: ${patternCounts.get(p) ?? 0} occurrences`),
+          ].join("\n"),
+          objectiveMode: "delivery",
+          severity: 1,
+          channel: "auto-fix",
+          startImmediately: true,
+        });
+        autoFixObjectiveId = objective.objectiveId;
+      } catch {
+        // auto-fix is best-effort
+      }
+    }
+  }
 
   const memoryText = renderObjectiveAuditMemoryText({
     objectiveId: parsed.objectiveId,
@@ -275,7 +420,8 @@ export const runFactoryObjectiveAudit = async (input: {
         ? `corrective_steer=issued aligned_after_correction=${report.assessment.alignedAfterCorrection ? "yes" : "no"}`
         : "corrective_steer=none",
     ],
-    recommendations: report.recommendations.slice(0, 6),
+    recommendations: recommendations.slice(0, 6),
+    autoFixObjectiveId,
     jsonPath: artifacts.jsonPath,
     textPath: artifacts.textPath,
   });
@@ -307,6 +453,8 @@ export const runFactoryObjectiveAudit = async (input: {
     alignedAfterCorrection: report.assessment.alignedAfterCorrection,
     jsonPath: artifacts.jsonPath,
     textPath: artifacts.textPath,
+    recommendations: recommendations.length,
+    autoFixObjectiveId,
   };
 };
 
@@ -321,6 +469,7 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
             repoRoot: service.git.repoRoot,
             memoryTools: auditMemoryTools ?? (() => { throw new Error("factory objective audit requires memory tools"); })(),
             payload: job.payload as Record<string, unknown>,
+            factoryService: service,
           })
         : await service.runObjectiveControl(job.payload as Record<string, unknown>);
       return { ok: true, result };
