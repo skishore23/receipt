@@ -47,15 +47,18 @@ const createMemoryStub = (): MemoryTools => ({
   reindex: async () => 0,
 });
 
-test("factory chat prompt guidance: classifies self-reflection prompts as conversational", () => {
+test("factory chat prompt guidance: classifies short prompts as conversational", () => {
   expect(classifyFactoryResponseStyle("grade your performance")).toBe("conversational");
+  expect(classifyFactoryResponseStyle("hello")).toBe("conversational");
+  expect(classifyFactoryResponseStyle("inspect AWS cost spike")).toBe("conversational");
   expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not use headings, scorecards, grades");
   expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not turn the reply into operator-handoff analysis");
 });
 
-test("factory chat prompt guidance: keeps infrastructure investigations in work mode", () => {
-  expect(classifyFactoryResponseStyle("inspect AWS cost spike")).toBe("work");
-  expect(renderFactoryResponseStyleGuidance("inspect AWS cost spike")).toContain("This turn is work-focused.");
+test("factory chat prompt guidance: classifies long prompts as work mode", () => {
+  const long = "investigate the cost spike across all regions and accounts, compare with last month baseline, and produce a summary report with recommendations";
+  expect(classifyFactoryResponseStyle(long)).toBe("work");
+  expect(renderFactoryResponseStyleGuidance(long)).toContain("This turn is work-focused.");
 });
 
 const createNoopDelegationTools = () => ({

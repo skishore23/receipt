@@ -78,12 +78,6 @@ export type FactoryChatContextReceiptLike = {
   readonly globalSeq?: number;
 };
 
-const FACTORY_CHAT_META_REFLECTION_RE =
-  /\b(?:do you think you did|did you do (?:good|well)|grade your performance|how did you do|self[- ]reflection|self[- ]reflect|reflect on (?:your|that)|what is off here|what feels off|why (?:is|was) (?:this|that|it) (?:off|robotic|unnatural|procedural)|missing soul|sound(?:ing)? (?:more )?(?:human|natural)|too (?:robotic|procedural)|answered? (?:like|as) (?:a )?(?:human|person)|why did that sound)\b/i;
-
-const FACTORY_CHAT_WORKLIKE_SIGNAL_RE =
-  /\b(?:fix|implement|change|update|edit|refactor|debug|investigate|inspect|analyze|review|check|build|test|file|code|repo|branch|commit|diff|task|objective|thread|deploy|aws|ec2|s3|lambda|bug|error|failure|ci|pr|inventory|bucket|buckets|running jobs|cost spike)\b/i;
-
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 
@@ -93,8 +87,7 @@ const normalizeForGrouping = (value: string): string =>
 export const classifyFactoryResponseStyle = (problem: string): FactoryChatResponseStyle => {
   const compact = problem.replace(/\s+/g, " ").trim();
   if (!compact) return "work";
-  if (FACTORY_CHAT_META_REFLECTION_RE.test(compact)) return "conversational";
-  if (compact.length <= 140 && !FACTORY_CHAT_WORKLIKE_SIGNAL_RE.test(compact)) return "conversational";
+  if (compact.length <= 140) return "conversational";
   return "work";
 };
 
