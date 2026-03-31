@@ -307,6 +307,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         latestHandoff: {
           status: event.status,
           summary: event.summary,
+          output: event.output,
           blocker: event.blocker,
           nextAction: event.nextAction,
           handoffKey: event.handoffKey,

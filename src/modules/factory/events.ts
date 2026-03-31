@@ -132,6 +132,7 @@ export type FactoryEvent =
       readonly title: string;
       readonly status: FactoryObjectiveHandoffStatus;
       readonly summary: string;
+      readonly output?: string;
       readonly blocker?: string;
       readonly nextAction?: string;
       readonly handoffKey: string;

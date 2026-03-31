@@ -87,6 +87,7 @@ export type FactoryObjectiveHandoffStatus =
 export type FactoryObjectiveHandoffRecord = {
   readonly status: FactoryObjectiveHandoffStatus;
   readonly summary: string;
+  readonly output?: string;
   readonly blocker?: string;
   readonly nextAction?: string;
   readonly handoffKey: string;
