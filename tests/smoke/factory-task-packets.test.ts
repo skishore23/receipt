@@ -46,6 +46,8 @@ test("factory task packets: memory scopes use the effective task prompt override
   ]);
   expect(scopes[0]?.defaultQuery).toBe("Refactor packet helpers\nExtract packet helpers\neffective prompt");
   expect(scopes[4]?.scope).toBe("factory/objectives/objective_demo/candidates/task_01_candidate_01");
+  expect(scopes.filter((s) => s.readOnly).map((s) => s.key)).toEqual(["agent", "repo"]);
+  expect(scopes.filter((s) => !s.readOnly).map((s) => s.key)).toEqual(["objective", "task", "candidate", "integration"]);
 });
 
 test("factory task packets: artifact activity ignores known files and summarizes extras", async () => {

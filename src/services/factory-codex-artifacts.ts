@@ -185,6 +185,7 @@ export const buildFactoryMemoryScriptSource = (configPath: string): string => {
     `if (command === "commit") {`,
     `  const scope = resolveScope(args[1]);`,
     `  if (!scope) throw new Error("unknown memory scope");`,
+    `  if (scope.readOnly) throw new Error(\`scope '\${scope.key}' is read-only; commit to a task or objective scope instead\`);`,
     `  const text = args.slice(2).join(" ").trim();`,
     `  if (!text) throw new Error("commit requires text");`,
     `  const result = runReceipt(["memory", "commit", scope.scope, "--text", text]);`,

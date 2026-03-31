@@ -29,6 +29,7 @@ export type FactoryMemoryScopeSpec = {
   readonly scope: string;
   readonly label: string;
   readonly defaultQuery: string;
+  readonly readOnly?: boolean;
 };
 
 export type FactoryContextTaskNode = {
@@ -187,12 +188,14 @@ export const buildTaskMemoryScopes = (
       scope: `factory/agents/${String(task.workerType)}`,
       label: `Agent memory (${String(task.workerType)})`,
       defaultQuery: baseQuery,
+      readOnly: true,
     },
     {
       key: "repo",
       scope: "factory/repo/shared",
       label: "Repo shared memory",
       defaultQuery: `${state.title}\n${task.title}`,
+      readOnly: true,
     },
     {
       key: "objective",
