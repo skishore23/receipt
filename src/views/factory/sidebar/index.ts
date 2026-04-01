@@ -162,6 +162,7 @@ const renderObjectiveLink = (model: FactoryNavModel, objective: FactoryChatObjec
   const href = factoryChatQuery({
     mode: model.mode,
     profileId: objective.profileId || model.activeProfileId,
+    chatId: model.chatId,
     objectiveId: objective.objectiveId,
     inspectorTab: model.inspectorTab,
   });
