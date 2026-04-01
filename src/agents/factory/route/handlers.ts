@@ -91,6 +91,7 @@ import {
   receiptRecordsHtml,
   receiptSideHtml,
 } from "../../../views/receipt";
+import { runtimeShell } from "../../../views/runtime";
 import { parseOrder, parseLimit, parseInspectorDepth } from "../../../framework/http";
 import { buildChatItemsForRun } from "../chat-items";
 import {
@@ -3885,6 +3886,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         const selected = files.find((f) => f.name === file)?.name ?? files[0]?.name;
         return html(receiptShell({ selected, limit, order, depth }));
       });
+
+      app.get("/runtime", async () => html(runtimeShell()));
 
       app.get("/receipt/island/folds", async (c) => {
         const selected = c.req.query("selected") ?? "";

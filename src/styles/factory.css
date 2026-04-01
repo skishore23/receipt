@@ -10,6 +10,9 @@
 @source "../views/factory/workbench/index.ts";
 @source "../views/factory/workbench/page.ts";
 @source "../views/receipt.ts";
+@source "../views/runtime/data.ts";
+@source "../views/runtime/render.ts";
+@source "../views/runtime/index.ts";
 
 @custom-variant dark (&:is(.dark *));
 

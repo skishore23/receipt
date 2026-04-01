@@ -5860,3 +5860,44 @@ test("factory service: objective-scoped factory SSE topic publishes on receipt a
   abort.abort();
   await streamReader.cancel();
 });
+
+// ── /runtime page ─────────────────────────────────────────────────────────────
+
+test("factory route: /runtime returns full runtime architecture page", async () => {
+  const app = createRouteTestApp();
+  const response = await app.request("http://receipt.test/runtime");
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  // Page shell
+  expect(body).toContain("RECEIPT RUNTIME");
+  expect(body).toContain("<!doctype html>");
+  // All three planes
+  expect(body).toContain("Control Plane");
+  expect(body).toContain("Execution Plane");
+  expect(body).toContain("Side Effects");
+  // All 6 actors with impl references
+  expect(body).toContain("HTTP Commands");
+  expect(body).toContain("handlers.ts");
+  expect(body).toContain("Readiness Engine");
+  expect(body).toContain("factoryReadyTasks()");
+  expect(body).toContain("Lease Controller");
+  expect(body).toContain("JobWorker");
+  expect(body).toContain("Run Driver");
+  expect(body).toContain("runDriver()");
+  expect(body).toContain("Tool Executor");
+  expect(body).toContain("LocalCodexExecutor");
+  expect(body).toContain("Outbox Worker");
+  // Data stores
+  expect(body).toContain("work_items");
+  expect(body).toContain("DEPENDENCY GRAPH");
+  expect(body).toContain("run_leases");
+  expect(body).toContain("LEASE TABLE");
+  expect(body).toContain("event_outbox");
+  expect(body).toContain("SIDE-EFFECT QUEUE");
+  // Concurrency callout
+  expect(body).toContain("Multi-Objective Concurrency");
+  expect(body).toContain("per objective, N in parallel");
+  // Delegation loop
+  expect(body).toContain("Child-Run Delegation Loop");
+  expect(body).toContain("delegate_to_agent");
+});
