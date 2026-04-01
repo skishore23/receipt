@@ -173,6 +173,68 @@ export const pollLatestChangeSeq = (db: ReceiptDb): number =>
       ?? 0,
   );
 
+export const listReceiptStreams = (
+  db: ReceiptDb,
+): ReadonlyArray<{ readonly name: string; readonly receiptCount: number; readonly updatedAt: number }> =>
+  db.orm.select({
+    name: schema.streams.name,
+    receiptCount: schema.streams.receiptCount,
+    updatedAt: schema.streams.updatedAt,
+  })
+    .from(schema.streams)
+    .orderBy(desc(schema.streams.updatedAt))
+    .all()
+    .map((row) => ({
+      name: row.name,
+      receiptCount: Number(row.receiptCount),
+      updatedAt: Number(row.updatedAt),
+    }));
+
+export const readReceiptsByStream = (
+  db: ReceiptDb,
+  stream: string,
+  opts?: { readonly order?: "asc" | "desc"; readonly limit?: number },
+): ReadonlyArray<{
+  readonly globalSeq: number;
+  readonly streamSeq: number;
+  readonly ts: number;
+  readonly hash: string;
+  readonly eventType: string;
+  readonly bodyJson: string;
+}> => {
+  const order = opts?.order ?? "desc";
+  const limit = opts?.limit ?? 200;
+  const rows = db.orm.select({
+    globalSeq: schema.receipts.globalSeq,
+    streamSeq: schema.receipts.streamSeq,
+    ts: schema.receipts.ts,
+    hash: schema.receipts.hash,
+    eventType: schema.receipts.eventType,
+    bodyJson: schema.receipts.bodyJson,
+  })
+    .from(schema.receipts)
+    .where(eq(schema.receipts.stream, stream))
+    .orderBy(order === "desc" ? desc(schema.receipts.streamSeq) : schema.receipts.streamSeq)
+    .limit(limit)
+    .all();
+  return rows.map((row) => ({
+    globalSeq: Number(row.globalSeq),
+    streamSeq: Number(row.streamSeq),
+    ts: Number(row.ts),
+    hash: row.hash,
+    eventType: row.eventType,
+    bodyJson: row.bodyJson,
+  }));
+};
+
+export const countReceiptsInStream = (db: ReceiptDb, stream: string): number =>
+  Number(
+    db.orm.select({ value: sql<number>`count(*)` })
+      .from(schema.receipts)
+      .where(eq(schema.receipts.stream, stream))
+      .get()?.value ?? 0,
+  );
+
 export const listChangesAfter = (
   db: ReceiptDb,
   afterSeq: number,

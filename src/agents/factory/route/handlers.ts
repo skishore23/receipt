@@ -74,11 +74,17 @@ import {
   parseComposerDraft,
 } from "../../../factory-cli/composer";
 import {
-  listReceiptFiles,
-  readReceiptFile,
   sliceReceiptRecords,
   buildReceiptTimeline,
+  type ReceiptFileInfo,
+  type ReceiptRecord,
 } from "../../../adapters/receipt-tools";
+import {
+  getReceiptDb,
+  listReceiptStreams,
+  readReceiptsByStream,
+  countReceiptsInStream,
+} from "../../../db/client";
 import {
   receiptShell,
   receiptFoldsHtml,
@@ -3858,13 +3864,24 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       // ── Receipt browser routes ──────────────────────────────────────
       const receiptDataDir = ctx.dataDir;
       const receiptSse = ctx.sse;
+      const receiptDb = getReceiptDb(receiptDataDir);
+
+      const dbStreamsToFileInfo = (streams: ReadonlyArray<{ name: string; receiptCount: number; updatedAt: number }>): ReceiptFileInfo[] =>
+        streams.map((s) => ({ name: s.name, size: s.receiptCount, mtime: s.updatedAt }));
+
+      const dbReceiptsToRecords = (rows: ReadonlyArray<{ globalSeq: number; streamSeq: number; ts: number; hash: string; eventType: string; bodyJson: string }>): ReceiptRecord[] =>
+        rows.map((row) => {
+          const envelope = { stream: "", seq: row.streamSeq, ts: row.ts, hash: row.hash, body: JSON.parse(row.bodyJson) };
+          const raw = JSON.stringify(envelope);
+          return { raw, data: envelope };
+        });
 
       app.get("/receipt", async (c) => {
         const file = c.req.query("file") ?? "";
         const order = parseOrder(c.req.query("order"));
         const limit = parseLimit(c.req.query("limit"));
         const depth = parseInspectorDepth(c.req.query("depth"));
-        const files = await listReceiptFiles(receiptDataDir);
+        const files = dbStreamsToFileInfo(listReceiptStreams(receiptDb));
         const selected = files.find((f) => f.name === file)?.name ?? files[0]?.name;
         return html(receiptShell({ selected, limit, order, depth }));
       });
@@ -3874,21 +3891,20 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         const order = parseOrder(c.req.query("order"));
         const limit = parseLimit(c.req.query("limit"));
         const depth = parseInspectorDepth(c.req.query("depth"));
-        const files = await listReceiptFiles(receiptDataDir);
+        const files = dbStreamsToFileInfo(listReceiptStreams(receiptDb));
         return html(receiptFoldsHtml(files, selected, order, limit, depth));
       });
 
       app.get("/receipt/island/records", async (c) => {
         const file = c.req.query("file") ?? "";
         if (!file) return html(receiptRecordsHtml({ selected: undefined, records: [], order: "desc", limit: 200, total: 0 }));
-        const files = await listReceiptFiles(receiptDataDir);
-        const found = files.find((f) => f.name === file);
-        if (!found) return html(`<div class="empty">Stream not found.</div>`);
-        const records = await readReceiptFile(receiptDataDir, found.name);
         const order = parseOrder(c.req.query("order"));
         const limit = parseLimit(c.req.query("limit"));
-        const slice = sliceReceiptRecords(records, order, limit);
-        return html(receiptRecordsHtml({ selected: found.name, records: slice, order, limit, total: records.length }));
+        const rows = readReceiptsByStream(receiptDb, file, { order, limit });
+        if (rows.length === 0) return html(`<div class="empty">Stream not found.</div>`);
+        const records = dbReceiptsToRecords(rows);
+        const total = countReceiptsInStream(receiptDb, file);
+        return html(receiptRecordsHtml({ selected: file, records, order, limit, total }));
       });
 
       app.get("/receipt/island/side", async (c) => {
@@ -3899,22 +3915,23 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         if (!file) {
           return html(receiptSideHtml({ selected: undefined, order, limit, depth, total: 0, shown: 0 }));
         }
-        const files = await listReceiptFiles(receiptDataDir);
-        const found = files.find((f) => f.name === file);
-        if (!found) {
+        const total = countReceiptsInStream(receiptDb, file);
+        if (total === 0) {
           return html(receiptSideHtml({ selected: file, order, limit, depth, total: 0, shown: 0 }));
         }
-        const records = await readReceiptFile(receiptDataDir, found.name);
-        const slice = sliceReceiptRecords(records, order, limit);
-        const timeline = buildReceiptTimeline(records, depth);
+        const rows = readReceiptsByStream(receiptDb, file, { order, limit });
+        const records = dbReceiptsToRecords(rows);
+        const allRecords = order === "desc" || rows.length < total
+          ? dbReceiptsToRecords(readReceiptsByStream(receiptDb, file, { order: "asc", limit: total }))
+          : records;
+        const timeline = buildReceiptTimeline(allRecords, depth);
         return html(receiptSideHtml({
-          selected: found.name,
+          selected: file,
           order,
           limit,
           depth,
-          total: records.length,
-          shown: slice.length,
-          fileMeta: { size: found.size, mtime: found.mtime },
+          total,
+          shown: records.length,
           timeline,
         }));
       });
