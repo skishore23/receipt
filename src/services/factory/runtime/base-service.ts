@@ -1761,13 +1761,15 @@ export class FactoryServiceBase {
     control: { shouldAbort: () => Promise<boolean> },
   ): Promise<Record<string, unknown>> {
     const CHECKPOINT_INTERVAL_MS = 30 * 60 * 1_000;
+    const POLL_INTERVAL_MS = 15_000;
     const monitorPayload = payload as unknown as FactoryMonitorJobPayload;
     let checkpoint = 0;
     const startedAt = Date.now();
+    let lastCheckpointAt = Date.now();
 
     while (true) {
-      // Wait for checkpoint interval
-      await new Promise((resolve) => setTimeout(resolve, CHECKPOINT_INTERVAL_MS));
+      // Poll frequently for codex job completion, only checkpoint every 30 min
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 
       // Check if codex job is still running
       const codexJob = await this.queue.getJob(monitorPayload.codexJobId);
@@ -1779,7 +1781,13 @@ export class FactoryServiceBase {
         return { status: "monitor_aborted", checkpoints: checkpoint };
       }
 
+      // Only run LLM evaluation at checkpoint intervals
+      if (Date.now() - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) {
+        continue;
+      }
+
       checkpoint += 1;
+      lastCheckpointAt = Date.now();
       const elapsedMs = Date.now() - startedAt;
 
       const result = await runMonitorCheckpoint({
