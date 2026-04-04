@@ -353,7 +353,7 @@ test("factory runtime: blocked tasks stay blocked instead of spawning mutation f
   expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
   expect(detail.tasks.some((task) => task.title.startsWith("Unblock "))).toBe(false);
   expect(detail.tasks.some((task) => task.title.startsWith("Finish "))).toBe(false);
-  expect(detail.blockedReason ?? "").toMatch(/No runnable tasks remained|blocked|Human input requested/i);
+  expect(detail.blockedReason ?? "").toMatch(/No runnable tasks remained|blocked|Autonomous recovery stopped/i);
 }, 120_000);
 
 test("factory runtime: transient blocked tasks retry once automatically before asking for help", async () => {
@@ -618,6 +618,73 @@ test("factory runtime: blocked tasks can record an explicit ask-human decision",
   expect(detail.latestDecision?.summary ?? "").toContain("Human input requested for task_01");
   expect(detail.blockedReason ?? "").toContain("Human input requested for task_01");
   expect(detail.tasks.find((task) => task.taskId === "task_01")?.status).toBe("blocked");
+}, 120_000);
+
+test("factory runtime: blocked objectives stay inert on bare react but follow-up guidance queues a new attempt", async () => {
+  const dataDir = await createTempDir("receipt-factory-blocked-react");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const codexExecutor: CodexExecutor = {
+    run: async (input) => {
+      await fs.writeFile(input.promptPath, input.prompt, "utf-8");
+      await fs.writeFile(input.stdoutPath, "", "utf-8");
+      await fs.writeFile(input.stderrPath, "", "utf-8");
+      const structured = {
+        outcome: "blocked",
+        summary: "Need the operator to choose the API contract before implementation can continue.",
+        handoff: "Ask the human to choose the contract, then retry with that decision.",
+      };
+      const raw = JSON.stringify(structured);
+      await fs.writeFile(input.lastMessagePath, raw, "utf-8");
+      return { exitCode: 0, signal: null, stdout: raw, stderr: "", lastMessage: raw };
+    },
+  };
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor,
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Blocked react objective",
+    prompt: "Only continue when the operator provides the missing contract choice.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const firstJob = await findLatestFactoryJob(queue, created.objectiveId);
+  await service.runTask(firstJob);
+
+  await service.reactObjective(created.objectiveId);
+
+  let detail = await service.getObjective(created.objectiveId);
+  let jobs = await queue.listJobs({ limit: 20 });
+  let taskJobs = jobs.filter((job) =>
+    job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+  expect(detail.status).toBe("blocked");
+  expect(detail.tasks).toHaveLength(1);
+  expect(detail.tasks[0]?.status).toBe("blocked");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.unblocked")).toBe(false);
+  expect(taskJobs).toHaveLength(1);
+
+  await service.reactObjectiveWithNote(created.objectiveId, "Use the CLI contract for the next pass.");
+
+  detail = await service.getObjective(created.objectiveId);
+  jobs = await queue.listJobs({ limit: 20 });
+  taskJobs = jobs.filter((job) =>
+    job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+  expect(detail.status).toBe("executing");
+  expect(detail.tasks).toHaveLength(2);
+  expect(detail.tasks[0]?.status).toBe("superseded");
+  expect(detail.tasks[1]?.taskId).toBe("task_02");
+  expect(detail.tasks[1]?.prompt).toContain("Operator follow-up for this attempt:");
+  expect(detail.tasks[1]?.prompt).toContain("Use the CLI contract for the next pass.");
+  expect(taskJobs).toHaveLength(2);
+  expect(taskJobs.some((job) => job.payload.taskId === "task_02")).toBe(true);
 }, 120_000);
 
 test("factory candidate lineage: rework dispatch mints a fresh candidate id", async () => {

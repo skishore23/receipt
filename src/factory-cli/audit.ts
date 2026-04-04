@@ -111,6 +111,8 @@ const truncateInline = (value: string | undefined, max = 180): string | undefine
 const safeLimit = (limit: number): number =>
   Math.max(1, Math.min(Math.floor(limit), 200));
 
+const USAGE_LIMIT_ANOMALY_RE = /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
+
 const recentObjectiveIds = (dataDir: string, limit: number): ReadonlyArray<string> => {
   const db = getReceiptDb(dataDir);
   const rows = db.sqlite.query(`
@@ -125,8 +127,21 @@ const recentObjectiveIds = (dataDir: string, limit: number): ReadonlyArray<strin
     .filter((value, index, values) => values.indexOf(value) === index);
 };
 
+const objectiveSnapshotTs = (dataDir: string, objectiveId: string): number | undefined => {
+  const db = getReceiptDb(dataDir);
+  const row = db.sqlite.query(`
+    SELECT COALESCE(updated_at, last_ts) AS ts
+    FROM streams
+    WHERE name = ?
+    LIMIT 1
+  `).get(`factory/objectives/${objectiveId}`) as { readonly ts?: number } | undefined;
+  const ts = Number(row?.ts);
+  return Number.isFinite(ts) ? ts : undefined;
+};
+
 const categorizeAnomaly = (summary: string): string => {
   const normalized = summary.toLowerCase();
+  if (USAGE_LIMIT_ANOMALY_RE.test(summary)) return "quota / rate limit";
   if (normalized.includes("lease expired")) return "lease expired";
   if (normalized.includes("database is locked")) return "database is locked";
   if (normalized.includes("iteration budget exhausted")) return "iteration budget exhausted";
@@ -224,7 +239,13 @@ export const readFactoryReceiptAudit = async (
   const warnings: string[] = [];
   const investigations = await Promise.all(objectiveIds.map(async (objectiveId) => {
     try {
-      return await readFactoryReceiptInvestigation(dataDir, repoRoot, objectiveId);
+      const asOfTs = objectiveSnapshotTs(dataDir, objectiveId);
+      return await readFactoryReceiptInvestigation(
+        dataDir,
+        repoRoot,
+        objectiveId,
+        typeof asOfTs === "number" ? { asOfTs } : {},
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (targetedObjectiveId) {

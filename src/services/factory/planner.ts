@@ -36,6 +36,15 @@ export const taskPromptIncludesObjectiveNote = (
   return normalizedPrompt.includes(`Operator follow-up for this attempt:\n${normalizedNote}`);
 };
 
+const canResumeBlockedObjective = (
+  state: FactoryState,
+  latestObjectiveOperatorNote: string | undefined,
+): boolean => {
+  if (state.status !== "blocked") return false;
+  if (latestObjectiveOperatorNote?.trim()) return true;
+  return (state.blockedReason ?? "").startsWith("Policy blocked:");
+};
+
 const latestTask = (state: FactoryState): FactoryTaskRecord | undefined =>
   [...state.workflow.taskIds]
     .map((taskId) => state.workflow.tasksById[taskId])
@@ -153,6 +162,7 @@ export const planObjectiveReact = (
   const effects: FactoryPlannerEffect[] = [];
   const latest = latestTask(state);
   const latestNoteSatisfied = taskPromptIncludesObjectiveNote(latest?.prompt, facts.latestObjectiveOperatorNote);
+  const resumeBlockedObjective = canResumeBlockedObjective(state, facts.latestObjectiveOperatorNote);
 
   if (
     state.workflow.activeTaskIds.length === 0
@@ -165,8 +175,10 @@ export const planObjectiveReact = (
       supersedeTaskId: latest && latest.status !== "integrated" && latest.status !== "superseded"
         ? latest.taskId
         : undefined,
-    });
+      });
   }
+
+  if (state.status === "blocked" && !resumeBlockedObjective) return effects;
 
   if (state.status === "blocked") {
     const blockedTaskIds = state.workflow.taskIds

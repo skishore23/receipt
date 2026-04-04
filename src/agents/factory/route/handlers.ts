@@ -93,7 +93,7 @@ import {
 } from "../../../views/receipt";
 import { runtimeShell } from "../../../views/runtime";
 import { parseOrder, parseLimit, parseInspectorDepth } from "../../../framework/http";
-import { buildChatItemsForRun } from "../chat-items";
+import { buildChatItemsForRun, renderObjectiveHandoffMessage } from "../chat-items";
 import {
   groupFactoryChatConversationByRunId,
   projectFactoryChatContextFromReceipts,
@@ -522,63 +522,117 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     if (!input.chatId || !input.objective) return;
     const handoff = buildObjectiveHandoffPayload(input.objective);
     if (!handoff) return;
+    const renderedHandoff = renderObjectiveHandoffMessage(handoff);
     const sessionStream = factoryChatSessionStream(service.git.repoRoot, input.profileId, input.chatId);
     const sessionChain = await agentRuntime.chain(sessionStream);
     const latestSessionHandoff = [...sessionChain].reverse().find((receipt) =>
       receipt.body.type === "objective.handoff"
       && receipt.body.objectiveId === handoff.objectiveId,
     )?.body;
-    const sessionHasHandoff = latestSessionHandoff?.type === "objective.handoff"
-      && latestSessionHandoff.handoffKey === handoff.handoffKey;
     const runStream = agentRunStream(sessionStream, handoff.runId);
     const runChain = await agentRuntime.chain(runStream);
+    const sessionHasHandoff = latestSessionHandoff?.type === "objective.handoff"
+      && latestSessionHandoff.handoffKey === handoff.handoffKey;
     const runHasHandoff = runChain.some((receipt) =>
       receipt.body.type === "objective.handoff"
       && receipt.body.handoffKey === handoff.handoffKey
     );
-    if (sessionHasHandoff && runHasHandoff) return;
-    const events: ReadonlyArray<AgentEvent> = [
-      {
-        type: "problem.set",
-        runId: handoff.runId,
-        agentId: "orchestrator",
-        problem: `Objective handoff for ${handoff.title}`,
-      },
-      {
-        type: "thread.bound",
-        runId: handoff.runId,
-        agentId: "orchestrator",
-        objectiveId: handoff.objectiveId,
-        chatId: input.chatId,
-        reason: "dispatch_update",
-      },
-      handoff,
-      {
-        type: "run.status",
-        runId: handoff.runId,
-        agentId: "orchestrator",
-        status: "completed",
-        note: `objective ${handoff.status} handoff`,
-      },
+    const sessionHasFinal = sessionChain.some((receipt) =>
+      receipt.body.type === "response.finalized"
+      && receipt.body.runId === handoff.runId,
+    );
+    const runHasFinal = runChain.some((receipt) =>
+      receipt.body.type === "response.finalized"
+      && receipt.body.runId === handoff.runId,
+    );
+    const sessionHasProblem = sessionChain.some((receipt) =>
+      receipt.body.type === "problem.set"
+      && receipt.body.runId === handoff.runId,
+    );
+    const runHasProblem = runChain.some((receipt) =>
+      receipt.body.type === "problem.set"
+      && receipt.body.runId === handoff.runId,
+    );
+    const sessionHasBinding = sessionChain.some((receipt) =>
+      receipt.body.type === "thread.bound"
+      && receipt.body.runId === handoff.runId
+      && receipt.body.objectiveId === handoff.objectiveId
+      && receipt.body.chatId === input.chatId,
+    );
+    const runHasBinding = runChain.some((receipt) =>
+      receipt.body.type === "thread.bound"
+      && receipt.body.runId === handoff.runId
+      && receipt.body.objectiveId === handoff.objectiveId
+      && receipt.body.chatId === input.chatId,
+    );
+    const sessionHasStatus = sessionChain.some((receipt) =>
+      receipt.body.type === "run.status"
+      && receipt.body.runId === handoff.runId
+      && receipt.body.status === "completed",
+    );
+    const runHasStatus = runChain.some((receipt) =>
+      receipt.body.type === "run.status"
+      && receipt.body.runId === handoff.runId
+      && receipt.body.status === "completed",
+    );
+    if (sessionHasHandoff && runHasHandoff && sessionHasFinal && runHasFinal && sessionHasProblem && runHasProblem && sessionHasBinding && runHasBinding && sessionHasStatus && runHasStatus) {
+      return;
+    }
+    const problemEvent: Extract<AgentEvent, { readonly type: "problem.set" }> = {
+      type: "problem.set",
+      runId: handoff.runId,
+      agentId: "orchestrator",
+      problem: `Objective handoff for ${handoff.title}`,
+    };
+    const threadBoundEvent: Extract<AgentEvent, { readonly type: "thread.bound" }> = {
+      type: "thread.bound",
+      runId: handoff.runId,
+      agentId: "orchestrator",
+      objectiveId: handoff.objectiveId,
+      chatId: input.chatId,
+      reason: "dispatch_update",
+    };
+    const finalEvent: Extract<AgentEvent, { readonly type: "response.finalized" }> = {
+      type: "response.finalized",
+      runId: handoff.runId,
+      agentId: "orchestrator",
+      content: renderedHandoff.body,
+    };
+    const statusEvent: Extract<AgentEvent, { readonly type: "run.status" }> = {
+      type: "run.status",
+      runId: handoff.runId,
+      agentId: "orchestrator",
+      status: "completed",
+      note: `objective ${handoff.status} handoff`,
+    };
+    const emitMissingEvents = async (
+      stream: string,
+      events: ReadonlyArray<AgentEvent>,
+    ): Promise<void> => {
+      for (const event of events) {
+        await agentRuntime.execute(stream, {
+          type: "emit",
+          eventId: makeEventId(stream),
+          event,
+        });
+      }
+    };
+    const runEvents: AgentEvent[] = [
+      ...(!runHasProblem ? [problemEvent] : []),
+      ...(!runHasBinding ? [threadBoundEvent] : []),
+      ...(!runHasHandoff ? [handoff] : []),
+      ...(!runHasFinal ? [finalEvent] : []),
+      ...(!runHasStatus ? [statusEvent] : []),
     ];
-    if (!runHasHandoff) {
-      for (const event of events) {
-        await agentRuntime.execute(runStream, {
-          type: "emit",
-          eventId: makeEventId(runStream),
-          event,
-        });
-      }
-    }
-    if (!sessionHasHandoff) {
-      for (const event of events) {
-        await agentRuntime.execute(sessionStream, {
-          type: "emit",
-          eventId: makeEventId(sessionStream),
-          event,
-        });
-      }
-    }
+    const sessionEvents: AgentEvent[] = [
+      ...(!sessionHasProblem ? [problemEvent] : []),
+      ...(!sessionHasBinding ? [threadBoundEvent] : []),
+      ...(!sessionHasHandoff ? [handoff] : []),
+      ...(!sessionHasFinal ? [finalEvent] : []),
+      ...(!sessionHasStatus ? [statusEvent] : []),
+    ];
+    if (runEvents.length > 0) await emitMissingEvents(runStream, runEvents);
+    if (sessionEvents.length > 0) await emitMissingEvents(sessionStream, sessionEvents);
   };
 
   const queueJobFromRecord = (job: JobRecord): QueueJob => ({

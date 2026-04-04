@@ -54,7 +54,7 @@ export const reactFactoryObjective = async (
   const refreshState = () => ops.getObjectiveState(objectiveId);
   let state = await refreshState();
 
-  if (ops.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
+  if (ops.isTerminalObjectiveStatus(state.status)) {
     await ops.rebalanceObjectiveSlots();
     return;
   }

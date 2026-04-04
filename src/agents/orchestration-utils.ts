@@ -14,6 +14,8 @@ export type FactoryLiveWaitState = {
   surfaced: boolean;
 };
 
+export type FactoryLiveFinalResponsePolicy = "allow" | "waiting_message" | "reject";
+
 export type ActiveChildProgress = {
   readonly jobId?: string;
   readonly summary?: string;
@@ -103,13 +105,22 @@ export const createLiveFactoryFinalizer = (input: {
   readonly factoryService?: Pick<FactoryService, "getObjective">;
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly liveWaitState: FactoryLiveWaitState;
+  readonly finalWhileChildRunning?: FactoryLiveFinalResponsePolicy;
   readonly describeActiveChild?: () => Promise<ActiveChildProgress | undefined>;
 }): AgentFinalizer =>
   async ({ text }) => {
     if (LIVE_PROGRESS_FINAL_TEXT_RE.test(text)) return { accept: true };
+    const finalWhileChildRunning = input.finalWhileChildRunning ?? "waiting_message";
 
     const activeChild = await input.describeActiveChild?.();
     if (activeChild?.summary || activeChild?.detail || activeChild?.jobId) {
+      if (finalWhileChildRunning === "allow") return { accept: true };
+      if (finalWhileChildRunning === "reject") {
+        return {
+          accept: false,
+          note: `child work is still running${activeChild.jobId ? ` as ${activeChild.jobId}` : ""}; continue monitoring before finalizing`,
+        };
+      }
       return {
         accept: true,
         text: renderActiveChildProgressText(activeChild),
@@ -122,6 +133,13 @@ export const createLiveFactoryFinalizer = (input: {
     const detail = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
     if (!detail || detail.archivedAt || detail.status === "blocked" || detail.status === "completed" || detail.status === "failed" || detail.status === "canceled") {
       return { accept: true };
+    }
+    if (finalWhileChildRunning === "allow") return { accept: true };
+    if (finalWhileChildRunning === "reject") {
+      return {
+        accept: false,
+        note: `${detail.title || detail.objectiveId} is still ${detail.status}${detail.phase ? ` (${detail.phase})` : ""}; continue monitoring with factory.status or factory.output`,
+      };
     }
     return {
       accept: true,

@@ -248,6 +248,44 @@ test("factory chat context projection: refreshes from change log and only binds 
   ]);
 });
 
+test("factory chat context projection: prefers finalized handoff interpretations over raw handoff summaries", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-context-handoff");
+  const repoRoot = await createTempDir("receipt-factory-chat-context-handoff-repo");
+  const runtime = createAgentRuntime(dataDir);
+  const sessionStream = factoryChatSessionStream(repoRoot, "generalist", "chat_handoff");
+
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_handoff", {
+    type: "objective.handoff",
+    runId: "run_handoff",
+    agentId: "orchestrator",
+    objectiveId: "objective_demo",
+    title: "Investigate NAT gateway cost spike",
+    status: "blocked",
+    summary: "We proved it was a NAT data-processing surge.",
+    blocker: "Historical flow logs are gone.",
+    nextAction: "Use /react with retained evidence.",
+    handoffKey: "handoff_demo",
+    sourceUpdatedAt: 1_710_000_000_000,
+  });
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_handoff", {
+    type: "response.finalized",
+    runId: "run_handoff",
+    agentId: "orchestrator",
+    content: "The NAT surge is confirmed, but attribution is still blocked because the historical flow logs are gone.",
+  });
+
+  await syncChangedChatContextProjections(dataDir);
+  const projection = readChatContextProjection(dataDir, sessionStream);
+
+  expect(projection?.conversation).toEqual([
+    expect.objectContaining({
+      role: "assistant",
+      runId: "run_handoff",
+      text: "The NAT surge is confirmed, but attribution is still blocked because the historical flow logs are gone.",
+    }),
+  ]);
+});
+
 test("factory chat UI: chat items and inspector consume projected chat context", () => {
   const sessionStream = "agents/factory/demo/sessions/chat_demo";
   const chain = [

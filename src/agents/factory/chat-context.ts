@@ -184,6 +184,13 @@ export const projectFactoryChatContextFromReceipts = (input: {
     receipt.body.type === "problem.set" || receipt.body.type === "response.finalized")
     ? sessionReceipts
     : ordered;
+  const finalizedRunIds = new Set(
+    candidateConversationReceipts
+      .filter((receipt): receipt is FactoryChatContextReceiptLike & {
+        readonly body: Extract<AgentEvent, { readonly type: "response.finalized" }>;
+      } => receipt.body.type === "response.finalized")
+      .map((receipt) => receipt.body.runId),
+  );
 
   const messages = new Map<string, {
     role: "user" | "assistant";
@@ -210,6 +217,7 @@ export const projectFactoryChatContextFromReceipts = (input: {
         : body.type === "objective.handoff"
           ? asString(body.output ?? body.summary)
           : undefined;
+    if (body.type === "objective.handoff" && finalizedRunIds.has(body.runId)) continue;
     if (!role || !text) continue;
     const key = `${role}:${body.runId}:${normalizeForGrouping(text)}`;
     const ref = toSourceRef(receipt);

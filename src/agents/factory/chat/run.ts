@@ -408,6 +408,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         factoryService: input.factoryService,
         getCurrentObjectiveId,
         liveWaitState: factoryLiveWaitState,
+        finalWhileChildRunning: resolvedProfile.orchestration.finalWhileChildRunning,
         describeActiveChild: async () => {
           const activeChildren = (await listChildJobsForRun(input.queue, input.runId))
             .filter((job) => isActiveJobStatus(job.status))

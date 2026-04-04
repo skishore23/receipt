@@ -366,6 +366,7 @@ const createRouteTestApp = (overrides?: {
   readonly liveOutput?: Record<string, unknown>;
   readonly jobs?: ReadonlyArray<QueueJob>;
   readonly agentEvents?: Readonly<Record<string, ReadonlyArray<AgentEvent>>>;
+  readonly captureAgentEventStore?: (store: Map<string, AgentEvent[]>) => void;
   readonly onSubscribeMany?: (subscriptions: ReadonlyArray<{ readonly topic: string; readonly stream?: string }>) => void;
   readonly onListJobs?: (limit?: number) => void;
   readonly onEnqueue?: (input: Record<string, unknown>) => QueueJob | Promise<QueueJob>;
@@ -390,6 +391,7 @@ const createRouteTestApp = (overrides?: {
   const agentEventStore = new Map<string, AgentEvent[]>(
     Object.entries(overrides?.agentEvents ?? {}).map(([streamKey, events]) => [streamKey, [...events]]),
   );
+  overrides?.captureAgentEventStore?.(agentEventStore);
   const receiptChain = (streamKey: string) => {
     const events = agentEventStore.get(streamKey) ?? [];
     let prev: string | undefined;
@@ -1979,6 +1981,71 @@ test("factory chat items: objective handoff runs render the durable handoff with
   expect(handoff && handoff.kind === "assistant" ? handoff.meta : "").toBe("Blocked handoff");
   expect(handoff && handoff.kind === "assistant" ? handoff.body : "").toContain("is blocked and handed back to Chat.");
   expect(handoff && handoff.kind === "assistant" ? handoff.body : "").toContain("Use `/react <guidance>` to continue the tracked objective.");
+});
+
+test("factory chat items: objective handoff runs prefer the finalized assistant interpretation when present", () => {
+  const runStream = "agents/factory/demo/runs/run_objective_handoff_interpreted";
+  let prev: string | undefined;
+  const push = (body: AgentEvent, index: number) => {
+    const next = receipt(runStream, prev, body, index);
+    prev = next.hash;
+    return next;
+  };
+  const chain = [
+    push({
+      type: "problem.set",
+      runId: "run_objective_handoff_interpreted",
+      problem: "Objective handoff for Investigate NAT gateway cost spike",
+      agentId: "orchestrator",
+    }, 1),
+    push({
+      type: "thread.bound",
+      runId: "run_objective_handoff_interpreted",
+      objectiveId: "objective_demo",
+      chatId: "chat_demo",
+      reason: "dispatch_update",
+    }, 2),
+    push({
+      type: "objective.handoff",
+      runId: "run_objective_handoff_interpreted",
+      objectiveId: "objective_demo",
+      title: "Investigate NAT gateway cost spike",
+      status: "blocked",
+      summary: "We proved it was a one-day NAT data-processing surge.",
+      blocker: "Historical NAT and flow-log records are missing, so attribution is still unresolved.",
+      nextAction: "Use /react with retained evidence or close with an inconclusive conclusion.",
+      handoffKey: "handoff_demo_interpreted",
+      sourceUpdatedAt: 1_710_000_000_000,
+    }, 3),
+    push({
+      type: "response.finalized",
+      runId: "run_objective_handoff_interpreted",
+      agentId: "orchestrator",
+      content: "The investigation established a one-day NAT data-processing surge, but attribution is still blocked because the historical flow-log evidence is gone.",
+    }, 4),
+    push({
+      type: "run.status",
+      runId: "run_objective_handoff_interpreted",
+      agentId: "orchestrator",
+      status: "completed",
+      note: "objective blocked handoff",
+    }, 5),
+  ];
+
+  const items = buildChatItemsForRun("run_objective_handoff_interpreted", chain, new Map(), {
+    conversation: [{
+      role: "assistant",
+      text: "The investigation established a one-day NAT data-processing surge, but attribution is still blocked because the historical flow-log evidence is gone.",
+      runId: "run_objective_handoff_interpreted",
+      ts: 4,
+      refs: [],
+    }],
+  });
+
+  const assistantItems = items.filter((item): item is Extract<typeof items[number], { kind: "assistant" }> => item.kind === "assistant");
+  expect(assistantItems).toHaveLength(1);
+  expect(assistantItems[0]?.body).toContain("attribution is still blocked");
+  expect(assistantItems[0]?.body).not.toContain("handed back to Chat.");
 });
 
 test("factory chat items: completed objective handoffs prioritize the investigation result over orchestration status", () => {
@@ -3877,8 +3944,51 @@ test("factory route: objective handoff is durable in the bound chat session", as
   const replayBody = await replayResponse.text();
 
   expect(replayResponse.status).toBe(200);
-  expect(replayBody).toContain("Blocked handoff");
   expect(replayBody).toContain("Investigate NAT gateway cost spike");
+  expect(replayBody).toContain("is blocked and handed back to Chat.");
+  expect(replayBody).toContain("What we know");
+});
+
+test("factory route: objective handoff writes an interpreted final response into the bound chat session", async () => {
+  const blockedObjective = {
+    ...makeRunningWorkbenchObjectiveDetail("objective_blocked"),
+    title: "Investigate NAT gateway cost spike",
+    status: "blocked",
+    phase: "blocked",
+    latestSummary: "We proved it was a NAT data-processing surge, but not which workload caused it.",
+    blockedReason: "Need retained historical NAT or flow-log evidence to attribute the spike.",
+    blockedExplanation: "Need retained historical NAT or flow-log evidence to attribute the spike.",
+    nextAction: "Use /react with more evidence, or ask Chat to summarize the current findings.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+
+  let agentEventStore: Map<string, AgentEvent[]> | undefined;
+  const app = createRouteTestApp({
+    captureAgentEventStore: (store) => {
+      agentEventStore = store;
+    },
+    service: {
+      listObjectives: async () => [
+        blockedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => blockedObjective,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_blocked&inspectorTab=chat");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("is blocked and handed back to Chat.");
+
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", "chat_demo");
+  const sessionEvents = agentEventStore?.get(sessionStream) ?? [];
+  const finalEvent = sessionEvents.find((event): event is Extract<AgentEvent, { type: "response.finalized" }> =>
+    event.type === "response.finalized"
+  );
+  expect(finalEvent?.content).toContain("Investigate NAT gateway cost spike is blocked and handed back to Chat.");
+  expect(finalEvent?.content).toContain("What we know: We proved it was a NAT data-processing surge");
 });
 
 test("factory route: session stream changes invalidate the cached workbench handoff", async () => {

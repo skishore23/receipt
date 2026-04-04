@@ -13,6 +13,7 @@ import type { CodexExecutorInput, CodexRunControl } from "../../src/adapters/cod
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
+import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
 import { runFactoryObjectiveAudit } from "../../src/services/factory-runtime";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
@@ -75,6 +76,7 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 
 const createFactoryService = async (opts?: {
   readonly taskMode?: "investigation" | "delivery";
+  readonly taskResult?: Record<string, unknown>;
   readonly alignment?: {
     readonly verdict: "aligned" | "uncertain" | "drifted";
     readonly satisfied?: ReadonlyArray<string>;
@@ -105,8 +107,8 @@ const createFactoryService = async (opts?: {
         await fs.writeFile(input.promptPath, input.prompt, "utf-8");
         await fs.writeFile(input.stdoutPath, "", "utf-8");
         await fs.writeFile(input.stderrPath, "", "utf-8");
-        const raw = opts?.taskMode === "delivery"
-          ? JSON.stringify({
+        const raw = JSON.stringify(opts?.taskResult ?? (opts?.taskMode === "delivery"
+          ? {
               outcome: "approved",
               summary: "Delivered the requested change and reported the alignment result.",
               handoff: "The delivery task completed with an explicit alignment report for the controller.",
@@ -125,8 +127,8 @@ const createFactoryService = async (opts?: {
                 rationale: opts?.alignment?.rationale ?? "The worker explicitly mapped the delivery result back to the objective contract.",
               },
               nextAction: null,
-            })
-          : JSON.stringify({
+            }
+          : {
               outcome: "approved",
               summary: "Investigated the receipt flow and recorded a focused handoff.",
               handoff: "Use the generated packet summary first, then inspect the timeline if you need finer evidence.",
@@ -143,7 +145,7 @@ const createFactoryService = async (opts?: {
                 disagreements: [],
                 nextSteps: [],
               },
-            });
+            }));
         await fs.writeFile(input.lastMessagePath, raw, "utf-8");
         return {
           exitCode: 0,
@@ -699,4 +701,91 @@ test("factory objective audit persists objective snapshots into dedicated audit 
     && entry.text.includes("Summary")
   )).toBe(true);
   expect(objectiveAuditMemory.some((entry) => entry.text.includes("alignment="))).toBe(true);
+}, 120_000);
+
+test("factory objective audit ignores late sidecar failures that happen after objective completion", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    taskResult: {
+      outcome: "approved",
+      summary: "Investigated the receipt flow with concrete evidence and a clean handoff.",
+      handoff: "Use the captured commands and evidence bundle for any follow-up.",
+      artifacts: [],
+      completion: {
+        status: "done",
+        outcome: "complete",
+        remainingWork: [],
+      },
+      report: {
+        conclusion: "The objective completed with direct evidence and validation signal.",
+        evidence: [{ kind: "command", summary: "git status --short stayed clean." }],
+        scriptsRun: [{ command: "git status --short", exitCode: 0 }],
+        disagreements: [],
+        nextSteps: [],
+      },
+    },
+  });
+  const created = await service.createObjective({
+    title: "Snapshot audit objective",
+    prompt: "Finish an investigation with enough evidence to score as a strong run.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const completed = await service.getObjective(created.objectiveId);
+  expect(completed.status).toBe("completed");
+
+  const lateJob = await queue.enqueue({
+    agentId: "codex",
+    lane: "collect",
+    payload: {
+      kind: "factory.task.monitor",
+      objectiveId: created.objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      stream: `factory/objectives/${created.objectiveId}`,
+    },
+    maxAttempts: 1,
+  });
+  expect(await queue.leaseJob(lateJob.id, "audit-test-worker", 60_000)).toBeTruthy();
+  await queue.fail(
+    lateJob.id,
+    "audit-test-worker",
+    "lease expired after completion",
+    true,
+    { summary: "lease expired after completion" },
+  );
+
+  const liveReport = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(liveReport.assessment.verdict).toBe("mixed");
+  expect(liveReport.jobs.some((entry) => entry.jobId === lateJob.id)).toBe(true);
+
+  const snapshotReport = await readFactoryReceiptInvestigation(
+    dataDir,
+    repoRoot,
+    created.objectiveId,
+    { asOfTs: completed.updatedAt },
+  );
+  expect(snapshotReport.assessment.verdict).toBe("strong");
+  expect(snapshotReport.jobs.some((entry) => entry.jobId === lateJob.id)).toBe(false);
+
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: completed.status,
+      objectiveUpdatedAt: completed.updatedAt,
+    },
+  }) as {
+    readonly verdict: string;
+  };
+  expect(result.verdict).toBe("strong");
 }, 120_000);

@@ -198,6 +198,7 @@ const FACTORY_TASK_CODEX_MODEL =
   || process.env.HUB_FACTORY_TASK_MODEL?.trim()
   || "gpt-5.4-mini";
 const MAX_CONSECUTIVE_TASK_FAILURES = 5;
+const USAGE_LIMIT_BLOCK_REASON_RE = /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
 const RETRYABLE_BLOCK_REASON_RE = /\b(factory task failed|lease expired|timed out|timeout|missing structured factory task result|transient|temporary|connection reset|econnreset|spawn|signal|unexpectedly canceled|interrupted)\b/i;
 const NON_RETRYABLE_BLOCK_REASON_RE = /\b(no tracked diff|isolated runtime|cannot run in isolated mode|policy blocked|circuit[- ]broken|integration validation failed)\b/i;
 const HUMAN_INPUT_BLOCK_REASON_RE = /\b(missing (?:dependency |implementation |product |design )?details?|need .*detail|need .*guidance|need .*clarification|choose|which (?:approach|option|api|path)|operator|human|approval|permission denied|access denied|unauthorized|credentials|auth(?:entication|orization)?|forbidden)\b/i;
@@ -2600,10 +2601,13 @@ export class FactoryServiceBase {
 
   private humanDecisionReasonForBlockedTask(state: FactoryState, task: FactoryTaskRecord): string {
     const reason = this.blockedTaskReason(state, task);
+    if (USAGE_LIMIT_BLOCK_REASON_RE.test(reason)) {
+      return `Autonomous execution blocked for ${task.taskId}: ${reason}`;
+    }
     if (HUMAN_INPUT_BLOCK_REASON_RE.test(reason)) {
       return `Human input requested for ${task.taskId}: ${reason}`;
     }
-    return `Human input requested for ${task.taskId} after autonomous recovery stopped: ${reason}`;
+    return `Autonomous recovery stopped for ${task.taskId}: ${reason}`;
   }
 
   private async maybeAutonomousNextStepForBlockedObjective(

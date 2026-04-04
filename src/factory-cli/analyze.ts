@@ -254,6 +254,23 @@ export type ObjectiveAnalysis = {
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
 };
 
+type ObjectiveAnalysisReadOptions = {
+  readonly asOfTs?: number;
+};
+
+const normalizedAsOfTs = (value: number | undefined): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const filterReceiptsAsOf = <T>(
+  chain: ReadonlyArray<Receipt<T>>,
+  asOfTs: number | undefined,
+): ReadonlyArray<Receipt<T>> => {
+  const cutoff = normalizedAsOfTs(asOfTs);
+  return typeof cutoff === "number"
+    ? chain.filter((receipt) => receipt.ts <= cutoff)
+    : chain;
+};
+
 export type AuditRecommendation = {
   readonly summary: string;
   readonly suggestedFix: string;
@@ -530,9 +547,13 @@ const buildCandidateAnalysis = (candidate: FactoryCandidateRecord): CandidateAna
   integratedAt: candidate.integratedAt,
 });
 
-const readJobAnalysis = async (dataDir: string, stream: string): Promise<JobAnalysis | undefined> => {
+const readJobAnalysis = async (
+  dataDir: string,
+  stream: string,
+  options: ObjectiveAnalysisReadOptions = {},
+): Promise<JobAnalysis | undefined> => {
   const store = jsonlStore<JobEvent>(dataDir);
-  const chain = await store.read(stream);
+  const chain = filterReceiptsAsOf(await store.read(stream), options.asOfTs);
   if (chain.length === 0) return undefined;
   const state = fold(chain, reduceJob, initialJob);
   const jobId = stream.replace(/^jobs\//, "");
@@ -603,6 +624,7 @@ const readRelatedJobs = async (
   dataDir: string,
   objectiveId: string,
   knownJobIds: ReadonlySet<string>,
+  options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ReadonlyArray<JobAnalysis>> => {
   const store = jsonlStore<JobEvent>(dataDir);
   const jobStreams = store.listStreams ? await store.listStreams("jobs/") : [];
@@ -628,7 +650,7 @@ const readRelatedJobs = async (
   }
   const analyses: JobAnalysis[] = [];
   for (const stream of [...related].sort((left, right) => left.localeCompare(right))) {
-    const analysis = await readJobAnalysis(dataDir, stream);
+    const analysis = await readJobAnalysis(dataDir, stream, options);
     if (analysis) analyses.push(analysis);
   }
   return analyses.sort((left, right) => left.createdAt - right.createdAt || left.jobId.localeCompare(right.jobId));
@@ -829,6 +851,7 @@ const buildAgentRunAnalysis = (
 const readRelatedAgentRuns = async (
   dataDir: string,
   objectiveId: string,
+  options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ReadonlyArray<AgentRunAnalysis>> => {
   const store = jsonlStore<AgentEvent>(dataDir);
   const streams = store.listStreams ? await store.listStreams("agents/") : [];
@@ -836,7 +859,7 @@ const readRelatedAgentRuns = async (
   const analyses: AgentRunAnalysis[] = [];
   if (runStreams.length > 0) {
     for (const stream of runStreams.sort((left, right) => left.localeCompare(right))) {
-      const chain = await store.read(stream);
+      const chain = filterReceiptsAsOf(await store.read(stream), options.asOfTs);
       const analysis = buildAgentRunAnalysis(stream, objectiveId, chain);
       if (analysis) analyses.push(analysis);
     }
@@ -845,7 +868,7 @@ const readRelatedAgentRuns = async (
 
   const aggregateStreams = streams.filter((stream) => stream.includes(`/objectives/${objectiveId}`));
   for (const stream of aggregateStreams.sort((left, right) => left.localeCompare(right))) {
-    const chain = await store.read(stream);
+    const chain = filterReceiptsAsOf(await store.read(stream), options.asOfTs);
     const runChains = new Map<string, Array<Receipt<AgentEvent>>>();
     for (const receipt of chain) {
       const runId = asString(receipt.body.runId);
@@ -877,9 +900,13 @@ const buildRecommendations = (_anomalies: ReadonlyArray<AnalysisAnomaly>): Reado
 export const readObjectiveAnalysis = async (
   dataDir: string,
   objectiveIdOrStream: string,
+  options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ObjectiveAnalysis> => {
   const { objectiveId, stream } = objectiveReplayStream(objectiveIdOrStream);
-  const objectiveChain = await jsonlStore<FactoryEvent>(dataDir).read(stream);
+  const objectiveChain = filterReceiptsAsOf(
+    await jsonlStore<FactoryEvent>(dataDir).read(stream),
+    options.asOfTs,
+  );
   if (objectiveChain.length === 0) {
     throw new Error(`No receipts found for ${stream}`);
   }
@@ -890,8 +917,8 @@ export const readObjectiveAnalysis = async (
   const tasks = projection.tasks.map(buildTaskAnalysis);
   const candidates = projection.candidates.map(buildCandidateAnalysis);
   const [jobs, agentRuns] = await Promise.all([
-    readRelatedJobs(dataDir, objectiveId, knownJobIds),
-    readRelatedAgentRuns(dataDir, objectiveId),
+    readRelatedJobs(dataDir, objectiveId, knownJobIds, options),
+    readRelatedAgentRuns(dataDir, objectiveId, options),
   ]);
 
   const taskStatusCounts = new Map<string, number>();

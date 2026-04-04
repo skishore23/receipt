@@ -316,10 +316,27 @@ export type FactoryParsedRun = {
   readonly taskRuns: ReadonlyArray<ParsedTaskRun>;
 };
 
+type ParseReadOptions = {
+  readonly asOfTs?: number;
+};
+
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+
+const normalizedAsOfTs = (value: number | undefined): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const filterReceiptsAsOf = <T>(
+  chain: ReadonlyArray<Receipt<T>>,
+  asOfTs: number | undefined,
+): ReadonlyArray<Receipt<T>> => {
+  const cutoff = normalizedAsOfTs(asOfTs);
+  return typeof cutoff === "number"
+    ? chain.filter((receipt) => receipt.ts <= cutoff)
+    : chain;
+};
 
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
@@ -751,9 +768,13 @@ const readAgentRun = async (
   stream: string,
   options: {
     readonly runId?: string;
+    readonly asOfTs?: number;
   } = {},
 ): Promise<ParsedAgentRun | undefined> => {
-  const streamChain = await jsonlStore<AgentEvent>(dataDir).read(stream);
+  const streamChain = filterReceiptsAsOf(
+    await jsonlStore<AgentEvent>(dataDir).read(stream),
+    options.asOfTs,
+  );
   const chain = options.runId
     ? streamChain.filter((receipt) => receipt.body.runId === options.runId)
     : streamChain;
@@ -1036,8 +1057,12 @@ const readJob = async (
   dataDir: string,
   repoRoot: string,
   stream: string,
+  options: ParseReadOptions = {},
 ): Promise<ParsedJob | undefined> => {
-  const chain = await jsonlStore<JobEvent>(dataDir).read(stream);
+  const chain = filterReceiptsAsOf(
+    await jsonlStore<JobEvent>(dataDir).read(stream),
+    options.asOfTs,
+  );
   if (chain.length === 0) return undefined;
   const state = fold(chain, reduceJob, initialJob);
   const jobId = stream.replace(/^jobs\//u, "");
@@ -1246,7 +1271,11 @@ const sortTimeline = (items: ReadonlyArray<ParseTimelineItem>): ReadonlyArray<Pa
     || left.source.localeCompare(right.source)
     || left.type.localeCompare(right.type));
 
-const loadObjectiveContext = async (dataDir: string, objectiveStream: string): Promise<{
+const loadObjectiveContext = async (
+  dataDir: string,
+  objectiveStream: string,
+  options: ParseReadOptions = {},
+): Promise<{
   readonly analysis: ObjectiveAnalysis;
   readonly prompt?: string;
   readonly checks: ReadonlyArray<string>;
@@ -1259,8 +1288,11 @@ const loadObjectiveContext = async (dataDir: string, objectiveStream: string): P
     readonly latestSummary?: string;
   }>;
 }> => {
-  const analysis = await readObjectiveAnalysis(dataDir, objectiveStream);
-  const chain = await jsonlStore<FactoryEvent>(dataDir).read(objectiveStream);
+  const analysis = await readObjectiveAnalysis(dataDir, objectiveStream, options);
+  const chain = filterReceiptsAsOf(
+    await jsonlStore<FactoryEvent>(dataDir).read(objectiveStream),
+    options.asOfTs,
+  );
   const state = fold(chain, reduceFactory, initialFactoryState);
   const projection = buildFactoryProjection(state);
   const latestTask = [...projection.tasks]
@@ -1330,17 +1362,18 @@ export const readFactoryParsedRun = async (
   dataDir: string,
   repoRoot: string,
   requestedId?: string,
+  options: ParseReadOptions = {},
 ): Promise<FactoryParsedRun> => {
   const resolved = await resolveParseTarget(dataDir, requestedId);
   const warnings = [...resolved.ambiguousMatches].map((stream) => `Additional match: ${stream}`);
 
   if (resolved.kind === "objective") {
-    const objectiveContext = await loadObjectiveContext(dataDir, resolved.stream);
+    const objectiveContext = await loadObjectiveContext(dataDir, resolved.stream, options);
     const relatedRuns = (await Promise.all(
-      objectiveContext.analysis.agentRuns.map((run) => readAgentRun(dataDir, run.stream)),
+      objectiveContext.analysis.agentRuns.map((run) => readAgentRun(dataDir, run.stream, { asOfTs: options.asOfTs })),
     )).filter((run): run is ParsedAgentRun => Boolean(run));
     const relatedJobs = (await Promise.all(
-      objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream)),
+      objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
     )).filter((job): job is ParsedJob => Boolean(job));
     const taskRuns = relatedJobs
       .map((job) => job.taskRun)
@@ -1412,16 +1445,16 @@ export const readFactoryParsedRun = async (
         readAgentRun(
           dataDir,
           await resolveRunStreamForChatRun(dataDir, resolved.stream, run.runId),
-          { runId: run.runId },
+          { runId: run.runId, asOfTs: options.asOfTs },
         )),
     )).filter((run): run is ParsedAgentRun => Boolean(run));
     const latestObjectiveId = chatReplay.latestObjectiveId ?? relatedRuns.map((run) => run.objectiveId).find(Boolean);
     const objectiveContext = latestObjectiveId
-      ? await loadObjectiveContext(dataDir, `factory/objectives/${latestObjectiveId}`).catch(() => undefined)
+      ? await loadObjectiveContext(dataDir, `factory/objectives/${latestObjectiveId}`, options).catch(() => undefined)
       : undefined;
     const relatedJobs = objectiveContext
       ? (await Promise.all(
-          objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream)),
+          objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
         )).filter((job): job is ParsedJob => Boolean(job))
       : [];
     const taskRuns = relatedJobs
@@ -1485,18 +1518,18 @@ export const readFactoryParsedRun = async (
   }
 
   if (resolved.kind === "run") {
-    const run = await readAgentRun(dataDir, resolved.stream);
+    const run = await readAgentRun(dataDir, resolved.stream, { asOfTs: options.asOfTs });
     if (!run) throw new Error(`No receipts found for ${resolved.stream}`);
     const chatStream = resolved.stream.replace(/\/runs\/[^/]+$/u, "");
     const chatReplay = chatStream.includes("/sessions/")
       ? await readChatReplay(dataDir, chatStream).catch(() => undefined)
       : undefined;
     const objectiveContext = run.objectiveId
-      ? await loadObjectiveContext(dataDir, `factory/objectives/${run.objectiveId}`).catch(() => undefined)
+      ? await loadObjectiveContext(dataDir, `factory/objectives/${run.objectiveId}`, options).catch(() => undefined)
       : undefined;
     const relatedJobs = objectiveContext
       ? (await Promise.all(
-          objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream)),
+          objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
         )).filter((job): job is ParsedJob => Boolean(job))
       : [];
     const taskRuns = relatedJobs
@@ -1559,7 +1592,7 @@ export const readFactoryParsedRun = async (
     };
   }
 
-  const job = await readJob(dataDir, repoRoot, resolved.stream);
+  const job = await readJob(dataDir, repoRoot, resolved.stream, options);
   if (!job) throw new Error(`No receipts found for ${resolved.stream}`);
   return {
     requestedId,

@@ -107,6 +107,10 @@ export type FactoryReceiptInvestigationRenderOptions = {
   readonly compact?: boolean;
 };
 
+type FactoryReceiptInvestigationReadOptions = {
+  readonly asOfTs?: number;
+};
+
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -606,8 +610,9 @@ export const readFactoryReceiptInvestigation = async (
   dataDir: string,
   repoRoot: string,
   requestedId?: string,
+  options: FactoryReceiptInvestigationReadOptions = {},
 ): Promise<FactoryReceiptInvestigation> => {
-  const parsed = await readFactoryParsedRun(dataDir, repoRoot, requestedId);
+  const parsed = await readFactoryParsedRun(dataDir, repoRoot, requestedId, options);
   const analysis = parsed.objectiveAnalysis;
   const focusTaskRun = selectFocusTaskRun(parsed);
   const packetContext = await summarizeContextPack(focusTaskRun);

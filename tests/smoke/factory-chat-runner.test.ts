@@ -709,7 +709,7 @@ test("factory chat runner: status.read tools expose codex logs, objective status
   expect(observations.find((event) => event.tool === "factory.output" && "output" in event)?.output ?? "").toContain('Streaming live output.');
 });
 
-test("factory chat runner: finalizer rewrites premature completion text while a live objective is still running", async () => {
+test("factory chat runner: default live objective policy preserves the operator response while a live objective is still running", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-objective-finalizer");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -776,6 +776,100 @@ test("factory chat runner: finalizer rewrites premature completion text while a 
   const result = await runFactoryChat({
     stream: "agents/factory/demo",
     runId: "run_objective_live_finalizer",
+    problem: "Monitor the live investigation.",
+    objectiveId,
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: service as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Everything is already complete and healthy.");
+  expect(result.finalResponse).not.toContain("Work is still running in this chat.");
+});
+
+test("factory chat runner: live objective waiting-message policy rewrites premature completion text", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-objective-waiting-message");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  const objectiveId = "objective_live_waiting_message";
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.output"],
+    finalWhileChildRunning: "waiting_message",
+  });
+
+  const actions = [
+    {
+      thought: "inspect the live objective output",
+      action: {
+        type: "tool",
+        name: "factory.output",
+        input: JSON.stringify({ objectiveId, taskId: "task_01" }),
+        text: null,
+      },
+    },
+    {
+      thought: "incorrectly claim success",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Everything is already complete and healthy.",
+      },
+    },
+  ];
+
+  const service = createFactoryServiceStub({
+    getObjective: async () => makeSupervisorObjectiveDetail({
+      objectiveId,
+      objectiveMode: "investigation",
+      latestSummary: "Live evidence collection is still running.",
+      tasks: [{
+        taskId: "task_01",
+        title: "Collect live AWS evidence",
+        prompt: "Collect live AWS evidence",
+        status: "running",
+        workerType: "infra",
+        dependsOn: [],
+        candidateId: "candidate_01",
+      }],
+    }),
+    getObjectiveLiveOutput: async () => ({
+      objectiveId,
+      focusKind: "task",
+      focusId: "task_01",
+      title: "Collect live AWS evidence",
+      status: "running",
+      active: true,
+      summary: "Streaming live output.",
+      stdoutTail: "aws helper is still collecting evidence",
+    }),
+  });
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_objective_live_waiting_message",
     problem: "Monitor the live investigation.",
     objectiveId,
     config: FACTORY_CHAT_DEFAULT_CONFIG,

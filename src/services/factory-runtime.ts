@@ -325,7 +325,12 @@ export const runFactoryObjectiveAudit = async (input: {
 }): Promise<Record<string, unknown>> => {
   const parsed = parseObjectiveAuditPayload(input.payload);
   const report = await withObjectiveAuditRetry(() =>
-    readFactoryReceiptInvestigation(input.dataDir, input.repoRoot, parsed.objectiveId)
+    readFactoryReceiptInvestigation(
+      input.dataDir,
+      input.repoRoot,
+      parsed.objectiveId,
+      { asOfTs: parsed.objectiveUpdatedAt },
+    )
   );
   const artifacts = objectiveAuditArtifactPaths(input.dataDir, parsed.objectiveId);
   await fs.mkdir(artifacts.root, { recursive: true });
