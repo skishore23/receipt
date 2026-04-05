@@ -520,7 +520,10 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
 
 const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecutor =>
   async (toolInput) => {
-    const targetProfileId = asString(toolInput.profileId);
+    const targetProfileId = asString(toolInput.profileId)
+      ?? asString(toolInput.target)
+      ?? asString(toolInput.to)
+      ?? asString(toolInput.profile);
     if (!targetProfileId) throw new Error("profile.handoff requires profileId");
     if (targetProfileId === input.profile.root.id) {
       throw new Error(`profile.handoff target must differ from the current profile '${input.profile.root.id}'`);

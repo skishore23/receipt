@@ -1758,6 +1758,81 @@ test("factory chat runner: profile.handoff finalizes the current run after queue
   expect(finalized && "content" in finalized ? finalized.content : "").toBe("Handing this over to infrastructure.");
 });
 
+test("factory chat runner: profile.handoff accepts common profile id aliases", async () => {
+  for (const [alias, runId] of [
+    ["target", "run_handoff_alias_target"],
+    ["to", "run_handoff_alias_to"],
+    ["profile", "run_handoff_alias_profile"],
+  ] as const) {
+    const dataDir = await createTempDir(`receipt-factory-chat-handoff-${alias}`);
+    const repoRoot = await createTempDir("receipt-factory-chat-repo");
+    const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+    const agentRuntime = createAgentRuntime(dataDir);
+    const jobRuntime = createJobRuntime(dataDir);
+    const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+    const memoryTools = createMemoryStub();
+    await writeProfile(profileRoot, {
+      id: "generalist",
+      label: "Generalist",
+      default: true,
+      toolAllowlist: ["profile.handoff"],
+      handoffTargets: ["infrastructure"],
+    });
+    await writeProfile(profileRoot, {
+      id: "infrastructure",
+      label: "Infrastructure",
+      toolAllowlist: ["jobs.list"],
+    });
+
+    const result = await runFactoryChat({
+      stream: "agents/factory/demo",
+      runId,
+      problem: `Hand this investigation to infrastructure using alias ${alias}.`,
+      config: FACTORY_CHAT_DEFAULT_CONFIG,
+      runtime: agentRuntime,
+      llmText: async () => "",
+      llmStructured: async ({ schema }) => {
+        const aliasInput: Record<string, string> = {
+          reason: "Infra owns the runtime path check.",
+          goal: "Verify the live server/session wiring.",
+          currentState: "No tracked work has started yet.",
+          doneWhen: "Infra is ready to report back with the exact path.",
+        };
+        aliasInput[alias] = "infrastructure";
+        return {
+          parsed: schema.parse({
+            thought: `handoff to infrastructure using ${alias}`,
+            action: {
+              type: "tool",
+              name: "profile.handoff",
+              input: JSON.stringify(aliasInput),
+              text: null,
+            },
+          }),
+          raw: "",
+        };
+      },
+      model: "test-model",
+      apiReady: true,
+      memoryTools,
+      delegationTools: createNoopDelegationTools(),
+      workspaceRoot: repoRoot,
+      queue,
+      factoryService: {} as never,
+      repoRoot,
+      profileRoot,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.finalResponse).toBe("Handing this over to infrastructure.");
+
+    const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", runId));
+    const handoffEvent = chain.find((receipt) => receipt.body.type === "profile.handoff")?.body;
+    expect(handoffEvent?.type).toBe("profile.handoff");
+    expect(handoffEvent && "toProfileId" in handoffEvent ? handoffEvent.toProfileId : undefined).toBe("infrastructure");
+  }
+});
+
 test("factory chat runner: profile.handoff requires a structured engineer handoff", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-handoff-required");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
