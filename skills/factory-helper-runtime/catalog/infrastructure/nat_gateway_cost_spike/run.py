@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -46,6 +48,51 @@ def normalize_field_name(token: str) -> str:
 def is_nat_usage_type(value: str) -> bool:
     text = value.lower()
     return "natgateway" in text or "nat gateway" in text or "nat-gateway" in text
+
+
+def read_flow_log_configuration() -> dict[str, str] | None:
+    destination_type = (os.environ.get("NAT_FLOW_LOGS_DESTINATION_TYPE") or "").strip().lower()
+    destination = (os.environ.get("NAT_FLOW_LOGS_DESTINATION") or "").strip()
+    role_arn = (os.environ.get("NAT_FLOW_LOGS_ROLE_ARN") or "").strip()
+    log_format = (os.environ.get("NAT_FLOW_LOGS_LOG_FORMAT") or "").strip()
+    if not destination_type or not destination or not role_arn:
+        return None
+    if destination_type not in {"cloud-watch-logs", "s3"}:
+        return None
+    return {
+        "destinationType": destination_type,
+        "destination": destination,
+        "roleArn": role_arn,
+        "logFormat": log_format
+        or "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${subnet-id} ${bytes} ${start} ${end} ${action} ${log-status}",
+    }
+
+
+def extract_access_denied_action(message: str) -> str | None:
+    patterns = [
+        r"not authorized to perform: ([a-z0-9:*.-]+)",
+        r"AccessDeniedException.*?([a-z0-9:*.-]+)",
+        r"User .*? is not authorized to perform: ([a-z0-9:*.-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_failed_api_call(message: str, default_call: str) -> str:
+    for candidate in [
+        "DescribeFlowLogs",
+        "CreateFlowLogs",
+        "DescribeNatGateways",
+        "DescribeNetworkInterfaces",
+        "GetMetricStatistics",
+        "StartQuery",
+    ]:
+        if candidate.lower() in message.lower():
+            return candidate
+    return default_call
 
 
 def build_region_scope(profile: str | None, args: argparse.Namespace) -> list[str]:
@@ -325,6 +372,82 @@ def list_network_interfaces(profile: str | None, region: str, vpc_id: str | None
     return interfaces, None
 
 
+def list_private_subnet_ids(profile: str | None, region: str, vpc_id: str | None) -> tuple[list[str], str | None]:
+    subnets, warning = list_subnets(profile, region, vpc_id)
+    subnet_ids = []
+    for subnet in subnets:
+        subnet_id = str(subnet.get("subnetId") or "").strip()
+        if subnet_id and not bool(subnet.get("mapPublicIpOnLaunch")):
+            subnet_ids.append(subnet_id)
+    return subnet_ids, warning
+
+
+def flow_log_resources(profile: str | None, region: str, resource_ids: list[str]) -> tuple[list[dict[str, Any]], str | None]:
+    if not resource_ids:
+        return [], None
+    try:
+        payload = aws_cli_json(
+            ["ec2", "describe-flow-logs", "--filter", f"Name=resource-id,Values={','.join(resource_ids)}"],
+            profile=profile,
+            region=region,
+        )
+    except AwsCliError as error:
+        return [], summarize_errors(error)
+    flow_logs: list[dict[str, Any]] = []
+    for item in payload.get("FlowLogs", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        flow_logs.append(
+            {
+                "flowLogId": item.get("FlowLogId"),
+                "resourceId": item.get("ResourceId"),
+                "resourceType": item.get("ResourceType"),
+                "trafficType": item.get("TrafficType"),
+                "logDestinationType": item.get("LogDestinationType"),
+                "logGroupName": item.get("LogGroupName"),
+                "deliverLogsStatus": item.get("DeliverLogsStatus"),
+                "logFormat": str(item.get("LogFormat", "")).strip(),
+            }
+        )
+    return flow_logs, None
+
+
+def create_flow_logs(
+    profile: str | None,
+    region: str,
+    resource_type: str,
+    resource_ids: list[str],
+    config: dict[str, str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not resource_ids:
+        return None, None
+    command = [
+        "ec2",
+        "create-flow-logs",
+        "--resource-type",
+        resource_type,
+        "--resource-ids",
+        ",".join(resource_ids),
+        "--traffic-type",
+        "ALL",
+        "--deliver-logs-permission-arn",
+        config["roleArn"],
+        "--log-destination-type",
+        config["destinationType"],
+        "--log-format",
+        config["logFormat"],
+    ]
+    if config["destinationType"] == "cloud-watch-logs":
+        command.extend(["--log-group-name", config["destination"]])
+    else:
+        command.extend(["--log-destination", config["destination"]])
+    try:
+        payload = aws_cli_json(command, profile=profile, region=region)
+    except AwsCliError as error:
+        return None, summarize_errors(error)
+    return payload if isinstance(payload, dict) else {}, None
+
+
 def build_flow_log_query(log_format: str) -> str | None:
     fields = [normalize_field_name(token) for token in log_format.split() if token.strip()]
     if not fields or "bytes" not in fields:
@@ -451,6 +574,54 @@ def query_flow_logs(profile: str | None, region: str, vpc_id: str, candidate_sub
     return queried, warnings
 
 
+def recent_change_summary(profile: str | None, region: str, vpc_id: str, subnet_ids: list[str]) -> tuple[list[dict[str, Any]], str | None]:
+    resource_names = [vpc_id, *subnet_ids[:5]]
+    event_names = [
+        "CreateRoute",
+        "ReplaceRoute",
+        "DeleteRoute",
+        "AssociateRouteTable",
+        "DisassociateRouteTable",
+        "ModifySubnetAttribute",
+        "ModifyNetworkInterfaceAttribute",
+        "CreateNatGateway",
+        "DeleteNatGateway",
+        "RunInstances",
+    ]
+    events: list[dict[str, Any]] = []
+    for resource_name in resource_names:
+        try:
+            payload = aws_cli_json(
+                [
+                    "cloudtrail",
+                    "lookup-events",
+                    "--lookup-attributes",
+                    f"AttributeKey=ResourceName,AttributeValue={resource_name}",
+                    "--max-results",
+                    "10",
+                ],
+                profile=profile,
+                region=region,
+            )
+        except AwsCliError as error:
+            return [], summarize_errors(error)
+        for item in payload.get("Events", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            event_name = str(item.get("EventName", "")).strip()
+            if event_name not in event_names:
+                continue
+            events.append(
+                {
+                    "resourceName": resource_name,
+                    "eventName": event_name,
+                    "eventTime": item.get("EventTime"),
+                    "username": item.get("Username"),
+                }
+            )
+    return events, None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Investigate NAT Gateway cost spikes")
     parser.add_argument("--profile")
@@ -535,6 +706,9 @@ def main() -> int:
 
     nat_gateway_metrics: list[dict[str, Any]] = []
     nat_gateway_candidates: list[dict[str, Any]] = []
+    flow_log_preflight: list[dict[str, Any]] = []
+    permission_gap: dict[str, Any] | None = None
+    flow_log_config = read_flow_log_configuration()
     for nat in nat_gateways:
         metric_data, metric_warnings = query_nat_metrics(args.profile, nat, start, end)
         warnings.extend(metric_warnings)
@@ -561,6 +735,61 @@ def main() -> int:
         vpc_id = str(driver.get("vpcId") or "").strip()
         if not region or not vpc_id:
             continue
+        subnet_ids, subnet_warning = list_private_subnet_ids(args.profile, region, vpc_id)
+        if subnet_warning:
+            warnings.append(f"{region}/{vpc_id}: {subnet_warning}")
+        resource_ids = [vpc_id, *subnet_ids]
+        existing_flow_logs, flow_warning = flow_log_resources(args.profile, region, resource_ids)
+        if flow_warning:
+            warnings.append(f"{region}/{vpc_id}: describe-flow-logs: {flow_warning}")
+        if not existing_flow_logs and flow_log_config:
+            created: list[dict[str, Any]] = []
+            create_error: str | None = None
+            for resource_type, ids in [("VPC", [vpc_id]), ("Subnet", subnet_ids)]:
+                if not ids:
+                    continue
+                created_payload, create_warning = create_flow_logs(args.profile, region, resource_type, ids, flow_log_config)
+                created.append({"resourceType": resource_type, "resourceIds": ids, "response": created_payload})
+                if create_warning:
+                    create_error = create_warning
+                    warnings.append(f"{region}/{vpc_id}: create-flow-logs {resource_type}: {create_warning}")
+                    continue
+            flow_log_preflight.append(
+                {
+                    "region": region,
+                    "vpcId": vpc_id,
+                    "privateSubnetIds": subnet_ids,
+                    "existingFlowLogs": existing_flow_logs,
+                    "createAttempts": created,
+                    "configuration": {
+                        "destinationType": flow_log_config["destinationType"],
+                        "destination": flow_log_config["destination"],
+                    },
+                    "createError": create_error,
+                }
+            )
+            if create_error:
+                action = extract_access_denied_action(create_error)
+                if action and permission_gap is None:
+                    permission_gap = {
+                        "region": region,
+                        "vpcId": vpc_id,
+                        "missingPermission": action,
+                        "failedCall": extract_failed_api_call(create_error, "ec2 create-flow-logs"),
+                        "reason": "Flow Logs enablement was denied.",
+                    }
+        elif not existing_flow_logs:
+            flow_log_preflight.append(
+                {
+                    "region": region,
+                    "vpcId": vpc_id,
+                    "privateSubnetIds": subnet_ids,
+                    "existingFlowLogs": [],
+                    "createAttempts": [],
+                    "configuration": None,
+                    "createError": "No flow log destination configured.",
+                }
+            )
         subnets, subnet_warning = list_subnets(args.profile, region, vpc_id)
         if subnet_warning:
             warnings.append(f"{region}/{vpc_id}: {subnet_warning}")
@@ -573,6 +802,20 @@ def main() -> int:
         warnings.extend(flow_warnings)
         if queried:
             flow_log_evidence.append({"region": region, "vpcId": vpc_id, "subnets": subnets, "networkInterfaces": interfaces, "flowLogs": queried})
+        elif not existing_flow_logs:
+            change_events, change_warning = recent_change_summary(args.profile, region, vpc_id, subnet_ids)
+            if change_warning:
+                warnings.append(f"{region}/{vpc_id}: cloudtrail lookup-events: {change_warning}")
+            flow_log_evidence.append(
+                {
+                    "region": region,
+                    "vpcId": vpc_id,
+                    "subnets": subnets,
+                    "networkInterfaces": interfaces,
+                    "flowLogs": [],
+                    "recentChanges": change_events,
+                }
+            )
 
     top_flow_log_rows: list[dict[str, Any]] = []
     for item in flow_log_evidence:
@@ -615,10 +858,14 @@ def main() -> int:
         "natGateways": nat_gateways,
         "natGatewayMetrics": nat_gateway_metrics,
         "topDrivers": top_nat_gateways,
+        "flowLogPreflight": flow_log_preflight,
         "flowLogs": flow_log_evidence,
         "topFlowLogRows": top_flow_log_rows[:20],
+        "needsHumanAction": [],
         "warnings": warnings,
     }
+    if permission_gap and not nat_gateway_metrics and not top_flow_log_rows:
+        summary_data["needsHumanAction"] = [permission_gap]
 
     artifact = write_json_artifact(args.output_dir, "nat_gateway_cost_spike.json", summary_data, label="NAT Gateway cost spike investigation")
     if artifact:
@@ -643,7 +890,9 @@ def main() -> int:
     else:
         summary_bits.append("No matching CloudWatch VPC Flow Logs were found for the top NAT gateway VPCs and subnets.")
     summary = " ".join(summary_bits) if summary_bits else "NAT Gateway investigation completed, but the AWS evidence did not isolate a dominant driver."
-    status = "warning" if warnings or not top_nat_gateways else "ok"
+    if summary_data["needsHumanAction"]:
+        summary_bits.append("VPC Flow Logs were unavailable, creation was denied, and NAT Gateway fallback attribution was used.")
+    status = "warning" if warnings or not top_nat_gateways or summary_data["needsHumanAction"] else "ok"
 
     emit_result(build_result(status, summary, summary_data, artifacts=artifacts, errors=warnings))
     return 0
