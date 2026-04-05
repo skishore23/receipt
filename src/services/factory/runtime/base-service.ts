@@ -112,6 +112,7 @@ import { inferObjectiveLiveOutputFocusFromDetail } from "../live-output";
 import {
   processObjectiveReconcileControl,
   processObjectiveStartupControl,
+  isObjectiveCanceled,
 } from "../objective-control";
 import {
   buildIntegrationFilePaths,
@@ -2310,6 +2311,7 @@ export class FactoryServiceBase {
   private controlJobCancelReason(state: FactoryState | undefined): string | undefined {
     if (!state) return "objective control job canceled because the objective no longer exists";
     if (state.archivedAt) return "objective control job canceled because the objective is archived";
+    if (isObjectiveCanceled(state)) return "objective control job canceled because the objective was canceled";
     if (state.status === "blocked") return "objective control job canceled because the objective is blocked";
     if (this.isTerminalObjectiveStatus(state.status)) {
       return `objective control job canceled because the objective is ${state.status}`;
@@ -2750,6 +2752,8 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const state = await this.getObjectiveState(objectiveId);
+    if (isObjectiveCanceled(state)) return;
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
@@ -3176,6 +3180,7 @@ export class FactoryServiceBase {
     effect: Extract<FactoryPlannerEffect, { readonly type: "task.dispatch" }>,
     selection?: { readonly actionId: string; readonly reason: string },
   ): Promise<"applied" | "reconcile_scheduled"> {
+    if (isObjectiveCanceled(state)) return "applied";
     const task = state.workflow.tasksById[effect.taskId];
     if (!task) return "applied";
     const basedOn = await this.currentHeadHash(state.objectiveId);
@@ -3194,6 +3199,7 @@ export class FactoryServiceBase {
       return "applied";
     } catch (err) {
       if (err instanceof FactoryStaleObjectiveError) return "applied";
+      if (isObjectiveCanceled(await this.getObjectiveState(state.objectiveId))) return "applied";
       if (await this.scheduleTransientObjectiveReconcile(state, {
         operation: `dispatch ${task.taskId}`,
         selectedActionId: selection?.actionId ?? `retry_dispatch_${task.taskId}`,
@@ -3212,6 +3218,7 @@ export class FactoryServiceBase {
   ): Promise<"applied" | "retried" | "asked_human" | "reconcile_scheduled"> {
     switch (effect.type) {
       case "integration.queue": {
+        if (isObjectiveCanceled(state)) return "applied";
         const basedOn = await this.currentHeadHash(state.objectiveId);
         try {
           await this.queueIntegration(state, effect.candidateId, {
@@ -3239,6 +3246,7 @@ export class FactoryServiceBase {
         return "applied";
       }
       case "integration.ready_to_promote":
+        if (isObjectiveCanceled(state)) return "applied";
         await this.emitObjective(state.objectiveId, {
           type: "integration.ready_to_promote",
           objectiveId: state.objectiveId,
@@ -3249,6 +3257,7 @@ export class FactoryServiceBase {
         });
         return "applied";
       case "integration.promote": {
+        if (isObjectiveCanceled(state)) return "applied";
         const basedOn = await this.currentHeadHash(state.objectiveId);
         try {
           await this.promoteIntegration(state, effect.candidateId, {
@@ -3264,6 +3273,7 @@ export class FactoryServiceBase {
           });
         } catch (err) {
           if (err instanceof FactoryStaleObjectiveError) return "applied";
+          if (isObjectiveCanceled(await this.getObjectiveState(state.objectiveId))) return "applied";
           if (await this.scheduleTransientObjectiveReconcile(state, {
             operation: `promote integration ${effect.candidateId}`,
             selectedActionId: selection?.actionId ?? `retry_promote_integration_${effect.candidateId}`,
@@ -4370,6 +4380,7 @@ export class FactoryServiceBase {
     },
   ): Promise<void> {
     state = await this.getObjectiveStateAtHead(state.objectiveId, opts?.expectedPrev);
+    if (isObjectiveCanceled(state)) return;
     task = state.workflow.tasksById[task.taskId] ?? task;
     const profile = this.objectiveProfileForState(state);
     const workerType = this.normalizeProfileWorkerType(profile, String(task.workerType));
@@ -4424,6 +4435,8 @@ export class FactoryServiceBase {
       })()
       : undefined;
     const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, pinnedBaseCommit);
+    const refreshed = await this.getObjectiveState(state.objectiveId);
+    if (isObjectiveCanceled(refreshed)) return;
     const jobId = `job_factory_${state.objectiveId}_${task.taskId}_${candidateId}`;
     await this.emitObjectiveBatch(state.objectiveId, [
       ...(opts?.prefixEvents ?? []),
@@ -4523,6 +4536,7 @@ export class FactoryServiceBase {
       readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
     },
   ): Promise<void> {
+    if (isObjectiveCanceled(state)) return;
     const candidate = state.candidates[candidateId];
     if (state.integration.queuedCandidateIds.includes(candidateId) || state.integration.activeCandidateId === candidateId) {
       // console.log(`[DEBUG queueIntegration] SKIPPING candidateId: ${candidateId} as it is already queued or active.`);

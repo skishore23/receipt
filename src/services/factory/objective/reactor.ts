@@ -7,6 +7,7 @@ import type {
   FactoryObjectivePlannerFacts,
   FactoryPlannerEffect,
 } from "../effects";
+import { isObjectiveCanceled } from "../objective-control";
 import { planObjectiveReact } from "../planner";
 import {
   selectFactoryRebracketEffect,
@@ -54,7 +55,7 @@ export const reactFactoryObjective = async (
   const refreshState = () => ops.getObjectiveState(objectiveId);
   let state = await refreshState();
 
-  if (ops.isTerminalObjectiveStatus(state.status)) {
+  if (ops.isTerminalObjectiveStatus(state.status) || isObjectiveCanceled(state)) {
     await ops.rebalanceObjectiveSlots();
     return;
   }
@@ -63,7 +64,7 @@ export const reactFactoryObjective = async (
   await ops.syncFailedActiveTasks(state);
   await ops.redriveQueuedActiveTasks(state);
   state = await refreshState();
-  if (ops.isTerminalObjectiveStatus(state.status)) {
+  if (ops.isTerminalObjectiveStatus(state.status) || isObjectiveCanceled(state)) {
     await ops.rebalanceObjectiveSlots();
     return;
   }
@@ -82,11 +83,11 @@ export const reactFactoryObjective = async (
   while (plannerPasses < 64) {
     plannerPasses += 1;
     state = await refreshState();
-    if (ops.isTerminalObjectiveStatus(state.status) || state.scheduler.slotState === "queued") break;
+    if (ops.isTerminalObjectiveStatus(state.status) || isObjectiveCanceled(state) || state.scheduler.slotState === "queued") break;
 
     if (await ops.syncInvestigationSynthesisIfReady(state)) continue;
     state = await refreshState();
-    if (ops.isTerminalObjectiveStatus(state.status) || state.scheduler.slotState === "queued") break;
+    if (ops.isTerminalObjectiveStatus(state.status) || isObjectiveCanceled(state) || state.scheduler.slotState === "queued") break;
 
     const facts = await ops.collectObjectivePlannerFacts(state);
     const effects = planObjectiveReact({

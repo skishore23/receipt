@@ -7,13 +7,16 @@ export type FactoryObjectiveControlHooks = {
   readonly reactObjective: (objectiveId: string) => Promise<unknown>;
 };
 
+export const isObjectiveCanceled = (state: Pick<FactoryState, "status"> | undefined): boolean =>
+  state?.status === "canceled";
+
 const continueActiveObjective = async (
   hooks: FactoryObjectiveControlHooks,
   objectiveId: string,
 ): Promise<void> => {
   await hooks.rebalanceObjectiveSlots();
   const state = await hooks.getObjectiveState(objectiveId);
-  if (hooks.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
+  if (hooks.isTerminalObjectiveStatus(state.status) || state.status === "blocked" || isObjectiveCanceled(state)) {
     await hooks.rebalanceObjectiveSlots();
     return;
   }
