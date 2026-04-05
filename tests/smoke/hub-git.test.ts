@@ -80,6 +80,32 @@ test("hub git mirrors source publish remotes into factory worktrees", async () =
   await expect(git(workspace.path, ["remote", "get-url", "source"])).resolves.toBe(configuredRepoRoot);
 });
 
+test("hub git creates missing worktree parents before checkout", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-missing-parent-source");
+  const dataDir = await mkTmp("receipt-hub-git-missing-parent-data");
+  const worktreesRoot = path.join(dataDir, "custom", "nested", "worktrees");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git missing parent test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const hub = new HubGit({ dataDir, repoRoot, worktreesRoot });
+  await hub.ensureReady();
+
+  const workspace = await hub.createWorkspace({
+    workspaceId: "missing-parent",
+    agentId: "codex",
+  });
+
+  await expect(fs.stat(path.dirname(workspace.path)).then((stat) => stat.isDirectory())).resolves.toBe(true);
+  await expect(fs.stat(workspace.path).then((stat) => stat.isDirectory())).resolves.toBe(true);
+  await expect(git(workspace.path, ["rev-parse", "--abbrev-ref", "HEAD"])).resolves.toBe(workspace.branchName);
+});
+
 test("hub git reaps a stale remote config lock during bootstrap", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-stale-lock-source");
   const dataDir = await mkTmp("receipt-hub-git-stale-lock-data");
