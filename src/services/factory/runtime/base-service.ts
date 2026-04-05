@@ -94,6 +94,7 @@ import {
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
+  repairTaskResultSections,
   renderDeliveryResultText,
   renderInvestigationReportText,
 } from "../result-contracts";
@@ -4009,20 +4010,36 @@ export class FactoryServiceBase {
       rawResult.alignment,
       this.defaultDeliveryAlignment(state, deliveryCompletion),
     );
+    const repairedDelivery = repairTaskResultSections({
+      outcome,
+      summary: effectiveSummary,
+      handoff,
+      artifacts: workerArtifacts,
+      scriptsRun,
+      completion: deliveryCompletion,
+      alignment: deliveryAlignment,
+      signals: [
+        ...checkResults.map((check) => `${check.command} exited ${String(check.exitCode ?? "unknown")}`),
+        ...artifactIssues.map((issue) => issue.summary),
+      ],
+    });
+    const effectiveDeliveryCompletion = repairedDelivery.completion;
+    const effectiveDeliveryAlignment = repairedDelivery.alignment;
+    const effectiveScriptsRun = repairedDelivery.scriptsRun;
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
-        completion: deliveryCompletion,
-        scriptsRun,
+        completion: effectiveDeliveryCompletion,
+        scriptsRun: effectiveScriptsRun,
         nextAction,
         failedCheck,
       });
-    const effectiveDeliveryCompletion = controllerResolvedPartial
+    const controllerAdjustedCompletion = controllerResolvedPartial
       ? {
-          ...deliveryCompletion,
-          proof: [...new Set([...deliveryCompletion.proof, "Controller reran the configured checks successfully."])],
+          ...effectiveDeliveryCompletion,
+          proof: [...new Set([...effectiveDeliveryCompletion.proof, "Controller reran the configured checks successfully."])],
           remaining: [],
         } satisfies FactoryTaskCompletionRecord
-      : deliveryCompletion;
+      : effectiveDeliveryCompletion;
     const controllerResolvedPartialSummary = controllerResolvedPartial
       ? `${effectiveSummary} Controller verification cleared the partial delivery handoff after rerunning the configured checks.`
       : effectiveSummary;
@@ -4123,10 +4140,10 @@ export class FactoryServiceBase {
         headCommit: committed?.hash ?? payload.baseCommit,
         summary: candidateSummary,
         handoff: candidateHandoff,
-        completion: effectiveDeliveryCompletion,
-        alignment: deliveryAlignment,
+        completion: controllerAdjustedCompletion,
+        alignment: effectiveDeliveryAlignment,
         checkResults,
-        scriptsRun,
+        scriptsRun: effectiveScriptsRun,
         artifactRefs: resultRefs,
         tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
         producedAt: completedAt,
@@ -4146,15 +4163,15 @@ export class FactoryServiceBase {
       state,
       task,
       payload.candidateId,
-      renderDeliveryResultText({
-        summary: reviewSummary,
-        handoff: reviewHandoff,
-        scriptsRun,
-        completion: effectiveDeliveryCompletion,
-        alignment: deliveryAlignment,
-      }),
-      reviewStatus,
-    );
+        renderDeliveryResultText({
+          summary: reviewSummary,
+          handoff: reviewHandoff,
+          scriptsRun: effectiveScriptsRun,
+          completion: controllerAdjustedCompletion,
+          alignment: effectiveDeliveryAlignment,
+        }),
+        reviewStatus,
+      );
   }
 
   async runIntegrationValidation(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
