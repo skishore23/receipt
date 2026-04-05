@@ -12,6 +12,8 @@ import { buildFactoryFailureSignature, priorFactoryFailureSignatureMap } from ".
 
 const execFileAsync = promisify(execFile);
 const CHECK_TIMEOUT_MS = 60 * 60 * 1000;
+const VALIDATION_EVIDENCE_FILENAME = "validation_evidence.json";
+const OUTPUT_TRUNCATION_CHARS = 1600;
 
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
@@ -40,6 +42,44 @@ const runtimeBunPathEntries = (): ReadonlyArray<string> => {
 const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
   const relative = path.relative(rootPath, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+};
+
+const truncateText = (value: string, max = OUTPUT_TRUNCATION_CHARS): string =>
+  value.length > max ? `${value.slice(0, max - 1)}...` : value;
+
+const parseAssertions = (result: FactoryCheckResult): ReadonlyArray<string> => {
+  const assertions = [
+    result.ok ? "check passed" : "check failed",
+    `exit code ${result.exitCode}`,
+    result.stdout.trim() ? "stdout captured" : "stdout empty",
+    result.stderr.trim() ? "stderr captured" : "stderr empty",
+  ];
+  return assertions;
+};
+
+const validationEvidencePath = (workspacePath: string): string =>
+  path.join(workspacePath, ".receipt", "factory", VALIDATION_EVIDENCE_FILENAME);
+
+const writeValidationEvidence = async (input: {
+  readonly workspacePath: string;
+  readonly results: ReadonlyArray<FactoryCheckResult>;
+}): Promise<void> => {
+  const evidence = {
+    generatedAt: Date.now(),
+    artifact: validationEvidencePath(input.workspacePath),
+    results: input.results.map((result) => ({
+      command: result.command,
+      exitCode: result.exitCode,
+      ok: result.ok,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      stdout: truncateText(result.stdout.trim()),
+      stderr: truncateText(result.stderr.trim()),
+      assertions: parseAssertions(result),
+    })),
+  };
+  await fs.mkdir(path.dirname(evidence.artifact), { recursive: true });
+  await fs.writeFile(evidence.artifact, JSON.stringify(evidence, null, 2), "utf-8");
 };
 
 type FactoryWorkspaceGit = Pick<HubGit, "repoRoot" | "worktreesDir" | "worktreeStatus" | "restoreWorkspace" | "removeWorkspace">;
@@ -213,6 +253,7 @@ export const runFactoryChecks = async (input: {
       clearTimeout(timer);
     }
   }
+  await writeValidationEvidence({ workspacePath: input.workspacePath, results });
   return results;
 };
 
