@@ -38,6 +38,17 @@ export type JobWorkerOptions = {
   readonly concurrency?: number;
   readonly onTick?: () => void;
   readonly onError?: (error: Error) => void;
+  readonly onLeaseRenewFailed?: (event: LeaseRenewFailedEvent) => void;
+};
+
+export type LeaseRenewFailedEvent = {
+  readonly type: "lease_renew_failed";
+  readonly jobId: string;
+  readonly workerId: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+  readonly error: string;
 };
 
 type ActiveLeaseState = {
@@ -45,7 +56,85 @@ type ActiveLeaseState = {
   readonly startedAt: number;
   nextHeartbeatAt: number;
   process?: JobLeaseProcessRegistration;
+  renewer?: LeaseManager;
 };
+
+class LeaseManager {
+  private readonly leaseMs: number;
+  private readonly renewEveryMs: number;
+  private readonly maxAttempts: number;
+  private readonly renew: (attempt: number) => Promise<void>;
+  private readonly onFailed?: (event: LeaseRenewFailedEvent) => void;
+  private running = false;
+  private timer?: ReturnType<typeof setTimeout>;
+
+  constructor(opts: {
+    readonly leaseMs: number;
+    readonly renew: (attempt: number) => Promise<void>;
+    readonly onFailed?: (event: LeaseRenewFailedEvent) => void;
+  }) {
+    this.leaseMs = Math.max(1_000, opts.leaseMs);
+    this.renewEveryMs = Math.max(1_000, Math.floor(this.leaseMs / 3));
+    this.maxAttempts = 3;
+    this.renew = opts.renew;
+    this.onFailed = opts.onFailed;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    void this.loop();
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      this.timer = setTimeout(resolve, ms);
+    });
+  }
+
+  private nextDelay(attempt: number): number {
+    const base = Math.min(this.renewEveryMs, 250 * (2 ** (attempt - 1)));
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base / 2)));
+    return Math.max(100, base + jitter);
+  }
+
+  private async renewOnce(): Promise<void> {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      try {
+        await this.renew(attempt);
+        return;
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        const delayMs = this.nextDelay(attempt);
+        this.onFailed?.({
+          type: "lease_renew_failed",
+          jobId: "",
+          workerId: "",
+          attempt,
+          maxAttempts: this.maxAttempts,
+          delayMs,
+          error,
+        });
+        if (attempt >= this.maxAttempts) throw err;
+        await this.delay(delayMs);
+      }
+    }
+  }
+
+  private async loop(): Promise<void> {
+    while (this.running) {
+      await this.delay(this.renewEveryMs);
+      if (!this.running) break;
+      await this.renewOnce();
+    }
+  }
+}
 
 export class JobWorker {
   private readonly queue: JsonlQueue;
@@ -60,6 +149,7 @@ export class JobWorker {
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
+  private readonly onLeaseRenewFailed?: (event: LeaseRenewFailedEvent) => void;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeLeases = new Map<string, ActiveLeaseState>();
   private running = false;
@@ -79,6 +169,7 @@ export class JobWorker {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
     this.onError = opts.onError;
+    this.onLeaseRenewFailed = opts.onLeaseRenewFailed;
   }
 
   private reportError(err: unknown): void {
@@ -141,6 +232,8 @@ export class JobWorker {
   }
 
   private clearActiveLease(jobId: string): void {
+    const state = this.activeLeases.get(jobId);
+    state?.renewer?.stop();
     this.activeLeases.delete(jobId);
   }
 
@@ -179,6 +272,25 @@ export class JobWorker {
         state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
       }
     }
+  }
+
+  private startLeaseManager(state: ActiveLeaseState): void {
+    state.renewer?.stop();
+    state.renewer = new LeaseManager({
+      leaseMs: this.leaseMs,
+      renew: async () => {
+        await this.heartbeatLease(state);
+      },
+      onFailed: (event) => {
+        this.onLeaseRenewFailed?.({
+          ...event,
+          jobId: state.jobId,
+          workerId: this.workerId,
+        });
+        this.reportError(new Error(`lease renewal failed for job ${state.jobId}: ${event.error}`));
+      },
+    });
+    state.renewer.start();
   }
 
   private async waitForQueueAdvance(sinceVersion: number): Promise<ReturnType<JsonlQueue["snapshot"]>> {
@@ -270,6 +382,7 @@ export class JobWorker {
     const activeLease = this.registerActiveLease(job.id);
     await this.heartbeatLease(activeLease);
     if (!this.activeLeases.has(job.id)) return;
+    this.startLeaseManager(activeLease);
 
     const handler = this.handlers[job.agentId];
     if (!handler) {
