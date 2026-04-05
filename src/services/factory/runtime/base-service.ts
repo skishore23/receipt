@@ -3574,6 +3574,7 @@ export class FactoryServiceBase {
             taskId: effect.taskId,
             candidateId: effect.candidateId,
             summary: effect.summary,
+            completionReason: "NO_CHANGES_REQUIRED",
             completedAt: effect.completedAt,
           }];
         default:

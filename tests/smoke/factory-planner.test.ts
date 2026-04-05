@@ -83,6 +83,73 @@ test("factory planner: approved clean delivery emits an explicit noop completion
   ]);
 });
 
+test("factory planner: clean validation failure stays on the normal review path", () => {
+  const effects = planTaskResult({
+    taskId: "task_01",
+    candidateId: "task_01_candidate_01",
+    outcome: "approved",
+    workspaceDirty: false,
+    hasFailedCheck: true,
+    candidate: {
+      headCommit: "abc1234",
+      summary: "Validation failed.",
+      handoff: "The check failed.",
+      completion: {
+        changed: [],
+        proof: ["validation failed"],
+        remaining: ["Fix the failing check."],
+      },
+      checkResults: [],
+      artifactRefs: {},
+      producedAt: 8,
+    },
+    review: {
+      status: "changes_requested",
+      summary: "Validation failed.",
+      handoff: "The check failed.",
+      reviewedAt: 8,
+    },
+  });
+
+  expect(effects.map((effect) => effect.type)).toEqual([
+    "candidate.produce",
+    "task.review.request",
+    "candidate.review",
+  ]);
+});
+
+test("factory planner: clean validation pass without changes still terminates as noop completion", () => {
+  const effects = planTaskResult({
+    taskId: "task_01",
+    candidateId: "task_01_candidate_01",
+    outcome: "approved",
+    workspaceDirty: false,
+    hasFailedCheck: false,
+    candidate: {
+      headCommit: "abc1234",
+      summary: "Nothing to change.",
+      handoff: "No repository diff was needed.",
+      completion: {
+        changed: ["Existing implementation already satisfied the objective."],
+        proof: ["validation passed"],
+        remaining: [],
+        completionReason: "NO_CHANGES_REQUIRED",
+      },
+      checkResults: [],
+      artifactRefs: {},
+      producedAt: 12,
+    },
+    review: {
+      status: "approved",
+      summary: "Nothing to change.",
+      handoff: "No repository diff was needed.",
+      reviewedAt: 12,
+    },
+  });
+
+  expect(effects.map((effect) => effect.type)).toContain("task.noop_complete");
+});
+
 test("factory planner: blocked and delivery-partial outcomes stay blocked-only", () => {
   const blocked = planTaskResult({
     taskId: "task_01",

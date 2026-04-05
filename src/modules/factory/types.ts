@@ -135,6 +135,7 @@ export type FactoryTaskCompletionRecord = {
   readonly changed: ReadonlyArray<string>;
   readonly proof: ReadonlyArray<string>;
   readonly remaining: ReadonlyArray<string>;
+  readonly completionReason?: "NO_CHANGES_REQUIRED";
 };
 
 export type FactoryInvestigationReport = {

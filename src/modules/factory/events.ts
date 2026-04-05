@@ -170,6 +170,7 @@ export type FactoryEvent =
       readonly taskId: string;
       readonly candidateId: string;
       readonly summary: string;
+      readonly completionReason?: "NO_CHANGES_REQUIRED";
       readonly completedAt: number;
     }
   | {
