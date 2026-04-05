@@ -97,6 +97,7 @@ import {
   renderDeliveryResultText,
   renderInvestigationReportText,
 } from "../result-contracts";
+import { buildFactoryEvidencePack, FACTORY_EVIDENCE_PACK_SCHEMA } from "../../../reporting/evidence/task-evidence";
 import {
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
@@ -4032,6 +4033,7 @@ export class FactoryServiceBase {
 
     const resultRefs = {
       ...baseResultRefs,
+      evidencePack: fileRef(path.join(path.dirname(parsed.resultPath), "artifacts/evidence.json"), "task evidence pack"),
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
@@ -4138,6 +4140,29 @@ export class FactoryServiceBase {
         reviewedAt: completedAt,
       },
     };
+    const evidencePack = buildFactoryEvidencePack({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      summary: candidateSummary,
+      completion: effectiveDeliveryCompletion,
+      alignment: deliveryAlignment,
+      scriptsRun,
+      checkResults,
+      artifactRefs: [resultRefs],
+      generatedAt: completedAt,
+    });
+    const evidencePackPath = path.join(path.dirname(parsed.resultPath), "artifacts/evidence.json");
+    await fs.mkdir(path.dirname(evidencePackPath), { recursive: true });
+    await fs.writeFile(evidencePackPath, JSON.stringify(evidencePack, null, 2), "utf-8");
+    if (!(evidencePack.normalizedFindings.length > 0 && evidencePack.metrics.length > 0 && evidencePack.sources.length > 0)) {
+      throw new FactoryServiceError(500, "factory evidence pack missing required fields");
+    }
+    await fs.writeFile(
+      path.join(path.dirname(parsed.resultPath), "artifacts/evidence.schema.json"),
+      JSON.stringify(FACTORY_EVIDENCE_PACK_SCHEMA, null, 2),
+      "utf-8",
+    );
     await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult(plannerInput), {
       workerHandoff,
     });
