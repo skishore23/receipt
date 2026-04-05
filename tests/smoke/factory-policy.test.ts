@@ -417,6 +417,8 @@ test("factory policy: objectives record a planning receipt and expose it on deta
   expect(detail.planning?.taskGraph.map((task) => task.taskId)).toEqual(["task_01"]);
   expect(detail.planning?.acceptanceCriteria.length).toBeGreaterThan(0);
   expect(detail.planning?.validationPlan.length).toBeGreaterThan(0);
+  expect(detail.planning?.alignment.objective_id).toBe(created.objectiveId);
+  expect(detail.planning?.alignment.success_criteria.length).toBeGreaterThan(0);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "planning.receipt")).toBe(true);
 });
 

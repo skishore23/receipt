@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "objective_id": { "type": "string" },
+    "interpretation": { "type": "string" },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "success_criteria": { "type": "array", "items": { "type": "string" } },
+    "constraints": { "type": "array", "items": { "type": "string" } },
+    "planned_checks": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["objective_id", "interpretation", "assumptions", "success_criteria", "constraints", "planned_checks"],
+  "additionalProperties": false
+}

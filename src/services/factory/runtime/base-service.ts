@@ -1502,12 +1502,16 @@ export class FactoryServiceBase {
     state: FactoryState,
     plannedAt = Date.now(),
   ): FactoryPlanningReceiptRecord {
-    return buildFactoryPlanningReceipt({
+    const receipt = buildFactoryPlanningReceipt({
       state,
       profile: this.objectiveProfileForState(state),
       resolveTaskExecutionMode: (task) => this.taskExecutionMode(state, task),
       plannedAt,
     });
+    if (!receipt.alignment) {
+      throw new FactoryServiceError(500, `planning receipt missing alignment for objective ${state.objectiveId}`);
+    }
+    return receipt;
   }
 
   private async recordPlanningReceipt(objectiveId: string): Promise<void> {
