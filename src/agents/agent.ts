@@ -498,6 +498,63 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
     let maxIterations = input.config.maxIterations;
     let memoryScope = input.config.memoryScope;
     let finalized = false;
+    const finalizeWithText = async (opts: {
+      readonly iteration: number;
+      readonly text: string;
+      readonly note?: string;
+    }): Promise<boolean> => {
+      let finalText = opts.text.trim() || "Completed.";
+      if (input.finalizer) {
+        const result = await input.finalizer({
+          runId: input.runId,
+          runStream,
+          iteration: opts.iteration,
+          text: finalText,
+          problem,
+          workspaceRoot: resolvedWorkspaceRoot,
+          emit,
+          runtime: input.runtime,
+          now,
+        });
+        if (result.text?.trim()) {
+          finalText = result.text.trim();
+        }
+        if (!result.accept) {
+          await emit({
+            type: "validation.report",
+            runId: input.runId,
+            iteration: opts.iteration,
+            agentId: "orchestrator",
+            gate: "finalizer",
+            ok: false,
+            summary: result.note?.trim() || "finalization rejected",
+          });
+          return false;
+        }
+      }
+
+      await emit({
+        type: "response.finalized",
+        runId: input.runId,
+        agentId: "orchestrator",
+        content: finalText,
+      }, true);
+      await emit({
+        type: "run.status",
+        runId: input.runId,
+        status: "completed",
+        agentId: "orchestrator",
+        ...(opts.note?.trim() ? { note: opts.note.trim() } : {}),
+      }, true);
+      await input.memoryTools.commit({
+        scope: memoryScope,
+        text: `run ${input.runId} completed: ${truncateText(finalText, 800).text}`,
+        tags: ["agent", "final"],
+        meta: { ...memoryAuditBase, ts: now() },
+      });
+      finalized = true;
+      return true;
+    };
 
     if (!fs.existsSync(resolvedWorkspaceRoot)) {
       await emitFailure({
@@ -901,57 +958,10 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
           agentId: "orchestrator",
           actionType: "final",
         });
-
-        let finalText = parsed.text.trim() || "Completed.";
-        if (input.finalizer) {
-          const result = await input.finalizer({
-            runId: input.runId,
-            runStream,
-            iteration,
-            text: finalText,
-            problem,
-            workspaceRoot: resolvedWorkspaceRoot,
-            emit,
-            runtime: input.runtime,
-            now,
-          });
-          if (result.text?.trim()) {
-            finalText = result.text.trim();
-          }
-          if (!result.accept) {
-            await emit({
-              type: "validation.report",
-              runId: input.runId,
-              iteration,
-              agentId: "orchestrator",
-              gate: "finalizer",
-              ok: false,
-              summary: result.note?.trim() || "finalization rejected",
-            });
-            continue;
-          }
+        if (await finalizeWithText({ iteration, text: parsed.text })) {
+          break;
         }
-
-        await emit({
-          type: "response.finalized",
-          runId: input.runId,
-          agentId: "orchestrator",
-          content: finalText,
-        }, true);
-        await emit({
-          type: "run.status",
-          runId: input.runId,
-          status: "completed",
-          agentId: "orchestrator",
-        }, true);
-        await input.memoryTools.commit({
-          scope: memoryScope,
-          text: `run ${input.runId} completed: ${truncateText(finalText, 800).text}`,
-          tags: ["agent", "final"],
-          meta: { ...memoryAuditBase, ts: now() },
-        });
-        finalized = true;
-        break;
+        continue;
       }
 
       await emit({
@@ -1019,6 +1029,15 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         }
         if (result.pauseBudget === true) {
           maxIterations += 1;
+        }
+        if (result.finalText?.trim()) {
+          if (await finalizeWithText({
+            iteration,
+            text: result.finalText,
+            note: result.finalNote ?? `${parsed.name} completed`,
+          })) {
+            break;
+          }
         }
       } catch (err) {
         toolCallsFailed += 1;

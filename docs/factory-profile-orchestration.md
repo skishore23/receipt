@@ -331,7 +331,8 @@ The current handoff path:
 3. required handoff fields are validated
 4. a `profile.handoff` event is emitted
 5. a new `factory.run` is queued on the target profile stream
-6. the next run starts from a rendered handoff block plus the original request
+6. the current run finalizes after the handoff is queued so ownership changes only once per turn
+7. the next run starts from a rendered handoff block plus the original request
 
 The UI shows the handoff as a visible work card rather than hiding it in raw transcript text.
 

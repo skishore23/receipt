@@ -597,6 +597,8 @@ const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecut
         ...(chatId ? { chatId } : {}),
       }, null, 2),
       summary: `Queued ${targetProfileId} profile handoff.`,
+      finalText: `Handing this over to ${targetProfileId}.`,
+      finalNote: `profile handoff queued to ${targetProfileId}`,
       events: [{
         type: "profile.handoff",
         runId: input.runId,

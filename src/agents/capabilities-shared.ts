@@ -6,6 +6,8 @@ export type AgentToolResult = {
   readonly output: string;
   readonly summary: string;
   readonly pauseBudget?: boolean;
+  readonly finalText?: string;
+  readonly finalNote?: string;
   readonly events?: ReadonlyArray<AgentEvent>;
   readonly reports?: ReadonlyArray<Omit<Extract<AgentEvent, { type: "validation.report" }>, "type" | "runId" | "iteration" | "agentId">>;
 };
