@@ -4,6 +4,7 @@
 
 import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
 import type { JobLane } from "../../modules/job";
+import { startKeepalive } from "./lease-manager";
 
 export type JobLeaseProcessRegistration = {
   readonly pid: number;
@@ -45,6 +46,7 @@ type ActiveLeaseState = {
   readonly startedAt: number;
   nextHeartbeatAt: number;
   process?: JobLeaseProcessRegistration;
+  keepalive?: { readonly stop: () => void };
 };
 
 export class JobWorker {
@@ -141,6 +143,8 @@ export class JobWorker {
   }
 
   private clearActiveLease(jobId: string): void {
+    const current = this.activeLeases.get(jobId);
+    current?.keepalive?.stop();
     this.activeLeases.delete(jobId);
   }
 
@@ -151,6 +155,22 @@ export class JobWorker {
       return;
     }
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+  }
+
+  private startLeaseKeepalive(job: QueueJob, state: ActiveLeaseState): void {
+    state.keepalive = startKeepalive({
+      queue: this.queue,
+      jobId: job.id,
+      leaseId: job.id,
+      workerId: this.workerId,
+      ttlMs: this.leaseMs,
+      onError: (error) => this.reportError(error),
+      onEvent: (event) => {
+        if (event.type === "renew_failure" && event.consecutiveFailures >= 3) {
+          this.reportError(new Error(`lease keepalive exhausted for job ${event.jobId}`));
+        }
+      },
+    });
   }
 
   private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
@@ -268,6 +288,7 @@ export class JobWorker {
     }
 
     const activeLease = this.registerActiveLease(job.id);
+    this.startLeaseKeepalive(job, activeLease);
     await this.heartbeatLease(activeLease);
     if (!this.activeLeases.has(job.id)) return;
 

@@ -9,6 +9,7 @@ import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../../src/engine/runtime/job-worker";
+import { startKeepalive } from "../../src/engine/runtime/lease-manager";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 
 const mkTmp = async (label: string): Promise<string> =>
@@ -1036,6 +1037,54 @@ test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("lease keepalive: renews during a long running job before TTL expires", async () => {
+  let renewals = 0;
+  const keepalive = startKeepalive({
+    queue: {
+      heartbeat: async () => {
+        renewals += 1;
+        return { id: "job_keepalive_long", leaseUntil: Date.now() + 1_000 } as never;
+      },
+      getJob: async () => undefined,
+    },
+    jobId: "job_keepalive_long",
+    leaseId: "lease_keepalive_long",
+    workerId: "worker_keepalive_long",
+    ttlMs: 150,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  keepalive.stop();
+
+  expect(renewals).toBeGreaterThan(1);
+});
+
+test("lease keepalive: retries a transient lease renewal failure and recovers", async () => {
+  let attempts = 0;
+  const errors: string[] = [];
+  const keepalive = startKeepalive({
+    queue: {
+      heartbeat: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("simulated lease renewal failure");
+        return { id: "job_keepalive_recover", leaseUntil: Date.now() + 1_000 } as never;
+      },
+      getJob: async () => undefined,
+    },
+    jobId: "job_keepalive_recover",
+    leaseId: "lease_keepalive_recover",
+    workerId: "worker_keepalive_recover",
+    ttlMs: 150,
+    onError: (error) => errors.push(error.message),
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  keepalive.stop();
+
+  expect(attempts).toBeGreaterThan(1);
+  expect(errors.some((message) => message.includes("lease keepalive failed"))).toBe(true);
 });
 
 test("job worker: registered child liveness fails a codex job before lease expiry when the child exits early", async () => {
