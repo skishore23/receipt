@@ -186,6 +186,7 @@ const DEFAULT_CHECKS = ["bun run build"] as const;
 const DEFAULT_FACTORY_PROFILE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 export const FACTORY_CONTROL_AGENT_ID = "factory-control";
 const OBJECTIVE_CONTROL_REDRIVE_AGE_MS = 30_000;
+const OBJECTIVE_CONTROL_DISPATCH_DEBOUNCE_MS = 1_500;
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "infra"]);
 
 const resolveRepoRoot = (repoRoot?: string): string =>
@@ -726,6 +727,7 @@ export class FactoryServiceBase {
     readonly key: string;
     readonly card: FactoryObjectiveCard;
   }>();
+  private readonly objectiveControlDispatchAt = new Map<string, number>();
 
   constructor(opts: FactoryServiceOptions) {
     this.dataDir = opts.dataDir;
@@ -2323,6 +2325,19 @@ export class FactoryServiceBase {
     return ageMs >= OBJECTIVE_CONTROL_REDRIVE_AGE_MS;
   }
 
+  private isActiveControlJob(job: QueueJob, objectiveId: string): boolean {
+    return job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.sessionKey === `factory:objective:${objectiveId}`
+      && (job.status === "queued" || job.status === "leased" || job.status === "running");
+  }
+
+  private async findActiveObjectiveControlJob(objectiveId: string): Promise<QueueJob | undefined> {
+    const jobs = await this.queue.listJobs();
+    return [...jobs]
+      .filter((job) => this.isActiveControlJob(job, objectiveId))
+      .sort((left, right) => this.compareRecentQueueJobs(left, right))[0];
+  }
+
   private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
     const queued = (await this.queue.listJobs({ status: "queued", limit: 500 }))
       .filter((job) => this.isObjectiveControlJob(job));
@@ -2750,11 +2765,30 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const dispatchKey = `factory:objective:${objectiveId}:${reason}`;
+    const now = Date.now();
+    const recentDispatchAt = this.objectiveControlDispatchAt.get(dispatchKey) ?? 0;
+    const active = await this.findActiveObjectiveControlJob(objectiveId);
+    if (active) {
+      const staleLease = (active.status === "leased" || active.status === "running")
+        && active.leaseUntil !== undefined
+        && active.leaseUntil <= now;
+      if (!staleLease || (now - recentDispatchAt) < OBJECTIVE_CONTROL_DISPATCH_DEBOUNCE_MS) {
+        this.objectiveControlDispatchAt.set(dispatchKey, now);
+        this.sse.publish("jobs", active.id);
+        return;
+      }
+      await this.queue.cancel(active.id, "stale_lease", "factory.resume");
+    } else if ((now - recentDispatchAt) < OBJECTIVE_CONTROL_DISPATCH_DEBOUNCE_MS) {
+      return;
+    }
+
+    this.objectiveControlDispatchAt.set(dispatchKey, now);
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
-      singletonMode: reason === "admitted" ? "cancel" : "steer",
+      singletonMode: "steer",
       maxAttempts: 2,
       payload: {
         kind: "factory.objective.control",
