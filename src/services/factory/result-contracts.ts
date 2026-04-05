@@ -6,6 +6,8 @@ import type {
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskAlignmentReport,
+  FactoryStructuredEvidenceRecord,
 } from "../../modules/factory";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -50,6 +52,13 @@ const artifactLines = (
   return lines;
 };
 
+export class FactoryTaskResultContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FactoryTaskResultContractError";
+  }
+}
+
 export const FACTORY_TASK_ARTIFACT_SCHEMA = {
   type: "object",
   properties: {
@@ -69,6 +78,29 @@ export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
     status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
   },
   required: ["command", "summary", "status"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    type: { type: "string" },
+    uri: { type: "string" },
+    inline: { type: "string" },
+    summary: { type: "string" },
+  },
+  required: ["type", "summary"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_TASK_ALIGNMENT_REPORT_SCHEMA = {
+  type: "object",
+  properties: {
+    goals: { type: "array", items: { type: "string" } },
+    checks: { type: "array", items: { type: "string" } },
+    verdict: { type: "string", enum: ["aligned", "uncertain", "drifted"] },
+  },
+  required: ["goals", "checks", "verdict"],
   additionalProperties: false,
 } as const;
 
@@ -128,11 +160,13 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
       type: "array",
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
+    structuredEvidence: FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA,
+    alignmentReport: FACTORY_TASK_ALIGNMENT_REPORT_SCHEMA,
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "structuredEvidence", "alignmentReport", "completion", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -216,6 +250,69 @@ export const normalizeExecutionScriptsRun = (
           : undefined,
       } satisfies FactoryExecutionScriptRun))
     : [];
+
+export const reportScriptRun = (
+  command: string,
+  exitCode: number | null,
+  logsRef?: string,
+): FactoryExecutionScriptRun => ({
+  command: clipText(command, 220) ?? "command",
+  summary: clipText(logsRef, 280) ?? (exitCode === 0 ? "Passed." : exitCode === null ? "Completed." : `Exited ${exitCode}.`),
+  status: exitCode === 0 ? "ok" : exitCode === null ? "warning" : "error",
+});
+
+export const attachEvidence = (
+  input: FactoryStructuredEvidenceRecord,
+): FactoryStructuredEvidenceRecord => ({
+  type: clipText(input.type, 120) ?? "evidence",
+  summary: clipText(input.summary, 280) ?? "Evidence captured.",
+  ...(input.uri ? { uri: clipText(input.uri, 400) } : {}),
+  ...(input.inline ? { inline: clipText(input.inline, 800) } : {}),
+});
+
+export const normalizeStructuredEvidence = (
+  value: unknown,
+): FactoryStructuredEvidenceRecord | undefined => {
+  if (!isRecord(value)) return undefined;
+  const type = clipText(typeof value.type === "string" ? value.type : undefined, 120);
+  const summary = clipText(typeof value.summary === "string" ? value.summary : undefined, 280);
+  if (!type || !summary) return undefined;
+  const uri = clipText(typeof value.uri === "string" ? value.uri : undefined, 400);
+  const inline = clipText(typeof value.inline === "string" ? value.inline : undefined, 800);
+  return { type, summary, ...(uri ? { uri } : {}), ...(inline ? { inline } : {}) };
+};
+
+export const normalizeTaskAlignmentReport = (
+  value: unknown,
+): FactoryTaskAlignmentReport | undefined => {
+  if (!isRecord(value)) return undefined;
+  const verdict = value.verdict === "aligned" || value.verdict === "uncertain" || value.verdict === "drifted"
+    ? value.verdict
+    : undefined;
+  if (!verdict) return undefined;
+  return {
+    goals: asReadonlyStringArray(value.goals),
+    checks: asReadonlyStringArray(value.checks),
+    verdict,
+  };
+};
+
+export const requireDeliveryTaskResultEvidence = (input: {
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly structuredEvidence?: FactoryStructuredEvidenceRecord;
+  readonly alignmentReport?: FactoryTaskAlignmentReport;
+  readonly validationEnabled: boolean;
+}): void => {
+  if (input.validationEnabled && input.scriptsRun.length === 0) {
+    throw new FactoryTaskResultContractError("task result missing scriptsRun while validation is enabled");
+  }
+  if (!input.alignmentReport) {
+    throw new FactoryTaskResultContractError("task result missing alignmentReport at completion");
+  }
+  if (input.validationEnabled && !input.structuredEvidence) {
+    throw new FactoryTaskResultContractError("task result missing structuredEvidence while validation is enabled");
+  }
+};
 
 export const normalizeTaskCompletionRecord = (
   value: unknown,
@@ -317,6 +414,8 @@ export const renderDeliveryResultText = (input: {
   readonly summary: string;
   readonly handoff: string;
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly structuredEvidence?: FactoryStructuredEvidenceRecord;
+  readonly alignmentReport?: FactoryTaskAlignmentReport;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
 }): string =>
@@ -328,6 +427,13 @@ export const renderDeliveryResultText = (input: {
       input.scriptsRun.length
         ? input.scriptsRun.map((item) =>
           `${item.status ?? "ok"}: ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
+        : ["none recorded"],
+      true,
+    ),
+    renderSection(
+      "Structured Evidence",
+      input.structuredEvidence
+        ? [`${input.structuredEvidence.type}: ${input.structuredEvidence.summary}${input.structuredEvidence.uri ? ` | ${input.structuredEvidence.uri}` : ""}${input.structuredEvidence.inline ? ` | ${input.structuredEvidence.inline}` : ""}`]
         : ["none recorded"],
       true,
     ),
@@ -367,6 +473,17 @@ export const renderDeliveryResultText = (input: {
           : []),
         input.alignment?.rationale ?? "No explicit alignment rationale recorded.",
       ],
+      false,
+    ),
+    renderSection(
+      "Alignment Report",
+      input.alignmentReport
+        ? [
+            `Goals: ${input.alignmentReport.goals.join(" | ") || "none"}`,
+            `Checks: ${input.alignmentReport.checks.join(" | ") || "none"}`,
+            `Verdict: ${input.alignmentReport.verdict}`,
+          ]
+        : ["none recorded"],
       false,
     ),
   ].join("\n\n");

@@ -196,6 +196,17 @@ const createFactoryService = async (opts?: {
                 : "Worker is blocked and is handing the blocker back to the controller.",
           artifacts: [],
           scriptsRun: [],
+          structuredEvidence: {
+            type: "validation-log",
+            uri: "file:///tmp/policy-test.log",
+            inline: null,
+            summary: "Captured the representative validation trace.",
+          },
+          alignmentReport: {
+            goals: ["Emit scriptsRun and structured evidence."],
+            checks: ["Schema emitted required evidence fields."],
+            verdict: alignment.verdict,
+          },
           completion: {
             changed: codexOutcome === "approved" || codexOutcome === "partial" ? ["Updated POLICY_TEST.txt in the task workspace."] : [],
             proof: ["POLICY_TEST.txt was written by the worker stub."],
@@ -360,12 +371,16 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   };
 
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
+  expect(prompt).toContain(`"structuredEvidence": { "type": string, "uri": string | null, "inline": string | null, "summary": string }`);
+  expect(prompt).toContain(`"alignmentReport": { "goals": string[], "checks": string[], "verdict": "aligned" | "uncertain" | "drifted" }`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }`);
   expect(prompt).toContain(`"handoff": string`);
-  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, completion, and alignment.");
+  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, structuredEvidence, alignmentReport, completion, and alignment.");
   expect(schema.required).toContain("handoff");
   expect(schema.required).toContain("scriptsRun");
+  expect(schema.required).toContain("structuredEvidence");
+  expect(schema.required).toContain("alignmentReport");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
 });
