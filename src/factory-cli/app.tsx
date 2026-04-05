@@ -1136,9 +1136,11 @@ export const FactoryTerminalApp = ({
     setShowHelp(false);
     const command = parsed.command;
     if (command.type === "help") {
+      console.log(JSON.stringify({ event: "factory.chat.help", phase: "invoked" }));
       setShowHelp(true);
       setDraft("");
       setMessage("Showing chat command help.");
+      console.log(JSON.stringify({ event: "factory.chat.help", phase: "completed" }));
       return;
     }
     if (command.type === "watch") {

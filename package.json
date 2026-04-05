@@ -18,8 +18,8 @@
   ],
   "scripts": {
     "assets:prepare": "bun scripts/copy-runtime-assets.mjs",
-    "css:build": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --minify",
-    "css:watch": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --watch",
+    "css:build": "node node_modules/.bin/tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --minify",
+    "css:watch": "node node_modules/.bin/tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --watch",
     "dev": "bun run assets:prepare && bun run css:build && bun --watch src/server.ts",
     "dev:resonate": "bun run assets:prepare && bun run css:build && bun scripts/start-resonate-dev.mjs",
     "cli": "bun src/cli.ts",
@@ -46,6 +46,8 @@
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
+    "test:help": "bun test ./src/chatbox/commands/__tests__/help.test.ts",
+    "validate:help": "bun run build && bun run test:help",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
     "verify": "bun run build && bun run check:no-any && bun run test:smoke",
     "db:generate": "drizzle-kit generate"
