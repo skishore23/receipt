@@ -98,9 +98,12 @@ export const resolveExecutionLeaseMs = (job: QueueJob): number => {
   const payloadTimeoutMs = typeof job.payload.timeoutMs === "number" && Number.isFinite(job.payload.timeoutMs)
     ? Math.floor(job.payload.timeoutMs)
     : undefined;
+  const adaptiveLeaseMs = payloadTimeoutMs !== undefined
+    ? Math.max(defaultLeaseMs, Math.min(Math.floor(payloadTimeoutMs * 1.5), 3_600_000))
+    : defaultLeaseMs;
   if (job.agentId === "codex") {
-    const buffered = payloadTimeoutMs !== undefined ? payloadTimeoutMs + 300_000 : defaultCodexLeaseMs;
+    const buffered = payloadTimeoutMs !== undefined ? Math.max(adaptiveLeaseMs, payloadTimeoutMs + 300_000) : defaultCodexLeaseMs;
     return Math.max(defaultCodexLeaseMs, Math.min(buffered, 3_600_000));
   }
-  return defaultLeaseMs;
+  return adaptiveLeaseMs;
 };

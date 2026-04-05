@@ -23,7 +23,7 @@ import { createDelegationTools } from "./adapters/delegation";
 import { createHeartbeat, parseHeartbeatSpecsFromEnv } from "./adapters/heartbeat";
 import { resonateJobBackend } from "./adapters/resonate-job-backend";
 import { createResonateDriverStarter, createResonateRoleRuntime } from "./adapters/resonate-runtime";
-import { resolveProcessRole } from "./adapters/resonate-config";
+import { resolveExecutionLeaseMs, resolveProcessRole } from "./adapters/resonate-config";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobCmd, JobEvent, JobState } from "./modules/job";
 import { decide as decideJob, reduce as reduceJob, initial as initialJob } from "./modules/job";
@@ -128,8 +128,6 @@ const chatJobConcurrency = parseWorkerConcurrency(process.env.CHAT_JOB_CONCURREN
 const orchestrationJobConcurrency = parseWorkerConcurrency(process.env.ORCHESTRATION_JOB_CONCURRENCY, 20);
 const codexJobConcurrency = parseWorkerConcurrency(process.env.CODEX_JOB_CONCURRENCY, 30);
 const jobIdleResyncMs = Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000);
-const jobLeaseMs = Number(process.env.JOB_LEASE_MS ?? 300_000);
-const codexJobLeaseMs = Number(process.env.CODEX_JOB_LEASE_MS ?? 900_000);
 const subJobWaitMsRaw = Number(process.env.SUBJOB_WAIT_MS ?? 1_500);
 const subJobWaitMs = Number.isFinite(subJobWaitMsRaw)
   ? Math.max(0, Math.min(Math.floor(subJobWaitMsRaw), 30_000))
@@ -898,7 +896,7 @@ const workers = [
     leaseAgentIds: ["factory"],
     leaseLanes: ["chat"],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: jobLeaseMs,
+    leaseMs: resolveExecutionLeaseMs,
     concurrency: chatJobConcurrency,
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:chat]`, error);
@@ -910,7 +908,7 @@ const workers = [
     workerId: `${jobWorkerId}:orchestration`,
     leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: jobLeaseMs,
+    leaseMs: resolveExecutionLeaseMs,
     concurrency: orchestrationJobConcurrency,
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
@@ -922,7 +920,7 @@ const workers = [
     workerId: `${jobWorkerId}:codex`,
     leaseAgentIds: ["codex"],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: codexJobLeaseMs,
+    leaseMs: resolveExecutionLeaseMs,
     concurrency: codexJobConcurrency,
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:codex]`, error);

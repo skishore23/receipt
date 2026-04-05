@@ -11,6 +11,7 @@ import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../ser
 import type { FactoryService, FactoryTaskView } from "../services/factory-service";
 import type { FactoryCliConfig } from "./config";
 import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "../db/client";
+import { resolveExecutionLeaseMs } from "../adapters/resonate-config";
 
 export type FactoryCliRuntime = {
   readonly config: FactoryCliConfig;
@@ -126,7 +127,7 @@ export const createFactoryCliRuntime = (
     queue,
     workerId: process.env.JOB_WORKER_ID ?? `factory_cli_${process.pid}`,
     idleResyncMs: Math.max(1_000, Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000)),
-    leaseMs: Math.max(5_000, Number(process.env.JOB_LEASE_MS ?? 30_000)),
+    leaseMs: resolveExecutionLeaseMs,
     concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 12)),
     leaseAgentIds: Object.keys(handlers),
     handlers,

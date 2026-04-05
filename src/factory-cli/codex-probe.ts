@@ -11,6 +11,7 @@ import { SseHub } from "../framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../services/factory-runtime";
 import type { FactoryCliConfig } from "./config";
+import { resolveExecutionLeaseMs } from "../adapters/resonate-config";
 
 export type CodexProbeMode = "direct" | "queue" | "both";
 
@@ -272,7 +273,7 @@ const runQueueProbe = async (
     queue,
     workerId: `factory_codex_probe_${process.pid}`,
     idleResyncMs: Math.max(250, opts.pollMs),
-    leaseMs: Math.max(5_000, Math.min(opts.timeoutMs, 30_000)),
+    leaseMs: resolveExecutionLeaseMs,
     concurrency: 1,
     leaseAgentIds: Object.keys(handlers),
     handlers,
