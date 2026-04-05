@@ -202,6 +202,23 @@ export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const describeMissingDeliveryFinalizationEvidence = (input: {
+  readonly alignment: unknown;
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly completion: FactoryTaskCompletionRecord;
+}): ReadonlyArray<string> => {
+  const missing: string[] = [];
+  const alignment = isRecord(input.alignment);
+  const hasAlignmentArtifact = alignment && typeof input.alignment === "object";
+  if (!hasAlignmentArtifact) missing.push("alignment.json");
+  if (input.scriptsRun.length === 0) missing.push("scripts_run.log");
+  if (input.completion.proof.length === 0) missing.push("evidence/index.json");
+  return [...new Set(missing)];
+};
+
+export const renderMissingDeliveryFinalizationEvidenceError = (missing: ReadonlyArray<string>): string =>
+  `Delivery finalization blocked: missing required alignment/evidence artifact(s): ${missing.join(", ")}. Generate an alignment.json with verdict/satisfied/missing/outOfScope/rationale and record at least one structured proof item plus scripts_run.log before finalizing the task.`;
+
 export const normalizeExecutionScriptsRun = (
   value: unknown,
 ): ReadonlyArray<FactoryExecutionScriptRun> =>

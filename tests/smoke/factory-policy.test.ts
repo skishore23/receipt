@@ -24,6 +24,10 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../../src/services/factory-service";
+import {
+  describeMissingDeliveryFinalizationEvidence,
+  renderMissingDeliveryFinalizationEvidenceError,
+} from "../../src/services/factory/result-contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -368,6 +372,18 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
+});
+
+test("factory policy: missing delivery finalization evidence reports a single deterministic error", () => {
+  const missing = describeMissingDeliveryFinalizationEvidence({
+    alignment: undefined,
+    scriptsRun: [],
+    completion: { changed: ["src/index.ts"], proof: [], remaining: [] },
+  });
+  expect(missing).toEqual(["alignment.json", "scripts_run.log", "evidence/index.json"]);
+  expect(renderMissingDeliveryFinalizationEvidenceError(missing)).toContain("alignment.json");
+  expect(renderMissingDeliveryFinalizationEvidenceError(missing)).toContain("scripts_run.log");
+  expect(renderMissingDeliveryFinalizationEvidenceError(missing)).toContain("evidence/index.json");
 });
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
