@@ -9,6 +9,7 @@ import { resolveCliInvocation } from "../../lib/runtime-paths";
 import type { FactoryCheckResult, FactoryState, FactoryTaskExecutionMode } from "../../modules/factory";
 import { pathExists } from "./artifact-inspection";
 import { buildFactoryFailureSignature, priorFactoryFailureSignatureMap } from "./failure-policy";
+import { writeEvidenceArtifacts } from "../../evidence/emitter";
 
 const execFileAsync = promisify(execFile);
 const CHECK_TIMEOUT_MS = 60 * 60 * 1000;
@@ -213,6 +214,10 @@ export const runFactoryChecks = async (input: {
       clearTimeout(timer);
     }
   }
+  await writeEvidenceArtifacts({
+    workspacePath: input.workspacePath,
+    checkResults: results,
+  });
   return results;
 };
 
