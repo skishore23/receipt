@@ -44,6 +44,7 @@ type ActiveLeaseState = {
   readonly jobId: string;
   readonly startedAt: number;
   nextHeartbeatAt: number;
+  renewalFailures: number;
   process?: JobLeaseProcessRegistration;
 };
 
@@ -135,6 +136,7 @@ export class JobWorker {
       jobId,
       startedAt: Date.now(),
       nextHeartbeatAt: 0,
+      renewalFailures: 0,
     };
     this.activeLeases.set(jobId, state);
     return state;
@@ -144,12 +146,29 @@ export class JobWorker {
     this.activeLeases.delete(jobId);
   }
 
+  private async checkpointLeaseRenewal(state: ActiveLeaseState): Promise<void> {
+    const checkpointStartedAt = Date.now();
+    await this.queue.progress(state.jobId, this.workerId, {
+      leaseRenewalLatencyMs: 0,
+      renewalFailures: state.renewalFailures,
+      leaseRenewalCheckpointAt: checkpointStartedAt,
+    });
+  }
+
   private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
+    const startedAt = Date.now();
+    await this.checkpointLeaseRenewal(state);
     const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
     if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
       this.clearActiveLease(state.jobId);
       return;
     }
+    const latencyMs = Date.now() - startedAt;
+    await this.queue.progress(state.jobId, this.workerId, {
+      leaseRenewalLatencyMs: latencyMs,
+      renewalFailures: state.renewalFailures,
+      leaseRenewalCheckpointAt: Date.now(),
+    });
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
   }
 
@@ -175,8 +194,27 @@ export class JobWorker {
       try {
         await this.heartbeatLease(state);
       } catch (err) {
+        state.renewalFailures += 1;
+        const latencyMs = Date.now() - now;
+        const checkpoint = {
+          leaseRenewalLatencyMs: latencyMs,
+          renewalFailures: state.renewalFailures,
+          leaseRenewalCheckpointAt: Date.now(),
+        };
+        try {
+          await this.queue.progress(state.jobId, this.workerId, checkpoint);
+        } catch {
+          // Preserve the failure path even if checkpointing the renewal fails.
+        }
+        await this.queue.fail(
+          state.jobId,
+          this.workerId,
+          `Failed to renew lease for job ${state.jobId}: ${err instanceof Error ? err.message : String(err)}`,
+          false,
+          checkpoint,
+        );
+        this.clearActiveLease(state.jobId);
         this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
-        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
       }
     }
   }

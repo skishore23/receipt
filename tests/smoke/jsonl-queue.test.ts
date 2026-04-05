@@ -1038,6 +1038,74 @@ test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat
   }
 });
 
+test("job worker: checkpoints lease renewal before retrying a failed heartbeat", async () => {
+  const dir = await mkTmp("receipt-queue-worker-renewal-checkpoint");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const baseQueue = jsonlQueue({ runtime, stream: "jobs" });
+    let heartbeatCalls = 0;
+    const checkpointPayloads: Record<string, unknown>[] = [];
+    const queue: typeof baseQueue = {
+      ...baseQueue,
+      progress: async (jobId, workerId, result) => {
+        if (result) checkpointPayloads.push(result);
+        return baseQueue.progress(jobId, workerId, result);
+      },
+      heartbeat: async (jobId, workerId, leaseMs) => {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 1) {
+          throw new Error("simulated lease renewal failure");
+        }
+        return baseQueue.heartbeat(jobId, workerId, leaseMs);
+      },
+    };
+    const workerErrors: string[] = [];
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_renewal_checkpoint",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async () => ({ ok: true, result: { ok: true } }),
+      },
+      onError: (error) => {
+        workerErrors.push(error.message);
+      },
+    });
+
+    const job = await baseQueue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_worker_checkpoint" },
+      maxAttempts: 2,
+    });
+
+    worker.start();
+    await waitFor(() => workerErrors.some((message) => message.includes("simulated lease renewal failure")));
+    worker.stop();
+
+    const settled = await baseQueue.getJob(job.id);
+
+    expect(heartbeatCalls).toBeGreaterThanOrEqual(1);
+    expect(checkpointPayloads.some((payload) => (
+      "leaseRenewalLatencyMs" in payload
+      && "renewalFailures" in payload
+      && "leaseRenewalCheckpointAt" in payload
+    ))).toBe(true);
+    expect(settled?.status).toBe("queued");
+    expect(settled?.lastError).toContain("Failed to renew lease for job");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("job worker: registered child liveness fails a codex job before lease expiry when the child exits early", async () => {
   const dir = await mkTmp("receipt-queue-worker-child-liveness");
   try {
