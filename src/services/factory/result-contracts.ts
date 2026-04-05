@@ -87,6 +87,7 @@ export const FACTORY_TASK_COMPLETION_SCHEMA = {
       type: "array",
       items: { type: "string" },
     },
+    completionReason: { type: ["string", "null"], enum: ["NO_CHANGES_REQUIRED", null] },
   },
   required: ["changed", "proof", "remaining"],
   additionalProperties: false,
@@ -229,6 +230,9 @@ export const normalizeTaskCompletionRecord = (
     changed: changed.length > 0 ? changed : (fallback?.changed ?? []),
     proof: proof.length > 0 ? proof : (fallback?.proof ?? []),
     remaining: remaining.length > 0 ? remaining : (fallback?.remaining ?? []),
+    completionReason: record.completionReason === "NO_CHANGES_REQUIRED"
+      ? "NO_CHANGES_REQUIRED"
+      : fallback?.completionReason,
   };
 };
 
@@ -310,6 +314,7 @@ export const buildDefaultTaskCompletion = (input: {
     changed: changed.length > 0 ? changed : [input.summary],
     proof: [...new Set([...scriptProof, ...reportProof, ...validationProof])],
     remaining: [],
+    completionReason: input.checkResults && input.checkResults.length > 0 ? undefined : "NO_CHANGES_REQUIRED",
   };
 };
 

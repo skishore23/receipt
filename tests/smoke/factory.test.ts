@@ -1559,6 +1559,7 @@ test("factory reducer: task.noop_completed marks the approved candidate as noop-
   expect(replay.candidates.task_01_candidate_01?.status).toBe("approved");
   expect(replay.candidates.task_01_candidate_01?.integrationDisposition).toBe("noop");
   expect(replay.candidates.task_01_candidate_01?.updatedAt).toBe(5);
+  expect(replay.candidates.task_01_candidate_01?.completion?.completionReason).toBe("NO_CHANGES_REQUIRED");
   expect(replay.latestSummary).toBe("Approved with no repository diff.");
 });
 

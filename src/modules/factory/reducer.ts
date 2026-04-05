@@ -367,6 +367,10 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         status: "approved",
         integrationDisposition: "noop",
         latestReason: event.summary,
+        completion: {
+          ...(next.candidates[event.candidateId]?.completion ?? { changed: [], proof: [], remaining: [] }),
+          completionReason: event.completionReason ?? "NO_CHANGES_REQUIRED",
+        },
         updatedAt: event.completedAt,
       });
       return {
