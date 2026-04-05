@@ -6,7 +6,9 @@ import type {
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskEvidenceRecord,
 } from "../../modules/factory";
+import { normalizeFactoryEvidenceRecord, FACTORY_EVIDENCE_SCHEMA } from "./evidence";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -129,10 +131,14 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
+    evidence: {
+      type: "array",
+      items: FACTORY_EVIDENCE_SCHEMA,
+    },
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "evidence", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -231,6 +237,13 @@ export const normalizeTaskCompletionRecord = (
     remaining: remaining.length > 0 ? remaining : (fallback?.remaining ?? []),
   };
 };
+
+export const normalizeTaskEvidenceRecords = (
+  value: unknown,
+): ReadonlyArray<FactoryTaskEvidenceRecord> =>
+  Array.isArray(value)
+    ? value.map((item) => normalizeFactoryEvidenceRecord(item)).filter((item): item is FactoryTaskEvidenceRecord => Boolean(item))
+    : [];
 
 export const normalizeTaskAlignmentRecord = (
   value: unknown,
