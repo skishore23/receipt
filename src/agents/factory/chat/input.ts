@@ -16,6 +16,7 @@ import { syncChatContextProjectionStream, readChatContextProjection } from "../.
 import { buildFactoryQueueJobSnapshot } from "../../../views/factory/job-presenters";
 import { isActiveJobStatus } from "../../orchestration-utils";
 import { resolveProfileMemorySummary } from "./memory";
+import { assertGitRepo } from "../../../lib/git-repo";
 
 const execFileAsync = promisify(execFile);
 
@@ -289,8 +290,9 @@ type GitChangedFileSnapshotEntry = {
 
 const gitStatusEntries = async (repoRoot: string): Promise<ReadonlyArray<GitChangedFileEntry>> => {
   try {
+    const gitRoot = await assertGitRepo(repoRoot);
     const { stdout } = await execFileAsync("git", ["status", "--porcelain=1", "-z", "--untracked-files=all"], {
-      cwd: repoRoot,
+      cwd: gitRoot,
       encoding: "utf-8",
       maxBuffer: 4 * 1024 * 1024,
     });
@@ -376,26 +378,27 @@ export const createDisposableProbeWorkspace = async (
   repoRoot: string,
   jobId: string,
 ): Promise<DisposableProbeWorkspace> => {
+  const gitRoot = await assertGitRepo(repoRoot);
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), `receipt-direct-probe-${jobId}-`));
   const workspacePath = path.join(tempRoot, "workspace");
   try {
     await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: repoRoot,
+      cwd: gitRoot,
       encoding: "utf-8",
       maxBuffer: 1024 * 1024,
     });
     await execFileAsync("git", ["worktree", "add", "--detach", workspacePath, "HEAD"], {
-      cwd: repoRoot,
+      cwd: gitRoot,
       encoding: "utf-8",
       maxBuffer: 4 * 1024 * 1024,
     });
-    await ensureProbeWorkspaceNodeModulesLink(repoRoot, workspacePath);
-    await mirrorDirtyGitStateToWorkspace(repoRoot, workspacePath);
+    await ensureProbeWorkspaceNodeModulesLink(gitRoot, workspacePath);
+    await mirrorDirtyGitStateToWorkspace(gitRoot, workspacePath);
     return {
       workspacePath,
       cleanup: async () => {
         await execFileAsync("git", ["worktree", "remove", "--force", workspacePath], {
-          cwd: repoRoot,
+          cwd: gitRoot,
           encoding: "utf-8",
           maxBuffer: 4 * 1024 * 1024,
         }).catch(() => undefined);

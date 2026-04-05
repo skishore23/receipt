@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { assertGitRepo } from "./git-repo";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,8 +26,9 @@ const parseChangedFiles = (porcelain: string): ReadonlyArray<string> =>
     .filter(Boolean);
 
 const git = async (repoRoot: string, args: ReadonlyArray<string>): Promise<string> => {
+  const cwd = await assertGitRepo(repoRoot);
   const { stdout } = await execFileAsync("git", [...args], {
-    cwd: repoRoot,
+    cwd,
     encoding: "utf-8",
     maxBuffer: 4 * 1024 * 1024,
   });
