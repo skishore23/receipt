@@ -136,6 +136,44 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_RUN_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    commands_run: {
+      type: "array",
+      items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
+    },
+    artifacts: {
+      type: "array",
+      items: FACTORY_TASK_ARTIFACT_SCHEMA,
+    },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          summary: { type: "string" },
+          detail: { type: ["string", "null"] },
+        },
+        required: ["title", "summary", "detail"],
+        additionalProperties: false,
+      },
+    },
+    timestamps: {
+      type: "object",
+      properties: {
+        startedAt: { type: "number" },
+        finalizedAt: { type: "number" },
+      },
+      required: ["startedAt", "finalizedAt"],
+      additionalProperties: false,
+    },
+  },
+  required: ["commands_run", "artifacts", "findings", "timestamps"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_PUBLISH_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -370,6 +408,51 @@ export const renderDeliveryResultText = (input: {
       false,
     ),
   ].join("\n\n");
+
+export const buildRunAlignmentDocument = (input: {
+  readonly objectiveId: string;
+  readonly plan: string;
+  readonly assumptions: ReadonlyArray<string>;
+  readonly securityChecks: ReadonlyArray<string>;
+}): string =>
+  [
+    `objective_id: ${input.objectiveId}`,
+    `plan: ${clipText(input.plan, 1200) ?? "none"}`,
+    `assumptions:`,
+    ...(input.assumptions.length ? input.assumptions.map((item) => `- ${clipText(item, 280) ?? item}`) : ["- none"]),
+    `security_checks:`,
+    ...(input.securityChecks.length ? input.securityChecks.map((item) => `- ${clipText(item, 280) ?? item}`) : ["- none"]),
+  ].join("\n");
+
+export const buildRunEvidenceBundle = (input: {
+  readonly commandsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly artifacts: ReadonlyArray<{ readonly label: string; readonly path: string | null; readonly summary: string | null }>;
+  readonly findings: ReadonlyArray<{ readonly title: string; readonly summary: string; readonly detail?: string | null }>;
+  readonly startedAt: number;
+  readonly finalizedAt: number;
+}): Readonly<Record<string, unknown>> => ({
+  commands_run: input.commandsRun,
+  artifacts: input.artifacts,
+  findings: input.findings,
+  timestamps: {
+    startedAt: input.startedAt,
+    finalizedAt: input.finalizedAt,
+  },
+});
+
+export const assertRequiredTaskResultFields = (input: {
+  readonly outcome?: string;
+  readonly summary?: string;
+  readonly handoff?: string;
+  readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly alignment?: FactoryTaskAlignmentRecord;
+}): void => {
+  if (!input.outcome) throw new Error("factory task result is missing outcome");
+  if (!input.summary) throw new Error("factory task result is missing summary");
+  if (!input.handoff) throw new Error("factory task result is missing handoff");
+  if (!input.scriptsRun || input.scriptsRun.length === 0) throw new Error("factory task result is missing scriptsRun evidence");
+  if (!input.alignment) throw new Error("factory task result is missing alignment review");
+};
 
 export const renderWorkerHandoffText = (input: {
   readonly summary: string;
