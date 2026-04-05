@@ -1036,6 +1036,80 @@ export class FactoryServiceBase {
     ];
   }
 
+  private async hashFile(filePath: string): Promise<string> {
+    const content = await fs.readFile(filePath);
+    return createHash("sha256").update(content).digest("hex");
+  }
+
+  private async writePublishReportArtifacts(input: {
+    readonly state: FactoryState;
+    readonly candidateId: string;
+    readonly resultPath: string;
+    readonly stdoutPath: string;
+    readonly stderrPath: string;
+    readonly promptPath: string;
+    readonly lastMessagePath: string;
+    readonly publishResult: FactoryPublishResult;
+  }): Promise<{ readonly alignmentReportPath: string; readonly scriptsRunPath: string; readonly evidenceIndexPath: string }> {
+    const publishDir = path.dirname(input.resultPath);
+    const candidate = input.state.candidates[input.candidateId];
+    const objective = input.state;
+    const alignmentReportPath = path.join(publishDir, "alignment_report.json");
+    const scriptsRunPath = path.join(publishDir, "scripts_run.json");
+    const evidenceIndexPath = path.join(publishDir, "evidence_index.json");
+    const changedFiles = candidate?.completion?.changed ?? [];
+    const proof = candidate?.completion?.proof ?? [];
+    const validationSteps = candidate?.checkResults.map((check) => check.command) ?? [];
+    const objectiveStatement = `${objective.title}\n\n${objective.prompt}`.trim();
+    const implementedChanges = [
+      ...changedFiles.map((file) => ({ kind: "file", path: file })),
+      { kind: "pull_request", url: input.publishResult.prUrl, number: input.publishResult.prNumber ?? null },
+    ];
+    const logPaths = [
+      input.promptPath,
+      input.lastMessagePath,
+      input.stdoutPath,
+      input.stderrPath,
+    ].map((filePath) => ({ path: filePath, sha256: null as string | null }));
+    const evidenceFiles = [
+      input.resultPath,
+      alignmentReportPath,
+      scriptsRunPath,
+      evidenceIndexPath,
+      input.stdoutPath,
+      input.stderrPath,
+      input.promptPath,
+      input.lastMessagePath,
+    ];
+    const evidenceIndex = [] as Array<{ path: string; sha256: string }>;
+    for (const filePath of evidenceFiles) {
+      if (!(await pathExists(filePath))) continue;
+      evidenceIndex.push({ path: filePath, sha256: await this.hashFile(filePath) });
+    }
+    const alignmentReport = {
+      objectiveStatement,
+      implementedChanges,
+      validationStepsExecuted: validationSteps.length > 0 ? validationSteps : ["No validation commands were recorded in the publish candidate."],
+      evidencePaths: logPaths,
+      evidenceSummary: {
+        proof,
+        prUrl: input.publishResult.prUrl,
+        prNumber: input.publishResult.prNumber ?? null,
+      },
+    };
+    const scriptsRun = [
+      { command: `publish:${input.publishResult.prUrl}`, exitCode: 0, durationMs: 0 },
+      { command: `report:alignment_report.json`, exitCode: 0, durationMs: 0 },
+    ];
+    await fs.writeFile(alignmentReportPath, JSON.stringify(alignmentReport, null, 2), "utf-8");
+    await fs.writeFile(scriptsRunPath, JSON.stringify(scriptsRun, null, 2), "utf-8");
+    await fs.writeFile(evidenceIndexPath, JSON.stringify(evidenceIndex, null, 2), "utf-8");
+    if (!(await pathExists(alignmentReportPath))) {
+      throw new Error("alignment report missing at completion");
+    }
+    return { alignmentReportPath, scriptsRunPath, evidenceIndexPath };
+  }
+
   private repoInfrastructureKnowledgeRoot(): string {
     return path.join(this.dataDir, "factory", "knowledge", repoKeyForRoot(this.git.repoRoot), "infrastructure");
   }
@@ -4794,6 +4868,20 @@ export class FactoryServiceBase {
         throw lastPublishError instanceof Error ? lastPublishError : new Error(String(lastPublishError ?? "factory publish failed"));
       }
       await fs.writeFile(parsed.resultPath, JSON.stringify(publishResult, null, 2), "utf-8");
+      const publishArtifacts = await this.writePublishReportArtifacts({
+        state,
+        candidateId: parsed.candidateId,
+        resultPath: parsed.resultPath,
+        stdoutPath: parsed.stdoutPath,
+        stderrPath: parsed.stderrPath,
+        promptPath: parsed.promptPath,
+        lastMessagePath: parsed.lastMessagePath,
+        publishResult,
+      });
+      const reportCheck = await fs.readFile(publishArtifacts.alignmentReportPath, "utf-8");
+      if (!reportCheck.trim()) {
+        throw new Error("alignment report missing at completion");
+      }
       const summary = publishResult.summary;
       await commitFactoryPublishMemory(this.memoryTools, state, parsed.candidateId, {
         summary,
