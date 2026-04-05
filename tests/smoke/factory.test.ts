@@ -734,6 +734,45 @@ test("factory service: task live output marks stale Codex work as stalled and su
   expect(liveOutput.summary).toContain("\"type\":\"turn.started\"");
 });
 
+test("factory service: concurrent objective control dispatches dedupe onto one job", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-dedupe");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Concurrent control dedupe",
+    prompt: "Only one control job should be created for the same state version.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    enqueueObjectiveControl(objectiveId: string, reason: "startup" | "admitted" | "reconcile"): Promise<void>;
+  };
+  await Promise.all([
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+  ]);
+
+  const controlJobs = (await queue.listJobs({ limit: 10 }))
+    .filter((job) => job.agentId === "factory-control");
+  expect(controlJobs).toHaveLength(1);
+  expect(controlJobs[0]?.payload).toMatchObject({
+    kind: "factory.objective.control",
+    objectiveId: created.objectiveId,
+    reason: "startup",
+  });
+  expect(controlJobs[0]?.sessionKey).toBe(`factory:objective:${created.objectiveId}`);
+});
+
 test("factory service: duplicate objective control enqueues steer onto the existing session job", async () => {
   const dataDir = await createTempDir("receipt-factory-control-steer");
   const repoRoot = await createSourceRepo();

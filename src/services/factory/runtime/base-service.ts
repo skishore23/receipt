@@ -2307,6 +2307,14 @@ export class FactoryServiceBase {
       || right.id.localeCompare(left.id);
   }
 
+  private objectiveControlIdempotencyKey(
+    objectiveId: string,
+    stateVersion: number,
+    actionType: FactoryObjectiveControlJobPayload["reason"],
+  ): string {
+    return `factory:objective-control:${objectiveId}:${stateVersion}:${actionType}`;
+  }
+
   private controlJobCancelReason(state: FactoryState | undefined): string | undefined {
     if (!state) return "objective control job canceled because the objective no longer exists";
     if (state.archivedAt) return "objective control job canceled because the objective is archived";
@@ -2750,7 +2758,11 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const state = (await this.listObjectiveStates()).find((item) => item.objectiveId === objectiveId);
+    const stateVersion = state?.updatedAt ?? Date.now();
+    const idempotencyKey = this.objectiveControlIdempotencyKey(objectiveId, stateVersion, reason);
     const created = await this.queue.enqueue({
+      jobId: idempotencyKey,
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
@@ -2760,6 +2772,8 @@ export class FactoryServiceBase {
         kind: "factory.objective.control",
         objectiveId,
         reason,
+        stateVersion,
+        idempotencyKey,
       } satisfies FactoryObjectiveControlJobPayload,
     });
     this.sse.publish("jobs", created.id);
