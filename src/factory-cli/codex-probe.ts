@@ -276,6 +276,9 @@ const runQueueProbe = async (
     concurrency: 1,
     leaseAgentIds: Object.keys(handlers),
     handlers,
+    onMetric: (metric) => {
+      console.info("[codex-probe job-metric]", JSON.stringify(metric));
+    },
   });
   const snapshots: CodexProbeSnapshot[] = [];
   const seen = new Set<string>();

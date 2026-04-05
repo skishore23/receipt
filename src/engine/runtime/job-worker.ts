@@ -4,6 +4,7 @@
 
 import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
 import type { JobLane } from "../../modules/job";
+import { withTimeout } from "../../lib/async";
 
 export type JobLeaseProcessRegistration = {
   readonly pid: number;
@@ -12,6 +13,7 @@ export type JobLeaseProcessRegistration = {
 
 export type JobExecutionContext = {
   readonly workerId: string;
+  readonly signal: AbortSignal;
   readonly pullCommands: (types?: ReadonlyArray<"steer" | "follow_up" | "abort">) => Promise<ReadonlyArray<QueueCommandRecord>>;
   readonly registerLeaseProcess: (process: JobLeaseProcessRegistration) => void;
   readonly clearLeaseProcess: () => void;
@@ -38,6 +40,7 @@ export type JobWorkerOptions = {
   readonly concurrency?: number;
   readonly onTick?: () => void;
   readonly onError?: (error: Error) => void;
+  readonly onMetric?: (metric: Readonly<Record<string, unknown>>) => void;
 };
 
 type ActiveLeaseState = {
@@ -60,6 +63,7 @@ export class JobWorker {
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
+  private readonly onMetric?: (metric: Readonly<Record<string, unknown>>) => void;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeLeases = new Map<string, ActiveLeaseState>();
   private running = false;
@@ -79,6 +83,7 @@ export class JobWorker {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
     this.onError = opts.onError;
+    this.onMetric = opts.onMetric;
   }
 
   private reportError(err: unknown): void {
@@ -87,6 +92,14 @@ export class JobWorker {
       this.onError?.(error);
     } catch {
       // Error reporting must not crash the worker loop.
+    }
+  }
+
+  private reportMetric(metric: Readonly<Record<string, unknown>>): void {
+    try {
+      this.onMetric?.(metric);
+    } catch {
+      // Metrics reporting must not crash the worker loop.
     }
   }
 
@@ -150,6 +163,11 @@ export class JobWorker {
       this.clearActiveLease(state.jobId);
       return;
     }
+    this.reportMetric({
+      kind: "job.lease_renewed",
+      workerId: this.workerId,
+      jobId: state.jobId,
+    });
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
   }
 
@@ -175,8 +193,19 @@ export class JobWorker {
       try {
         await this.heartbeatLease(state);
       } catch (err) {
-        this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
-        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+        const message = `Failed to renew lease for job ${state.jobId}: ${err instanceof Error ? err.message : String(err)}`;
+        this.reportError(new Error(message));
+        this.clearActiveLease(state.jobId);
+        await this.queue.fail(state.jobId, this.workerId, message, true, {
+          status: "failed",
+          summary: message,
+        });
+        this.reportMetric({
+          kind: "job.lease_renew_failed",
+          workerId: this.workerId,
+          jobId: state.jobId,
+          reason: message,
+        });
       }
     }
   }
@@ -260,10 +289,27 @@ export class JobWorker {
     const pullCommands = async (
       types?: ReadonlyArray<"steer" | "follow_up" | "abort">
     ): Promise<ReadonlyArray<QueueCommandRecord>> => this.queue.consumeCommands(job.id, types);
+    const commandStartedAt = Date.now();
+    const abortController = new AbortController();
+    const timeoutMs = Math.max(
+      1_000,
+      Math.min(
+        typeof job.payload.timeoutMs === "number" && Number.isFinite(job.payload.timeoutMs)
+          ? Math.floor(job.payload.timeoutMs)
+          : this.leaseMs - 1_000,
+        this.leaseMs - 500,
+      ),
+    );
 
     const preAbort = await pullCommands(["abort"]);
     if (preAbort.length > 0 || job.abortRequested) {
       await this.queue.cancel(job.id, "abort requested", this.workerId);
+      this.reportMetric({
+        kind: "job.canceled",
+        workerId: this.workerId,
+        jobId: job.id,
+        reason: "abort requested",
+      });
       return;
     }
 
@@ -278,9 +324,10 @@ export class JobWorker {
       return;
     }
 
-    try {
-      const result = await handler(job, {
+    const runHandler = withTimeout(
+      handler(job, {
         workerId: this.workerId,
+        signal: abortController.signal,
         pullCommands,
         registerLeaseProcess: (process) => {
           if (!Number.isInteger(process.pid) || process.pid <= 0) return;
@@ -292,11 +339,22 @@ export class JobWorker {
         clearLeaseProcess: () => {
           activeLease.process = undefined;
         },
-      });
+      }),
+      { timeoutMs, label: `job ${job.id}`, signal: abortController.signal },
+    );
+
+    try {
+      const result = await runHandler;
       this.clearActiveLease(job.id);
       const postAbort = await pullCommands(["abort"]);
       if (postAbort.length > 0) {
         await this.queue.cancel(job.id, "abort requested", this.workerId);
+        this.reportMetric({
+          kind: "job.canceled",
+          workerId: this.workerId,
+          jobId: job.id,
+          reason: "abort requested",
+        });
         return;
       }
       if (result.ok) {
@@ -304,9 +362,24 @@ export class JobWorker {
       } else {
         await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }
+      this.reportMetric({
+        kind: "job.duration",
+        workerId: this.workerId,
+        jobId: job.id,
+        durationMs: Date.now() - commandStartedAt,
+        status: result.ok ? "completed" : "failed",
+      });
     } catch (err) {
       this.clearActiveLease(job.id);
       const message = err instanceof Error ? err.message : String(err);
+      abortController.abort();
+      this.reportMetric({
+        kind: "job.timeout_or_error",
+        workerId: this.workerId,
+        jobId: job.id,
+        durationMs: Date.now() - commandStartedAt,
+        error: message,
+      });
       await this.queue.fail(job.id, this.workerId, message);
     }
   }

@@ -100,6 +100,7 @@ const executeJob = async (
   const workerId = resolveExecutionWorkerId(job);
   return handler(job, {
     workerId,
+    signal: new AbortController().signal,
     pullCommands: async (types) => queue.consumeCommands(job.id, types),
     registerLeaseProcess: () => undefined,
     clearLeaseProcess: () => undefined,
