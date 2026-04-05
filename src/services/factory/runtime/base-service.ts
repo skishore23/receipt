@@ -3806,12 +3806,14 @@ export class FactoryServiceBase {
     const checkResults = isInvestigation
       ? []
       : await runFactoryChecks({
-        commands: state.checks,
-        workspacePath: payload.workspacePath,
-        dataDir: this.dataDir,
-        repoRoot: this.git.repoRoot,
-        worktreesDir: this.git.worktreesDir,
-      });
+          commands: state.checks,
+          workspacePath: payload.workspacePath,
+          dataDir: this.dataDir,
+          repoRoot: this.git.repoRoot,
+          worktreesDir: this.git.worktreesDir,
+          objectiveId: state.objectiveId,
+          taskId: state.taskId,
+        });
     const failedCheck = checkResults.find((check) => !check.ok);
 
     if (payload.executionMode === "isolated" && !isInvestigation) {
@@ -3922,6 +3924,7 @@ export class FactoryServiceBase {
                 command: `artifact:${path.basename(issue.path)}`,
                 summary: issue.summary,
                 status: issue.status,
+                scriptName: path.basename(issue.path),
               } satisfies FactoryInvestigationReport["scriptsRun"][number])),
             ],
           }
@@ -3943,6 +3946,12 @@ export class FactoryServiceBase {
                 command: check.command,
                 summary: check.ok ? "Passed." : "Failed.",
                 status: check.ok ? "ok" : "error",
+                startedAt: check.startedAt,
+                finishedAt: check.finishedAt,
+                durationMs: Math.max(0, check.finishedAt - check.startedAt),
+                exitCode: check.exitCode,
+                stdoutHash: createHash("sha1").update(check.stdout).digest("hex"),
+                stderrHash: createHash("sha1").update(check.stderr).digest("hex"),
               } satisfies FactoryInvestigationReport["scriptsRun"][number])),
             ],
           }
@@ -4173,6 +4182,7 @@ export class FactoryServiceBase {
       dataDir: this.dataDir,
       repoRoot: this.git.repoRoot,
       worktreesDir: this.git.worktreesDir,
+      objectiveId: parsed.objectiveId,
     });
     const failed = results.find((result) => !result.ok);
     const raw = JSON.stringify({ results }, null, 2);
@@ -6145,6 +6155,7 @@ export class FactoryServiceBase {
       dataDir: this.dataDir,
       repoRoot: this.git.repoRoot,
       worktreesDir: this.git.worktreesDir,
+      objectiveId: this.objectiveId,
     });
   }
 

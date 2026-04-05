@@ -64,9 +64,16 @@ export const FACTORY_TASK_ARTIFACT_SCHEMA = {
 export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
   type: "object",
   properties: {
+    scriptName: { type: ["string", "null"] },
     command: { type: "string" },
     summary: { type: ["string", "null"] },
     status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
+    startedAt: { type: ["number", "null"] },
+    finishedAt: { type: ["number", "null"] },
+    durationMs: { type: ["number", "null"] },
+    exitCode: { type: ["number", "null"] },
+    stdoutHash: { type: ["string", "null"] },
+    stderrHash: { type: ["string", "null"] },
   },
   required: ["command", "summary", "status"],
   additionalProperties: false,
@@ -209,11 +216,18 @@ export const normalizeExecutionScriptsRun = (
     ? value
       .filter((item): item is Record<string, unknown> => isRecord(item))
       .map((item) => ({
+        scriptName: clipText(typeof item.scriptName === "string" ? item.scriptName : undefined, 220),
         command: clipText(typeof item.command === "string" ? item.command : undefined, 220) ?? "command",
         summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
         status: item.status === "ok" || item.status === "warning" || item.status === "error"
           ? item.status
           : undefined,
+        startedAt: typeof item.startedAt === "number" && Number.isFinite(item.startedAt) ? item.startedAt : undefined,
+        finishedAt: typeof item.finishedAt === "number" && Number.isFinite(item.finishedAt) ? item.finishedAt : undefined,
+        durationMs: typeof item.durationMs === "number" && Number.isFinite(item.durationMs) ? item.durationMs : undefined,
+        exitCode: typeof item.exitCode === "number" && Number.isFinite(item.exitCode) ? item.exitCode : item.exitCode === null ? null : undefined,
+        stdoutHash: clipText(typeof item.stdoutHash === "string" ? item.stdoutHash : undefined, 120),
+        stderrHash: clipText(typeof item.stderrHash === "string" ? item.stderrHash : undefined, 120),
       } satisfies FactoryExecutionScriptRun))
     : [];
 
