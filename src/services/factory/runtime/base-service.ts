@@ -57,6 +57,12 @@ import {
   type FactoryChatCodexArtifactPaths,
 } from "../../factory-codex-artifacts";
 import {
+  createFactoryTaskRunManifest,
+  ensureFactoryTaskRunManifest,
+  factoryRunManifestPath,
+  validateFactoryTaskRunManifest,
+} from "../evidence-emitter";
+import {
   helperCatalogArtifactRefs,
   loadFactoryHelperContext,
 } from "../../factory-helper-catalog";
@@ -4009,6 +4015,73 @@ export class FactoryServiceBase {
       rawResult.alignment,
       this.defaultDeliveryAlignment(state, deliveryCompletion),
     );
+    const taskRunManifestPath = factoryRunManifestPath(this.dataDir, state.objectiveId, task.taskId);
+    const runManifest = createFactoryTaskRunManifest({
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      candidateId: payload.candidateId,
+      scriptsRun,
+      validationOutputs: checkResults,
+      proof: deliveryCompletion.proof,
+      alignment: deliveryAlignment,
+      completion: deliveryCompletion,
+      createdAt: completedAt,
+      updatedAt: completedAt,
+    });
+    await ensureFactoryTaskRunManifest({ path: taskRunManifestPath, manifest: runManifest });
+    const runManifestErrors = validateFactoryTaskRunManifest(runManifest);
+    if (runManifestErrors.length > 0) {
+      const diagnostic = `Task run manifest contract failed: ${runManifestErrors.join(", ")}`;
+      const blockedCompletion = normalizeTaskCompletionRecord(rawResult.completion, deliveryCompletion);
+      await ensureFactoryTaskRunManifest({
+        path: taskRunManifestPath,
+        manifest: { ...runManifest, diagnostics: [...(runManifest.diagnostics ?? []), diagnostic], updatedAt: Date.now() },
+      });
+      await commitFactoryTaskMemory(
+        this.memoryTools,
+        state,
+        task,
+        payload.candidateId,
+        renderDeliveryResultText({
+          summary: diagnostic,
+          handoff: diagnostic,
+          scriptsRun,
+          completion: blockedCompletion,
+          alignment: deliveryAlignment,
+        }),
+        "blocked",
+      );
+      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        outcome: "blocked",
+        workspaceDirty: status.dirty,
+        hasFailedCheck: Boolean(failedCheck),
+        blockedReason: diagnostic,
+        candidate: {
+          headCommit: committed?.hash ?? payload.baseCommit,
+          summary: diagnostic,
+          handoff: diagnostic,
+          completion: blockedCompletion,
+          alignment: deliveryAlignment,
+          checkResults,
+          scriptsRun,
+          artifactRefs: {
+            ...baseResultRefs,
+            runManifest: fileRef(taskRunManifestPath, "task run manifest"),
+            ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
+          },
+          producedAt: completedAt,
+        },
+        review: {
+          status: "changes_requested",
+          summary: diagnostic,
+          handoff: diagnostic,
+          reviewedAt: completedAt,
+        },
+      }), { workerHandoff });
+      return;
+    }
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
         completion: deliveryCompletion,
@@ -4032,6 +4105,7 @@ export class FactoryServiceBase {
 
     const resultRefs = {
       ...baseResultRefs,
+      runManifest: fileRef(taskRunManifestPath, "task run manifest"),
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
