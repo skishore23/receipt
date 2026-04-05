@@ -2750,10 +2750,12 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const idempotencyKey = `factory:${objectiveId}:objective-control:${reason}`;
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
+      idempotencyKey,
       singletonMode: reason === "admitted" ? "cancel" : "steer",
       maxAttempts: 2,
       payload: {
@@ -4485,6 +4487,7 @@ export class FactoryServiceBase {
       agentId: "codex",
       lane: "collect",
       sessionKey: `factory:${state.objectiveId}:${task.taskId}`,
+      idempotencyKey: `factory:${state.objectiveId}:${task.taskId}:codex:${candidateId}`,
       singletonMode: "allow",
       maxAttempts: 2,
       payload,
@@ -4509,6 +4512,7 @@ export class FactoryServiceBase {
       agentId: "codex",
       lane: "collect",
       sessionKey: `factory:monitor:${state.objectiveId}:${task.taskId}`,
+      idempotencyKey: `factory:${state.objectiveId}:${task.taskId}:monitor:${candidateId}`,
       singletonMode: "allow",
       maxAttempts: 1,
       payload: monitorPayload,
@@ -4646,6 +4650,7 @@ export class FactoryServiceBase {
       agentId: "codex",
       lane: "collect",
       sessionKey: `factory:integration:${objectiveId}`,
+      idempotencyKey: `factory:${objectiveId}:integration:${candidateId}`,
       singletonMode: "allow",
       maxAttempts: 1,
       payload,
@@ -4961,6 +4966,7 @@ export class FactoryServiceBase {
       agentId: "codex",
       lane: "collect",
       sessionKey: `factory:integration:${state.objectiveId}`,
+      idempotencyKey: `factory:${state.objectiveId}:publish:${candidateId}`,
       singletonMode: "allow",
       maxAttempts: 1,
       payload,
