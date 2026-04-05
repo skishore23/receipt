@@ -94,6 +94,7 @@ import {
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
+  validateTaskEvidenceRecord,
   renderDeliveryResultText,
   renderInvestigationReportText,
 } from "../result-contracts";
@@ -3696,6 +3697,10 @@ export class FactoryServiceBase {
       ).join("\n")}`
       : undefined;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
+    const evidenceCheck = validateTaskEvidenceRecord(rawResult.evidence, scriptsRun);
+    if (!evidenceCheck.ok) {
+      throw new FactoryServiceError(409, evidenceCheck.reason ?? "task evidence missing");
+    }
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);

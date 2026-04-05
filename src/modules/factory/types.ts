@@ -123,6 +123,14 @@ export type FactoryTaskAlignmentRecord = {
   readonly rationale: string;
 };
 
+export type FactoryTaskEvidenceRecord = {
+  readonly executedCommands: ReadonlyArray<string>;
+  readonly outputs: ReadonlyArray<string>;
+  readonly discoveredAssets: ReadonlyArray<string>;
+  readonly timestamps: Readonly<Record<string, string>>;
+  readonly proof: ReadonlyArray<string>;
+};
+
 export type FactoryObjectiveContractRecord = {
   readonly acceptanceCriteria: ReadonlyArray<string>;
   readonly allowedScope: ReadonlyArray<string>;

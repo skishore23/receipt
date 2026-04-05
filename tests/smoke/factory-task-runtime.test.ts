@@ -10,6 +10,7 @@ import {
   materializeFactoryIsolatedTaskSupportFiles,
   removeFactoryTaskRuntimeWorkspace,
 } from "../../src/services/factory/task-runtime";
+import { validateTaskEvidenceRecord } from "../../src/services/factory/result-contracts";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -195,4 +196,10 @@ test("factory task runtime: isolated runtimes copy support files and cleanup res
     git,
   });
   expect(removedWorkspace).toBe(path.join(git.worktreesDir, "task-demo"));
+});
+
+test("factory task result contract rejects empty evidence when scripts ran", () => {
+  const result = validateTaskEvidenceRecord({}, [{ command: "bun run build" }]);
+  expect(result.ok).toBe(false);
+  expect(result.reason).toContain("executed_commands");
 });
