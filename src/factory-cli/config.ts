@@ -7,6 +7,7 @@ import type { HeartbeatSpec } from "../adapters/heartbeat";
 import type { JobLane } from "../modules/job";
 import type { FactoryObjectivePolicy } from "../modules/factory";
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory";
+import { assertGitRepo } from "../lib/git-repo";
 
 const execFileAsync = promisify(execFile);
 
@@ -125,8 +126,9 @@ const defaultFactoryConfigPath = (repoRoot: string): string =>
 
 export const detectGitRoot = async (cwd: string): Promise<string | undefined> => {
   try {
+    const gitRoot = await assertGitRepo(cwd);
     const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
+      cwd: gitRoot,
       encoding: "utf-8",
     });
     const root = stdout.trim();
