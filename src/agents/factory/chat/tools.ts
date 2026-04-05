@@ -27,6 +27,7 @@ import {
 import { createRepoStatusTool, effectiveFactoryLiveWaitMs, waitForSnapshotChange, isActiveJobStatus, clampWaitMs, deriveObjectiveTitle } from "../../orchestration-utils";
 import { summarizeFactoryObjective } from "../../../views/factory/objective-presenters";
 import { normalizeFactoryDispatchInput, resolveFactoryDispatchAction, isObjectiveContinuationBoundary } from "../dispatch";
+import { resolveFactoryOutputFocus } from "../output-focus";
 import { asString, asRecord, nextId, stableCodexSessionKey, workerMemoryScope, toolSummary, latestActiveCodexJob, jobMatchesProfileContext, codexJobPriority, normalizeJobSnapshot, reusableInfrastructureRefs } from "./input";
 import { commitWorkerSummary } from "./memory";
 import { codexJobSnapshot } from "./status";
@@ -649,34 +650,14 @@ const createFactoryOutputTool = (input: FactoryChatToolsInput): AgentToolExecuto
   async (toolInput) => {
     const objectiveId = asString(toolInput.objectiveId) ?? input.getCurrentObjectiveId();
     if (!objectiveId) throw new Error("factory.output requires objectiveId");
-    const taskId = asString(toolInput.taskId);
-    const jobId = asString(toolInput.jobId);
-    const requestedFocusKind = asString(toolInput.focusKind);
-    const requestedFocusId = asString(toolInput.focusId);
-    let focusKind: "task" | "job";
-    let focusId: string;
-    if (taskId) {
-      focusKind = "task";
-      focusId = taskId;
-    } else if (jobId) {
-      focusKind = "job";
-      focusId = jobId;
-    } else if (requestedFocusKind === "task" || requestedFocusKind === "job") {
-      if (!requestedFocusId) throw new Error("factory.output requires focusId");
-      focusKind = requestedFocusKind;
-      focusId = requestedFocusId;
-    } else if (requestedFocusKind) {
-      throw new Error("factory.output requires focusKind of 'task' or 'job'");
-    } else if (requestedFocusId) {
-      throw new Error("factory.output requires focusKind when focusId is provided");
-    } else {
-      const inferredFocus = await input.factoryService.inferObjectiveLiveOutputFocus(objectiveId);
-      if (!inferredFocus) {
-        throw new Error("factory.output requires focusKind/focusId, taskId/jobId, or an objective with exactly one active/nonterminal task (or exactly one task total)");
-      }
-      focusKind = inferredFocus.focusKind;
-      focusId = inferredFocus.focusId;
-    }
+    const { focusKind, focusId } = await resolveFactoryOutputFocus({
+      factoryService: input.factoryService,
+      objectiveId,
+      taskId: asString(toolInput.taskId),
+      jobId: asString(toolInput.jobId),
+      focusKind: asString(toolInput.focusKind),
+      focusId: asString(toolInput.focusId),
+    });
     const requestedWaitMs = clampWaitMs(toolInput.waitForChangeMs);
     const buildOutput = async (): Promise<Record<string, unknown>> => ({
       worker: "factory",
