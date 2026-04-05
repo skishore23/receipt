@@ -726,6 +726,17 @@ test("factory policy: software delivery objectives auto-publish and expose PR me
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
   expect(publishResult.status).toBe("completed");
+  const publishPayload = publishJob.payload as FactoryIntegrationPublishJobPayload;
+  const publishDir = path.dirname(publishPayload.resultPath);
+  const alignmentReportPath = path.join(publishDir, "alignment_report.json");
+  const scriptsRunPath = path.join(publishDir, "scripts_run.json");
+  const evidenceIndexPath = path.join(publishDir, "evidence_index.json");
+  await expect(fs.readFile(alignmentReportPath, "utf-8")).resolves.toMatch(/objectiveStatement/);
+  await expect(fs.readFile(scriptsRunPath, "utf-8")).resolves.toMatch(/durationMs/);
+  await expect(fs.readFile(evidenceIndexPath, "utf-8")).resolves.toMatch(/sha256/);
+  expect((await fs.readFile(alignmentReportPath, "utf-8")).trim().length).toBeGreaterThan(0);
+  expect((await fs.readFile(scriptsRunPath, "utf-8")).trim().length).toBeGreaterThan(0);
+  expect((await fs.readFile(evidenceIndexPath, "utf-8")).trim().length).toBeGreaterThan(0);
 
   const published = await service.getObjective(created.objectiveId);
   const debug = await service.getObjectiveDebug(created.objectiveId);
