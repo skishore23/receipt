@@ -4,6 +4,7 @@
 
 import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
 import type { JobLane } from "../../modules/job";
+import { emitAlignmentEvent, makeAlignmentPayload, type AlignmentReporter } from "../../agent/reporting/alignment";
 
 export type JobLeaseProcessRegistration = {
   readonly pid: number;
@@ -38,6 +39,7 @@ export type JobWorkerOptions = {
   readonly concurrency?: number;
   readonly onTick?: () => void;
   readonly onError?: (error: Error) => void;
+  readonly alignmentReporter?: AlignmentReporter;
 };
 
 type ActiveLeaseState = {
@@ -60,6 +62,7 @@ export class JobWorker {
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
+  private readonly alignmentReporter?: AlignmentReporter;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeLeases = new Map<string, ActiveLeaseState>();
   private running = false;
@@ -79,6 +82,7 @@ export class JobWorker {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
     this.onError = opts.onError;
+    this.alignmentReporter = opts.alignmentReporter;
   }
 
   private reportError(err: unknown): void {
@@ -257,12 +261,34 @@ export class JobWorker {
   }
 
   private async runLeased(job: QueueJob): Promise<void> {
+    const objectiveId = typeof job.payload.objectiveId === "string" ? job.payload.objectiveId : undefined;
+    const taskId = typeof job.payload.taskId === "string" ? job.payload.taskId : undefined;
+    const emit = async (decisionSummary: string, evidenceRefs: ReadonlyArray<string> = []): Promise<void> => {
+      await emitAlignmentEvent({
+        ...makeAlignmentPayload({
+          jobId: job.id,
+          objectiveId,
+          taskId,
+          decisionSummary,
+          evidenceRefs,
+          constraintsChecked: [
+            `agent:${job.agentId}`,
+            `lane:${job.lane}`,
+            `attempt:${job.attempt + 1}`,
+          ],
+        }),
+        reporter: this.alignmentReporter,
+      });
+    };
+
+    await emit("job execution started");
     const pullCommands = async (
       types?: ReadonlyArray<"steer" | "follow_up" | "abort">
     ): Promise<ReadonlyArray<QueueCommandRecord>> => this.queue.consumeCommands(job.id, types);
 
     const preAbort = await pullCommands(["abort"]);
     if (preAbort.length > 0 || job.abortRequested) {
+      await emit("job canceled before handler execution", ["abort command observed"]);
       await this.queue.cancel(job.id, "abort requested", this.workerId);
       return;
     }
@@ -274,6 +300,7 @@ export class JobWorker {
     const handler = this.handlers[job.agentId];
     if (!handler) {
       this.clearActiveLease(job.id);
+      await emit("job failed because no handler was registered", [`agent:${job.agentId}`]);
       await this.queue.fail(job.id, this.workerId, `No handler for agent '${job.agentId}'`, true);
       return;
     }
@@ -296,17 +323,21 @@ export class JobWorker {
       this.clearActiveLease(job.id);
       const postAbort = await pullCommands(["abort"]);
       if (postAbort.length > 0) {
+        await emit("job canceled after handler completion", ["abort command observed"]);
         await this.queue.cancel(job.id, "abort requested", this.workerId);
         return;
       }
       if (result.ok) {
+        await emit("job completed successfully", ["queue.complete"]);
         await this.queue.complete(job.id, this.workerId, result.result);
       } else {
+        await emit("job failed", ["queue.fail"]);
         await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }
     } catch (err) {
       this.clearActiveLease(job.id);
       const message = err instanceof Error ? err.message : String(err);
+      await emit(`job failed with exception: ${message}`, ["exception"]);
       await this.queue.fail(job.id, this.workerId, message);
     }
   }
