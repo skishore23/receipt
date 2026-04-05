@@ -753,11 +753,9 @@ export class LocalCodexExecutor implements CodexExecutor {
         });
 
         const stderrLog = `${result.stderr}\n${result.stdout}\n${await fsp.readFile(input.stderrPath, "utf-8").catch(() => "")}`;
-        const unknownOptionMatch = /(?:bwrap:\s*)?Unknown option (--[A-Za-z0-9-]+)/i.exec(stderrLog);
-        if (!retrying && sandboxMode && (unknownOptionMatch || !bwrapCapabilities.argv0Supported)) {
-          const removedFlags = new Set<string>();
-          if (!bwrapCapabilities.argv0Supported) removedFlags.add("--argv0");
-          if (unknownOptionMatch) removedFlags.add(unknownOptionMatch[1]);
+        const unknownOptionDetected = /Unknown option/i.test(stderrLog);
+        if (!retrying && sandboxMode && unknownOptionDetected) {
+          const removedFlags = new Set<string>(stderrLog.match(/--[A-Za-z0-9-]+/g) ?? []);
           if (removedFlags.size > 0) {
             await emitSandboxRetryEvent(control, input.stderrPath, [...removedFlags]);
             return execute(undefined, true);
@@ -788,10 +786,6 @@ export class LocalCodexExecutor implements CodexExecutor {
       };
 
       let sandboxMode = initialSandboxMode;
-      if (sandboxMode && !bwrapCapabilities.argv0Supported) {
-        await emitSandboxRetryEvent(control, input.stderrPath, ["--argv0"]);
-        sandboxMode = undefined;
-      }
       return await execute(sandboxMode);
     } finally {
       if (isolatedCodexHome) {
