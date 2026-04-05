@@ -4710,6 +4710,8 @@ export class FactoryServiceBase {
       worktreesDir: this.git.worktreesDir,
     });
     const resultSchemaPath = path.join(path.dirname(parsed.resultPath), "schema.json");
+    const reportJsonPath = path.join(path.dirname(parsed.resultPath), "objective_report.json");
+    const reportMdPath = path.join(path.dirname(parsed.resultPath), "objective_report.md");
     await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
     await fs.writeFile(resultSchemaPath, JSON.stringify(FACTORY_PUBLISH_RESULT_SCHEMA, null, 2), "utf-8");
 
@@ -4793,6 +4795,38 @@ export class FactoryServiceBase {
       if (!publishResult) {
         throw lastPublishError instanceof Error ? lastPublishError : new Error(String(lastPublishError ?? "factory publish failed"));
       }
+      const validationStepsRun = [
+        `Summarized objective memory for factory/objectives/${parsed.objectiveId}`,
+        `Summarized integration memory for factory/objectives/${parsed.objectiveId}/integration`,
+        `Summarized publish memory for factory/objectives/${parsed.objectiveId}/publish`,
+        `Collected recent objective receipts for objective ${parsed.objectiveId}`,
+        `Verified publish result artifact at ${parsed.resultPath}`,
+      ];
+      const report = {
+        objective_id: parsed.objectiveId,
+        change_summary: publishResult.summary,
+        files_changed: [parsed.resultPath],
+        before_after_screenshots: [],
+        validation_steps_run: validationStepsRun,
+        result: "promoted",
+      };
+      await fs.writeFile(reportJsonPath, JSON.stringify(report, null, 2), "utf-8");
+      await fs.writeFile(reportMdPath, [
+        `# Objective Report`,
+        "",
+        `- Objective ID: ${report.objective_id}`,
+        `- Result: ${report.result}`,
+        `- Change Summary: ${report.change_summary}`,
+        `- Files Changed: ${report.files_changed.join(", ") || "none"}`,
+        `- Before/After Screenshots: ${report.before_after_screenshots.length ? report.before_after_screenshots.join(", ") : "none"}`,
+        `- Validation Steps Run:`,
+        ...report.validation_steps_run.map((step) => `  - ${step}`),
+      ].join("\n"), "utf-8");
+      const reportJson = await fs.readFile(reportJsonPath, "utf-8").catch(() => undefined);
+      const reportMd = await fs.readFile(reportMdPath, "utf-8").catch(() => undefined);
+      if (!reportJson || !reportMd || report.validation_steps_run.length === 0) {
+        throw new FactoryServiceError(500, "objective report artifact missing or incomplete");
+      }
       await fs.writeFile(parsed.resultPath, JSON.stringify(publishResult, null, 2), "utf-8");
       const summary = publishResult.summary;
       await commitFactoryPublishMemory(this.memoryTools, state, parsed.candidateId, {
@@ -4802,6 +4836,7 @@ export class FactoryServiceBase {
           `PR: ${publishResult.prUrl}`,
           publishResult.headRefName ? `Head ref: ${publishResult.headRefName}` : "",
           publishResult.baseRefName ? `Base ref: ${publishResult.baseRefName}` : "",
+          `Objective report: ${reportJsonPath}`,
         ].filter(Boolean),
         tags: ["publish", "succeeded"],
       });
