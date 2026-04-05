@@ -92,6 +92,7 @@ import {
   FACTORY_TASK_RESULT_SCHEMA,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
+  normalizeTaskEvidenceRecords,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
   renderDeliveryResultText,
@@ -994,8 +995,19 @@ export class FactoryServiceBase {
       outOfScope: [],
       rationale: inferredAligned
         ? "The worker did not emit an explicit alignment block, but the controller inferred alignment from proof-backed completion with no remaining work."
-        : "The worker did not emit an explicit alignment block, so the controller could not prove the full objective contract was satisfied.",
+      : "The worker did not emit an explicit alignment block, so the controller could not prove the full objective contract was satisfied.",
     };
+  }
+
+  private deliveryPassHasRequiredEvidence(input: {
+    readonly evidence: ReadonlyArray<unknown>;
+    readonly alignment: FactoryTaskAlignmentRecord;
+    readonly completion: FactoryTaskCompletionRecord;
+  }): boolean {
+    return input.alignment.verdict === "aligned"
+      && input.completion.remaining.length === 0
+      && input.completion.proof.length > 0
+      && input.evidence.length > 0;
   }
 
   private workerTaskSkillRefs(selectedSkills: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -4004,11 +4016,17 @@ export class FactoryServiceBase {
         checkResults,
       }),
     );
+    const deliveryEvidence = normalizeTaskEvidenceRecords((rawResult as Record<string, unknown>).evidence);
     const deliveryContract = this.objectiveContractForState(state);
     const deliveryAlignment = normalizeTaskAlignmentRecord(
       rawResult.alignment,
       this.defaultDeliveryAlignment(state, deliveryCompletion),
     );
+    const passEligible = this.deliveryPassHasRequiredEvidence({
+      evidence: deliveryEvidence,
+      alignment: deliveryAlignment,
+      completion: deliveryCompletion,
+    });
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
         completion: deliveryCompletion,
@@ -4073,6 +4091,14 @@ export class FactoryServiceBase {
           contract: deliveryContract,
         }));
       }
+    }
+    if (outcome === "approved" && !passEligible) {
+      plannerOutcome = "changes_requested";
+      reviewStatus = "changes_requested";
+      reviewSummary = `${candidateSummary} PASS requires structured evidence plus an aligned contract report.`;
+      reviewHandoff = `${candidateHandoff}\n\nPASS requires a non-empty evidence payload, proof-backed completion, and aligned contract reporting before approval.`;
+      candidateSummary = reviewSummary;
+      candidateHandoff = reviewHandoff;
     }
     if (failedCheck) {
       const classification = await classifyFactoryFailedCheck({
