@@ -367,7 +367,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} objective`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} scope task`));
   expect(promptBody).toMatch(new RegExp(`bun ${payload.memoryScriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} search repo`));
-  expect(promptBody).toMatch(/Always include an explicit handoff string, scriptsRun, completion, and alignment\./);
+  expect(promptBody).toMatch(/Always include an explicit handoff string, scriptsRun, structuredEvidence, completion, and alignment\./);
 
   expect(captured.context).toMatch(/# Factory Task Context Summary/);
   expect(captured.context).toMatch(/## What Matters/);

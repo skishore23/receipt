@@ -6,6 +6,7 @@ import type {
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
+  FactoryStructuredEvidenceRecord,
 } from "../../modules/factory";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -92,6 +93,17 @@ export const FACTORY_TASK_COMPLETION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    summary: { type: "string" },
+    detail: { type: ["string", "null"] },
+  },
+  required: ["title", "summary", "detail"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   type: "object",
   properties: {
@@ -128,11 +140,15 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
       type: "array",
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
+    structuredEvidence: {
+      type: "array",
+      items: FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA,
+    },
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "structuredEvidence", "completion", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -215,6 +231,21 @@ export const normalizeExecutionScriptsRun = (
           ? item.status
           : undefined,
       } satisfies FactoryExecutionScriptRun))
+    : [];
+
+export const normalizeStructuredEvidence = (
+  value: unknown,
+): ReadonlyArray<FactoryStructuredEvidenceRecord> =>
+  Array.isArray(value)
+    ? value
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => ({
+        title: clipText(typeof item.title === "string" ? item.title : undefined, 120) ?? "Evidence",
+        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 240) ?? "Evidence item",
+        detail: item.detail === null
+          ? null
+          : clipText(typeof item.detail === "string" ? item.detail : undefined, 600) ?? null,
+      }))
     : [];
 
 export const normalizeTaskCompletionRecord = (

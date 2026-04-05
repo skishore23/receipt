@@ -137,6 +137,12 @@ export type FactoryTaskCompletionRecord = {
   readonly remaining: ReadonlyArray<string>;
 };
 
+export type FactoryStructuredEvidenceRecord = {
+  readonly title: string;
+  readonly summary: string;
+  readonly detail: string | null;
+};
+
 export type FactoryInvestigationReport = {
   readonly conclusion: string;
   readonly evidence: ReadonlyArray<FactoryInvestigationEvidence>;

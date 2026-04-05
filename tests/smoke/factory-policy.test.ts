@@ -360,12 +360,14 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   };
 
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
+  expect(prompt).toContain(`"structuredEvidence": [{ "title": string, "summary": string, "detail": string | null }]`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }`);
   expect(prompt).toContain(`"handoff": string`);
-  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, completion, and alignment.");
+  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, structuredEvidence, completion, and alignment.");
   expect(schema.required).toContain("handoff");
   expect(schema.required).toContain("scriptsRun");
+  expect(schema.required).toContain("structuredEvidence");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
 });
