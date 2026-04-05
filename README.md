@@ -246,6 +246,29 @@ bun run docker:prod:down
 
 Both modes expose: `http://localhost:8787` (Receipt), `http://localhost:8001` (Resonate HTTP), `http://localhost:9090/metrics` (Resonate metrics).
 
+## Deploy to AWS
+
+The repo includes an ECS Fargate entrypoint under `deploy/aws/ecs/`.
+
+```bash
+bash deploy/aws/ecs/scripts/validate.sh
+bash deploy/aws/ecs/scripts/bootstrap-ecr.sh receipt
+bash deploy/aws/ecs/scripts/deploy-ecs.sh
+```
+
+The deployment script expects these environment variables to be set:
+
+```bash
+export EXECUTION_ROLE_ARN=arn:aws:iam::123456789012:role/receipt-ecs-execution
+export TASK_ROLE_ARN=arn:aws:iam::123456789012:role/receipt-ecs-task
+export OPENAI_API_KEY_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:receipt/openai
+export CLUSTER_NAME=receipt
+export SERVICE_NAME=receipt
+export REPOSITORY_NAME=receipt
+```
+
+`deploy/aws/ecs/scripts/deploy-ecs.sh` builds the local image, pushes it to ECR, registers a new task definition, updates the ECS service, and waits for stability.
+
 ## Development
 
 ```bash

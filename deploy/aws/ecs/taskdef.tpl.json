@@ -1,0 +1,43 @@
+{
+  "family": "{{TASK_FAMILY}}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "{{CPU}}",
+  "memory": "{{MEMORY}}",
+  "executionRoleArn": "{{EXECUTION_ROLE_ARN}}",
+  "taskRoleArn": "{{TASK_ROLE_ARN}}",
+  "containerDefinitions": [
+    {
+      "name": "{{CONTAINER_NAME}}",
+      "image": "{{IMAGE_URI}}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": {{CONTAINER_PORT}},
+          "hostPort": {{CONTAINER_PORT}},
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "{{OPENAI_API_KEY_SECRET_ARN}}"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "{{LOG_GROUP_NAME}}",
+          "awslogs-region": "{{AWS_REGION}}",
+          "awslogs-stream-prefix": "{{LOG_STREAM_PREFIX}}"
+        }
+      }
+    }
+  ]
+}
