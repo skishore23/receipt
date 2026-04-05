@@ -97,6 +97,7 @@ import {
   renderDeliveryResultText,
   renderInvestigationReportText,
 } from "../result-contracts";
+import { finalizeAlignment } from "../reporting";
 import {
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
@@ -208,6 +209,13 @@ const ALIGNMENT_CORRECTION_NOTE_PREFIX = "Alignment correction for this objectiv
 const PUBLISH_TRANSIENT_FAILURE_RE =
   /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
 const PUBLISH_MAX_ATTEMPTS = 3;
+
+const evidenceRef = (kind: string, ref: string, label?: string, region?: ReadonlyArray<string>) => ({
+  kind,
+  ref,
+  ...(label ? { label } : {}),
+  ...(region ? { region: [...region] } : {}),
+});
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -4009,6 +4017,19 @@ export class FactoryServiceBase {
       rawResult.alignment,
       this.defaultDeliveryAlignment(state, deliveryCompletion),
     );
+    const alignmentReport = await finalizeAlignment({
+      objectiveId: payload.objectiveId,
+      workspacePath: payload.workspacePath,
+      taskId: payload.taskId,
+      completion: effectiveDeliveryCompletion,
+      scriptsRun,
+      verdictRationale: deliveryAlignment.rationale,
+      evidenceRefs: [
+        evidenceRef("artifact", baseResultRefs.result.ref, baseResultRefs.result.label),
+        evidenceRef("artifact", baseResultRefs.lastMessage.ref, baseResultRefs.lastMessage.label),
+        ...checkResults.map((check) => evidenceRef("script", check.command, check.ok ? "check passed" : "check failed")),
+      ],
+    });
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
         completion: deliveryCompletion,
@@ -4127,6 +4148,7 @@ export class FactoryServiceBase {
         alignment: deliveryAlignment,
         checkResults,
         scriptsRun,
+        alignmentReport,
         artifactRefs: resultRefs,
         tokensUsed: typeof rawResult.tokensUsed === "number" ? rawResult.tokensUsed : undefined,
         producedAt: completedAt,

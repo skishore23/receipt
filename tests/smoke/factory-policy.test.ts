@@ -320,6 +320,38 @@ test("factory policy: delivery task prompts keep publish in the controller lane"
   expect(prompt).toContain("The controller handles integration and PR publication after an approved candidate.");
 });
 
+test("factory policy: successful delivery runs emit a populated alignment report", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Alignment report finalization",
+    prompt: "Ship the fix and require a machine-readable alignment report.",
+    profileId: "software",
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+
+  const taskPayload = taskJob.payload as FactoryTaskJobPayload;
+  const alignmentPath = path.join(path.dirname(taskPayload.resultPath), `${taskPayload.taskId}.alignment.json`);
+  const rawAlignment = await fs.readFile(alignmentPath, "utf-8");
+  const alignment = JSON.parse(rawAlignment) as {
+    readonly objective_id: string;
+    readonly claims: ReadonlyArray<string>;
+    readonly evidence_refs: ReadonlyArray<{ readonly ref: string }>;
+    readonly scripts_run: ReadonlyArray<{ readonly command: string }>;
+    readonly verdict_rationale: string;
+  };
+
+  expect(alignment.objective_id).toBe(created.objectiveId);
+  expect(alignment.claims.length).toBeGreaterThan(0);
+  expect(alignment.evidence_refs.length).toBeGreaterThan(0);
+  expect(alignment.scripts_run.length).toBeGreaterThan(0);
+  expect(alignment.verdict_rationale).toContain("alignment");
+});
+
 test("factory policy: validation-owned task packets include the full repo checks", async () => {
   const { service, queue } = await createFactoryService();
 
