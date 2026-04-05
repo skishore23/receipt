@@ -114,6 +114,38 @@ export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    proofBundle: {
+      type: "object",
+      properties: {
+        logs: {
+          type: "array",
+          items: { type: "string" },
+        },
+        artifacts: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+      required: ["logs", "artifacts"],
+      additionalProperties: false,
+    },
+    alignment: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["not_performed"] },
+        reason: { type: "string" },
+      },
+      required: ["status", "reason"],
+      additionalProperties: false,
+    },
+  },
+  required: ["proofBundle", "alignment"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -130,9 +162,10 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
     },
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
+    structuredEvidence: FACTORY_TASK_STRUCTURED_EVIDENCE_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "structuredEvidence", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -253,6 +286,41 @@ export const normalizeTaskAlignmentRecord = (
     rationale: clipText(typeof record.rationale === "string" ? record.rationale : undefined, 500)
       ?? fallback?.rationale
       ?? "Alignment was not explicitly reported.",
+  };
+};
+
+export const normalizeStructuredEvidenceRecord = (
+  value: unknown,
+  fallback?: {
+    readonly logs?: ReadonlyArray<string>;
+    readonly artifacts?: ReadonlyArray<string>;
+    readonly alignmentReason?: string;
+  },
+): {
+  readonly proofBundle: {
+    readonly logs: ReadonlyArray<string>;
+    readonly artifacts: ReadonlyArray<string>;
+  };
+  readonly alignment: {
+    readonly status: "not_performed";
+    readonly reason: string;
+  };
+} => {
+  const record = isRecord(value) ? value : {};
+  const proofBundle = isRecord(record.proofBundle) ? record.proofBundle : {};
+  const logs = asReadonlyStringArray(proofBundle.logs).map((item) => clipText(item, 280) ?? item);
+  const artifacts = asReadonlyStringArray(proofBundle.artifacts).map((item) => clipText(item, 280) ?? item);
+  return {
+    proofBundle: {
+      logs: logs.length > 0 ? logs : (fallback?.logs ?? []),
+      artifacts: artifacts.length > 0 ? artifacts : (fallback?.artifacts ?? []),
+    },
+    alignment: {
+      status: "not_performed",
+      reason: clipText(typeof record.alignment?.reason === "string" ? record.alignment.reason : undefined, 500)
+        ?? fallback?.alignmentReason
+        ?? "Alignment validation was not performed.",
+    },
   };
 };
 
