@@ -1,0 +1,13 @@
+{
+  "id": "aws_cost_summary",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": [
+    "infrastructure",
+    "aws",
+    "cost",
+    "mode"
+  ],
+  "description": "Resolve AWS cost summary mode with deterministic offline fallback classification.",
+  "entrypoint": "run.py"
+}
