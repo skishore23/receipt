@@ -5,6 +5,7 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../factory-types";
+import { FACTORY_TASK_RESULT_SCHEMA, normalizeStructuredEvidence } from "./result-contracts";
 
 export type FactoryPublishResult = {
   readonly summary: string;
@@ -111,6 +112,26 @@ export const resolveFactoryTaskWorkerResult = async (
     ?? parseJsonObjectCandidate(await readTextIfPresent(payload.resultPath) ?? "");
   if (!result) {
     throw new FactoryServiceError(500, "missing structured factory task result from codex");
+  }
+  if (result.status === "completed") {
+    const structuredEvidence = normalizeStructuredEvidence(result.structuredEvidence);
+    if (structuredEvidence.length === 0) {
+      throw new FactoryServiceError(500, "completed factory task result missing structuredEvidence");
+    }
+    const scriptsRun = Array.isArray(result.scriptsRun) ? result.scriptsRun : [];
+    if (scriptsRun.length === 0) {
+      throw new FactoryServiceError(500, "completed factory task result missing scriptsRun");
+    }
+    if (!result.alignment || typeof result.alignment !== "object" || Array.isArray(result.alignment)) {
+      throw new FactoryServiceError(500, "completed factory task result missing alignment");
+    }
+    if (!result.completion || typeof result.completion !== "object" || Array.isArray(result.completion)) {
+      throw new FactoryServiceError(500, "completed factory task result missing completion");
+    }
+    if (FACTORY_TASK_RESULT_SCHEMA.required.some((key) => !(key in result))) {
+      throw new FactoryServiceError(500, "completed factory task result missing required fields");
+    }
+    result.structuredEvidence = structuredEvidence;
   }
   return execution.tokensUsed !== undefined
     ? { ...result, tokensUsed: execution.tokensUsed }
