@@ -123,6 +123,23 @@ export type FactoryTaskAlignmentRecord = {
   readonly rationale: string;
 };
 
+export type FactoryTaskAlignmentReportRow = {
+  readonly requirementId: string;
+  readonly requirementText: string;
+  readonly checkName: string;
+  readonly dataSource: string;
+  readonly evidenceRefs: ReadonlyArray<string>;
+  readonly result: "pass" | "fail" | "incomplete";
+  readonly notes: string | null;
+};
+
+export type FactoryTaskAlignmentReport = {
+  readonly generatedAt: number;
+  readonly result: "complete" | "incomplete";
+  readonly rows: ReadonlyArray<FactoryTaskAlignmentReportRow>;
+  readonly notes: string | null;
+};
+
 export type FactoryObjectiveContractRecord = {
   readonly acceptanceCriteria: ReadonlyArray<string>;
   readonly allowedScope: ReadonlyArray<string>;
