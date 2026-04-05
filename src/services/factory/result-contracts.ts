@@ -24,6 +24,43 @@ const asReadonlyStringArray = (value: unknown): ReadonlyArray<string> =>
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
     : [];
 
+const isEvidencePrimitive = (
+  value: unknown,
+): value is string | number | boolean | null =>
+  value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+
+const normalizeEvidencePrimitive = (
+  value: unknown,
+): string | number | boolean | null | undefined => {
+  if (typeof value === "string") return clipText(value, 600);
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+  if (Array.isArray(value) || isRecord(value)) return clipText(JSON.stringify(value), 600);
+  return undefined;
+};
+
+const normalizeEvidenceRecordMap = (
+  value: unknown,
+): Record<string, string | number | boolean | null> => {
+  if (Array.isArray(value)) {
+    const entries = value
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .flatMap((item) => {
+        const key = clipText(typeof item.key === "string" ? item.key : undefined, 140);
+        const normalizedValue = normalizeEvidencePrimitive(item.value);
+        return key && normalizedValue !== undefined ? [[key, normalizedValue] as const] : [];
+      });
+    return Object.fromEntries(entries);
+  }
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, entryValue]) => {
+      const clippedKey = clipText(key, 140);
+      const normalizedValue = normalizeEvidencePrimitive(entryValue);
+      return clippedKey && normalizedValue !== undefined ? [[clippedKey, normalizedValue] as const] : [];
+    }),
+  );
+};
+
 const renderSection = (
   title: string,
   lines: ReadonlyArray<string>,
@@ -115,6 +152,25 @@ export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_EVIDENCE_RECORD_VALUE_SCHEMA = {
+  type: ["string", "number", "boolean", "null"],
+} as const;
+
+export const FACTORY_EVIDENCE_RECORD_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    key: { type: "string" },
+    value: FACTORY_EVIDENCE_RECORD_VALUE_SCHEMA,
+  },
+  required: ["key", "value"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_EVIDENCE_RECORD_MAP_SCHEMA = {
+  type: "array",
+  items: FACTORY_EVIDENCE_RECORD_ENTRY_SCHEMA,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -178,9 +234,9 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
           timestamp: { type: "number" },
           tool_name: { type: "string" },
           command_or_api: { type: "string" },
-          inputs: { type: "object" },
-          outputs: { type: "object" },
-          summary_metrics: { type: "object" },
+          inputs: FACTORY_EVIDENCE_RECORD_MAP_SCHEMA,
+          outputs: FACTORY_EVIDENCE_RECORD_MAP_SCHEMA,
+          summary_metrics: FACTORY_EVIDENCE_RECORD_MAP_SCHEMA,
         },
         required: ["objective_id", "task_id", "timestamp", "tool_name", "command_or_api", "inputs", "outputs", "summary_metrics"],
         additionalProperties: false,
@@ -199,7 +255,7 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
       items: { type: "string" },
     },
   },
-  required: ["conclusion", "evidence", "scriptsRun", "disagreements", "nextSteps"],
+  required: ["conclusion", "evidence", "evidenceRecords", "scriptsRun", "disagreements", "nextSteps"],
   additionalProperties: false,
 } as const;
 
@@ -298,11 +354,9 @@ export const normalizeInvestigationReport = (
         timestamp: typeof item.timestamp === "number" ? item.timestamp : Date.now(),
         tool_name: clipText(typeof item.tool_name === "string" ? item.tool_name : undefined, 140) ?? "tool",
         command_or_api: clipText(typeof item.command_or_api === "string" ? item.command_or_api : undefined, 280) ?? "command",
-        inputs: isRecord(item.inputs) ? item.inputs : {},
-        outputs: isRecord(item.outputs) ? item.outputs : {},
-        summary_metrics: isRecord(item.summary_metrics)
-          ? item.summary_metrics as Record<string, number | string | boolean | null>
-          : {},
+        inputs: normalizeEvidenceRecordMap(item.inputs),
+        outputs: normalizeEvidenceRecordMap(item.outputs),
+        summary_metrics: normalizeEvidenceRecordMap(item.summary_metrics),
       }))
     : [];
   const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);

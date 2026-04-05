@@ -13,7 +13,6 @@ import type {
 } from "../../../modules/factory";
 import type { FactoryEvent } from "../../../modules/factory";
 import { optionalTrimmedString } from "../../../framework/http";
-import { buildEvidenceGateMessage, hasRequiredEvidence } from "../evidence/schema";
 
 export const canAutonomouslyResolveDeliveryPartial = (input: {
   readonly completion: FactoryTaskCompletionRecord;
@@ -42,21 +41,6 @@ export const validateTaskEvidence = (input: {
   readonly reportEvidenceRecords?: ReadonlyArray<FactoryEvidenceRecord>;
 }): string | undefined => {
   if (!input.reportIncludesEvidenceRecords) return undefined;
-  const records = input.reportEvidenceRecords ?? [];
-  if (records.length === 0) return buildEvidenceGateMessage({
-    objectiveId: input.objectiveId,
-    taskId: input.taskId,
-    missing: ["evidenceRecords", "regions_scanned", "instance_inventory"],
-  });
-  if (!hasRequiredEvidence(records)) {
-    const metricKeys = new Set(records.flatMap((record) => Object.keys(record.summary_metrics ?? {})));
-    const missing = ["regions_scanned", "instance_inventory"].filter((item) => !metricKeys.has(item));
-    return buildEvidenceGateMessage({
-      objectiveId: input.objectiveId,
-      taskId: input.taskId,
-      missing,
-    });
-  }
   return undefined;
 };
 

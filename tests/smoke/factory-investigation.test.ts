@@ -120,7 +120,7 @@ test("factory investigation: no-diff reports complete without integration and sy
       expect(schema.required).toEqual(["outcome", "summary", "handoff", "artifacts", "completion", "nextAction", "report"]);
       const report = (schema.properties as Record<string, Record<string, unknown>>).report;
       expect(report.type).toEqual(["object", "null"]);
-      expect(report.required).toEqual(["conclusion", "evidence", "scriptsRun", "disagreements", "nextSteps"]);
+      expect(report.required).toEqual(["conclusion", "evidence", "evidenceRecords", "scriptsRun", "disagreements", "nextSteps"]);
       const evidenceItem = ((report.properties as Record<string, Record<string, unknown>>).evidence.items as Record<string, unknown>);
       expect(evidenceItem.required).toEqual(["title", "summary", "detail"]);
       const scriptItem = ((report.properties as Record<string, Record<string, unknown>>).scriptsRun.items as Record<string, unknown>);
@@ -139,6 +139,7 @@ test("factory investigation: no-diff reports complete without integration and sy
         report: {
           conclusion: "The configured AWS identity has read access but no mutation path was exercised.",
           evidence: [{ title: "AWS CLI inspection", summary: "Read-only identity details were collected successfully.", detail: null }],
+          evidenceRecords: [],
           scriptsRun: [{ command: "aws sts get-caller-identity", summary: "Confirmed the active principal.", status: "ok" }],
           disagreements: [],
           nextSteps: ["If mutation testing is required, create a higher-severity follow-up objective."],
@@ -195,6 +196,7 @@ test("factory investigation: blocked structured reports stay non-approvable and 
         report: {
           conclusion: "Partial AWS evidence was collected, but ELB and CloudWatch access gaps left the inventory incomplete.",
           evidence: [{ title: "EC2 inventory", summary: "Instance and EBS counts were collected successfully.", detail: null }],
+          evidenceRecords: [],
           scriptsRun: [{ command: "bash .receipt/factory/task_01_inventory.sh", summary: "Collected partial AWS inventory and captured denied APIs.", status: "warning" }],
           disagreements: [],
           nextSteps: ["Grant read-only access for the denied services and rerun the inventory if deeper attribution is required."],
@@ -265,6 +267,7 @@ test("factory investigation: approved results downgrade to partial when captured
         report: {
           conclusion: "The sampled AWS services look healthy.",
           evidence: [{ title: "Alarm scan", summary: "No alarms were in ALARM state.", detail: null }],
+          evidenceRecords: [],
           scriptsRun: [{ command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary", summary: "Collected alarm state.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
@@ -519,6 +522,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
       report: {
         conclusion: "Service health evidence points to an application-side fault.",
         evidence: [{ title: "Health checks", summary: "Service health degraded before the deployment change.", detail: null }],
+        evidenceRecords: [],
         scriptsRun: [],
         disagreements: ["Initial attribution differed across observed signals."],
         nextSteps: [],
@@ -542,6 +546,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
       report: {
         conclusion: "Deployment evidence points to an infrastructure-side drift.",
         evidence: [{ title: "Deployment diff", summary: "The latest rollout changed core infrastructure settings.", detail: null }],
+        evidenceRecords: [],
         scriptsRun: [],
         disagreements: [],
         nextSteps: ["Validate the application fix path before any infra rollback."],
@@ -629,7 +634,7 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   };
   const { service } = await createFactoryService({
     codexRun: async () => {
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => mixedContext,
@@ -727,7 +732,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
       capturedSandboxMode = input.sandboxMode;
       capturedCompletionSignalPath = input.completionSignalPath;
       capturedReasoningEffort = input.reasoningEffort;
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => mixedContext,
@@ -835,6 +840,7 @@ test("factory investigation: infrastructure task packets mount selected checked-
         report: {
           conclusion: "The task packet mounted checked-in helper metadata for the AWS bucket prompt.",
           evidence: [],
+          evidenceRecords: [],
           scriptsRun: [],
           disagreements: [],
           nextSteps: [],
@@ -923,6 +929,7 @@ test("factory investigation: IAM user count prompts select the checked-in IAM he
         report: {
           conclusion: "The task packet mounted the IAM user helper for the count prompt.",
           evidence: [],
+          evidenceRecords: [],
           scriptsRun: [],
           disagreements: [],
           nextSteps: [],
@@ -990,7 +997,7 @@ test("factory investigation: resource-specific helper prompts tell Codex to use 
   };
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => awsContext,
@@ -1030,6 +1037,7 @@ test("factory investigation: infrastructure objectives can start from a dirty so
         report: {
           conclusion: "Bucket inventory completed.",
           evidence: [],
+          evidenceRecords: [],
           scriptsRun: [],
           disagreements: [],
           nextSteps: [],
@@ -1100,6 +1108,7 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
         report: {
           conclusion: "The rerun completed after live operator guidance was applied.",
           evidence: [{ title: "Restart marker", summary: "The workspace marker survived the restart boundary.", detail: null }],
+          evidenceRecords: [],
           scriptsRun: [{ command: "bun run build", summary: "Validation passed.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
