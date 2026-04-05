@@ -5714,6 +5714,31 @@ test("factory route: composer slash commands mutate the selected objective on th
   });
 });
 
+test("factory route: /help returns a concrete composer response", async () => {
+  const app = createRouteTestApp();
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist&chat=chat_demo&objective=objective_demo", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "accept": "application/json",
+    },
+    body: new URLSearchParams({
+      prompt: "/help",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(200);
+  const body = await response.json() as {
+    readonly location?: string;
+    readonly chat?: { readonly chatId?: string };
+    readonly selection?: { readonly objectiveId?: string };
+  };
+  expect(body.location).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action");
+  expect(body.chat).toEqual({ chatId: "chat_demo" });
+  expect(body.selection).toEqual({ objectiveId: "objective_demo" });
+});
+
 test("factory workbench route: /react mutates the selected objective from the page route", async () => {
   let reacted: { readonly objectiveId: string; readonly message?: string } | undefined;
   const app = createRouteTestApp({
