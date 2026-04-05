@@ -814,7 +814,7 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
 }, 15_000);
 
-test("local codex executor fails closed when sandbox bootstrap fails", async () => {
+test("local codex executor retries without sandbox when sandbox bootstrap fails", async () => {
   const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
   const { scriptPath, attemptsPath } = await createSandboxBootstrapFailureCodexStub();
   const artifactDir = path.join(root, ".receipt", "factory");
@@ -831,7 +831,7 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     },
   });
 
-  await expect(executor.run({
+  const result = await executor.run({
     prompt: "# Task\nReturn the final JSON only.\n",
     workspacePath: root,
     promptPath,
@@ -840,12 +840,13 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     stderrPath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  })).rejects.toThrow(/Unknown option --argv0|codex exited with 1/);
+  });
 
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\n");
+  expect(result.exitCode).toBe(0);
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\nworkspace-write\n");
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
   expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).not.toContain("retrying with danger-full-access");
+  expect(stderrLog).toContain("sandbox compatibility fallback");
 }, 15_000);
 
 test("local codex executor can keep read-only mutation policy while bypassing sandbox inference", async () => {
