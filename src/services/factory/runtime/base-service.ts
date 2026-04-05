@@ -87,6 +87,9 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  assertRequiredTaskResultFields,
+  buildRunAlignmentDocument,
+  buildRunEvidenceBundle,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
@@ -3381,53 +3384,58 @@ export class FactoryServiceBase {
         status: "blocked",
       };
     }
-    let rebuiltPacket = false;
-    if (parsed.executionMode === "worktree") {
-      const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
-      if (!workspaceStatus.exists) {
-        await this.git.restoreWorkspace({
-          workspaceId: parsed.workspaceId,
-          branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
-          workspacePath: parsed.workspacePath,
-          baseHash: parsed.baseCommit,
-        });
-        rebuiltPacket = true;
+    const runStartedAt = Date.now();
+    const evidencePath = path.join(parsed.workspacePath, ".receipt", "factory", `${parsed.taskId}.evidence.json`);
+    const alignmentPath = path.join(parsed.workspacePath, ".receipt", "factory", `${parsed.taskId}.alignment.json`);
+    let finalTaskResult: Record<string, unknown> | undefined;
+    try {
+      let rebuiltPacket = false;
+      if (parsed.executionMode === "worktree") {
+        const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
+        if (!workspaceStatus.exists) {
+          await this.git.restoreWorkspace({
+            workspaceId: parsed.workspaceId,
+            branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
+            workspacePath: parsed.workspacePath,
+            baseHash: parsed.baseCommit,
+          });
+          rebuiltPacket = true;
+        }
+      } else {
+        const exists = await pathExists(parsed.workspacePath);
+        if (!exists) {
+          await fs.mkdir(parsed.workspacePath, { recursive: true });
+          rebuiltPacket = true;
+        }
+        await materializeFactoryIsolatedTaskSupportFiles(
+          parsed.workspacePath,
+          this.profileRoot,
+          this.workerTaskProfile(parsed.profile),
+        );
       }
-    } else {
-      const exists = await pathExists(parsed.workspacePath);
-      if (!exists) {
-        await fs.mkdir(parsed.workspacePath, { recursive: true });
-        rebuiltPacket = true;
+      const packetPresent = await this.taskPacketPresent(parsed);
+      if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
+        await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
       }
-      await materializeFactoryIsolatedTaskSupportFiles(
-        parsed.workspacePath,
-        this.profileRoot,
-        this.workerTaskProfile(parsed.profile),
+      const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
+        workspacePath: parsed.workspacePath,
+        dataDir: this.dataDir,
+        repoRoot: this.git.repoRoot,
+        worktreesDir: this.git.worktreesDir,
+      });
+      const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
+      await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
+      await fs.writeFile(
+        resultSchemaPath,
+        JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
+        "utf-8",
       );
-    }
-    const packetPresent = await this.taskPacketPresent(parsed);
-    if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
-      await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
-    }
-    const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
-      workspacePath: parsed.workspacePath,
-      dataDir: this.dataDir,
-      repoRoot: this.git.repoRoot,
-      worktreesDir: this.git.worktreesDir,
-    });
-    const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
-    await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
-    await fs.writeFile(
-      resultSchemaPath,
-      JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
-      "utf-8",
-    );
-    const guidanceHistory: FactoryLiveGuidance[] = [];
-    let restartCount = 0;
-    let execution;
-    while (true) {
-      try {
-        execution = await this.codexExecutor.run({
+      const guidanceHistory: FactoryLiveGuidance[] = [];
+      let restartCount = 0;
+      let execution;
+      while (true) {
+        try {
+          execution = await this.codexExecutor.run({
           prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
           workspacePath: parsed.workspacePath,
           promptPath: parsed.promptPath,
@@ -3455,15 +3463,15 @@ export class FactoryServiceBase {
             PATH: workspaceCommandEnv.path,
           },
         }, control);
-        break;
-      } catch (error) {
-        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
-        const guidance = parseFactoryLiveGuidance(error.signal);
-        if (!guidance) throw error;
-        guidanceHistory.push(guidance);
-        restartCount += 1;
-        const restartedAt = Date.now();
-        await this.emitObjectiveBatch(parsed.objectiveId, [
+          break;
+        } catch (error) {
+          if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+          const guidance = parseFactoryLiveGuidance(error.signal);
+          if (!guidance) throw error;
+          guidanceHistory.push(guidance);
+          restartCount += 1;
+          const restartedAt = Date.now();
+          await this.emitObjectiveBatch(parsed.objectiveId, [
           {
             type: "task.intervention.applied",
             objectiveId: parsed.objectiveId,
@@ -3488,18 +3496,74 @@ export class FactoryServiceBase {
             restartedAt,
           },
         ]);
+        }
+      }
+      const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
+      finalTaskResult = taskResult;
+      await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
+      await this.applyTaskWorkerResult(parsed, taskResult);
+      await this.reactObjective(parsed.objectiveId);
+      return {
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        candidateId: parsed.candidateId,
+        status: "completed",
+      };
+    } finally {
+      if (finalTaskResult) {
+        const normalizedResult = finalTaskResult as {
+          readonly outcome?: unknown;
+          readonly summary?: unknown;
+          readonly handoff?: unknown;
+          readonly scriptsRun?: unknown;
+          readonly alignment?: unknown;
+          readonly completion?: { readonly remaining?: unknown };
+        };
+        assertRequiredTaskResultFields({
+          outcome: typeof normalizedResult.outcome === "string" ? normalizedResult.outcome : undefined,
+          summary: typeof normalizedResult.summary === "string" ? normalizedResult.summary : undefined,
+          handoff: typeof normalizedResult.handoff === "string" ? normalizedResult.handoff : undefined,
+          scriptsRun: Array.isArray(normalizedResult.scriptsRun) ? normalizeExecutionScriptsRun(normalizedResult.scriptsRun) : [],
+          alignment: normalizedResult.alignment ? normalizeTaskAlignmentRecord(normalizedResult.alignment) : undefined,
+        });
+        await fs.mkdir(path.dirname(alignmentPath), { recursive: true });
+        const alignment = normalizeTaskAlignmentRecord(normalizedResult.alignment);
+        const commandsRun = Array.isArray(normalizedResult.scriptsRun)
+          ? normalizeExecutionScriptsRun(normalizedResult.scriptsRun)
+          : [];
+        const assumptions = Array.isArray(normalizedResult.completion?.remaining)
+          ? normalizedResult.completion.remaining.filter((item): item is string => typeof item === "string")
+          : [];
+        await fs.writeFile(
+          alignmentPath,
+          buildRunAlignmentDocument({
+            objectiveId: parsed.objectiveId,
+            plan: String(normalizedResult.summary ?? ""),
+            assumptions,
+            securityChecks: commandsRun.map((item) => `${item.command}${item.summary ? ` | ${item.summary}` : ""}`),
+          }),
+          "utf-8",
+        );
+        const findings = [
+          {
+            title: "Alignment verdict",
+            summary: alignment.verdict,
+            detail: alignment.rationale,
+          },
+        ];
+        await fs.writeFile(
+          evidencePath,
+          JSON.stringify(buildRunEvidenceBundle({
+            commandsRun,
+            artifacts: [],
+            findings,
+            startedAt: runStartedAt,
+            finalizedAt: Date.now(),
+          }), null, 2),
+          "utf-8",
+        );
       }
     }
-    const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
-    await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
-    await this.applyTaskWorkerResult(parsed, taskResult);
-    await this.reactObjective(parsed.objectiveId);
-    return {
-      objectiveId: parsed.objectiveId,
-      taskId: parsed.taskId,
-      candidateId: parsed.candidateId,
-      status: "completed",
-    };
   }
 
   private async detectArtifactIssues(
