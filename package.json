@@ -47,7 +47,7 @@
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
-    "verify": "bun run build && bun run check:no-any && bun run test:smoke",
+    "verify": "bun run build && bun run check:no-any && bun run test:smoke && bun test tests/e2e",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

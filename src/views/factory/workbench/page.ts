@@ -344,7 +344,8 @@ const renderWorkbenchHeaderMetric = (input: {
   readonly value: string;
   readonly tooltip?: string;
   readonly iconClass?: string;
-}): string => `<div class="inline-flex items-center gap-1.5 border border-white/8 bg-black/35 px-2 py-1 text-[11px] text-muted-foreground"${tooltipAttr(input.tooltip)}>
+  readonly testId?: string;
+}): string => `<div${input.testId ? ` data-factory-workbench-header-metric="${esc(input.testId)}"` : ""} class="inline-flex items-center gap-1.5 border border-white/8 bg-black/35 px-2 py-1 text-[11px] text-muted-foreground"${tooltipAttr(input.tooltip)}>
   <span class="${esc(input.iconClass ?? "text-muted-foreground")}">${input.icon}</span>
   <span class="font-medium uppercase tracking-[0.12em]">${esc(input.label)}</span>
   <span class="font-semibold text-foreground">${esc(input.value)}</span>
@@ -408,7 +409,7 @@ const renderProfileSelect = (input: {
   const wrapperClass = input.wrapperClass ?? "flex min-w-[14rem] flex-col gap-1.5";
   const minWidthClass = input.minWidthClass ?? "min-w-[12rem]";
   const selectClass = input.selectClass ?? `${profileSelectClass} ${input.compact ? "min-h-[2.5rem]" : ""}`;
-  return `<label class="${esc(wrapperClass)}">
+  return `<label data-factory-workbench-header-trigger="engineer" class="${esc(wrapperClass)}">
     <span class="${input.hideLabel ? "sr-only" : "text-[12px] font-medium text-muted-foreground"}">${esc(input.label)}</span>
     <select id="${esc(input.id)}" data-factory-profile-select="true" class="${esc(`${selectClass} ${minWidthClass}`.trim())}">
       ${input.profiles.map((profile) => `<option value="${esc(profile.href)}"${profile.selected ? " selected" : ""}>${esc(profile.label)}</option>`).join("")}
@@ -1317,6 +1318,7 @@ const renderWorkbenchHeader = (
           label: "Tokens",
           value: tokenCount.toLocaleString(),
           tooltip: `${tokenCount.toLocaleString()} tokens used`,
+          testId: "token-count",
         })
         : ""}
       ${typeof elapsedMinutes === "number"
@@ -1325,6 +1327,7 @@ const renderWorkbenchHeader = (
           label: "Spent",
           value: formatElapsedMinutes(elapsedMinutes),
           tooltip: "Time spent on the selected objective",
+          testId: "elapsed-minutes",
         })
         : ""}
     </div>
