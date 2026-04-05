@@ -3695,10 +3695,16 @@ export class FactoryServiceBase {
         `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`
       ).join("\n")}`
       : undefined;
+    const objectiveAlignmentArtifact = workerArtifacts.find((item) =>
+      /(^|[\\/])objective_alignment\.json$/i.test(item.path ?? item.label),
+    );
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
+    const hasStructuredObjectiveAlignmentReport = state.objectiveMode === "delivery"
+      && Boolean(objectiveAlignmentArtifact)
+      && Boolean(isRecord(rawResult.alignment));
     let outcome: FactoryTaskResultOutcome;
     switch (optionalTrimmedString(rawResult.outcome)) {
       case "changes_requested":
@@ -3720,11 +3726,14 @@ export class FactoryServiceBase {
         `- ${issue.summary}${issue.detail ? ` ${issue.detail}` : ""}`
       ).join("\n")}`
       : undefined;
+    const objectiveAlignmentIssue = state.objectiveMode === "delivery" && !hasStructuredObjectiveAlignmentReport
+      ? "Delivery completion did not attach the required structured objective-alignment report at artifacts/objective_alignment.json."
+      : undefined;
     const effectiveSummary = forcedPartialFromArtifacts
       ? `${summary}${summary.endsWith(".") ? "" : "."} Captured evidence artifacts recorded command errors, so this investigation remains partial.`
       : summary;
     const explicitHandoff = optionalTrimmedString(rawResult.handoff) ?? nextAction ?? effectiveSummary;
-    const handoff = [explicitHandoff, workerArtifactSummary, artifactIssueSummary]
+    const handoff = [explicitHandoff, workerArtifactSummary, artifactIssueSummary, objectiveAlignmentIssue]
       .filter(Boolean)
       .join("\n\n") || effectiveSummary;
     const workerHandoff = this.buildWorkerHandoffEvent({
@@ -3752,6 +3761,9 @@ export class FactoryServiceBase {
           this.defaultDeliveryAlignment(state, initialCompletion),
         )
       : undefined;
+    if (state.objectiveMode === "delivery" && objectiveAlignmentIssue) {
+      outcome = "changes_requested";
+    }
 
     if (outcome === "blocked" && !hasStructuredInvestigationReport) {
       await commitFactoryTaskMemory(
