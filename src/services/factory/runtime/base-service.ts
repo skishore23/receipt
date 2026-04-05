@@ -90,6 +90,7 @@ import {
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
+  validateRunArtifacts,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
@@ -4009,6 +4010,11 @@ export class FactoryServiceBase {
       rawResult.alignment,
       this.defaultDeliveryAlignment(state, deliveryCompletion),
     );
+    validateRunArtifacts({
+      scriptsRun,
+      proof: deliveryCompletion.proof,
+      alignment: deliveryAlignment,
+    });
     const controllerResolvedPartial = outcome === "partial"
       && this.canAutonomouslyResolveDeliveryPartial({
         completion: deliveryCompletion,

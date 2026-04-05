@@ -136,6 +136,29 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export class EvidenceMissingError extends Error {
+  readonly missing: ReadonlyArray<string>;
+
+  constructor(missing: ReadonlyArray<string>) {
+    const uniqueMissing = [...new Set(missing)];
+    super(`Evidence missing: ${uniqueMissing.join(", ")}. Capture scriptsRun with each command and exit code, include proof links/files in completion.proof, and report alignment before returning the task result.`);
+    this.name = "EvidenceMissingError";
+    this.missing = uniqueMissing;
+  }
+}
+
+export const validateRunArtifacts = (input: {
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly proof: ReadonlyArray<string>;
+  readonly alignment?: FactoryTaskAlignmentRecord;
+}): void => {
+  const missing: string[] = [];
+  if (input.scriptsRun.length === 0) missing.push("scriptsRun");
+  if (input.proof.length === 0) missing.push("proof");
+  if (!input.alignment) missing.push("alignment");
+  if (missing.length > 0) throw new EvidenceMissingError(missing);
+};
+
 export const FACTORY_PUBLISH_RESULT_SCHEMA = {
   type: "object",
   properties: {
