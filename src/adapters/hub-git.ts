@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -7,10 +8,14 @@ const execFileAsync = promisify(execFile);
 
 export class HubGitError extends Error {
   readonly status: number;
+  readonly code?: string;
+  readonly details?: Readonly<Record<string, unknown>>;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, opts?: { readonly code?: string; readonly details?: Readonly<Record<string, unknown>> }) {
     super(message);
     this.status = status;
+    this.code = opts?.code;
+    this.details = opts?.details;
   }
 }
 
@@ -156,7 +161,9 @@ const isOperationalPath = (file: string): boolean => {
 export class HubGit {
   readonly repoRoot: string;
   readonly bareDir: string;
-  readonly worktreesDir: string;
+  worktreesDir: string;
+  private readonly configuredWorktreesDir: string;
+  private worktreesDirReady: Promise<void> | undefined;
 
   private readonly remoteName = "source";
   private readyPromise: Promise<void> | undefined;
@@ -168,7 +175,8 @@ export class HubGit {
   constructor(opts: HubGitOptions) {
     this.repoRoot = path.resolve(opts.repoRoot);
     this.bareDir = path.join(opts.dataDir, "hub", "repo.git");
-    this.worktreesDir = path.join(opts.dataDir, "hub", "worktrees");
+    this.configuredWorktreesDir = path.join(opts.dataDir, "hub", "worktrees");
+    this.worktreesDir = this.configuredWorktreesDir;
   }
 
   invalidateGraph(): void {
@@ -180,6 +188,45 @@ export class HubGit {
       this.readyPromise = this.prepare();
     }
     return this.readyPromise;
+  }
+
+  private async ensureWorktreesDirReady(): Promise<void> {
+    if (!this.worktreesDirReady) {
+      this.worktreesDirReady = this.prepareWorktreesDir();
+    }
+    return this.worktreesDirReady;
+  }
+
+  private async prepareWorktreesDir(): Promise<void> {
+    const candidates = [this.configuredWorktreesDir, ...this.alternateWorktreesDirs()];
+    let lastError: NodeJS.ErrnoException | undefined;
+    for (const candidate of candidates) {
+      try {
+        await fs.promises.mkdir(candidate, { recursive: true });
+        await fs.promises.access(candidate, fs.constants.W_OK);
+        this.worktreesDir = candidate;
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err as NodeJS.ErrnoException : undefined;
+      }
+    }
+
+    throw new HubGitError(500, "unable to prepare a writable worktree base directory", {
+      code: "ERR_WORKTREE_DIR_CREATE_FAILED",
+      details: {
+        path: this.configuredWorktreesDir,
+        errno: lastError?.errno,
+        message: lastError?.message,
+      },
+    });
+  }
+
+  private alternateWorktreesDirs(): ReadonlyArray<string> {
+    const candidates: string[] = [];
+    const xdgStateHome = process.env.XDG_STATE_HOME;
+    if (xdgStateHome) candidates.push(path.join(xdgStateHome, "receipt", "worktrees"));
+    candidates.push(path.join(os.tmpdir(), "receipt-worktrees"));
+    return candidates.filter((candidate) => candidate !== this.configuredWorktreesDir);
   }
 
   async syncFromSource(): Promise<void> {
@@ -369,6 +416,7 @@ export class HubGit {
 
   async createWorkspace(spec: HubGitWorkspaceSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
+    await this.ensureWorktreesDirReady();
     const workspacePath = path.join(this.worktreesDir, spec.workspaceId);
     if (fs.existsSync(workspacePath)) {
       throw new HubGitError(409, "workspace path already exists");
@@ -384,7 +432,6 @@ export class HubGit {
     }
 
     const baseHash = spec.baseHash ? await this.resolveCommit(spec.baseHash) : await this.requiredSourceHead();
-    await fs.promises.mkdir(this.worktreesDir, { recursive: true });
     await this.execGit(["worktree", "add", "-b", branchName, workspacePath, baseHash], { gitDir: this.bareDir });
     await this.configureWorktreeIdentity(workspacePath);
     this.invalidateGraph();
@@ -398,7 +445,7 @@ export class HubGit {
 
   async restoreWorkspace(spec: HubGitWorkspaceRestoreSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
-    await fs.promises.mkdir(this.worktreesDir, { recursive: true });
+    await this.ensureWorktreesDirReady();
     const workspaceExists = fs.existsSync(spec.workspacePath);
     const hasWorktreeMetadata = workspaceExists ? await this.hasLiveWorktreeMetadata(spec.workspacePath) : false;
     if (workspaceExists && !hasWorktreeMetadata) {
@@ -499,6 +546,7 @@ export class HubGit {
     opts?: { readonly resetToBase?: boolean },
   ): Promise<HubGitWorkspace> {
     await this.syncFromSource();
+    await this.ensureWorktreesDirReady();
     const workspaceId = `factory_integration_${safeBranchPart(objectiveId)}`;
     const workspacePath = path.join(this.worktreesDir, workspaceId);
     const branchName = `hub/integration/${workspaceId}`;
