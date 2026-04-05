@@ -242,6 +242,8 @@ const uniqueChecks = (checks?: ReadonlyArray<string>): ReadonlyArray<string> => 
 };
 const stateRef = (ref: string, label?: string): GraphRef => ({ kind: "state", ref, label });
 const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref, label });
+const digestText = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
 const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
@@ -996,6 +998,41 @@ export class FactoryServiceBase {
         ? "The worker did not emit an explicit alignment block, but the controller inferred alignment from proof-backed completion with no remaining work."
         : "The worker did not emit an explicit alignment block, so the controller could not prove the full objective contract was satisfied.",
     };
+  }
+
+  private async collectTaskRunEvidence(input: {
+    readonly workspacePath: string;
+    readonly stdoutPath: string;
+    readonly stderrPath: string;
+    readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+    readonly artifactRefs: ReadonlyArray<GraphRef>;
+  }): Promise<{ readonly path: string; readonly record: Record<string, unknown> }> {
+    const [stdout, stderr] = await Promise.all([
+      this.readTextTail(input.stdoutPath, 16_000),
+      this.readTextTail(input.stderrPath, 16_000),
+    ]);
+    const record = {
+      collectedAt: Date.now(),
+      stdoutDigest: digestText(stdout ?? ""),
+      stderrDigest: digestText(stderr ?? ""),
+      scriptsRun: input.scriptsRun.map((item) => ({
+        command: item.command,
+        summary: item.summary ?? null,
+        status: item.status ?? null,
+        exitCode: item.exitCode ?? null,
+        stdoutDigest: item.stdoutDigest ?? digestText(stdout ?? ""),
+        stderrDigest: item.stderrDigest ?? digestText(stderr ?? ""),
+        artifactPaths: item.artifactPaths ?? [],
+      })),
+      artifactPointers: input.artifactRefs.map((ref) => ({
+        kind: ref.kind,
+        ref: ref.ref,
+        label: ref.label ?? null,
+      })),
+    };
+    const pathToEvidence = path.join(input.workspacePath, ".run_evidence.json");
+    await fs.writeFile(pathToEvidence, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
+    return { path: pathToEvidence, record };
   }
 
   private workerTaskSkillRefs(selectedSkills: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -3880,6 +3917,20 @@ export class FactoryServiceBase {
       memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
       memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
     } satisfies Readonly<Record<string, GraphRef>>;
+    const evidenceArtifactRefs = Object.values(baseResultRefs);
+    let runEvidence: { readonly path: string; readonly record: Record<string, unknown> };
+    try {
+      runEvidence = await this.collectTaskRunEvidence({
+        workspacePath: payload.workspacePath,
+        stdoutPath: payload.stdoutPath,
+        stderrPath: payload.stderrPath,
+        scriptsRun,
+        artifactRefs: evidenceArtifactRefs,
+      });
+    } catch (error) {
+      throw new FactoryServiceError(500, `instrumentation_error: unable to collect task run evidence (${(error as Error).message})`);
+    }
+    const runEvidenceRef = fileRef(runEvidence.path, "task run evidence");
 
     if (isInvestigation) {
       const report = normalizeInvestigationReport(
@@ -3959,6 +4010,7 @@ export class FactoryServiceBase {
       );
       const resultRefs = {
         ...baseResultRefs,
+        runEvidence: runEvidenceRef,
         ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
       } satisfies Readonly<Record<string, GraphRef>>;
       await this.emitObjectiveBatch(payload.objectiveId, [
@@ -4032,6 +4084,7 @@ export class FactoryServiceBase {
 
     const resultRefs = {
       ...baseResultRefs,
+      runEvidence: runEvidenceRef,
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 

@@ -67,8 +67,15 @@ export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
     command: { type: "string" },
     summary: { type: ["string", "null"] },
     status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
+    exitCode: { type: ["number", "null"] },
+    stdoutDigest: { type: "string" },
+    stderrDigest: { type: "string" },
+    artifactPaths: {
+      type: "array",
+      items: { type: "string" },
+    },
   },
-  required: ["command", "summary", "status"],
+  required: ["command", "summary", "status", "exitCode", "stdoutDigest", "stderrDigest", "artifactPaths"],
   additionalProperties: false,
 } as const;
 
@@ -214,6 +221,16 @@ export const normalizeExecutionScriptsRun = (
         status: item.status === "ok" || item.status === "warning" || item.status === "error"
           ? item.status
           : undefined,
+        exitCode: typeof item.exitCode === "number" && Number.isFinite(item.exitCode)
+          ? Math.trunc(item.exitCode)
+          : (item.exitCode === null ? null : undefined),
+        stdoutDigest: clipText(typeof item.stdoutDigest === "string" ? item.stdoutDigest : undefined, 160)
+          ?? "missing",
+        stderrDigest: clipText(typeof item.stderrDigest === "string" ? item.stderrDigest : undefined, 160)
+          ?? "missing",
+        artifactPaths: Array.isArray(item.artifactPaths)
+          ? item.artifactPaths.filter((path): path is string => typeof path === "string" && path.trim().length > 0).map((path) => path.trim())
+          : [],
       } satisfies FactoryExecutionScriptRun))
     : [];
 

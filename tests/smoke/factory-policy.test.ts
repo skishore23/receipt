@@ -357,9 +357,21 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   const schemaPath = resultPath.replace(/\.json$/i, ".schema.json");
   const schema = JSON.parse(await fs.readFile(schemaPath, "utf-8")) as {
     readonly required?: ReadonlyArray<string>;
+    readonly properties?: Record<string, { readonly items?: { readonly properties?: Record<string, unknown> } }>;
+  };
+  const evidencePath = path.join(taskJob.payload.workspacePath, ".run_evidence.json");
+  const evidence = JSON.parse(await fs.readFile(evidencePath, "utf-8")) as {
+    readonly scriptsRun?: ReadonlyArray<{
+      readonly command?: string;
+      readonly exitCode?: number | null;
+      readonly stdoutDigest?: string;
+      readonly stderrDigest?: string;
+      readonly artifactPaths?: ReadonlyArray<string>;
+    }>;
+    readonly artifactPointers?: ReadonlyArray<{ readonly ref?: string }>;
   };
 
-  expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
+  expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null, "exitCode": number | null, "stdoutDigest": string, "stderrDigest": string, "artifactPaths": string[] }]`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }`);
   expect(prompt).toContain(`"handoff": string`);
@@ -368,6 +380,9 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
+  expect(evidence.scriptsRun?.[0]?.stdoutDigest).toBeTruthy();
+  expect(evidence.scriptsRun?.[0]?.stderrDigest).toBeTruthy();
+  expect(evidence.artifactPointers?.some((item) => item.ref?.includes(".run_evidence.json"))).toBe(true);
 });
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
