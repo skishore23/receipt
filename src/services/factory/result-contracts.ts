@@ -50,6 +50,9 @@ const artifactLines = (
   return lines;
 };
 
+const STRUCTURED_EVIDENCE_NOT_GENERATED = "missing_structured_evidence";
+const STRUCTURED_EVIDENCE_SENTINEL = "proof_not_generated: missing structured evidence";
+
 export const FACTORY_TASK_ARTIFACT_SCHEMA = {
   type: "object",
   properties: {
@@ -261,7 +264,7 @@ export const normalizeInvestigationReport = (
   summary: string,
 ): FactoryInvestigationReport => {
   const record = isRecord(value) ? value : {};
-  const evidence = Array.isArray(record.evidence)
+  const structuredEvidence = Array.isArray(record.evidence)
     ? record.evidence
       .filter((item): item is Record<string, unknown> => isRecord(item))
       .map((item) => ({
@@ -271,6 +274,15 @@ export const normalizeInvestigationReport = (
       }))
     : [];
   const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);
+  const evidence = structuredEvidence.length > 0
+    ? structuredEvidence
+    : (!isRecord(value)
+      ? [{
+          title: "Evidence not generated",
+          summary: "Structured evidence was not generated.",
+          detail: STRUCTURED_EVIDENCE_NOT_GENERATED,
+        }]
+      : []);
   return {
     conclusion: clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400) ?? summary,
     evidence,
@@ -306,9 +318,10 @@ export const buildDefaultTaskCompletion = (input: {
   const validationProof = (input.checkResults ?? [])
     .map((item) => clipText(`${item.command} exited ${String(item.exitCode ?? 0)}`, 280))
     .filter((item): item is string => Boolean(item));
+  const proof = [...new Set([...scriptProof, ...reportProof, ...validationProof])];
   return {
     changed: changed.length > 0 ? changed : [input.summary],
-    proof: [...new Set([...scriptProof, ...reportProof, ...validationProof])],
+    proof: proof.length > 0 ? proof : [STRUCTURED_EVIDENCE_SENTINEL],
     remaining: [],
   };
 };
