@@ -114,6 +114,34 @@ export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    executedCommands: {
+      type: "array",
+      items: { type: "string" },
+    },
+    outputs: {
+      type: "array",
+      items: { type: "string" },
+    },
+    discoveredAssets: {
+      type: "array",
+      items: { type: "string" },
+    },
+    timestamps: {
+      type: "object",
+      additionalProperties: { type: "string" },
+    },
+    proof: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["executedCommands", "outputs", "discoveredAssets", "timestamps", "proof"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -128,11 +156,12 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
       type: "array",
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
+    evidence: FACTORY_TASK_EVIDENCE_SCHEMA,
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "evidence", "completion", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -254,6 +283,52 @@ export const normalizeTaskAlignmentRecord = (
       ?? fallback?.rationale
       ?? "Alignment was not explicitly reported.",
   };
+};
+
+export const normalizeTaskEvidenceRecord = (
+  value: unknown,
+): { readonly executedCommands: ReadonlyArray<string>; readonly outputs: ReadonlyArray<string>; readonly discoveredAssets: ReadonlyArray<string>; readonly timestamps: Readonly<Record<string, string>>; readonly proof: ReadonlyArray<string> } => {
+  const record = isRecord(value) ? value : {};
+  const toStrings = (input: unknown): ReadonlyArray<string> =>
+    Array.isArray(input)
+      ? input.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+      : [];
+  const timestamps = isRecord(record.timestamps)
+    ? Object.fromEntries(Object.entries(record.timestamps).filter(([, item]) => typeof item === "string" && item.trim().length > 0).map(([key, item]) => [key, item.trim()]))
+    : {};
+  return {
+    executedCommands: toStrings(record.executedCommands),
+    outputs: toStrings(record.outputs),
+    discoveredAssets: toStrings(record.discoveredAssets),
+    timestamps,
+    proof: toStrings(record.proof),
+  };
+};
+
+export const validateTaskEvidenceRecord = (
+  value: unknown,
+  scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>,
+): { readonly ok: boolean; readonly reason?: string } => {
+  const evidence = normalizeTaskEvidenceRecord(value);
+  if (
+    evidence.executedCommands.length === 0
+    && evidence.outputs.length === 0
+    && evidence.discoveredAssets.length === 0
+    && Object.keys(evidence.timestamps).length === 0
+    && evidence.proof.length === 0
+  ) {
+    return {
+      ok: false,
+      reason: "Task evidence is missing. Record executed_commands, outputs, discovered_assets, timestamps, and proof before completing the task.",
+    };
+  }
+  if (scriptsRun.length > 0 && evidence.executedCommands.length === 0) {
+    return {
+      ok: false,
+      reason: "Task evidence is missing executed_commands for a task that ran scripts.",
+    };
+  }
+  return { ok: true };
 };
 
 export const normalizeInvestigationReport = (
