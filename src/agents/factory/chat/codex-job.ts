@@ -117,6 +117,8 @@ export const runFactoryCodexJob = async (input: {
     lastMessagePath: artifacts.lastMessagePath,
     stdoutPath: artifacts.stdoutPath,
     stderrPath: artifacts.stderrPath,
+    stepLogPath: artifacts.stepLogPath,
+    stepRecordPath: artifacts.stepRecordPath,
     timeoutMs: input.timeoutMs,
     env,
     sandboxMode,

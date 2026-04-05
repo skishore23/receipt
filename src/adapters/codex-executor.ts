@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -33,6 +34,8 @@ export type CodexRunInput = {
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly stallTimeoutMs?: number;
+  readonly stepLogPath?: string;
+  readonly stepRecordPath?: string;
 };
 
 export type CodexProgressUpdate = {
@@ -245,6 +248,22 @@ const extractTokensUsed = (...streams: ReadonlyArray<string>): number | undefine
   return undefined;
 };
 
+const redactEnv = (env: NodeJS.ProcessEnv): Record<string, boolean> => ({
+  hasAwsProfile: Boolean(env.AWS_PROFILE),
+  hasAwsRegion: Boolean(env.AWS_REGION || env.AWS_DEFAULT_REGION),
+  hasCodexHome: Boolean(env.CODEX_HOME),
+  hasPath: Boolean(env.PATH),
+});
+
+const sha256File = async (targetPath: string): Promise<string | undefined> => {
+  try {
+    const data = await fsp.readFile(targetPath);
+    return crypto.createHash("sha256").update(data).digest("hex");
+  } catch {
+    return undefined;
+  }
+};
+
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -432,6 +451,8 @@ export class LocalCodexExecutor implements CodexExecutor {
           fsp.writeFile(input.lastMessagePath, "", "utf-8"),
           prepareAttemptLog(input.stdoutPath, "stdout"),
           prepareAttemptLog(input.stderrPath, "stderr"),
+          input.stepLogPath ? fsp.mkdir(path.dirname(input.stepLogPath), { recursive: true }) : Promise.resolve(),
+          input.stepRecordPath ? fsp.mkdir(path.dirname(input.stepRecordPath), { recursive: true }) : Promise.resolve(),
         ]);
 
         const args = [
@@ -459,6 +480,16 @@ export class LocalCodexExecutor implements CodexExecutor {
         }
         args.push("-");
 
+        const stepCommand = [this.bin, ...args].join(" ");
+        const stepSummary = {
+          command: this.bin,
+          args,
+          startedAt: new Date().toISOString(),
+          endedAt: undefined as string | undefined,
+          exitCode: undefined as number | null | undefined,
+          signal: undefined as NodeJS.Signals | null | undefined,
+          env: redactEnv(childEnv),
+        };
         const child = spawn(this.bin, args, {
           cwd: input.workspacePath,
           env: childEnv,
@@ -494,6 +525,7 @@ export class LocalCodexExecutor implements CodexExecutor {
         let lastMessageWriteChain = Promise.resolve();
         const stdoutFile = fs.createWriteStream(input.stdoutPath, { flags: "a", encoding: "utf-8" });
         const stderrFile = fs.createWriteStream(input.stderrPath, { flags: "a", encoding: "utf-8" });
+        const stepFile = input.stepLogPath ? fs.createWriteStream(input.stepLogPath, { flags: "a", encoding: "utf-8" }) : undefined;
         const observeOutputActivity = (): void => {
           const now = Date.now();
           lastOutputAt = now;
@@ -565,6 +597,7 @@ export class LocalCodexExecutor implements CodexExecutor {
           stdout += chunk;
           observeOutputActivity();
           stdoutFile.write(chunk);
+          stepFile?.write(chunk);
           if (!input.jsonOutput) return;
           consumeJsonStdout(chunk);
         });
@@ -572,6 +605,7 @@ export class LocalCodexExecutor implements CodexExecutor {
           stderr += chunk;
           observeOutputActivity();
           stderrFile.write(chunk);
+          stepFile?.write(chunk);
         });
 
         child.stdin.write(input.prompt);
@@ -699,7 +733,24 @@ export class LocalCodexExecutor implements CodexExecutor {
               }
               await progressChain;
               await lastMessageWriteChain;
-              await Promise.all([closeStream(stdoutFile), closeStream(stderrFile)]);
+              stepSummary.endedAt = new Date().toISOString();
+              stepSummary.exitCode = code;
+              stepSummary.signal = signal;
+              const stepRecord = {
+                ...stepSummary,
+                commandLine: stepCommand,
+                stdoutPath: input.stdoutPath,
+                stderrPath: input.stderrPath,
+                stdoutSha256: await sha256File(input.stdoutPath),
+                stderrSha256: await sha256File(input.stderrPath),
+                logSha256: input.stepLogPath ? await sha256File(input.stepLogPath) : undefined,
+              };
+              await Promise.all([
+                closeStream(stdoutFile),
+                closeStream(stderrFile),
+                stepFile ? closeStream(stepFile) : Promise.resolve(),
+                input.stepRecordPath ? fsp.writeFile(input.stepRecordPath, `${JSON.stringify(stepRecord, null, 2)}\n`, "utf-8") : Promise.resolve(),
+              ]);
               const lastMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
               const resolvedLastMessage = lastMessage.trim() || latestStructuredLastMessage?.trim() || undefined;
               resolve({

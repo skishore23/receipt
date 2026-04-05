@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 
 export type FactoryChatCodexArtifactPaths = {
   readonly root: string;
+  readonly stepsRoot: string;
+  readonly stepLogPath: string;
+  readonly stepRecordPath: string;
+  readonly awsCallsPath: string;
   readonly promptPath: string;
   readonly lastMessagePath: string;
   readonly stdoutPath: string;
@@ -21,6 +25,10 @@ export const factoryChatCodexArtifactPaths = (
   const root = path.join(dataDir, "factory-chat", "codex", jobId);
   return {
     root,
+    stepsRoot: path.join(root, "steps"),
+    stepLogPath: path.join(root, "steps", "codex-run.log"),
+    stepRecordPath: path.join(root, "steps", "codex-run.json"),
+    awsCallsPath: path.join(root, "aws_calls.json"),
     promptPath: path.join(root, "prompt.md"),
     lastMessagePath: path.join(root, "last-message.txt"),
     stdoutPath: path.join(root, "stdout.log"),
