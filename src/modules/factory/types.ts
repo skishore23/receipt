@@ -137,6 +137,58 @@ export type FactoryTaskCompletionRecord = {
   readonly remaining: ReadonlyArray<string>;
 };
 
+export type FactoryEvidencePackMetric = {
+  readonly name: string;
+  readonly value: string;
+  readonly unit: string | null;
+  readonly timeRange: string | null;
+};
+
+export type FactoryEvidencePackSource =
+  | {
+      readonly kind: "query_id";
+      readonly ref: string;
+      readonly summary: string | null;
+    }
+  | {
+      readonly kind: "file_path";
+      readonly ref: string;
+      readonly summary: string | null;
+    }
+  | {
+      readonly kind: "aws_api";
+      readonly ref: string;
+      readonly summary: string | null;
+    }
+  | {
+      readonly kind: "other";
+      readonly ref: string;
+      readonly summary: string | null;
+    };
+
+export type FactoryEvidencePackFinding = {
+  readonly title: string;
+  readonly summary: string;
+  readonly detail: string | null;
+};
+
+export type FactoryEvidencePackRecord = {
+  readonly version: 1;
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly generatedAt: number;
+  readonly normalizedFindings: ReadonlyArray<FactoryEvidencePackFinding>;
+  readonly metrics: ReadonlyArray<FactoryEvidencePackMetric>;
+  readonly sources: ReadonlyArray<FactoryEvidencePackSource>;
+  readonly conclusion: {
+    readonly summary: string;
+    readonly confidence: "low" | "medium" | "high";
+    readonly alignmentVerdict: FactoryTaskAlignmentVerdict;
+  };
+  readonly openQuestions: ReadonlyArray<string>;
+};
+
 export type FactoryInvestigationReport = {
   readonly conclusion: string;
   readonly evidence: ReadonlyArray<FactoryInvestigationEvidence>;
