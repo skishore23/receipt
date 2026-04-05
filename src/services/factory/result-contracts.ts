@@ -60,6 +60,15 @@ const digestText = (value: string): string => {
   return Math.abs(hash).toString(16).padStart(8, "0");
 };
 
+const renderEvidenceItemsTable = (items: ReadonlyArray<FactoryEvidenceBundleItem>): string[] => {
+  if (items.length === 0) return ["| kind | label | digest | raw log |", "| --- | --- | --- | --- |", "| none | none | none | none |"];
+  return [
+    "| kind | label | digest | raw log |",
+    "| --- | --- | --- | --- |",
+    ...items.slice(0, 5).map((item) => `| ${item.kind} | ${item.label} | ${item.digest} | ${item.rawLogRef ?? ""} |`),
+  ];
+};
+
 export const buildEvidenceBundle = (input: {
   readonly objectiveId: string;
   readonly taskId: string;
@@ -425,8 +434,7 @@ export const renderDeliveryResultText = (input: {
         ? [
             `id=${input.evidenceBundle.evidenceBundleId}`,
             `window=${input.evidenceBundle.startedAt}..${input.evidenceBundle.finishedAt}`,
-            ...input.evidenceBundle.items.slice(0, 5).map((item) =>
-              `${item.kind} | ${item.label} | ${item.digest}${item.rawLogRef ? ` | ${item.rawLogRef}` : ""}`),
+            ...renderEvidenceItemsTable(input.evidenceBundle.items),
           ]
         : ["none recorded"],
       true,
