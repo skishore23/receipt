@@ -269,6 +269,19 @@ export type FactorySchedulerRecord = {
   readonly releaseReason?: string;
 };
 
+export type FactoryControlJobStatus = "queued" | "running" | "done";
+
+export type FactoryControlJobRecord = {
+  readonly idempotencyKey: string;
+  readonly status: FactoryControlJobStatus;
+  readonly jobId?: string;
+  readonly sessionKey: string;
+  readonly kind: string;
+  readonly taskId: string;
+  readonly attempt: number;
+  readonly updatedAt: number;
+};
+
 export type FactoryCheckResult = {
   readonly command: string;
   readonly ok: boolean;
@@ -407,6 +420,7 @@ export type FactoryState = {
   readonly workflow: FactoryWorkflowState;
   readonly integration: FactoryIntegrationRecord;
   readonly scheduler: FactorySchedulerRecord;
+  readonly controlJobs: Readonly<Record<string, FactoryControlJobRecord>>;
   readonly planning?: FactoryPlanningReceiptRecord;
   readonly investigation: {
     readonly reports: Readonly<Record<string, FactoryInvestigationTaskReport>>;

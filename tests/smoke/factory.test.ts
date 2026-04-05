@@ -817,6 +817,38 @@ test("factory service: steered objective control jobs are redriven when the queu
   expect(redrivenJobIds).toEqual([initialControl!.id]);
 });
 
+test("factory service: repeated rebrackets keep only one queued validate job per objective session", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-dedup");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Control dedup",
+    prompt: "Collapse repeated rebracket decisions into one job.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    enqueueIntegrationValidation(objectiveId: string, candidateId: string, workspacePath: string, checks: ReadonlyArray<string>): Promise<void>;
+  };
+  for (let i = 0; i < 3; i += 1) {
+    await internals.enqueueIntegrationValidation(created.objectiveId, "candidate_shared", `/tmp/factory-control-${created.objectiveId}`, ["git status --short"]);
+  }
+
+  const validateJobs = (await queue.listJobs({ limit: 10 }))
+    .filter((job) => job.payload.kind === "factory.integration.validate" && job.payload.objectiveId === created.objectiveId);
+  expect(validateJobs).toHaveLength(1);
+});
+
 test("factory service: resumeObjectives cancels queued control jobs for blocked objectives", async () => {
   const dataDir = await createTempDir("receipt-factory-control-cleanup");
   const repoRoot = await createSourceRepo();

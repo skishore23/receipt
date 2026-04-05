@@ -158,6 +158,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         updatedAt: event.createdAt,
         latestHandoff: undefined,
         taskRunsUsed: 0,
+        controlJobs: {},
         candidatePassesByTask: {},
         consecutiveFailuresByTask: {},
         lastDispatchAt: undefined,
@@ -176,6 +177,24 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         ...state,
         latestSummary: event.message,
         updatedAt: event.notedAt,
+      };
+    case "objective.control_job.recorded":
+      return {
+        ...state,
+        updatedAt: event.updatedAt,
+        controlJobs: {
+          ...state.controlJobs,
+          [event.idempotencyKey]: {
+            idempotencyKey: event.idempotencyKey,
+            status: event.status,
+            jobId: event.jobId,
+            sessionKey: event.sessionKey,
+            kind: event.kind,
+            taskId: event.taskId,
+            attempt: event.attempt,
+            updatedAt: event.updatedAt,
+          },
+        },
       };
     case "planning.receipt":
       return {

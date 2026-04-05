@@ -52,6 +52,18 @@ export type FactoryEvent =
       readonly notedAt: number;
     }
   | {
+      readonly type: "objective.control_job.recorded";
+      readonly objectiveId: string;
+      readonly idempotencyKey: string;
+      readonly status: "queued" | "running" | "done";
+      readonly jobId?: string;
+      readonly sessionKey: string;
+      readonly kind: string;
+      readonly taskId: string;
+      readonly attempt: number;
+      readonly updatedAt: number;
+    }
+  | {
       readonly type: "planning.receipt";
       readonly objectiveId: string;
       readonly plan: FactoryPlanningReceiptRecord;

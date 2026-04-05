@@ -710,6 +710,7 @@ export class FactoryServiceBase {
     readonly digest: string;
     readonly excerpt: string;
   } | undefined>>();
+  private readonly controlSessionLocks = new Map<string, Promise<void>>();
   private cloudExecutionContextPromise?: Promise<FactoryCloudExecutionContext>;
 
   private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
@@ -752,6 +753,123 @@ export class FactoryServiceBase {
 
   async ensureBootstrap(): Promise<void> {
     await this.git.ensureReady();
+  }
+
+  private async withControlSessionLock<T>(sessionKey: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.controlSessionLocks.get(sessionKey) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.controlSessionLocks.set(sessionKey, previous.then(() => next));
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  private controlJobIdempotencyKey(input: {
+    readonly objectiveId: string;
+    readonly stage: "objective" | "validate" | "publish";
+    readonly taskId: string;
+    readonly attempt: number;
+  }): string {
+    return `${input.objectiveId}:${input.stage}:${input.taskId}:${input.attempt}`;
+  }
+
+  private async recordControlJob(state: FactoryState, record: {
+    readonly idempotencyKey: string;
+    readonly status: "queued" | "running" | "done";
+    readonly sessionKey: string;
+    readonly kind: string;
+    readonly taskId: string;
+    readonly attempt: number;
+    readonly updatedAt: number;
+    readonly jobId?: string;
+  }): Promise<void> {
+    await this.emitObjective(state.objectiveId, {
+      type: "objective.control_job.recorded",
+      objectiveId: state.objectiveId,
+      ...record,
+    });
+  }
+
+  private async queueControlJob(
+    state: FactoryState,
+    input: {
+      readonly sessionKey: string;
+      readonly kind: string;
+      readonly taskId: string;
+      readonly attempt: number;
+      readonly singletonMode: "allow" | "cancel" | "steer";
+      readonly agentId: string;
+      readonly lane?: "collect" | "steer" | "follow_up" | "chat";
+      readonly maxAttempts?: number;
+      readonly payload: Record<string, unknown>;
+    },
+  ): Promise<QueueJob | undefined> {
+    const idempotencyKey = this.controlJobIdempotencyKey({
+      objectiveId: state.objectiveId,
+      stage: input.kind,
+      taskId: input.taskId,
+      attempt: input.attempt,
+    });
+    return this.withControlSessionLock(input.sessionKey, async () => {
+      const currentState = await this.getObjectiveState(state.objectiveId);
+      const existing = currentState.controlJobs[idempotencyKey];
+      if (existing && existing.status !== "done") {
+        const existingJob = existing.jobId ? await this.queue.getJob(existing.jobId) : undefined;
+        if (existingJob && existingJob.status !== "canceled" && existingJob.status !== "failed" && existingJob.status !== "completed") {
+          return existingJob;
+        }
+      }
+      const jobs = await this.queue.listJobs({ status: "queued", limit: 500 });
+      const duplicate = jobs.find((job) =>
+        job.sessionKey?.trim() === input.sessionKey
+        && job.payload.kind === input.kind
+        && String(job.payload.objectiveId ?? "") === state.objectiveId
+        && String(job.payload.taskId ?? job.payload.candidateId ?? job.payload.reason ?? "") === input.taskId,
+      );
+      if (duplicate) {
+        await this.recordControlJob(currentState, {
+          idempotencyKey,
+          status: "queued",
+          jobId: duplicate.id,
+          sessionKey: input.sessionKey,
+          kind: input.kind,
+          taskId: input.taskId,
+          attempt: input.attempt,
+          updatedAt: Date.now(),
+        });
+        return duplicate;
+      }
+      const created = await this.queue.enqueue({
+        jobId: input.kind === "factory.integration.publish"
+          ? `job_factory_publish_${state.objectiveId}_${input.taskId}`
+          : input.kind === "factory.integration.validate"
+            ? `job_factory_validate_${state.objectiveId}_${input.taskId}`
+            : undefined,
+        agentId: input.agentId,
+        lane: input.lane ?? "collect",
+        sessionKey: input.sessionKey,
+        singletonMode: input.singletonMode,
+        maxAttempts: input.maxAttempts ?? 1,
+        payload: input.payload,
+      });
+      await this.recordControlJob(currentState, {
+        idempotencyKey,
+        status: "queued",
+        jobId: created.id,
+        sessionKey: input.sessionKey,
+        kind: input.kind,
+        taskId: input.taskId,
+        attempt: input.attempt,
+        updatedAt: created.updatedAt,
+      });
+      return created;
+    });
   }
 
   private async loadCloudExecutionContext(): Promise<FactoryCloudExecutionContext> {
@@ -2750,11 +2868,15 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
-    const created = await this.queue.enqueue({
+    const state = await this.getObjectiveState(objectiveId);
+    const created = await this.queueControlJob(state, {
+      sessionKey: `factory:objective:${objectiveId}`,
+      kind: "factory.objective.control",
+      taskId: reason,
+      attempt: 1,
+      singletonMode: reason === "admitted" ? "cancel" : "steer",
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
-      sessionKey: `factory:objective:${objectiveId}`,
-      singletonMode: reason === "admitted" ? "cancel" : "steer",
       maxAttempts: 2,
       payload: {
         kind: "factory.objective.control",
@@ -2762,9 +2884,10 @@ export class FactoryServiceBase {
         reason,
       } satisfies FactoryObjectiveControlJobPayload,
     });
-    this.sse.publish("jobs", created.id);
+    if (created) this.sse.publish("jobs", created.id);
     if (
       this.redriveQueuedJob
+      && created
       && created.status === "queued"
       && reason === "reconcile"
     ) {
@@ -2781,10 +2904,38 @@ export class FactoryServiceBase {
       ? payload.reason
       : "startup";
     await this.ensureBootstrap();
-    if (reason === "reconcile") {
-      await this.processObjectiveReconcile(objectiveId);
-    } else {
-      await this.processObjectiveStartup(objectiveId, reason);
+    const state = await this.getObjectiveState(objectiveId);
+    const key = this.controlJobIdempotencyKey({
+      objectiveId,
+      stage: "objective",
+      taskId: reason,
+      attempt: 1,
+    });
+    await this.recordControlJob(state, {
+      idempotencyKey: key,
+      status: "running",
+      sessionKey: `factory:objective:${objectiveId}`,
+      kind: "factory.objective.control",
+      taskId: reason,
+      attempt: 1,
+      updatedAt: Date.now(),
+    });
+    try {
+      if (reason === "reconcile") {
+        await this.processObjectiveReconcile(objectiveId);
+      } else {
+        await this.processObjectiveStartup(objectiveId, reason);
+      }
+    } finally {
+      await this.recordControlJob(state, {
+        idempotencyKey: key,
+        status: "done",
+        sessionKey: `factory:objective:${objectiveId}`,
+        kind: "factory.objective.control",
+        taskId: reason,
+        attempt: 1,
+        updatedAt: Date.now(),
+      });
     }
     return {
       objectiveId,
@@ -4630,6 +4781,7 @@ export class FactoryServiceBase {
     workspacePath: string,
     checks: ReadonlyArray<string>,
   ): Promise<void> {
+    const state = await this.getObjectiveState(objectiveId);
     const files = buildIntegrationFilePaths(workspacePath, candidateId);
     const payload: FactoryIntegrationJobPayload = {
       kind: "factory.integration.validate",
@@ -4641,16 +4793,18 @@ export class FactoryServiceBase {
       resultPath: files.resultPath,
       checks,
     };
-    const created = await this.queue.enqueue({
-      jobId: `job_factory_validate_${objectiveId}_${candidateId}`,
+    const created = await this.queueControlJob(state, {
+      sessionKey: `factory:integration:${objectiveId}`,
+      kind: "factory.integration.validate",
+      taskId: candidateId,
+      attempt: 1,
+      singletonMode: "allow",
       agentId: "codex",
       lane: "collect",
-      sessionKey: `factory:integration:${objectiveId}`,
-      singletonMode: "allow",
       maxAttempts: 1,
       payload,
     });
-    this.sse.publish("jobs", created.id);
+    if (created) this.sse.publish("jobs", created.id);
   }
 
   private parseIntegrationPublishPayload(payload: Record<string, unknown>): FactoryIntegrationPublishJobPayload {
@@ -4679,6 +4833,21 @@ export class FactoryServiceBase {
       .slice(0, 12)
       .reverse()
       .map((receipt) => `- ${receipt.body.type}: ${this.summarizeReceipt(receipt.body)}`);
+    const key = this.controlJobIdempotencyKey({
+      objectiveId: parsed.objectiveId,
+      stage: "publish",
+      taskId: parsed.candidateId,
+      attempt: 1,
+    });
+    await this.recordControlJob(state, {
+      idempotencyKey: key,
+      status: "running",
+      sessionKey: `factory:integration:${parsed.objectiveId}`,
+      kind: "factory.integration.publish",
+      taskId: parsed.candidateId,
+      attempt: 1,
+      updatedAt: Date.now(),
+    });
     const [objectiveMemorySummary, integrationMemorySummary, publishMemorySummary] = await Promise.all([
       summarizeFactoryMemoryScope({
         memoryTools: this.memoryTools,
@@ -4843,6 +5012,15 @@ export class FactoryServiceBase {
         }),
       ]);
       await this.reactObjective(parsed.objectiveId);
+      await this.recordControlJob(state, {
+        idempotencyKey: key,
+        status: "done",
+        sessionKey: `factory:integration:${parsed.objectiveId}`,
+        kind: "factory.integration.publish",
+        taskId: parsed.candidateId,
+        attempt: 1,
+        updatedAt: Date.now(),
+      });
       return {
         objectiveId: parsed.objectiveId,
         status: "completed",
@@ -4894,6 +5072,15 @@ export class FactoryServiceBase {
         }),
       ]);
       await this.reactObjective(parsed.objectiveId);
+      await this.recordControlJob(state, {
+        idempotencyKey: key,
+        status: "done",
+        sessionKey: `factory:integration:${parsed.objectiveId}`,
+        kind: "factory.integration.publish",
+        taskId: parsed.candidateId,
+        attempt: 1,
+        updatedAt: Date.now(),
+      });
       return { objectiveId: parsed.objectiveId, status: "failed", message: reason };
     }
   }
