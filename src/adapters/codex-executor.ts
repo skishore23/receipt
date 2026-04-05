@@ -3,6 +3,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 export type CodexRunInput = {
   readonly prompt: string;
@@ -56,6 +58,15 @@ export type CodexRunResult = {
   readonly progressAt?: number;
   readonly latestEventType?: string;
   readonly latestEventText?: string;
+  readonly scriptsRun?: ReadonlyArray<{
+    readonly command: string;
+    readonly cwd: string;
+    readonly exitCode: number | null;
+    readonly startedAt: number;
+    readonly finishedAt: number;
+    readonly stdoutPath: string;
+    readonly stderrPath: string;
+  }>;
 };
 
 export type CodexControlSignal = {
@@ -128,6 +139,8 @@ const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+const execFileAsync = promisify(execFile);
 
 const prependPath = (dir: string, currentPath: string | undefined): string =>
   currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
@@ -234,6 +247,31 @@ const closeStream = (stream: fs.WriteStream): Promise<void> =>
     stream.on("error", reject);
     stream.end(() => resolve());
   });
+
+const taskExecutionArtifactsDir = (input: Pick<CodexRunInput, "workspacePath" | "objectiveId" | "taskId" | "candidateId">): string | undefined => {
+  if (!input.objectiveId || !input.taskId || !input.candidateId) return undefined;
+  return path.join(input.workspacePath, "artifacts", input.objectiveId, input.taskId, input.candidateId);
+};
+
+const envSummary = (env: NodeJS.ProcessEnv): Record<string, string | undefined> => ({
+  platform: process.platform,
+  arch: process.arch,
+  node: process.version,
+  bun: process.versions.bun,
+  cwd: process.cwd(),
+  dataDir: env.DATA_DIR?.trim(),
+  receiptDataDir: env.RECEIPT_DATA_DIR?.trim(),
+  path: env.PATH?.split(path.delimiter).slice(0, 8).join(path.delimiter),
+});
+
+const toolVersion = async (command: string, args: ReadonlyArray<string>): Promise<string | undefined> => {
+  try {
+    const { stdout } = await execFileAsync(command, [...args], { encoding: "utf-8" });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 const extractTokensUsed = (...streams: ReadonlyArray<string>): number | undefined => {
   for (const stream of streams) {
@@ -422,6 +460,13 @@ export class LocalCodexExecutor implements CodexExecutor {
     }
 
     try {
+      const artifactsDir = taskExecutionArtifactsDir(input);
+      const evidenceBase = artifactsDir ? {
+        commandJsonPath: path.join(artifactsDir, "command.json"),
+        executionEvidencePath: path.join(artifactsDir, "execution_evidence.json"),
+        stepLogPath: path.join(artifactsDir, "step_1.log"),
+      } : undefined;
+      if (artifactsDir) await fsp.mkdir(artifactsDir, { recursive: true });
       const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
         await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
         await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
@@ -465,10 +510,23 @@ export class LocalCodexExecutor implements CodexExecutor {
           stdio: ["pipe", "pipe", "pipe"],
         });
         const childStartedAt = Date.now();
+        const command = [this.bin, ...args].join(" ");
+        if (evidenceBase) {
+          const commandRecord = {
+            command,
+            cwd: input.workspacePath,
+            startedAt: childStartedAt,
+            finishedAt: null,
+            exitCode: null,
+            stdoutPath: input.stdoutPath,
+            stderrPath: input.stderrPath,
+          };
+          await fsp.writeFile(evidenceBase.commandJsonPath, JSON.stringify(commandRecord, null, 2), "utf-8");
+        }
         if (child.pid && control?.onChildSpawn) {
           void Promise.resolve(control.onChildSpawn({
             pid: child.pid,
-            command: [this.bin, ...args].join(" "),
+            command,
             workspacePath: input.workspacePath,
             startedAt: childStartedAt,
           })).catch(() => undefined);
@@ -687,7 +745,7 @@ export class LocalCodexExecutor implements CodexExecutor {
               if (child.pid && control?.onChildExit) {
                 await Promise.resolve(control.onChildExit({
                   pid: child.pid,
-                  command: [this.bin, ...args].join(" "),
+                  command,
                   workspacePath: input.workspacePath,
                   startedAt: childStartedAt,
                   exitCode: code,
@@ -700,6 +758,34 @@ export class LocalCodexExecutor implements CodexExecutor {
               await progressChain;
               await lastMessageWriteChain;
               await Promise.all([closeStream(stdoutFile), closeStream(stderrFile)]);
+              if (evidenceBase) {
+                await fsp.writeFile(evidenceBase.stepLogPath, [stdout.trim(), stderr.trim()].filter(Boolean).join("\n\n"), "utf-8");
+                const executionEvidence = {
+                  command,
+                  cwd: input.workspacePath,
+                  repoCommit: await toolVersion("git", ["rev-parse", "HEAD"]),
+                  toolVersions: {
+                    git: await toolVersion("git", ["--version"]),
+                    bwrap: await toolVersion("bwrap", ["--version"]),
+                  },
+                  environment: envSummary(childEnv),
+                  artifacts: {
+                    stepLogPath: evidenceBase.stepLogPath,
+                    commandJsonPath: evidenceBase.commandJsonPath,
+                  },
+                  startedAt: childStartedAt,
+                  finishedAt: Date.now(),
+                  exitCode: completionTriggered ? 0 : timedOut ? 124 : code,
+                };
+                try {
+                  await fsp.writeFile(evidenceBase.executionEvidencePath, JSON.stringify(executionEvidence, null, 2), "utf-8");
+                } catch (err) {
+                  const error = new Error("failed to serialize execution evidence");
+                  (error as Error & { code?: string; cause?: unknown }).code = "E_EXECUTION_EVIDENCE_SERIALIZATION";
+                  (error as Error & { cause?: unknown }).cause = err;
+                  throw error;
+                }
+              }
               const lastMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
               const resolvedLastMessage = lastMessage.trim() || latestStructuredLastMessage?.trim() || undefined;
               resolve({
@@ -712,6 +798,15 @@ export class LocalCodexExecutor implements CodexExecutor {
                 progressAt,
                 latestEventType,
                 latestEventText,
+                scriptsRun: [{
+                  command,
+                  cwd: input.workspacePath,
+                  exitCode: completionTriggered ? 0 : timedOut ? 124 : code,
+                  startedAt: childStartedAt,
+                  finishedAt: Date.now(),
+                  stdoutPath: input.stdoutPath,
+                  stderrPath: input.stderrPath,
+                }],
               });
             } catch (err) {
               reject(err);

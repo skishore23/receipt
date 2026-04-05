@@ -6095,7 +6095,7 @@ export class FactoryServiceBase {
 
   private async resolveTaskWorkerResult(
     payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
-    execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
+    execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number; readonly scriptsRun?: ReadonlyArray<Record<string, unknown>> },
   ): Promise<Record<string, unknown>> {
     return resolveFactoryTaskWorkerResult(payload, execution);
   }

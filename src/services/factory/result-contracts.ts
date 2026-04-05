@@ -210,6 +210,12 @@ export const normalizeExecutionScriptsRun = (
       .filter((item): item is Record<string, unknown> => isRecord(item))
       .map((item) => ({
         command: clipText(typeof item.command === "string" ? item.command : undefined, 220) ?? "command",
+        cwd: clipText(typeof item.cwd === "string" ? item.cwd : undefined, 260),
+        exitCode: typeof item.exitCode === "number" && Number.isFinite(item.exitCode) ? item.exitCode : (typeof item.exitCode === "bigint" ? Number(item.exitCode) : undefined),
+        startedAt: typeof item.startedAt === "number" && Number.isFinite(item.startedAt) ? item.startedAt : undefined,
+        finishedAt: typeof item.finishedAt === "number" && Number.isFinite(item.finishedAt) ? item.finishedAt : undefined,
+        stdoutPath: clipText(typeof item.stdoutPath === "string" ? item.stdoutPath : undefined, 260),
+        stderrPath: clipText(typeof item.stderrPath === "string" ? item.stderrPath : undefined, 260),
         summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
         status: item.status === "ok" || item.status === "warning" || item.status === "error"
           ? item.status
