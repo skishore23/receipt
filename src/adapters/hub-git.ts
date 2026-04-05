@@ -124,6 +124,14 @@ const canonicalizeRepoPath = async (value: string): Promise<string> => {
 const safeBranchPart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
 
+const branchStem = (agentId: string, workspaceId: string, baseHash: string): string =>
+  `hub/${safeBranchPart(agentId)}/${safeBranchPart(workspaceId)}_${baseHash.slice(0, 8)}`;
+
+const branchRef = (branchName: string): string => `refs/heads/${branchName}`;
+
+const branchExistsError = (message: string): boolean =>
+  /already exists|ref exists|cannot lock ref/i.test(message);
+
 const parseTouchedFiles = (raw: string): ReadonlyArray<string> =>
   raw
     .split(/\r?\n/)
@@ -374,26 +382,51 @@ export class HubGit {
       throw new HubGitError(409, "workspace path already exists");
     }
 
-    const branchName = `hub/${safeBranchPart(spec.agentId)}/${spec.workspaceId}`;
-    const branchRef = `refs/heads/${branchName}`;
-    const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
-      .then(() => true)
-      .catch(() => false);
-    if (branchExists) {
-      throw new HubGitError(409, "workspace branch already exists");
-    }
-
     const baseHash = spec.baseHash ? await this.resolveCommit(spec.baseHash) : await this.requiredSourceHead();
     await fs.promises.mkdir(this.worktreesDir, { recursive: true });
-    await this.execGit(["worktree", "add", "-b", branchName, workspacePath, baseHash], { gitDir: this.bareDir });
-    await this.configureWorktreeIdentity(workspacePath);
-    this.invalidateGraph();
-    return {
-      workspaceId: spec.workspaceId,
-      baseHash,
-      branchName,
-      path: workspacePath,
-    };
+    const branchPrefix = branchStem(spec.agentId, spec.workspaceId, baseHash);
+    let selectedBranchName: string | undefined;
+    let createdBranch = false;
+    try {
+      for (let suffix = 0; ; suffix += 1) {
+        const candidate = suffix === 0 ? branchPrefix : `${branchPrefix}-${suffix}`;
+        const exists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef(candidate)], { gitDir: this.bareDir })
+          .then(() => true)
+          .catch(() => false);
+        if (exists) {
+          const branchHead = clean(await this.execGit(["rev-parse", "--verify", candidate], { gitDir: this.bareDir }).catch(() => ""));
+          if (!branchHead) {
+            throw new HubGitError(409, "workspace branch already exists");
+          }
+          selectedBranchName = candidate;
+          break;
+        }
+        try {
+          await this.execGit(["worktree", "add", "-b", candidate, workspacePath, baseHash], { gitDir: this.bareDir });
+          selectedBranchName = candidate;
+          createdBranch = true;
+          break;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!branchExistsError(message)) throw err;
+        }
+      }
+      if (!selectedBranchName) {
+        throw new HubGitError(500, "unable to determine workspace branch");
+      }
+      await this.configureWorktreeIdentity(workspacePath);
+      this.invalidateGraph();
+      return {
+        workspaceId: spec.workspaceId,
+        baseHash,
+        branchName: selectedBranchName,
+        path: workspacePath,
+      };
+    } finally {
+      if (createdBranch && (!selectedBranchName || !(await pathExists(workspacePath)))) {
+        await this.execGit(["update-ref", "-d", branchRef(selectedBranchName ?? branchPrefix)], { gitDir: this.bareDir }).catch(() => undefined);
+      }
+    }
   }
 
   async restoreWorkspace(spec: HubGitWorkspaceRestoreSpec): Promise<HubGitWorkspace> {
@@ -406,8 +439,7 @@ export class HubGit {
     }
     if (!fs.existsSync(spec.workspacePath)) {
       await this.execGit(["worktree", "prune"], { gitDir: this.bareDir });
-      const branchRef = `refs/heads/${spec.branchName}`;
-      const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
+      const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef(spec.branchName)], { gitDir: this.bareDir })
         .then(() => true)
         .catch(() => false);
       if (branchExists) {
@@ -430,13 +462,20 @@ export class HubGit {
   async removeWorkspace(workspacePath: string): Promise<void> {
     await this.ensureReady();
     if (!fs.existsSync(workspacePath)) return;
+    const branchName = clean(await this.execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspacePath }).catch(() => ""));
     if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
       await this.removeWorkspaceDirectory(workspacePath);
       await this.execGit(["worktree", "prune"], { gitDir: this.bareDir }).catch(() => undefined);
+      if (branchName && branchName !== "HEAD") {
+        await this.execGit(["update-ref", "-d", branchRef(branchName)], { gitDir: this.bareDir }).catch(() => undefined);
+      }
       this.invalidateGraph();
       return;
     }
     await this.execGit(["worktree", "remove", "--force", workspacePath], { gitDir: this.bareDir });
+    if (branchName && branchName !== "HEAD") {
+      await this.execGit(["update-ref", "-d", branchRef(branchName)], { gitDir: this.bareDir }).catch(() => undefined);
+    }
     this.invalidateGraph();
   }
 

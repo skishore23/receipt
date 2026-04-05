@@ -286,6 +286,37 @@ test("hub git repairs orphaned worktree directories whose admin metadata was pru
   });
 });
 
+test("hub git reuses an existing workspace branch without failing on repeat provisioning", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-reuse-source");
+  const dataDir = await mkTmp("receipt-hub-git-reuse-data");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git reuse test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  const first = await hub.createWorkspace({
+    workspaceId: "repeat-provision",
+    agentId: "codex",
+  });
+  const firstBranch = first.branchName;
+  await hub.removeWorkspace(first.path);
+
+  const second = await hub.createWorkspace({
+    workspaceId: "repeat-provision",
+    agentId: "codex",
+  });
+
+  expect(second.branchName).toBe(firstBranch);
+  await expect(git(path.join(dataDir, "hub", "repo.git"), ["show-ref", "--verify", "--quiet", `refs/heads/${firstBranch}`])).resolves.toBe("");
+});
+
 test("hub git still blocks promotion when dirty source changes overlap promoted files", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-overlap-source");
   const dataDir = await mkTmp("receipt-hub-git-overlap-data");
