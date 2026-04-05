@@ -3811,6 +3811,36 @@ test("factory chat runner: codex progress snapshots surface while the child is s
   expect(updates.some((update) => String(update.summary ?? "").includes("Inspecting the repository."))).toBe(true);
 });
 
+test("factory chat runner: preflight stops early when the worktree runner cannot execute pwd", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-preflight-failure");
+  const repoRoot = path.join(dataDir, "missing-worktree");
+  let executorCalls = 0;
+  const result = await runFactoryCodexJob({
+    dataDir,
+    repoRoot,
+    jobId: "job_preflight_failure",
+    prompt: "Inspect the repo.",
+    executor: {
+      run: async () => {
+        executorCalls += 1;
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          lastMessage: "should not run",
+        };
+      },
+    },
+  });
+
+  expect(result.status).toBe("failed");
+  expect(executorCalls).toBe(0);
+  expect(String(result.summary)).toContain("Preflight failed");
+  expect(Array.isArray((result as Record<string, unknown>).preflight?.remediation)).toBe(true);
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_preflight_failure", "preflight-failure.json"), "utf-8")).resolves.toContain("Preflight failed before Codex execution.");
+});
+
 test("factory chat runner: direct codex probes run read-only and materialize a packet", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-direct-packet");
   const repoRoot = await createTempDir("receipt-factory-chat-direct-packet-repo");

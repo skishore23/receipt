@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 
 import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../../../adapters/codex-executor";
 import type { FactoryService } from "../../../services/factory-service";
@@ -24,6 +25,69 @@ const tail = (value: string | undefined, max = 400): string | undefined => {
   const text = value?.trim();
   if (!text) return undefined;
   return text.length <= max ? text : `…${text.slice(text.length - max)}`;
+};
+
+type PreflightResult = {
+  readonly command: string;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly remediation: ReadonlyArray<string>;
+};
+
+const runPreflight = async (workspacePath: string): Promise<PreflightResult> => {
+  const command = "pwd";
+  return await new Promise<PreflightResult>((resolve) => {
+    const child = spawn(command, [], {
+      cwd: workspacePath,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf-8");
+    child.stderr?.setEncoding("utf-8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => {
+      resolve({
+        command,
+        stdout,
+        stderr: stderr || (error instanceof Error ? error.message : String(error)),
+        exitCode: 1,
+        signal: null,
+        remediation: [
+          "mount path missing -> recreate worktree",
+          "binary execution failed -> verify the worktree runner can spawn basic host commands",
+        ],
+      });
+    });
+    child.once("close", (exitCode, signal) => {
+      const trimmedStderr = stderr.trim();
+      resolve({
+        command,
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        remediation: exitCode === 0
+          ? []
+          : [
+              ...(trimmedStderr.includes("bwrap") || trimmedStderr.includes("sandbox")
+                ? ["bwrap unavailable -> set SANDBOX_MODE=none"]
+                : []),
+              ...(trimmedStderr.includes("No such file") || trimmedStderr.includes("ENOENT")
+                ? ["mount path missing -> recreate worktree"]
+                : []),
+              "worktree runner failed to execute a minimal command -> inspect sandbox/bootstrap configuration",
+            ],
+      });
+    });
+  });
 };
 
 export const runFactoryCodexJob = async (input: {
@@ -109,6 +173,25 @@ export const runFactoryCodexJob = async (input: {
   let initialChangedFileSnapshot = readOnly
     ? await gitChangedFileSnapshots(workspacePath)
     : undefined;
+  const preflight = await runPreflight(workspacePath);
+  if (preflight.exitCode !== 0) {
+    const preflightFailure = {
+      status: "failed",
+      worker: "codex",
+      mode: readOnly ? "read_only_probe" : "workspace_write",
+      readOnly,
+      summary: "Preflight failed before Codex execution.",
+      preflight,
+      artifacts,
+    };
+    await fs.writeFile(
+      path.join(artifacts.root, "preflight-failure.json"),
+      JSON.stringify(preflightFailure, null, 2),
+      "utf-8",
+    );
+    await writeResult(preflightFailure);
+    return preflightFailure;
+  }
 
   const runExecutor = () => input.executor.run({
     prompt: renderedPrompt,
