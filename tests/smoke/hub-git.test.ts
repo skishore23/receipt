@@ -55,6 +55,47 @@ test("hub git canonicalizes local source paths and serializes concurrent remote 
   await fs.rm(aliasRoot, { force: true });
 });
 
+test("hub git preflights candidate worktrees before git operations", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-preflight-source");
+  const dataDir = await mkTmp("receipt-hub-git-preflight-data");
+  const hub = new HubGit({ dataDir, repoRoot });
+
+  await expect(hub.validateWorkspacePath(path.join(dataDir, "missing-worktree"), repoRoot)).resolves.toEqual({
+    valid: false,
+  });
+
+  const plainDir = path.join(dataDir, "plain-dir");
+  await fs.mkdir(plainDir, { recursive: true });
+  await expect(hub.validateWorkspacePath(plainDir, repoRoot)).resolves.toEqual({
+    valid: false,
+  });
+
+  const bareRepo = path.join(dataDir, "bare-repo");
+  await git(dataDir, ["init", "--bare", bareRepo]);
+  await expect(hub.validateWorkspacePath(bareRepo, repoRoot)).resolves.toEqual({
+    valid: false,
+  });
+
+  const worktreeRoot = await mkTmp("receipt-hub-git-preflight-worktree");
+  await git(worktreeRoot, ["init"]);
+  await git(worktreeRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(worktreeRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(worktreeRoot, "README.md"), "# hub git preflight test\n", "utf-8");
+  await git(worktreeRoot, ["add", "README.md"]);
+  await git(worktreeRoot, ["commit", "-m", "init"]);
+  await git(worktreeRoot, ["branch", "-M", "main"]);
+  await git(worktreeRoot, ["remote", "add", "origin", repoRoot]);
+  await expect(hub.validateWorkspacePath(worktreeRoot, repoRoot)).resolves.toEqual({
+    valid: true,
+    originUrl: repoRoot,
+  });
+  await git(worktreeRoot, ["remote", "set-url", "origin", path.join(dataDir, "wrong-remote")]);
+  await expect(hub.validateWorkspacePath(worktreeRoot, repoRoot)).resolves.toEqual({
+    valid: false,
+    originUrl: path.join(dataDir, "wrong-remote"),
+  });
+});
+
 test("hub git mirrors source publish remotes into factory worktrees", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-publish-remote-source");
   const dataDir = await mkTmp("receipt-hub-git-publish-remote-data");

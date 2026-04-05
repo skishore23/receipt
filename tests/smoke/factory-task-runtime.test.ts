@@ -136,6 +136,54 @@ test("factory task runtime: ensureFactoryTaskWorkspace restores a conflicting wo
   ]);
 });
 
+test("factory task runtime: ensureFactoryTaskWorkspace reclones invalid workspace paths before git operations", async () => {
+  const calls: string[] = [];
+  const git = {
+    repoRoot: "/tmp/source-repo",
+    worktreesDir: "/tmp/worktrees",
+    async validateWorkspacePath() {
+      calls.push("validate");
+      return { valid: false, originUrl: "file:///tmp/wrong-repo" };
+    },
+    async worktreeStatus() {
+      calls.push("status");
+      return { exists: true, dirty: false, head: "old-head", branch: "hub/codex/demo" };
+    },
+    async removeWorkspace(workspacePath: string) {
+      calls.push(`remove:${workspacePath}`);
+    },
+    async createWorkspace(input: Parameters<HubGit["createWorkspace"]>[0]) {
+      calls.push(`create:${input.workspaceId}:${input.agentId}:${input.baseHash}`);
+      return {
+        workspaceId: input.workspaceId,
+        branchName: `hub/${input.agentId}/${input.workspaceId}`,
+        path: path.join("/tmp/worktrees", input.workspaceId),
+        baseHash: input.baseHash ?? "new-head",
+      };
+    },
+    async resetWorkspace() {
+      throw new Error("should not reset");
+    },
+    async restoreWorkspace() {
+      throw new Error("should not restore");
+    },
+  } satisfies Pick<HubGit, "createWorkspace" | "removeWorkspace" | "resetWorkspace" | "restoreWorkspace" | "validateWorkspacePath" | "worktreeStatus" | "worktreesDir" | "repoRoot">;
+
+  const runtime = await ensureFactoryTaskWorkspace({
+    git,
+    workspaceId: "demo",
+    workerType: "codex",
+    baseHash: "new-head",
+  });
+
+  expect(runtime.path).toBe("/tmp/worktrees/demo");
+  expect(calls).toEqual([
+    "validate",
+    "remove:/tmp/worktrees/demo",
+    "create:demo:codex:new-head",
+  ]);
+});
+
 test("factory task runtime: isolated runtimes copy support files and cleanup respects worktree ownership", async () => {
   const dataDir = await createTempDir("receipt-factory-data");
   const profileRoot = await createTempDir("receipt-factory-profile");

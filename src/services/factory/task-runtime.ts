@@ -6,7 +6,7 @@ import type { FactoryObjectiveProfileSnapshot, FactoryTaskExecutionMode, Factory
 
 type FactoryRuntimeGit = Pick<
   HubGit,
-  "createWorkspace" | "removeWorkspace" | "resetWorkspace" | "restoreWorkspace" | "worktreeStatus" | "worktreesDir"
+  "createWorkspace" | "removeWorkspace" | "resetWorkspace" | "restoreWorkspace" | "validateWorkspacePath" | "worktreeStatus" | "worktreesDir" | "repoRoot"
 >;
 
 export const factoryTaskRuntimeDir = (dataDir: string, workspaceId: string): string =>
@@ -60,7 +60,8 @@ export const ensureFactoryTaskWorkspace = async (input: {
   const { git, workspaceId, workerType, baseHash } = input;
   const workspacePath = path.join(git.worktreesDir, workspaceId);
   const branchName = `hub/${workerType}/${workspaceId}`;
-  const existing = await git.worktreeStatus(workspacePath);
+  const validation = await git.validateWorkspacePath(workspacePath, git.repoRoot);
+  const existing = validation.valid ? await git.worktreeStatus(workspacePath) : { exists: false, dirty: false };
   if (existing.exists) {
     if (input.resetIfBaseMismatch && existing.head && existing.head !== baseHash) {
       const restored = await git.resetWorkspace(workspacePath, baseHash);
@@ -75,6 +76,9 @@ export const ensureFactoryTaskWorkspace = async (input: {
       branchName: existing.branch ?? branchName,
       baseHash: existing.head ?? baseHash,
     };
+  }
+  if (!validation.valid) {
+    await git.removeWorkspace(workspacePath).catch(() => undefined);
   }
   try {
     return await git.createWorkspace({
