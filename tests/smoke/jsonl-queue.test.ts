@@ -1092,6 +1092,67 @@ test("job worker: registered child liveness fails a codex job before lease expir
   }
 });
 
+test("job worker: renews a long-running lease until the scan completes", async () => {
+  const dir = await mkTmp("receipt-queue-worker-lease-renewal");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const heartbeats: number[] = [];
+    const baseHeartbeat = queue.heartbeat.bind(queue);
+    const trackedQueue: typeof queue = {
+      ...queue,
+      heartbeat: async (jobId, workerId, leaseMs) => {
+        heartbeats.push(Date.now());
+        return baseHeartbeat(jobId, workerId, leaseMs);
+      },
+    };
+
+    const worker = new JobWorker({
+      queue: trackedQueue,
+      workerId: "worker_lease_renewal",
+      idleResyncMs: 20_000,
+      leaseMs: 900,
+      concurrency: 1,
+      handlers: {
+        scanner: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return { ok: true, result: { scan: "complete" } };
+        },
+      },
+    });
+
+    const job = await queue.enqueue({
+      agentId: "scanner",
+      payload: { kind: "factory.scan.run", runId: "r_lease_renewal" },
+      maxAttempts: 1,
+    });
+
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const mid = await queue.getJob(job.id);
+    expect(mid?.status === "leased" || mid?.status === "running").toBe(true);
+    expect(heartbeats.length).toBeGreaterThan(0);
+
+    const settled = await queue.waitForJob(job.id, 5_000, 50);
+    worker.stop();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const current = await queue.getJob(job.id);
+    expect(current?.status).toBe("completed");
+    expect(heartbeats.length).toBeGreaterThan(1);
+    expect(current?.leaseUntil).toBeDefined();
+    expect(settled?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("job worker: clearing registered child liveness lets post-processing finish after the child exits", async () => {
   const dir = await mkTmp("receipt-queue-worker-child-liveness-clear");
   try {
