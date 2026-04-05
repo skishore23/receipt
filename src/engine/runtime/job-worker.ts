@@ -44,6 +44,9 @@ type ActiveLeaseState = {
   readonly jobId: string;
   readonly startedAt: number;
   nextHeartbeatAt: number;
+  heartbeatTimer?: NodeJS.Timeout;
+  consecutiveHeartbeatFailures: number;
+  retryingHeartbeat: boolean;
   process?: JobLeaseProcessRegistration;
 };
 
@@ -57,6 +60,8 @@ export class JobWorker {
   private readonly leaseMs: number;
   private readonly leaseHeartbeatMs: number;
   private readonly leasePollMs: number;
+  private readonly maxHeartbeatFailures = 3;
+  private readonly heartbeatRetryDelayMs = 250;
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
@@ -135,12 +140,20 @@ export class JobWorker {
       jobId,
       startedAt: Date.now(),
       nextHeartbeatAt: 0,
+      consecutiveHeartbeatFailures: 0,
+      retryingHeartbeat: false,
     };
     this.activeLeases.set(jobId, state);
+    state.heartbeatTimer = setInterval(() => {
+      void this.maybeHeartbeatLease(state);
+    }, this.leaseHeartbeatMs);
+    state.heartbeatTimer.unref?.();
     return state;
   }
 
   private clearActiveLease(jobId: string): void {
+    const state = this.activeLeases.get(jobId);
+    if (state?.heartbeatTimer) clearInterval(state.heartbeatTimer);
     this.activeLeases.delete(jobId);
   }
 
@@ -151,6 +164,64 @@ export class JobWorker {
       return;
     }
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+  }
+
+  private logLeaseMetric(event: string, state: ActiveLeaseState, extra?: Record<string, unknown>): void {
+    console.info(JSON.stringify({
+      event,
+      job_id: state.jobId,
+      lease_ttl_seconds: Math.round(this.leaseMs / 1000),
+      job_runtime_seconds: Number(((Date.now() - state.startedAt) / 1000).toFixed(3)),
+      consecutive_failures: state.consecutiveHeartbeatFailures,
+      ...extra,
+    }));
+  }
+
+  private async retryHeartbeatLease(state: ActiveLeaseState): Promise<void> {
+    let attempt = 0;
+    let lastErr: unknown;
+    while (attempt < 3) {
+      attempt += 1;
+      try {
+        await this.heartbeatLease(state);
+        state.consecutiveHeartbeatFailures = 0;
+        this.logLeaseMetric("renew_success", state, { attempt });
+        return;
+      } catch (err) {
+        lastErr = err;
+        state.consecutiveHeartbeatFailures += 1;
+        this.logLeaseMetric("renew_fail", state, {
+          attempt,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (attempt < 3) {
+          const jitter = Math.floor(Math.random() * this.heartbeatRetryDelayMs);
+          await new Promise((resolve) => setTimeout(resolve, this.heartbeatRetryDelayMs + jitter));
+        }
+      }
+    }
+
+    if (state.consecutiveHeartbeatFailures >= this.maxHeartbeatFailures) {
+      this.clearActiveLease(state.jobId);
+      const reason = `lease renewal failed ${state.consecutiveHeartbeatFailures} consecutive times`;
+      await this.queue.fail(state.jobId, this.workerId, reason, true, {
+        status: "failed",
+        summary: reason,
+        error: lastErr instanceof Error ? lastErr.message : String(lastErr ?? reason),
+      });
+      throw new Error(reason);
+    }
+  }
+
+  private async maybeHeartbeatLease(state: ActiveLeaseState): Promise<void> {
+    if (state.retryingHeartbeat || !this.activeLeases.has(state.jobId)) return;
+    if (Date.now() < state.nextHeartbeatAt) return;
+    state.retryingHeartbeat = true;
+    try {
+      await this.retryHeartbeatLease(state);
+    } finally {
+      state.retryingHeartbeat = false;
+    }
   }
 
   private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
@@ -173,7 +244,7 @@ export class JobWorker {
       }
       if (now < state.nextHeartbeatAt) continue;
       try {
-        await this.heartbeatLease(state);
+        await this.maybeHeartbeatLease(state);
       } catch (err) {
         this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
         state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
@@ -268,7 +339,7 @@ export class JobWorker {
     }
 
     const activeLease = this.registerActiveLease(job.id);
-    await this.heartbeatLease(activeLease);
+    await this.maybeHeartbeatLease(activeLease);
     if (!this.activeLeases.has(job.id)) return;
 
     const handler = this.handlers[job.agentId];
@@ -293,6 +364,7 @@ export class JobWorker {
           activeLease.process = undefined;
         },
       });
+      await this.maybeHeartbeatLease(activeLease);
       this.clearActiveLease(job.id);
       const postAbort = await pullCommands(["abort"]);
       if (postAbort.length > 0) {
