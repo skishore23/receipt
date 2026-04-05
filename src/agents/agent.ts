@@ -1040,7 +1040,9 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
           stage: "runtime",
           failureClass: "runtime_error",
           message: err instanceof Error ? err.message : String(err),
-          retryable: true,
+          retryable: typeof (err as { readonly retryable?: unknown }).retryable === "boolean"
+            ? (err as { readonly retryable: boolean }).retryable
+            : true,
         };
     await emitFailure(failure, true);
     await emit({

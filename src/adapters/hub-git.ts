@@ -7,10 +7,25 @@ const execFileAsync = promisify(execFile);
 
 export class HubGitError extends Error {
   readonly status: number;
+  readonly retryable: boolean;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, retryable = false) {
     super(message);
     this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+export class InvalidWorktreeError extends HubGitError {
+  readonly resolvedPath: string;
+  readonly derivedFrom: string;
+  readonly remediation: string;
+
+  constructor(input: { readonly resolvedPath: string; readonly derivedFrom: string; readonly remediation: string; readonly details: string }) {
+    super(422, `invalid worktree at ${input.resolvedPath}: ${input.details}`, false);
+    this.resolvedPath = input.resolvedPath;
+    this.derivedFrom = input.derivedFrom;
+    this.remediation = input.remediation;
   }
 }
 
@@ -180,6 +195,39 @@ export class HubGit {
       this.readyPromise = this.prepare();
     }
     return this.readyPromise;
+  }
+
+  async validateWorktree(worktreePath: string, derivedFrom: string): Promise<void> {
+    const resolvedPath = path.resolve(worktreePath);
+    const stat = await fs.promises.stat(resolvedPath).catch(() => undefined);
+    if (!stat || !stat.isDirectory()) {
+      throw new InvalidWorktreeError({
+        resolvedPath,
+        derivedFrom,
+        remediation: "set WORKTREE=/path/to/repo or run git clone <url> <path>",
+        details: "path does not exist or is not a directory",
+      });
+    }
+
+    const insideWorkTree = clean(await this.execGit(["rev-parse", "--is-inside-work-tree"], { cwd: resolvedPath }).catch(() => ""));
+    if (insideWorkTree !== "true") {
+      throw new InvalidWorktreeError({
+        resolvedPath,
+        derivedFrom,
+        remediation: "set WORKTREE=/path/to/repo or run git clone <url> <path>",
+        details: "git rev-parse --is-inside-work-tree failed",
+      });
+    }
+
+    const originUrl = clean(await this.execGit(["remote", "get-url", "origin"], { cwd: resolvedPath }).catch(() => ""));
+    if (!originUrl) {
+      throw new InvalidWorktreeError({
+        resolvedPath,
+        derivedFrom,
+        remediation: "set WORKTREE=/path/to/repo or run git clone <url> <path>",
+        details: "git remote get-url origin failed",
+      });
+    }
   }
 
   async syncFromSource(): Promise<void> {
@@ -466,6 +514,7 @@ export class HubGit {
     if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
       return { exists: false, dirty: false };
     }
+    await this.validateWorktree(workspacePath, "worktree path derived from workspaceId/worktreesDir default");
     const dirtyRaw = await this.execGit(["status", "--porcelain=v1", "--", ".", ":(exclude).receipt"], { cwd: workspacePath });
     const head = clean(await this.execGit(["rev-parse", "HEAD"], { cwd: workspacePath }).catch(() => ""));
     const branch = clean(await this.execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspacePath }).catch(() => ""));
@@ -670,6 +719,7 @@ export class HubGit {
     if (!isRepo) {
       throw new HubGitError(503, "HUB_REPO_ROOT is not a git repository");
     }
+    await this.validateWorktree(this.repoRoot, "repo root derived from FactoryServiceOptions.repoRoot / HUB_REPO_ROOT");
 
     await fs.promises.mkdir(path.dirname(this.bareDir), { recursive: true });
     await fs.promises.mkdir(this.worktreesDir, { recursive: true });
