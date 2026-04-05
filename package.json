@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "assets:prepare": "bun scripts/copy-runtime-assets.mjs",
+    "prebuild": "bun scripts/preflight-frontend.ts",
     "css:build": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --minify",
     "css:watch": "tailwindcss -i src/styles/factory.css -o dist/assets/factory.css --watch",
     "dev": "bun run assets:prepare && bun run css:build && bun --watch src/server.ts",
@@ -43,6 +44,7 @@
     "docker:down": "bash scripts/docker-dev.sh down",
     "clean": "bun -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "bun run clean && bun run assets:prepare && bun run css:build",
+    "build:ci": "bun run build 2>&1 | tee build.log",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
