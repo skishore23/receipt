@@ -986,6 +986,7 @@ export const FactoryTerminalApp = ({
   const exitRef = useRef(false);
   const selectedObjectiveIdRef = useRef<string | undefined>(initialObjectiveId);
   const busyRef = useRef<string | undefined>(undefined);
+  const actionAbortRef = useRef<AbortController | undefined>(undefined);
 
   const selectedList = snapshot?.board ? flattenObjectives(snapshot.board) : [];
   const compact = terminalWidth < 140;
@@ -1084,6 +1085,7 @@ export const FactoryTerminalApp = ({
     }, 30_000);
     return () => {
       closed = true;
+      actionAbortRef.current?.abort();
       unsubscribe();
       clearInterval(fallback);
       if (refreshTimerRef.current) {
@@ -1104,17 +1106,40 @@ export const FactoryTerminalApp = ({
     snapshot?.detail?.policy.promotion.autoPromote,
   ]);
 
-  const runAction = async (label: string, action: () => Promise<void>): Promise<void> => {
+  const isAbortError = (error: unknown): boolean =>
+    Boolean(error && typeof error === "object" && "name" in error && (error as { readonly name?: string }).name === "AbortError");
+
+  const runAction = async (label: string, action: (signal: AbortSignal) => Promise<void>): Promise<void> => {
+    actionAbortRef.current?.abort();
+    const controller = typeof AbortController === "function" ? new AbortController() : undefined;
+    actionAbortRef.current = controller;
+    const startedAt = Date.now();
+    const correlationId = `${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${startedAt.toString(36)}`;
+    const timeout = window.setTimeout(() => {
+      controller?.abort();
+    }, 4_000);
     try {
       setBusy(label);
-      setMessage(label);
+      setMessage(`${label}...`);
       setError(undefined);
-      await action();
+      console.info(JSON.stringify({ event: "command_start", command: label, correlationId, at: startedAt }));
+      await action(controller?.signal ?? new AbortController().signal);
       await refresh();
+      console.info(JSON.stringify({ event: "command_finish", command: label, correlationId, at: Date.now(), elapsedMs: Date.now() - startedAt }));
       setMessage(`${label} complete.`);
     } catch (err) {
+      if (isAbortError(err) || controller?.signal.aborted) {
+        console.info(JSON.stringify({ event: "command_cancel", command: label, correlationId, at: Date.now(), elapsedMs: Date.now() - startedAt }));
+        setMessage(`${label} canceled.`);
+        return;
+      }
+      if (err instanceof Error && /timed out/i.test(err.message)) {
+        console.info(JSON.stringify({ event: "command_timeout", command: label, correlationId, at: Date.now(), elapsedMs: Date.now() - startedAt }));
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      clearTimeout(timeout);
+      if (actionAbortRef.current === controller) actionAbortRef.current = undefined;
       setBusy(undefined);
     }
   };
@@ -1156,13 +1181,14 @@ export const FactoryTerminalApp = ({
       return;
     }
     if (command.type === "new") {
-      await runAction("Creating objective", async () => {
+      await runAction("Creating objective", async (_signal) => {
         const created = await createObjectiveMutation(runtime, {
           prompt: command.prompt,
           title: command.title,
           objectiveMode: command.objectiveMode,
           checks: runtime.config.defaultChecks,
           policy: runtime.config.defaultPolicy,
+          signal,
         });
         selectedObjectiveIdRef.current = created.objectiveId;
         setSelectedObjectiveId(created.objectiveId);
@@ -1179,67 +1205,72 @@ export const FactoryTerminalApp = ({
     }
     switch (command.type) {
       case "react":
-        await runAction("Reacting objective", async () => {
+        await runAction("Reacting objective", async (_signal) => {
           await reactObjectiveMutation(runtime, {
             objectiveId,
             message: command.message,
+            signal,
           });
         });
         setDraft("");
         return;
       case "promote":
-        await runAction("Promoting objective", async () => {
-          await promoteObjectiveMutation(runtime, objectiveId);
+        await runAction("Promoting objective", async (_signal) => {
+          await promoteObjectiveMutation(runtime, objectiveId, signal);
         });
         setDraft("");
         return;
       case "cancel":
-        await runAction("Canceling objective", async () => {
+        await runAction("Canceling objective", async (_signal) => {
           await cancelObjectiveMutation(runtime, {
             objectiveId,
             reason: command.reason ?? "canceled from CLI",
+            signal,
           });
         });
         setDraft("");
         return;
       case "cleanup":
-        await runAction("Cleaning workspaces", async () => {
-          await cleanupObjectiveMutation(runtime, objectiveId);
+        await runAction("Cleaning workspaces", async (_signal) => {
+          await cleanupObjectiveMutation(runtime, objectiveId, signal);
         });
         setDraft("");
         return;
       case "archive":
-        await runAction("Archiving objective", async () => {
-          await archiveObjectiveMutation(runtime, objectiveId);
+        await runAction("Archiving objective", async (_signal) => {
+          await archiveObjectiveMutation(runtime, objectiveId, signal);
         });
         setDraft("");
         return;
       case "abort-job":
-        await runAction("Requesting job abort", async () => {
+        await runAction("Requesting job abort", async (_signal) => {
           const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
           await abortJobMutation(runtime, {
             jobId: activeJob.id,
             reason: command.reason ?? "abort requested from CLI",
+            signal,
           });
         });
         setDraft("");
         return;
       case "steer":
-        await runAction("Sending steer guidance", async () => {
+        await runAction("Sending steer guidance", async (_signal) => {
           const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
           await steerJobMutation(runtime, {
             jobId: activeJob.id,
             message: command.message ?? "",
+            signal,
           });
         });
         setDraft("");
         return;
       case "follow-up":
-        await runAction("Sending follow-up guidance", async () => {
+        await runAction("Sending follow-up guidance", async (_signal) => {
           const activeJob = requireActiveObjectiveJob(snapshot?.detail, snapshot?.live);
           await followUpJobMutation(runtime, {
             jobId: activeJob.id,
             message: command.message ?? "",
+            signal,
           });
         });
         setDraft("");

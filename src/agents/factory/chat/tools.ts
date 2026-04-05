@@ -52,6 +52,7 @@ type FactoryChatToolsInput = {
   readonly consumeDiscoveryBudget?: () => void;
   readonly liveWaitState: { surfaced: boolean };
   readonly supervisorConfig: FactorySupervisorConfig;
+  readonly signal?: AbortSignal;
 };
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
@@ -267,7 +268,7 @@ const createCodexStatusTool = (input: FactoryChatToolsInput): AgentToolExecutor 
     };
     const initial = await buildStatus();
     const waited = waitForChangeMs > 0 && Number(initial.activeCount ?? 0) > 0
-      ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus)
+      ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus, { signal: input.signal })
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
@@ -573,7 +574,7 @@ const createFactoryStatusTool = (input: FactoryChatToolsInput): AgentToolExecuto
       ? requestedWaitMs
       : effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
     const waited = waitForChangeMs > 0 && live
-      ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus)
+      ? await waitForSnapshotChange(initial, waitForChangeMs, buildStatus, { signal: input.signal })
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
@@ -689,7 +690,7 @@ const createFactoryOutputTool = (input: FactoryChatToolsInput): AgentToolExecuto
       ? requestedWaitMs
       : effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
     const waited = waitForChangeMs > 0 && live
-      ? await waitForSnapshotChange(initial, waitForChangeMs, buildOutput)
+      ? await waitForSnapshotChange(initial, waitForChangeMs, buildOutput, { signal: input.signal })
       : { value: initial, waitedMs: 0, changed: false };
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }

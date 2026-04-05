@@ -38,6 +38,14 @@ export type FactoryMutationResult =
 const activeJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
 
+const throwIfAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+};
+
 export const pickActiveObjectiveJob = (
   detail: FactoryObjectiveDetail | undefined,
   live: FactoryLiveProjection | undefined,
@@ -61,8 +69,10 @@ export const createObjectiveMutation = async (
     readonly channel?: string;
     readonly policy?: FactoryObjectivePolicy;
     readonly profileId?: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(input.signal);
   const prepared = prepareObjectiveCreation(input.prompt, {
     title: input.title,
     objectiveMode: input.objectiveMode,
@@ -78,6 +88,7 @@ export const createObjectiveMutation = async (
     policy: input.policy,
     profileId: input.profileId,
   });
+  throwIfAborted(input.signal);
   return {
     kind: "objective",
     action: "create",
@@ -99,8 +110,10 @@ export const composeObjectiveMutation = async (
     readonly channel?: string;
     readonly policy?: FactoryObjectivePolicy;
     readonly profileId?: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(input.signal);
   const prepared = input.objectiveId
     ? undefined
     : prepareObjectiveCreation(input.prompt, {
@@ -119,6 +132,7 @@ export const composeObjectiveMutation = async (
     policy: input.policy,
     profileId: input.profileId,
   });
+  throwIfAborted(input.signal);
   return {
     kind: "objective",
     action: "compose",
@@ -133,9 +147,12 @@ export const reactObjectiveMutation = async (
   input: {
     readonly objectiveId: string;
     readonly message?: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(input.signal);
   const objective = await runtime.service.reactObjectiveWithNote(input.objectiveId, input.message);
+  throwIfAborted(input.signal);
   return {
     kind: "objective",
     action: "react",
@@ -148,8 +165,11 @@ export const reactObjectiveMutation = async (
 export const promoteObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
+  signal?: AbortSignal,
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(signal);
   const objective = await runtime.service.promoteObjective(objectiveId);
+  throwIfAborted(signal);
   return {
     kind: "objective",
     action: "promote",
@@ -163,9 +183,12 @@ export const cancelObjectiveMutation = async (
   input: {
     readonly objectiveId: string;
     readonly reason?: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(input.signal);
   const objective = await runtime.service.cancelObjective(input.objectiveId, input.reason);
+  throwIfAborted(input.signal);
   return {
     kind: "objective",
     action: "cancel",
@@ -177,8 +200,11 @@ export const cancelObjectiveMutation = async (
 export const cleanupObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
+  signal?: AbortSignal,
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(signal);
   const objective = await runtime.service.cleanupObjectiveWorkspaces(objectiveId);
+  throwIfAborted(signal);
   return {
     kind: "objective",
     action: "cleanup",
@@ -190,8 +216,11 @@ export const cleanupObjectiveMutation = async (
 export const archiveObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
+  signal?: AbortSignal,
 ): Promise<FactoryObjectiveMutationResult> => {
+  throwIfAborted(signal);
   const objective = await runtime.service.archiveObjective(objectiveId);
+  throwIfAborted(signal);
   return {
     kind: "objective",
     action: "archive",
@@ -205,9 +234,12 @@ export const abortJobMutation = async (
   input: {
     readonly jobId: string;
     readonly reason?: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryJobMutationResult> => {
+  throwIfAborted(input.signal);
   const queued = await runtime.service.queueJobAbort(input.jobId, input.reason);
+  throwIfAborted(input.signal);
   return {
     kind: "job",
     action: "abort",
@@ -222,9 +254,12 @@ export const steerJobMutation = async (
   input: {
     readonly jobId: string;
     readonly message: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryJobMutationResult> => {
+  throwIfAborted(input.signal);
   const queued = await runtime.service.queueJobSteer(input.jobId, input.message);
+  throwIfAborted(input.signal);
   return {
     kind: "job",
     action: "steer",
@@ -239,9 +274,12 @@ export const followUpJobMutation = async (
   input: {
     readonly jobId: string;
     readonly message: string;
+    readonly signal?: AbortSignal;
   },
 ): Promise<FactoryJobMutationResult> => {
+  throwIfAborted(input.signal);
   const queued = await runtime.service.queueJobFollowUp(input.jobId, input.message);
+  throwIfAborted(input.signal);
   return {
     kind: "job",
     action: "follow_up",
