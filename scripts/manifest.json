@@ -1,0 +1,17 @@
+{
+  "default": [
+    "scripts/copy-runtime-assets.mjs"
+  ],
+  "objectives": {
+    "objective_mnl7eubt_7avrrh": [
+      "scripts/copy-runtime-assets.mjs",
+      "scripts/factory-investigate.ts"
+    ]
+  },
+  "tasks": {
+    "task_01": [
+      "scripts/copy-runtime-assets.mjs",
+      "scripts/factory-investigate.ts"
+    ]
+  }
+}

@@ -44,6 +44,12 @@ const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
 
 type FactoryWorkspaceGit = Pick<HubGit, "repoRoot" | "worktreesDir" | "worktreeStatus" | "restoreWorkspace" | "removeWorkspace">;
 
+type FactoryScriptManifest = {
+  readonly default?: ReadonlyArray<string>;
+  readonly objectives?: Readonly<Record<string, ReadonlyArray<string>>>;
+  readonly tasks?: Readonly<Record<string, ReadonlyArray<string>>>;
+};
+
 export type FactoryBaselineCheckCache = Map<string, Promise<{
   readonly digest: string;
   readonly excerpt: string;
@@ -168,8 +174,46 @@ export const runFactoryChecks = async (input: {
   readonly dataDir: string;
   readonly repoRoot: string;
   readonly worktreesDir: string;
+  readonly objectiveId?: string;
+  readonly taskId?: string;
 }): Promise<ReadonlyArray<FactoryCheckResult>> => {
   const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv(input);
+  const manifestPath = path.join(input.repoRoot, "scripts", "manifest.json");
+  const manifest = await resolveRequiredScripts(manifestPath, {
+    objectiveId: input.objectiveId,
+    taskId: input.taskId,
+  });
+  if (!manifest.present) {
+    return [{
+      command: "scripts/manifest.json",
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `required script manifest missing: ${manifestPath}`,
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      durationMs: 0,
+      stdoutHash: createHash("sha1").update("").digest("hex"),
+      stderrHash: createHash("sha1").update(`required script manifest missing: ${manifestPath}`).digest("hex"),
+    }];
+  }
+  if (manifest.requiredScripts.length > 0) {
+    const missing = await findMissingRequiredScripts(manifest.requiredScripts, input.workspacePath);
+    if (missing.length > 0) {
+      return missing.map((scriptName) => ({
+        command: scriptName,
+        ok: false,
+        exitCode: 127,
+        stdout: "",
+        stderr: `required script not found in manifest preflight: ${scriptName}`,
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        durationMs: 0,
+        stdoutHash: createHash("sha1").update("").digest("hex"),
+        stderrHash: createHash("sha1").update(`required script not found in manifest preflight: ${scriptName}`).digest("hex"),
+      }));
+    }
+  }
   const results: FactoryCheckResult[] = [];
   for (const command of input.commands) {
     const startedAt = Date.now();
@@ -196,6 +240,9 @@ export const runFactoryChecks = async (input: {
         stderr,
         startedAt,
         finishedAt: Date.now(),
+        durationMs: Date.now() - startedAt,
+        stdoutHash: createHash("sha1").update(stdout).digest("hex"),
+        stderrHash: createHash("sha1").update(stderr).digest("hex"),
       });
     } catch (err) {
       const failure = err as Error & { stdout?: string; stderr?: string; code?: number };
@@ -207,6 +254,9 @@ export const runFactoryChecks = async (input: {
         stderr: failure.stderr ?? failure.message,
         startedAt,
         finishedAt: Date.now(),
+        durationMs: Date.now() - startedAt,
+        stdoutHash: createHash("sha1").update(failure.stdout ?? "").digest("hex"),
+        stderrHash: createHash("sha1").update(failure.stderr ?? failure.message).digest("hex"),
       });
       break;
     } finally {
@@ -214,6 +264,35 @@ export const runFactoryChecks = async (input: {
     }
   }
   return results;
+};
+
+const resolveRequiredScripts = async (
+  manifestPath: string,
+  input: { readonly objectiveId?: string; readonly taskId?: string },
+): Promise<{ readonly present: boolean; readonly requiredScripts: ReadonlyArray<string> }> => {
+  const raw = await fs.readFile(manifestPath, "utf-8").catch(() => undefined);
+  if (!raw) return { present: false, requiredScripts: [] };
+  const parsed = JSON.parse(raw) as FactoryScriptManifest;
+  return {
+    present: true,
+    requiredScripts: [
+    ...(parsed.default ?? []),
+    ...(input.objectiveId ? parsed.objectives?.[input.objectiveId] ?? [] : []),
+    ...(input.taskId ? parsed.tasks?.[input.taskId] ?? [] : []),
+    ].map((item) => item.trim()).filter((item) => item.length > 0),
+  };
+};
+
+const findMissingRequiredScripts = async (
+  scripts: ReadonlyArray<string>,
+  workspacePath: string,
+): Promise<ReadonlyArray<string>> => {
+  const missing: string[] = [];
+  for (const scriptName of scripts) {
+    const scriptPath = path.join(workspacePath, scriptName);
+    if (!(await pathExists(scriptPath))) missing.push(scriptName);
+  }
+  return missing;
 };
 
 export const baselineFactoryFailureSignature = async (input: {

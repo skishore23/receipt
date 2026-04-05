@@ -103,9 +103,16 @@ export type FactoryInvestigationEvidence = {
 };
 
 export type FactoryExecutionScriptRun = {
+  readonly scriptName?: string;
   readonly command: string;
   readonly summary?: string;
   readonly status?: "ok" | "warning" | "error";
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+  readonly durationMs?: number;
+  readonly exitCode?: number | null;
+  readonly stdoutHash?: string;
+  readonly stderrHash?: string;
 };
 
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
@@ -277,6 +284,9 @@ export type FactoryCheckResult = {
   readonly stderr: string;
   readonly startedAt: number;
   readonly finishedAt: number;
+  readonly durationMs: number;
+  readonly stdoutHash: string;
+  readonly stderrHash: string;
 };
 
 export type FactoryRebracketRecord = {
