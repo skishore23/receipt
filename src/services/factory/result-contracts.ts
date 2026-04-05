@@ -2,6 +2,8 @@ import type { GraphRef } from "@receipt/core/graph";
 import { trimmedString } from "../../framework/http";
 import type {
   FactoryCheckResult,
+  FactoryEvidenceBundle,
+  FactoryEvidenceBundleItem,
   FactoryExecutionScriptRun,
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
@@ -50,6 +52,64 @@ const artifactLines = (
   return lines;
 };
 
+const digestText = (value: string): string => {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(31, hash) + value.charCodeAt(index) | 0;
+  }
+  return Math.abs(hash).toString(16).padStart(8, "0");
+};
+
+const renderEvidenceItemsTable = (items: ReadonlyArray<FactoryEvidenceBundleItem>): string[] => {
+  if (items.length === 0) return ["| kind | label | digest | raw log |", "| --- | --- | --- | --- |", "| none | none | none | none |"];
+  return [
+    "| kind | label | digest | raw log |",
+    "| --- | --- | --- | --- |",
+    ...items.slice(0, 5).map((item) => `| ${item.kind} | ${item.label} | ${item.digest} | ${item.rawLogRef ?? ""} |`),
+  ];
+};
+
+export const buildEvidenceBundle = (input: {
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly stdout: string;
+  readonly stderr: string;
+}): FactoryEvidenceBundle => {
+  const items: FactoryEvidenceBundleItem[] = [
+    ...input.scriptsRun.map((item) => ({
+      kind: "command" as const,
+      label: item.command,
+      digest: digestText(`${item.command}\n${item.summary ?? ""}\n${item.status ?? ""}`),
+    })),
+    {
+      kind: "log",
+      label: "stdout",
+      digest: digestText(input.stdout),
+      rawLogRef: "stdout.log",
+    },
+    {
+      kind: "log",
+      label: "stderr",
+      digest: digestText(input.stderr),
+      rawLogRef: "stderr.log",
+    },
+  ];
+  return {
+    evidenceBundleId: `evidence_bundle_${input.objectiveId}_${input.taskId}_${input.candidateId}`,
+    objectiveId: input.objectiveId,
+    taskId: input.taskId,
+    candidateId: input.candidateId,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    items,
+    rawLogs: { stdout: input.stdout, stderr: input.stderr },
+  };
+};
+
 export const FACTORY_TASK_ARTIFACT_SCHEMA = {
   type: "object",
   properties: {
@@ -69,6 +129,42 @@ export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
     status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
   },
   required: ["command", "summary", "status"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_EVIDENCE_BUNDLE_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    kind: { type: "string", enum: ["command", "api_call", "log"] },
+    label: { type: "string" },
+    digest: { type: "string" },
+    rawLogRef: { type: "string" },
+  },
+  required: ["kind", "label", "digest"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_EVIDENCE_BUNDLE_SCHEMA = {
+  type: "object",
+  properties: {
+    evidenceBundleId: { type: "string" },
+    objectiveId: { type: "string" },
+    taskId: { type: "string" },
+    candidateId: { type: "string" },
+    startedAt: { type: "number" },
+    finishedAt: { type: "number" },
+    items: { type: "array", items: FACTORY_EVIDENCE_BUNDLE_ITEM_SCHEMA },
+    rawLogs: {
+      type: "object",
+      properties: {
+        stdout: { type: "string" },
+        stderr: { type: "string" },
+      },
+      required: ["stdout", "stderr"],
+      additionalProperties: false,
+    },
+  },
+  required: ["evidenceBundleId", "objectiveId", "taskId", "candidateId", "startedAt", "finishedAt", "items", "rawLogs"],
   additionalProperties: false,
 } as const;
 
@@ -317,6 +413,7 @@ export const renderDeliveryResultText = (input: {
   readonly summary: string;
   readonly handoff: string;
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly evidenceBundle?: FactoryEvidenceBundle;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
 }): string =>
@@ -328,6 +425,17 @@ export const renderDeliveryResultText = (input: {
       input.scriptsRun.length
         ? input.scriptsRun.map((item) =>
           `${item.status ?? "ok"}: ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
+        : ["none recorded"],
+      true,
+    ),
+    renderSection(
+      "Evidence Bundle",
+      input.evidenceBundle
+        ? [
+            `id=${input.evidenceBundle.evidenceBundleId}`,
+            `window=${input.evidenceBundle.startedAt}..${input.evidenceBundle.finishedAt}`,
+            ...renderEvidenceItemsTable(input.evidenceBundle.items),
+          ]
         : ["none recorded"],
       true,
     ),

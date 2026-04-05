@@ -87,6 +87,7 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  buildEvidenceBundle,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
@@ -3416,6 +3417,7 @@ export class FactoryServiceBase {
       worktreesDir: this.git.worktreesDir,
     });
     const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
+    const evidenceBundlePath = parsed.resultPath.replace(/\.json$/i, ".evidence-bundle.json");
     await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
     await fs.writeFile(
       resultSchemaPath,
@@ -3425,81 +3427,98 @@ export class FactoryServiceBase {
     const guidanceHistory: FactoryLiveGuidance[] = [];
     let restartCount = 0;
     let execution;
-    while (true) {
-      try {
-        execution = await this.codexExecutor.run({
-          prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
-          workspacePath: parsed.workspacePath,
-          promptPath: parsed.promptPath,
-          lastMessagePath: parsed.lastMessagePath,
-          stdoutPath: parsed.stdoutPath,
-          stderrPath: parsed.stderrPath,
-          model: FACTORY_TASK_CODEX_MODEL,
-          jsonOutput: true,
-          outputSchemaPath: resultSchemaPath,
-          completionSignalPath: parsed.lastMessagePath,
-          completionQuietMs: 1_500,
-          reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
-          sandboxMode: sandboxModeForTask(),
-          isolateCodexHome: true,
-          objectiveId: parsed.objectiveId,
-          taskId: parsed.taskId,
-          candidateId: parsed.candidateId,
-          integrationRef: parsed.integrationRef,
-          contextRefs: parsed.contextRefs,
-          skillBundlePaths: parsed.skillBundlePaths,
-          repoSkillPaths: parsed.repoSkillPaths,
-          env: {
-            DATA_DIR: this.dataDir,
-            RECEIPT_DATA_DIR: this.dataDir,
-            PATH: workspaceCommandEnv.path,
-          },
-        }, control);
-        break;
-      } catch (error) {
-        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
-        const guidance = parseFactoryLiveGuidance(error.signal);
-        if (!guidance) throw error;
-        guidanceHistory.push(guidance);
-        restartCount += 1;
-        const restartedAt = Date.now();
-        await this.emitObjectiveBatch(parsed.objectiveId, [
-          {
-            type: "task.intervention.applied",
+    let taskScriptsRun: ReadonlyArray<FactoryExecutionScriptRun> = [];
+    const taskStartedAt = Date.now();
+    try {
+      while (true) {
+        try {
+          execution = await this.codexExecutor.run({
+            prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
+            workspacePath: parsed.workspacePath,
+            promptPath: parsed.promptPath,
+            lastMessagePath: parsed.lastMessagePath,
+            stdoutPath: parsed.stdoutPath,
+            stderrPath: parsed.stderrPath,
+            model: FACTORY_TASK_CODEX_MODEL,
+            jsonOutput: true,
+            outputSchemaPath: resultSchemaPath,
+            completionSignalPath: parsed.lastMessagePath,
+            completionQuietMs: 1_500,
+            reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
+            sandboxMode: sandboxModeForTask(),
+            isolateCodexHome: true,
             objectiveId: parsed.objectiveId,
             taskId: parsed.taskId,
             candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            appliedAt: guidance.appliedAt,
-          },
-          {
-            type: "task.intervention.restarted",
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            restartCount,
-            restartedAt,
-          },
-        ]);
+            integrationRef: parsed.integrationRef,
+            contextRefs: parsed.contextRefs,
+            skillBundlePaths: parsed.skillBundlePaths,
+            repoSkillPaths: parsed.repoSkillPaths,
+            env: {
+              DATA_DIR: this.dataDir,
+              RECEIPT_DATA_DIR: this.dataDir,
+              PATH: workspaceCommandEnv.path,
+            },
+          }, control);
+          break;
+        } catch (error) {
+          if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+          const guidance = parseFactoryLiveGuidance(error.signal);
+          if (!guidance) throw error;
+          guidanceHistory.push(guidance);
+          restartCount += 1;
+          const restartedAt = Date.now();
+          await this.emitObjectiveBatch(parsed.objectiveId, [
+            {
+              type: "task.intervention.applied",
+              objectiveId: parsed.objectiveId,
+              taskId: parsed.taskId,
+              candidateId: parsed.candidateId,
+              jobId: guidance.jobId ?? parsed.workspaceId,
+              guidance: guidance.guidance,
+              guidanceKind: guidance.guidanceKind,
+              sourceCommandIds: guidance.sourceCommandIds,
+              appliedAt: guidance.appliedAt,
+            },
+            {
+              type: "task.intervention.restarted",
+              objectiveId: parsed.objectiveId,
+              taskId: parsed.taskId,
+              candidateId: parsed.candidateId,
+              jobId: guidance.jobId ?? parsed.workspaceId,
+              guidance: guidance.guidance,
+              guidanceKind: guidance.guidanceKind,
+              sourceCommandIds: guidance.sourceCommandIds,
+              restartCount,
+              restartedAt,
+            },
+          ]);
+        }
       }
+      const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
+      taskScriptsRun = normalizeExecutionScriptsRun(taskResult.scriptsRun);
+      await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
+      await this.applyTaskWorkerResult(parsed, taskResult);
+      await this.reactObjective(parsed.objectiveId);
+      return {
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        candidateId: parsed.candidateId,
+        status: "completed",
+      };
+    } finally {
+      const evidenceBundle = buildEvidenceBundle({
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        candidateId: parsed.candidateId,
+        startedAt: taskStartedAt,
+        finishedAt: Date.now(),
+        scriptsRun: taskScriptsRun,
+        stdout: await this.readTextTail(parsed.stdoutPath, 4_000) ?? "",
+        stderr: await this.readTextTail(parsed.stderrPath, 4_000) ?? "",
+      });
+      await fs.writeFile(evidenceBundlePath, JSON.stringify(evidenceBundle, null, 2), "utf-8");
     }
-    const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
-    await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
-    await this.applyTaskWorkerResult(parsed, taskResult);
-    await this.reactObjective(parsed.objectiveId);
-    return {
-      objectiveId: parsed.objectiveId,
-      taskId: parsed.taskId,
-      candidateId: parsed.candidateId,
-      status: "completed",
-    };
   }
 
   private async detectArtifactIssues(
@@ -3697,6 +3716,18 @@ export class FactoryServiceBase {
       : undefined;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
     const completedAt = Date.now();
+    const stdoutTail = await this.readTextTail(optionalTrimmedString(payload.stdoutPath), 900) ?? "";
+    const stderrTail = await this.readTextTail(optionalTrimmedString(payload.stderrPath), 600) ?? "";
+    const evidenceBundle = buildEvidenceBundle({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      startedAt: completedAt,
+      finishedAt: completedAt,
+      scriptsRun,
+      stdout: stdoutTail,
+      stderr: stderrTail,
+    });
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
     let outcome: FactoryTaskResultOutcome;
@@ -3763,6 +3794,7 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          evidenceBundle,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -3825,6 +3857,7 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          evidenceBundle,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -4146,13 +4179,14 @@ export class FactoryServiceBase {
       state,
       task,
       payload.candidateId,
-      renderDeliveryResultText({
-        summary: reviewSummary,
-        handoff: reviewHandoff,
-        scriptsRun,
-        completion: effectiveDeliveryCompletion,
-        alignment: deliveryAlignment,
-      }),
+        renderDeliveryResultText({
+          summary: reviewSummary,
+          handoff: reviewHandoff,
+          scriptsRun,
+          evidenceBundle,
+          completion: effectiveDeliveryCompletion,
+          alignment: deliveryAlignment,
+        }),
       reviewStatus,
     );
   }

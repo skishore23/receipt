@@ -108,6 +108,24 @@ export type FactoryExecutionScriptRun = {
   readonly status?: "ok" | "warning" | "error";
 };
 
+export type FactoryEvidenceBundleItem = {
+  readonly kind: "command" | "api_call" | "log";
+  readonly label: string;
+  readonly digest: string;
+  readonly rawLogRef?: string;
+};
+
+export type FactoryEvidenceBundle = {
+  readonly evidenceBundleId: string;
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+  readonly items: ReadonlyArray<FactoryEvidenceBundleItem>;
+  readonly rawLogs: Readonly<{ stdout: string; stderr: string }>;
+};
+
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
 
 export type FactoryTaskAlignmentVerdict =
