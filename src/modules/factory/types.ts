@@ -106,6 +106,10 @@ export type FactoryExecutionScriptRun = {
   readonly command: string;
   readonly summary?: string;
   readonly status?: "ok" | "warning" | "error";
+  readonly exitCode?: number | null;
+  readonly stdoutDigest?: string;
+  readonly stderrDigest?: string;
+  readonly artifactPaths?: ReadonlyArray<string>;
 };
 
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
