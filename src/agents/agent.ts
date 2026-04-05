@@ -261,9 +261,15 @@ const structuredAgentActionSchema = z.object({
     input: z.string(),
     text: z.string().nullable(),
   }).strict(),
-  memory: z.object({
-    preferenceNotes: z.array(z.string()).max(6).optional(),
-  }).strict().optional(),
+  memory: z.preprocess(
+    (value) => value ?? null,
+    z.object({
+      preferenceNotes: z.preprocess(
+        (value) => value ?? null,
+        z.array(z.string()).max(6).nullable(),
+      ),
+    }).strict().nullable(),
+  ),
 }).strict();
 
 type StructuredAgentAction = z.infer<typeof structuredAgentActionSchema>;

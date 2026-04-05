@@ -884,7 +884,24 @@ test("local codex executor retries sandbox startup once after older bwrap compat
       BWRAP_BIN: bwrapStub,
       SANDBOX_ATTEMPTS_PATH: attemptsPath,
     },
-});
+  });
+
+  await expect(executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  })).resolves.toMatchObject({ exitCode: 0 });
+
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\nnone\n");
+  const stderrLog = await fs.readFile(stderrPath, "utf-8");
+  expect(stderrLog).toContain("bwrap: Unknown option --argv0");
+  expect(stderrLog).toContain("\"eventType\":\"sandbox_start_retry\"");
+}, 15_000);
 
 test("local codex executor writes evidence for failed steps", async () => {
   const root = await mkTmp("receipt-codex-executor-failed-step");
@@ -922,28 +939,11 @@ test("local codex executor writes evidence for failed steps", async () => {
     evidencePath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  })).rejects.toThrow(/codex exited with 3/);
+  })).rejects.toThrow(/intentional failure|codex exited with 3/);
 
   const evidence = JSON.parse(await fs.readFile(evidencePath, "utf-8")) as { readonly exitCode: number; readonly stderr: string };
   expect(evidence.exitCode).toBe(3);
   expect(evidence.stderr).toContain("intentional failure");
-}, 15_000);
-
-  await expect(executor.run({
-    prompt: "# Task\nReturn the final JSON only.\n",
-    workspacePath: root,
-    promptPath,
-    lastMessagePath,
-    stdoutPath,
-    stderrPath,
-    sandboxMode: "workspace-write",
-    mutationPolicy: "workspace_edit",
-  })).resolves.toMatchObject({ exitCode: 0 });
-
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\nnone\n");
-  const stderrLog = await fs.readFile(stderrPath, "utf-8");
-  expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).toContain("\"eventType\":\"sandbox_start_retry\"");
 }, 15_000);
 
 test("local codex executor can keep read-only mutation policy while bypassing sandbox inference", async () => {

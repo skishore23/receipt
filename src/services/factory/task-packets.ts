@@ -275,7 +275,6 @@ export const listTaskArtifactActivity = async (
     path.basename(files.stdoutPath),
     path.basename(files.stderrPath),
     path.basename(files.lastMessagePath),
-    path.basename(files.evidencePath),
     path.basename(files.skillBundlePath),
     path.basename(files.memoryScriptPath),
     path.basename(files.memoryConfigPath),

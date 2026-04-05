@@ -259,6 +259,9 @@ So the current profile model is:
 - profile-specific action policy
 - profile-specific handoff topology
 
+Legacy `repo.read` and `repo.write` capabilities are rejected.
+`codex.run` in Factory chat is a read-only probe, while tracked repo changes still go back through `factory.dispatch`.
+
 ## Objective Creation And Routing
 
 Plain chat stays with the selected profile unless the operator explicitly switches profiles or the active profile calls `profile.handoff`.
@@ -381,27 +384,12 @@ What you can rely on today:
 
 What this does not guarantee yet:
 
-- service-level callers can still bypass profile action policy if they call `FactoryService` directly
 - `QA Engineer` is not a mandatory runtime stage
 - structured handoff guarantees shape, not quality of the written content
 
 ## Next Minimal Fix
 
-The next smallest loose end is to move the same `actionPolicy` checks into `FactoryService` entrypoints:
-
-- `createObjective`
-- `promoteObjective`
-- `cancelObjective`
-- `cleanupObjectiveWorkspaces`
-- `archiveObjective`
-
-Why this is the next minimal fix:
-
-- it closes the only meaningful bypass left in this V1 design
-- it does not add a new profile, stage, planner branch, or UI surface
-- it keeps the current simple model but makes the guarantee service-level instead of chat-level
-
-That should happen before adding more personas or more workflow stages.
+The next smallest loose end is to keep the docs and profile guidance aligned with the now-enforced service-level `actionPolicy` checks, without adding new personas or workflow stages.
 
 ## Code Map
 

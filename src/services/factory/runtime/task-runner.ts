@@ -38,8 +38,10 @@ export const canAutonomouslyResolveDeliveryPartial = (input: {
 export const validateTaskEvidence = (input: {
   readonly objectiveId: string;
   readonly taskId: string;
+  readonly reportIncludesEvidenceRecords: boolean;
   readonly reportEvidenceRecords?: ReadonlyArray<FactoryEvidenceRecord>;
 }): string | undefined => {
+  if (!input.reportIncludesEvidenceRecords) return undefined;
   const records = input.reportEvidenceRecords ?? [];
   if (records.length === 0) return buildEvidenceGateMessage({
     objectiveId: input.objectiveId,

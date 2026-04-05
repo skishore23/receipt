@@ -718,6 +718,7 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   const created = await service.createObjective({
     title: "Manual promotion objective",
     prompt: "Require an explicit source promotion step.",
+    profileId: "software",
     policy: {
       promotion: { autoPromote: false },
     },

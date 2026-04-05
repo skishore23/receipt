@@ -2558,9 +2558,7 @@ export class FactoryService {
 
       const objectiveId = typeof current.payload.objectiveId === "string" ? current.payload.objectiveId : "";
       const summary = summariesById.get(objectiveId);
-      const cancelReason = current.payload.reason === "reconcile"
-        ? undefined
-        : this.controlJobCancelReason(summary);
+      const cancelReason = this.controlJobCancelReason(summary);
       if (cancelReason) {
         await this.queue.cancel(current.id, cancelReason, "factory.resume");
         continue;
@@ -3857,11 +3855,15 @@ export class FactoryService {
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
+    const normalizedStructuredInvestigationReport = hasStructuredInvestigationReport
+      ? normalizeInvestigationReport(rawResult.report, summary)
+      : undefined;
     if (hasStructuredInvestigationReport) {
       const structuredEvidenceFailure = validateTaskEvidence({
         objectiveId: payload.objectiveId,
         taskId: payload.taskId,
-        reportEvidenceRecords: normalizeInvestigationReport(rawResult.report, summary).evidenceRecords,
+        reportIncludesEvidenceRecords: Object.hasOwn(rawResult.report, "evidenceRecords"),
+        reportEvidenceRecords: normalizedStructuredInvestigationReport?.evidenceRecords,
       });
       if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
     }
@@ -4049,10 +4051,9 @@ export class FactoryService {
     } satisfies Readonly<Record<string, GraphRef>>;
 
     if (isInvestigation) {
-      const report = normalizeInvestigationReport(
-        hasStructuredInvestigationReport
-          ? rawResult.report
-          : {
+      const report = normalizedStructuredInvestigationReport
+        ?? normalizeInvestigationReport(
+            {
               conclusion: effectiveSummary,
               evidence: workerArtifacts.map((item) => ({
                 title: item.label,
@@ -4063,8 +4064,8 @@ export class FactoryService {
               disagreements: [],
               nextSteps: nextAction ? [nextAction] : [],
             },
-        effectiveSummary,
-      );
+            effectiveSummary,
+          );
       const reportWithArtifactIssues: FactoryInvestigationReport = artifactIssues.length > 0
         ? {
             ...report,
