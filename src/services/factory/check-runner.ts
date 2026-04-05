@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -12,11 +13,149 @@ import { buildFactoryFailureSignature, priorFactoryFailureSignatureMap } from ".
 
 const execFileAsync = promisify(execFile);
 const CHECK_TIMEOUT_MS = 60 * 60 * 1000;
+const FALLBACK_SHELL_CANDIDATES = ["/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"] as const;
 
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+
+const emitShellFallbackWarning = (details: Record<string, unknown>): void => {
+  console.warn(JSON.stringify({
+    event: "factory.check_runner.shell_fallback",
+    ...details,
+  }));
+};
+
+const isExecutableFile = (candidate: string): boolean => {
+  try {
+    fsSync.accessSync(candidate, fsSync.constants.X_OK);
+    return fsSync.existsSync(candidate);
+  } catch {
+    return false;
+  }
+};
+
+export const resolveFallbackShell = (): string | undefined => {
+  for (const candidate of FALLBACK_SHELL_CANDIDATES) {
+    if (fsSync.existsSync(candidate) && isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
+};
+
+export const parseShellCommand = (command: string): ReadonlyArray<string> => {
+  const args: string[] = [];
+  let current = "";
+  let quote: "single" | "double" | undefined;
+  let escaped = false;
+
+  for (const char of command) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (quote === "single") {
+      if (char === "'") quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (quote === "double") {
+      if (char === '"') quote = undefined;
+      else if (char === "\\") escaped = true;
+      else current += char;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "'") {
+      quote = "single";
+      continue;
+    }
+    if (char === '"') {
+      quote = "double";
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (escaped || quote) throw new Error(`Unable to parse command: ${command}`);
+  if (current) args.push(current);
+  return args;
+};
+
+export const execCommandWithShellFallback = async (input: {
+  readonly command: string;
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly shell?: string;
+  readonly execImpl?: typeof execFileAsync;
+  readonly signal?: AbortSignal;
+  readonly resolveShellImpl?: () => string | undefined;
+}): Promise<{ readonly stdout: string; readonly stderr: string }> => {
+  const execImpl = input.execImpl ?? execFileAsync;
+  const resolveShell = input.resolveShellImpl ?? resolveFallbackShell;
+  const runWithShell = async (shell: string) => {
+    const result = await execImpl(shell, ["-lc", input.command], {
+      cwd: input.cwd,
+      encoding: "utf-8",
+      env: input.env,
+      maxBuffer: 16 * 1024 * 1024,
+      signal: input.signal,
+    });
+    return { stdout: result.stdout, stderr: result.stderr };
+  };
+
+  const fallbackShell = resolveShell();
+  if (input.shell) {
+    try {
+      return await runWithShell(input.shell);
+    } catch (err) {
+      const failure = err as NodeJS.ErrnoException;
+      if (failure.code !== "ENOENT" && failure.code !== "EACCES") throw err;
+      emitShellFallbackWarning({
+        configuredShell: input.shell,
+        errorCode: failure.code,
+        fallbackShell: fallbackShell ?? null,
+      });
+      if (fallbackShell) return runWithShell(fallbackShell);
+      const parsed = parseShellCommand(input.command);
+      const [cmd, ...args] = parsed;
+      const { stdout, stderr } = await execImpl(cmd, args, {
+        cwd: input.cwd,
+        encoding: "utf-8",
+        env: input.env,
+        maxBuffer: 16 * 1024 * 1024,
+        shell: false,
+        signal: input.signal,
+      });
+      return { stdout, stderr };
+    }
+  }
+
+  const shell = fallbackShell;
+  if (shell) return runWithShell(shell);
+  const parsed = parseShellCommand(input.command);
+  const [cmd, ...args] = parsed;
+  const { stdout, stderr } = await execImpl(cmd, args, {
+    cwd: input.cwd,
+    encoding: "utf-8",
+    env: input.env,
+    maxBuffer: 16 * 1024 * 1024,
+    shell: false,
+    signal: input.signal,
+  });
+  return { stdout, stderr };
+};
 
 const prependPath = (dir: string, currentPath: string | undefined): string =>
   currentPath ? `${dir}${path.delimiter}${currentPath}` : dir;
@@ -176,16 +315,17 @@ export const runFactoryChecks = async (input: {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(new Error("check command timed out after 60 minutes")), CHECK_TIMEOUT_MS);
     try {
-      const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
+      const { stdout, stderr } = await execCommandWithShellFallback({
+        command,
         cwd: input.workspacePath,
-        encoding: "utf-8",
         env: {
           ...process.env,
           DATA_DIR: input.dataDir,
           RECEIPT_DATA_DIR: input.dataDir,
           PATH: workspaceCommandEnv.path,
         },
-        maxBuffer: 16 * 1024 * 1024,
+        shell: process.env.SHELL?.trim() || undefined,
+        execImpl: execFileAsync,
         signal: ac.signal,
       });
       results.push({
