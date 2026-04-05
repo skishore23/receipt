@@ -463,7 +463,8 @@ export class HubGit {
     if (!fs.existsSync(workspacePath)) {
       return { exists: false, dirty: false };
     }
-    if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
+    const validation = await this.preflightWorkspacePath(workspacePath);
+    if (!validation.valid) {
       return { exists: false, dirty: false };
     }
     const dirtyRaw = await this.execGit(["status", "--porcelain=v1", "--", ".", ":(exclude).receipt"], { cwd: workspacePath });
@@ -479,6 +480,8 @@ export class HubGit {
 
   async commitWorkspace(workspacePath: string, message: string): Promise<HubWorkspaceCommit> {
     await this.ensureReady();
+    const validation = await this.preflightWorkspacePath(workspacePath);
+    if (!validation.valid) throw new HubGitError(404, "workspace path is missing");
     const status = await this.worktreeStatus(workspacePath);
     if (!status.exists) throw new HubGitError(404, "workspace path is missing");
     if (!status.dirty) throw new HubGitError(409, "workspace has no tracked changes");
@@ -525,8 +528,18 @@ export class HubGit {
     });
   }
 
+  async validateWorkspacePath(
+    workspacePath: string,
+    expectedOrigin?: string,
+  ): Promise<{ readonly valid: boolean; readonly originUrl?: string }> {
+    await this.ensureReady();
+    return this.preflightWorkspacePath(workspacePath, expectedOrigin);
+  }
+
   async mergeCommitIntoWorkspace(workspacePath: string, commitHash: string, message: string): Promise<HubWorkspaceCommit> {
     await this.ensureReady();
+    const validation = await this.preflightWorkspacePath(workspacePath);
+    if (!validation.valid) throw new HubGitError(404, "workspace path is missing");
     const status = await this.worktreeStatus(workspacePath);
     if (!status.exists) throw new HubGitError(404, "workspace path is missing");
     const resolved = await this.resolveCommit(commitHash);
@@ -882,6 +895,21 @@ export class HubGit {
     const gitMeta = await fs.promises.readFile(gitPath, "utf-8").catch(() => "");
     const gitDirMatch = gitMeta.match(/^gitdir:\s*(.+)$/im);
     return gitDirMatch ? path.resolve(workspacePath, gitDirMatch[1].trim()) : undefined;
+  }
+
+  private async preflightWorkspacePath(
+    workspacePath: string,
+    expectedOrigin?: string,
+  ): Promise<{ readonly valid: boolean; readonly originUrl?: string }> {
+    if (!fs.existsSync(workspacePath)) return { valid: false };
+    const insideWorkTree = await this.execGit(["rev-parse", "--is-inside-work-tree"], { cwd: workspacePath })
+      .then((stdout) => clean(stdout) === "true")
+      .catch(() => false);
+    if (!insideWorkTree) return { valid: false };
+    const originUrl = clean(await this.execGit(["remote", "get-url", "origin"], { cwd: workspacePath }).catch(() => ""));
+    if (!originUrl) return { valid: false };
+    if (expectedOrigin && clean(originUrl) !== clean(expectedOrigin)) return { valid: false, originUrl };
+    return { valid: true, originUrl };
   }
 
   private async hasLiveWorktreeMetadata(workspacePath: string): Promise<boolean> {
