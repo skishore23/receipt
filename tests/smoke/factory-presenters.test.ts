@@ -12,6 +12,10 @@ import {
   summarizeFactoryQueueJob,
 } from "../../src/views/factory/job-presenters";
 import {
+  buildDefaultTaskCompletion,
+  normalizeInvestigationReport,
+} from "../../src/services/factory/result-contracts";
+import {
   summarizeFactoryObjective,
   toFactorySelectedObjectiveCard,
   toFactoryStateSelectedObjectiveCard,
@@ -230,4 +234,18 @@ test("factory presenters: shared queue job helpers preserve snapshot and summary
   expect(snapshot.summary).toBe("Worker is applying the patch.");
   expect(snapshot.task).toBe("Implement the feature");
   expect(snapshot.changedFiles).toEqual(["src/app.ts"]);
+});
+
+test("factory presenters: missing structured evidence is normalized with sentinels", () => {
+  const report = normalizeInvestigationReport(undefined, "Fallback summary");
+  const completion = buildDefaultTaskCompletion({
+    summary: "Fallback summary",
+    scriptsRun: [],
+    report,
+  });
+
+  expect(report.evidence).toHaveLength(1);
+  expect(report.evidence[0]?.title).toBe("Evidence not generated");
+  expect(report.scriptsRun).toEqual([]);
+  expect(completion.proof).toEqual(["proof_not_generated: missing structured evidence"]);
 });
