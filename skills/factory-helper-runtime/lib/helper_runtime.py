@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,9 @@ class AwsCliError(RuntimeError):
         self.command = command
         self.stdout = stdout
         self.stderr = stderr
+
+
+_SCRIPT_RUNS: list[dict[str, Any]] = []
 
 
 def utc_now() -> str:
@@ -72,6 +76,41 @@ def write_json_artifact(
     return artifact
 
 
+def register_evidence(kind: str, path: str, schema_version: str, sha256: str) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "path": path,
+        "schemaVersion": schema_version,
+        "sha256": sha256,
+    }
+
+
+def evidence_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def script_run(
+    *,
+    command: list[str],
+    exit_code: int,
+    duration_ms: int,
+    stdout_path: str | None,
+    stderr_path: str | None,
+) -> None:
+    _SCRIPT_RUNS.append({
+        "kind": "script_run",
+        "command": " ".join(command),
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+    })
+
+
+def script_runs() -> list[dict[str, Any]]:
+    return [dict(item) for item in _SCRIPT_RUNS]
+
+
 def _aws_env() -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("AWS_PAGER", "")
@@ -87,6 +126,8 @@ def _aws_command(
     profile: str | None = None,
     region: str | None = None,
     json_output: bool,
+    output_dir: str | None = None,
+    run_label: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = ["aws"]
     if profile:
@@ -96,12 +137,34 @@ def _aws_command(
     command.extend(aws_args)
     if json_output and "--output" not in aws_args:
         command.extend(["--output", "json"])
+    started = datetime.now(timezone.utc)
     completed = subprocess.run(
         command,
         capture_output=True,
         text=True,
         env=_aws_env(),
         check=False,
+    )
+    duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    if output_dir:
+        target_dir = ensure_output_dir(output_dir)
+        if target_dir is not None:
+            label = run_label or "aws_command"
+            digest = hashlib.sha256(" ".join(command).encode("utf-8")).hexdigest()[:16]
+            stdout_file = target_dir / f"{label}-{digest}.stdout.txt"
+            stderr_file = target_dir / f"{label}-{digest}.stderr.txt"
+            stdout_file.write_text(completed.stdout, encoding="utf-8")
+            stderr_file.write_text(completed.stderr, encoding="utf-8")
+            stdout_path = str(stdout_file)
+            stderr_path = str(stderr_file)
+    script_run(
+        command=command,
+        exit_code=completed.returncode,
+        duration_ms=duration_ms,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
     )
     if completed.returncode != 0:
         raise AwsCliError(
@@ -118,8 +181,17 @@ def aws_cli_json(
     *,
     profile: str | None = None,
     region: str | None = None,
+    output_dir: str | None = None,
+    run_label: str | None = None,
 ) -> Any:
-    completed = _aws_command(aws_args, profile=profile, region=region, json_output=True)
+    completed = _aws_command(
+        aws_args,
+        profile=profile,
+        region=region,
+        json_output=True,
+        output_dir=output_dir,
+        run_label=run_label,
+    )
     stdout = completed.stdout.strip()
     if not stdout:
         return {}
@@ -131,8 +203,17 @@ def aws_cli_text(
     *,
     profile: str | None = None,
     region: str | None = None,
+    output_dir: str | None = None,
+    run_label: str | None = None,
 ) -> str:
-    completed = _aws_command(aws_args, profile=profile, region=region, json_output=False)
+    completed = _aws_command(
+        aws_args,
+        profile=profile,
+        region=region,
+        json_output=False,
+        output_dir=output_dir,
+        run_label=run_label,
+    )
     return completed.stdout
 
 
