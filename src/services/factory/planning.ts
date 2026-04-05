@@ -1,4 +1,5 @@
 import type {
+  FactoryPlanningAlignmentRecord,
   FactoryObjectiveProfileSnapshot,
   FactoryPlanningReceiptRecord,
   FactoryPlanningTaskRecord,
@@ -54,6 +55,26 @@ const validationPlanForState = (
   return ["Run the relevant repo validation for the changed subsystem before promotion."];
 };
 
+const alignmentForState = (
+  state: FactoryState,
+): FactoryPlanningAlignmentRecord => {
+  const acceptanceCriteria = acceptanceCriteriaForState(state);
+  const constraints = planningConstraintsForState(state, state.profile);
+  const plannedChecks = validationPlanForState(state);
+  return {
+    objective_id: state.objectiveId,
+    interpretation: state.objectiveMode === "investigation"
+      ? "Gather evidence to answer the objective with traceable scripts and receipts."
+      : "Deliver the requested change while staying within the stated objective contract.",
+    assumptions: state.objectiveMode === "investigation"
+      ? ["The stated goal can be validated with repo evidence and recorded scripts."]
+      : ["The requested delivery can be completed without expanding the objective scope."],
+    success_criteria: acceptanceCriteria,
+    constraints,
+    planned_checks: plannedChecks,
+  };
+};
+
 export const buildFactoryPlanningReceipt = (input: {
   readonly state: FactoryState;
   readonly profile: FactoryObjectiveProfileSnapshot;
@@ -80,6 +101,7 @@ export const buildFactoryPlanningReceipt = (input: {
     taskGraph,
     acceptanceCriteria: acceptanceCriteriaForState(state),
     validationPlan: validationPlanForState(state),
+    alignment: alignmentForState(state),
     plannedAt: input.plannedAt ?? Date.now(),
   };
 };
@@ -107,4 +129,13 @@ export const renderPlanningReceiptLines = (
   planningReceipt.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- none",
   `Validation Plan:`,
   planningReceipt.validationPlan.map((item) => `- ${item}`).join("\n") || "- none",
+  `Alignment:`,
+  [
+    `Objective: ${planningReceipt.alignment.objective_id}`,
+    `Interpretation: ${planningReceipt.alignment.interpretation}`,
+    ...(planningReceipt.alignment.assumptions.length ? [`Assumptions: ${planningReceipt.alignment.assumptions.join(" | ")}`] : []),
+    ...(planningReceipt.alignment.success_criteria.length ? [`Success criteria: ${planningReceipt.alignment.success_criteria.join(" | ")}`] : []),
+    ...(planningReceipt.alignment.constraints.length ? [`Constraints: ${planningReceipt.alignment.constraints.join(" | ")}`] : []),
+    ...(planningReceipt.alignment.planned_checks.length ? [`Planned checks: ${planningReceipt.alignment.planned_checks.join(" | ")}`] : []),
+  ].join("\n"),
 ];

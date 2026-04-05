@@ -123,6 +123,15 @@ export type FactoryTaskAlignmentRecord = {
   readonly rationale: string;
 };
 
+export type FactoryPlanningAlignmentRecord = {
+  readonly objective_id: string;
+  readonly interpretation: string;
+  readonly assumptions: ReadonlyArray<string>;
+  readonly success_criteria: ReadonlyArray<string>;
+  readonly constraints: ReadonlyArray<string>;
+  readonly planned_checks: ReadonlyArray<string>;
+};
+
 export type FactoryObjectiveContractRecord = {
   readonly acceptanceCriteria: ReadonlyArray<string>;
   readonly allowedScope: ReadonlyArray<string>;
@@ -182,6 +191,7 @@ export type FactoryPlanningReceiptRecord = {
   readonly taskGraph: ReadonlyArray<FactoryPlanningTaskRecord>;
   readonly acceptanceCriteria: ReadonlyArray<string>;
   readonly validationPlan: ReadonlyArray<string>;
+  readonly alignment: FactoryPlanningAlignmentRecord;
   readonly plannedAt: number;
 };
 

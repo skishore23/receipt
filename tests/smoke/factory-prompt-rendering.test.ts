@@ -35,6 +35,14 @@ const planningReceipt = {
   }],
   acceptanceCriteria: ["Preserve the worker prompt contract."],
   validationPlan: ["bun test tests/smoke/factory-prompt-rendering.test.ts"],
+  alignment: {
+    objective_id: "objective_demo",
+    interpretation: "Keep prompt rendering stable while refactoring helpers.",
+    assumptions: ["The prompt contract remains the source of truth."],
+    success_criteria: ["Preserve the worker prompt contract."],
+    constraints: ["Keep prompt contracts stable."],
+    planned_checks: ["bun test tests/smoke/factory-prompt-rendering.test.ts"],
+  },
   plannedAt: 1,
 } satisfies FactoryPlanningReceiptRecord;
 
