@@ -37,6 +37,7 @@ import { runOrchestrator, normalizeFactoryChatConfig, runFactoryCodexJob } from 
 import { emitToContinuedRun, resolveContinuedRunTarget } from "./agents/run-target";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "./services/factory-runtime";
 import { FACTORY_CONTROL_AGENT_ID, type FactoryService } from "./services/factory-service";
+import { emitBootstrapFinalizer, readBootstrapContext, writeBootstrapSpool } from "./services/factory/runtime/bootstrap-finalizer";
 import { shouldQueueObjectiveAudit, shouldQueueObjectiveControlReconcile } from "./services/factory-job-gates";
 import { loadAgentRoutes } from "./framework/agent-loader";
 import { SseHub } from "./framework/sse-hub";
@@ -1351,10 +1352,58 @@ const scheduleUiWarmup = (): void => {
   timer.unref();
 };
 
+const bootstrapContext = readBootstrapContext();
+let bootstrapFinalizerEmitted = false;
+const emitBootstrapFinalizerOnce = async (error?: unknown): Promise<void> => {
+  if (bootstrapFinalizerEmitted) return;
+  bootstrapFinalizerEmitted = true;
+  try {
+    await emitBootstrapFinalizer({
+      repoRoot: REPO_ROOT,
+      dataDir: DATA_DIR,
+      phase: "bootstrap",
+      status: error ? "failed_or_exiting" : "succeeded",
+      error,
+      context: bootstrapContext,
+    });
+  } catch (finalizerErr) {
+    console.error("[runtime] bootstrap finalizer failed", finalizerErr);
+  }
+};
+
+process.once("exit", () => {
+  try {
+    writeBootstrapSpool({
+      repoRoot: REPO_ROOT,
+      dataDir: DATA_DIR,
+      phase: "bootstrap",
+      status: "failed_or_exiting",
+      context: bootstrapContext,
+    });
+  } catch {
+    // Exit hooks must not throw.
+  }
+});
+
+process.once("uncaughtException", (err) => {
+  void emitBootstrapFinalizerOnce(err).finally(() => process.exit(1));
+});
+
+process.once("unhandledRejection", (reason) => {
+  void emitBootstrapFinalizerOnce(reason).finally(() => process.exit(1));
+});
+
 try {
-  await startRuntimeWorkers();
+  try {
+    await startRuntimeWorkers();
+  } catch (err) {
+    throw err;
+  } finally {
+    await emitBootstrapFinalizerOnce();
+  }
 } catch (err) {
   console.error("[runtime] startup failed", err);
+  await emitBootstrapFinalizerOnce(err);
   process.exit(1);
 }
 
