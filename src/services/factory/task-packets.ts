@@ -270,6 +270,7 @@ export const listTaskArtifactActivity = async (
     path.basename(files.contextPackPath),
     path.basename(files.promptPath),
     path.basename(files.resultPath),
+    path.basename(path.join(path.dirname(files.resultPath), "artifacts", "audit_bundle.json")),
     path.basename(files.stdoutPath),
     path.basename(files.stderrPath),
     path.basename(files.lastMessagePath),

@@ -81,6 +81,7 @@ import {
 import { runMonitorCheckpoint } from "../monitor-job";
 import { MonitorCheckpointResultSchema } from "../monitor-checkpoint";
 import { llmStructured } from "../../../adapters/openai";
+import { buildAuditBundle, emitAuditBundle } from "../audit-reporting/audit-bundle";
 import {
   factoryPromotionGateBlockedReason,
   factoryTaskCompletionForTask,
@@ -3676,6 +3677,7 @@ export class FactoryServiceBase {
   }
 
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
+    let auditBundle: ReturnType<typeof buildAuditBundle> | undefined;
     const state = await this.getObjectiveState(payload.objectiveId);
     const task = state.workflow.tasksById[payload.taskId];
     if (!task) throw new FactoryServiceError(404, "factory task not found");
@@ -3752,122 +3754,152 @@ export class FactoryServiceBase {
           this.defaultDeliveryAlignment(state, initialCompletion),
         )
       : undefined;
+    const auditRegions = [{ name: "workspace", path: payload.workspacePath, summary: "Task execution workspace." }];
 
-    if (outcome === "blocked" && !hasStructuredInvestigationReport) {
-      await commitFactoryTaskMemory(
-        this.memoryTools,
-        state,
-        task,
-        payload.candidateId,
-        renderDeliveryResultText({
-          summary: effectiveSummary,
-          handoff,
-          scriptsRun,
-          completion: initialCompletion,
-          alignment: initialAlignment,
-        }),
-        outcome,
-      );
-      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
-        taskId: payload.taskId,
-        candidateId: payload.candidateId,
-        outcome,
-        workspaceDirty: false,
-        hasFailedCheck: false,
-        blockedReason: handoff,
-        candidate: {
-          headCommit: payload.baseCommit,
-          summary: effectiveSummary,
-          handoff,
-          completion: initialCompletion,
-          alignment: initialAlignment,
-          checkResults: [],
-          scriptsRun,
-          artifactRefs: {},
-          producedAt: completedAt,
-        },
-        review: {
-          status: "changes_requested",
-          summary: effectiveSummary,
-          handoff,
-          reviewedAt: completedAt,
-        },
-      }), {
-        workerHandoff,
-      });
-      return;
-    }
+    try {
+      if (outcome === "blocked" && !hasStructuredInvestigationReport) {
+        auditBundle = buildAuditBundle({
+          objectiveId: payload.objectiveId,
+          taskId: payload.taskId,
+          regions: auditRegions,
+          commandsRun: scriptsRun,
+          findings: workerArtifacts.map((item) => ({
+            title: item.label,
+            summary: item.summary ?? item.path ?? item.label,
+            detail: item.path,
+          })),
+          timestamps: { startedAt: completedAt, completedAt },
+          alignment: initialAlignment ?? this.defaultDeliveryAlignment(state, initialCompletion),
+          proof: initialCompletion.proof,
+        });
+        await commitFactoryTaskMemory(
+          this.memoryTools,
+          state,
+          task,
+          payload.candidateId,
+          renderDeliveryResultText({
+            summary: effectiveSummary,
+            handoff,
+            scriptsRun,
+            completion: initialCompletion,
+            alignment: initialAlignment,
+          }),
+          outcome,
+        );
+        await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
+          taskId: payload.taskId,
+          candidateId: payload.candidateId,
+          outcome,
+          workspaceDirty: false,
+          hasFailedCheck: false,
+          blockedReason: handoff,
+          candidate: {
+            headCommit: payload.baseCommit,
+            summary: effectiveSummary,
+            handoff,
+            completion: initialCompletion,
+            alignment: initialAlignment,
+            checkResults: [],
+            scriptsRun,
+            artifactRefs: {},
+            producedAt: completedAt,
+          },
+          review: {
+            status: "changes_requested",
+            summary: effectiveSummary,
+            handoff,
+            reviewedAt: completedAt,
+          },
+        }), {
+          workerHandoff,
+        });
+        return;
+      }
 
-    const status = await factoryTaskWorkspaceStatus({
-      workspacePath: payload.workspacePath,
-      executionMode: payload.executionMode,
-      git: this.git,
-    });
-    const checkResults = isInvestigation
-      ? []
-      : await runFactoryChecks({
-        commands: state.checks,
+      const status = await factoryTaskWorkspaceStatus({
         workspacePath: payload.workspacePath,
-        dataDir: this.dataDir,
-        repoRoot: this.git.repoRoot,
-        worktreesDir: this.git.worktreesDir,
+        executionMode: payload.executionMode,
+        git: this.git,
       });
-    const failedCheck = checkResults.find((check) => !check.ok);
+      const checkResults = isInvestigation
+        ? []
+        : await runFactoryChecks({
+          commands: state.checks,
+          workspacePath: payload.workspacePath,
+          dataDir: this.dataDir,
+          repoRoot: this.git.repoRoot,
+          worktreesDir: this.git.worktreesDir,
+        });
+      const failedCheck = checkResults.find((check) => !check.ok);
 
-    if (payload.executionMode === "isolated" && !isInvestigation) {
-      const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${effectiveSummary}`;
-      await commitFactoryTaskMemory(
-        this.memoryTools,
-        state,
-        task,
-        payload.candidateId,
-        renderDeliveryResultText({
-          summary: effectiveSummary,
-          handoff,
-          scriptsRun,
-          completion: initialCompletion,
-          alignment: initialAlignment,
-        }),
-        "blocked_isolated_runtime",
-      );
-      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
-        taskId: payload.taskId,
-        candidateId: payload.candidateId,
-        outcome,
-        workspaceDirty: false,
-        hasFailedCheck: false,
-        blockedReason: reason,
-        candidate: {
-          headCommit: payload.baseCommit,
-          summary: effectiveSummary,
-          handoff,
-          completion: initialCompletion,
-          alignment: initialAlignment,
-          checkResults,
-          scriptsRun,
-          artifactRefs: {},
-          producedAt: completedAt,
-        },
-        review: {
-          status: "changes_requested",
-          summary: effectiveSummary,
-          handoff,
-          reviewedAt: completedAt,
-        },
-      }), {
-        workerHandoff,
-      });
-      return;
-    }
+      if (payload.executionMode === "isolated" && !isInvestigation) {
+        const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${effectiveSummary}`;
+        auditBundle = buildAuditBundle({
+          objectiveId: payload.objectiveId,
+          taskId: payload.taskId,
+          regions: auditRegions,
+          commandsRun: scriptsRun,
+          findings: workerArtifacts.map((item) => ({
+            title: item.label,
+            summary: item.summary ?? item.path ?? item.label,
+            detail: item.path,
+          })),
+          timestamps: { startedAt: completedAt, completedAt },
+          alignment: initialAlignment ?? this.defaultDeliveryAlignment(state, initialCompletion),
+          proof: initialCompletion.proof,
+        });
+        await commitFactoryTaskMemory(
+          this.memoryTools,
+          state,
+          task,
+          payload.candidateId,
+          renderDeliveryResultText({
+            summary: effectiveSummary,
+            handoff,
+            scriptsRun,
+            completion: initialCompletion,
+            alignment: initialAlignment,
+          }),
+          "blocked_isolated_runtime",
+        );
+        await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
+          taskId: payload.taskId,
+          candidateId: payload.candidateId,
+          outcome,
+          workspaceDirty: false,
+          hasFailedCheck: false,
+          blockedReason: reason,
+          candidate: {
+            headCommit: payload.baseCommit,
+            summary: effectiveSummary,
+            handoff,
+            completion: initialCompletion,
+            alignment: initialAlignment,
+            checkResults,
+            scriptsRun,
+            artifactRefs: {},
+            producedAt: completedAt,
+          },
+          review: {
+            status: "changes_requested",
+            summary: effectiveSummary,
+            handoff,
+            reviewedAt: completedAt,
+          },
+        }), {
+          workerHandoff,
+        });
+        return;
+      }
 
-    const committed = status.dirty && payload.executionMode === "worktree"
-      ? await this.git.commitWorkspace(
-          payload.workspacePath,
-          isInvestigation
-            ? `[factory][investigation][${payload.objectiveId}] ${payload.taskId} ${state.title}`
-            : `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
-        )
-      : undefined;
+      const committed = status.dirty && payload.executionMode === "worktree"
+        ? await this.git.commitWorkspace(
+            payload.workspacePath,
+            isInvestigation
+              ? `[factory][investigation][${payload.objectiveId}] ${payload.taskId} ${state.title}`
+              : `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
+          )
+        : undefined;
     const baseResultRefs = {
       manifest: fileRef(payload.manifestPath, "task manifest"),
       prompt: fileRef(payload.promptPath, "task prompt"),
@@ -4155,6 +4187,25 @@ export class FactoryServiceBase {
       }),
       reviewStatus,
     );
+    } finally {
+      if (!auditBundle) {
+        auditBundle = buildAuditBundle({
+          objectiveId: payload.objectiveId,
+          taskId: payload.taskId,
+          regions: auditRegions,
+          commandsRun: scriptsRun,
+          findings: workerArtifacts.map((item) => ({
+            title: item.label,
+            summary: item.summary ?? item.path ?? item.label,
+            detail: item.path,
+          })),
+          timestamps: { startedAt: completedAt, completedAt },
+          alignment: initialAlignment ?? this.defaultDeliveryAlignment(state, initialCompletion),
+          proof: initialCompletion.proof,
+        });
+      }
+      await emitAuditBundle(auditBundle, payload.workspacePath);
+    }
   }
 
   async runIntegrationValidation(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
