@@ -5,6 +5,8 @@ import type {
   FactoryExecutionScriptRun,
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
+  FactoryTaskAlignmentReport,
+  FactoryTaskAlignmentReportRow,
   FactoryTaskCompletionRecord,
 } from "../../modules/factory";
 
@@ -114,6 +116,34 @@ export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_ALIGNMENT_REPORT_SCHEMA = {
+  type: "object",
+  properties: {
+    generatedAt: { type: "number" },
+    result: { type: "string", enum: ["complete", "incomplete"] },
+    rows: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          requirementId: { type: "string" },
+          requirementText: { type: "string" },
+          checkName: { type: "string" },
+          dataSource: { type: "string" },
+          evidenceRefs: { type: "array", items: { type: "string" } },
+          result: { type: "string", enum: ["pass", "fail", "incomplete"] },
+          notes: { type: ["string", "null"] },
+        },
+        required: ["requirementId", "requirementText", "checkName", "dataSource", "evidenceRefs", "result", "notes"],
+        additionalProperties: false,
+      },
+    },
+    notes: { type: ["string", "null"] },
+  },
+  required: ["generatedAt", "result", "rows", "notes"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -130,9 +160,10 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
     },
     completion: FACTORY_TASK_COMPLETION_SCHEMA,
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
+    alignmentReport: FACTORY_TASK_ALIGNMENT_REPORT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "alignmentReport", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -256,6 +287,53 @@ export const normalizeTaskAlignmentRecord = (
   };
 };
 
+const dedupeStrings = (items: ReadonlyArray<string>): ReadonlyArray<string> => [...new Set(items.filter(Boolean))];
+
+export const buildTaskAlignmentReport = (input: {
+  readonly requirementTexts: ReadonlyArray<string>;
+  readonly requiredChecks: ReadonlyArray<string>;
+  readonly alignment: FactoryTaskAlignmentRecord;
+  readonly completion: FactoryTaskCompletionRecord;
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly checkResults: ReadonlyArray<FactoryCheckResult>;
+}): FactoryTaskAlignmentReport => {
+  const defaultCheckName = input.requiredChecks[0] ?? "task result checks";
+  const checkEvidence = dedupeStrings([
+    ...input.checkResults.map((check) => `${check.command}#${String(check.exitCode ?? 0)}`),
+    ...input.scriptsRun.map((script) => script.summary ? `${script.command}: ${script.summary}` : script.command),
+    ...input.completion.proof,
+  ]);
+  const rows: FactoryTaskAlignmentReportRow[] = input.requirementTexts.map((requirementText, index) => {
+    const requirementId = `req-${String(index + 1).padStart(2, "0")}`;
+    const satisfied = input.alignment.satisfied[index] ?? undefined;
+    const missing = input.alignment.missing[index] ?? undefined;
+    const rowResult = missing || checkEvidence.length === 0 ? "incomplete" : "pass";
+    return {
+      requirementId,
+      requirementText,
+      checkName: defaultCheckName,
+      dataSource: input.checkResults.length > 0 ? "CLI check runner" : "SDK result synthesis",
+      evidenceRefs: checkEvidence.slice(0, 4),
+      result: rowResult,
+      notes: satisfied ?? missing ?? input.alignment.rationale,
+    };
+  });
+  const incomplete = rows.some((row) => row.result !== "pass");
+  return {
+    generatedAt: Date.now(),
+    result: incomplete ? "incomplete" : "complete",
+    rows,
+    notes: incomplete ? "One or more requirements did not map to a check plus evidence reference." : null,
+  };
+};
+
+export const renderAlignmentReportTable = (report: FactoryTaskAlignmentReport): string => {
+  const header = `| Requirement | Check | Data Source | Evidence | Result | Notes |`;
+  const divider = `| --- | --- | --- | --- | --- | --- |`;
+  const rows = report.rows.map((row) => `| ${row.requirementId}: ${row.requirementText} | ${row.checkName} | ${row.dataSource} | ${row.evidenceRefs.join(", ") || "none"} | ${row.result} | ${row.notes ?? ""} |`);
+  return [header, divider, ...rows].join("\n");
+};
+
 export const normalizeInvestigationReport = (
   value: unknown,
   summary: string,
@@ -319,6 +397,7 @@ export const renderDeliveryResultText = (input: {
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
+  readonly alignmentReport?: FactoryTaskAlignmentReport;
 }): string =>
   [
     renderSection("Summary", [input.summary || "No summary recorded."], false),
@@ -369,6 +448,15 @@ export const renderDeliveryResultText = (input: {
       ],
       false,
     ),
+    ...(input.alignmentReport
+      ? [
+          renderSection(
+            "Alignment Report",
+            [renderAlignmentReportTable(input.alignmentReport)],
+            false,
+          ),
+        ]
+      : []),
   ].join("\n\n");
 
 export const renderWorkerHandoffText = (input: {

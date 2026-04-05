@@ -87,6 +87,7 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  buildTaskAlignmentReport,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
@@ -4029,9 +4030,21 @@ export class FactoryServiceBase {
     const controllerResolvedPartialHandoff = controllerResolvedPartial
       ? `${handoff}\n\nController verification reran the configured checks successfully and resolved the remaining validation/cleanup notes.`
       : handoff;
+    const alignmentReport = buildTaskAlignmentReport({
+      requirementTexts: deliveryContract.acceptanceCriteria,
+      requiredChecks: deliveryContract.requiredChecks,
+      alignment: deliveryAlignment,
+      completion: effectiveDeliveryCompletion,
+      scriptsRun,
+      checkResults,
+    });
+    const alignmentArtifactPath = this.taskAlignmentArtifactPath(payload.workspacePath);
+    await fs.mkdir(path.dirname(alignmentArtifactPath), { recursive: true });
+    await fs.writeFile(alignmentArtifactPath, JSON.stringify(alignmentReport, null, 2), "utf-8");
 
     const resultRefs = {
       ...baseResultRefs,
+      alignment: artifactRef(alignmentArtifactPath, "alignment report"),
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
@@ -4073,6 +4086,12 @@ export class FactoryServiceBase {
           contract: deliveryContract,
         }));
       }
+    }
+    if (alignmentReport.result !== "complete") {
+      reviewStatus = "changes_requested";
+      plannerOutcome = "changes_requested";
+      reviewSummary = `${candidateSummary} Alignment reporting is incomplete.`;
+      reviewHandoff = `${candidateHandoff}\n\nThe required alignment report is missing check/evidence coverage for one or more requirements.`;
     }
     if (failedCheck) {
       const classification = await classifyFactoryFailedCheck({
@@ -4152,6 +4171,7 @@ export class FactoryServiceBase {
         scriptsRun,
         completion: effectiveDeliveryCompletion,
         alignment: deliveryAlignment,
+        alignmentReport,
       }),
       reviewStatus,
     );
@@ -6071,6 +6091,10 @@ export class FactoryServiceBase {
 
   private taskResultSchemaPath(resultPath: string): string {
     return resultPath.replace(/\.json$/i, ".schema.json");
+  }
+
+  private taskAlignmentArtifactPath(workspacePath: string): string {
+    return path.join(workspacePath, "artifacts", "alignment.json");
   }
 
   private async taskPacketPresent(
