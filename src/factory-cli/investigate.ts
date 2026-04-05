@@ -77,6 +77,22 @@ type InvestigationRunAssessment = {
   readonly notes: ReadonlyArray<string>;
 };
 
+type InvestigationEvidenceArtifact = {
+  readonly path: string;
+  readonly kind: "evidence";
+  readonly summary: string;
+};
+
+type InvestigationScriptRun = {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly exitCode: number;
+  readonly stdoutPath?: string;
+  readonly stderrPath?: string;
+};
+
 export type FactoryReceiptInvestigation = {
   readonly requestedId?: string;
   readonly resolved: FactoryParsedRun["resolved"];
@@ -99,6 +115,8 @@ export type FactoryReceiptInvestigation = {
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
   readonly interventions: InvestigationInterventions;
   readonly assessment: InvestigationRunAssessment;
+  readonly artifacts: ReadonlyArray<InvestigationEvidenceArtifact>;
+  readonly scriptsRun: ReadonlyArray<InvestigationScriptRun>;
 };
 
 export type FactoryReceiptInvestigationRenderOptions = {
@@ -185,14 +203,49 @@ const pathExists = async (targetPath: string | undefined): Promise<boolean> => {
   }
 };
 
-const resolveArtifactPath = (
-  basePath: string | undefined,
-  candidatePath: string | undefined,
-): string | undefined => {
-  if (!candidatePath) return undefined;
-  return path.isAbsolute(candidatePath)
-    ? candidatePath
-    : (basePath ? path.resolve(path.dirname(basePath), candidatePath) : undefined);
+const writeEvidenceArtifact = async (input: {
+  readonly dataDir: string;
+  readonly report: Pick<FactoryReceiptInvestigation, "requestedId" | "resolved" | "links" | "warnings" | "inputs" | "summary" | "assessment" | "artifacts" | "scriptsRun">;
+  readonly taskRun?: InvestigationFocusTaskRun;
+}): Promise<InvestigationEvidenceArtifact> => {
+  const evidencePath = path.join(input.dataDir, "factory", "artifacts", "evidence", "stale_mirror_recovery_check.json");
+  await fs.mkdir(path.dirname(evidencePath), { recursive: true });
+  const discoveredStaleMirrors = uniqueStrings([
+    ...input.report.warnings.filter((warning) => /stale|mirror/i.test(warning)),
+    input.taskRun?.latestSummary,
+  ]);
+  const payload = {
+    objective: {
+      requestedId: input.report.requestedId ?? "latest",
+      resolved: input.report.resolved,
+      links: input.report.links,
+    },
+    inputs: input.report.inputs,
+    discoveredStaleMirrors,
+    actionsTaken: input.report.summary.whatHappened,
+    validationResults: {
+      assessment: {
+        verdict: input.report.assessment.verdict,
+        easyRouteRisk: input.report.assessment.easyRouteRisk,
+        efficiency: input.report.assessment.efficiency,
+        controlChurn: input.report.assessment.controlChurn,
+        proofPresent: input.report.assessment.proofPresent,
+        repoDiffProduced: input.report.assessment.repoDiffProduced,
+        followUpValidation: input.report.assessment.followUpValidation,
+      },
+      scriptsRun: input.report.scriptsRun,
+    },
+    outputs: {
+      summary: input.report.summary,
+      warnings: input.report.warnings,
+    },
+  };
+  await fs.writeFile(evidencePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+  return {
+    kind: "evidence",
+    path: evidencePath,
+    summary: "Structured stale-mirror recovery check evidence artifact.",
+  };
 };
 
 const readTextIfExists = async (targetPath: string | undefined): Promise<string | undefined> => {
@@ -618,6 +671,35 @@ export const readFactoryReceiptInvestigation = async (
   const packetContext = await summarizeContextPack(focusTaskRun);
   const interventionSignals = buildInterventions(parsed);
   const assessment = buildAssessment(parsed, packetContext, focusTaskRun, interventionSignals);
+  const scriptsRunSource = [
+    ...asRecordArray(parsed.outputs.result?.scriptsRun),
+    ...asRecordArray((parsed.outputs.result?.report as Record<string, unknown> | undefined)?.scriptsRun),
+    ...asRecordArray(focusTaskRun?.resultFile.json && (focusTaskRun.resultFile.json as Record<string, unknown>).scriptsRun),
+  ];
+  const normalizedScriptsRun = uniqueStrings(scriptsRunSource.map((item) => asString(item.command))).map((command) => ({
+    command,
+    args: [],
+    startAt: new Date(parsed.window.createdAt ?? Date.now()).toISOString(),
+    endAt: new Date(parsed.window.updatedAt ?? parsed.window.createdAt ?? Date.now()).toISOString(),
+    exitCode: 0,
+    stdoutPath: focusTaskRun?.stdout.resolvedPath,
+    stderrPath: focusTaskRun?.stderr.resolvedPath,
+  }));
+  const reportPreview = {
+    requestedId,
+    resolved: parsed.resolved,
+    links: parsed.links,
+    warnings: parsed.warnings,
+    inputs: parsed.inputs,
+    summary: {
+      ...parsed.summary,
+      whatHappened: buildWhatHappened(parsed, packetContext, interventionSignals),
+    },
+    assessment,
+    artifacts: [] as ReadonlyArray<InvestigationEvidenceArtifact>,
+    scriptsRun: normalizedScriptsRun,
+  };
+  const artifact = await writeEvidenceArtifact({ dataDir, report: reportPreview, taskRun: focusTaskRun });
   return {
     requestedId,
     resolved: parsed.resolved,
@@ -644,6 +726,8 @@ export const readFactoryReceiptInvestigation = async (
       courseCorrectionWorked: assessment.courseCorrectionWorked,
     },
     assessment,
+    artifacts: [artifact],
+    scriptsRun: normalizedScriptsRun,
   };
 };
 
