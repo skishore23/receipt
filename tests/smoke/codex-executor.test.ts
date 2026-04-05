@@ -80,14 +80,62 @@ const createSandboxBootstrapFailureCodexStub = async (): Promise<{
     "#!/usr/bin/env bun",
     "const fs = require('node:fs');",
     "const args = process.argv.slice(2);",
-    "const sandboxMode = args[args.indexOf('--sandbox') + 1];",
+    "const sandboxMode = args.includes('--sandbox') ? args[args.indexOf('--sandbox') + 1] : undefined;",
     "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
     "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
     "if (!sandboxMode || !lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
-    "fs.appendFileSync(attemptsPath, `${sandboxMode}\\n`, 'utf8');",
+    "fs.appendFileSync(attemptsPath, String(sandboxMode) + '\\n', 'utf8');",
     "process.stderr.write('bwrap: Unknown option --argv0\\n');",
     "process.exit(1);",
     "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return { scriptPath, attemptsPath };
+};
+
+const createOlderBwrapHelpStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-bwrap-help-stub");
+  const scriptPath = path.join(dir, "bwrap-help-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const help = process.argv.includes('--help');",
+    "if (help) {",
+    "  process.stdout.write('Usage: bwrap [OPTIONS]\\n');",
+    "  process.stdout.write('  --bind DIR DEST\\n');",
+    "  process.stdout.write('  --ro-bind DIR DEST\\n');",
+    "  process.exit(0);",
+    "}",
+    "process.stdout.write('bwrap stub\\n');",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
+const createSandboxRetryCodexStub = async (): Promise<{
+  readonly scriptPath: string;
+  readonly attemptsPath: string;
+}> => {
+  const dir = await mkTmp("receipt-codex-executor-sandbox-retry");
+  const scriptPath = path.join(dir, "codex-sandbox-retry-stub");
+  const attemptsPath = path.join(dir, "attempts.log");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const sandboxIndex = args.indexOf('--sandbox');",
+    "const sandboxMode = sandboxIndex >= 0 ? args[sandboxIndex + 1] : undefined;",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
+    "if (!lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
+    "fs.appendFileSync(attemptsPath, String(sandboxMode ?? 'none') + '\\n', 'utf8');",
+    "if (sandboxMode) {",
+    "  process.stderr.write('bwrap: Unknown option --argv0\\n');",
+    "  process.exit(1);",
+    "}",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'sandbox retry succeeded', handoff: 'ok' }), 'utf8');",
+    "process.stdout.write('sandbox-retry-ok');",
   ].join("\n");
   await fs.writeFile(scriptPath, body, "utf-8");
   await fs.chmod(scriptPath, 0o755);
@@ -814,9 +862,10 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
 }, 15_000);
 
-test("local codex executor fails closed when sandbox bootstrap fails", async () => {
+test("local codex executor retries sandbox startup once after older bwrap compatibility failure", async () => {
   const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
-  const { scriptPath, attemptsPath } = await createSandboxBootstrapFailureCodexStub();
+  const { scriptPath, attemptsPath } = await createSandboxRetryCodexStub();
+  const bwrapStub = await createOlderBwrapHelpStub();
   const artifactDir = path.join(root, ".receipt", "factory");
   const promptPath = path.join(artifactDir, "task.prompt.md");
   const lastMessagePath = path.join(artifactDir, "task.last-message.md");
@@ -827,6 +876,7 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     timeoutMs: 60_000,
     env: {
       ...process.env,
+      BWRAP_BIN: bwrapStub,
       SANDBOX_ATTEMPTS_PATH: attemptsPath,
     },
   });
@@ -840,12 +890,12 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     stderrPath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  })).rejects.toThrow(/Unknown option --argv0|codex exited with 1/);
+  })).resolves.toMatchObject({ exitCode: 0 });
 
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\n");
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\nnone\n");
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
   expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).not.toContain("retrying with danger-full-access");
+  expect(stderrLog).toContain("\"eventType\":\"sandbox_start_retry\"");
 }, 15_000);
 
 test("local codex executor can keep read-only mutation policy while bypassing sandbox inference", async () => {
