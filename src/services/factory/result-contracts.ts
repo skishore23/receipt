@@ -114,6 +114,37 @@ export const FACTORY_TASK_ALIGNMENT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_VALIDATION_EVIDENCE_SCHEMA = {
+  type: "object",
+  properties: {
+    artifact: { type: "string" },
+    generatedAt: { type: "number" },
+    results: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          command: { type: "string" },
+          exitCode: { type: "number" },
+          ok: { type: "boolean" },
+          startedAt: { type: "number" },
+          finishedAt: { type: "number" },
+          stdout: { type: "string" },
+          stderr: { type: "string" },
+          assertions: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["command", "exitCode", "ok", "startedAt", "finishedAt", "stdout", "stderr", "assertions"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["artifact", "generatedAt", "results"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -319,6 +350,15 @@ export const renderDeliveryResultText = (input: {
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
+  readonly validationEvidence?: {
+    readonly artifact: string;
+    readonly results: ReadonlyArray<{
+      readonly command: string;
+      readonly exitCode: number;
+      readonly ok: boolean;
+      readonly assertions: ReadonlyArray<string>;
+    }>;
+  };
 }): string =>
   [
     renderSection("Summary", [input.summary || "No summary recorded."], false),
@@ -369,6 +409,21 @@ export const renderDeliveryResultText = (input: {
       ],
       false,
     ),
+    ...(input.validationEvidence
+      ? [
+          renderSection(
+            "Validation Evidence",
+            [
+              `Artifact: ${input.validationEvidence.artifact}`,
+              ...input.validationEvidence.results.map((item) =>
+                `${item.ok ? "passed" : "failed"}: ${item.command} (exit ${item.exitCode})${
+                  item.assertions.length > 0 ? ` | ${item.assertions.join(" | ")}` : ""
+                }`),
+            ],
+            false,
+          ),
+        ]
+      : []),
   ].join("\n\n");
 
 export const renderWorkerHandoffText = (input: {

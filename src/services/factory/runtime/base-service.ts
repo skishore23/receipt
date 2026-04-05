@@ -208,6 +208,7 @@ const ALIGNMENT_CORRECTION_NOTE_PREFIX = "Alignment correction for this objectiv
 const PUBLISH_TRANSIENT_FAILURE_RE =
   /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
 const PUBLISH_MAX_ATTEMPTS = 3;
+const VALIDATION_EVIDENCE_FILENAME = "validation_evidence.json";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -3812,6 +3813,12 @@ export class FactoryServiceBase {
         repoRoot: this.git.repoRoot,
         worktreesDir: this.git.worktreesDir,
       });
+    const validationEvidence = isInvestigation
+      ? undefined
+      : await this.readValidationEvidence(parsed.resultPath);
+    if (!isInvestigation && !validationEvidence) {
+      throw new Error(`missing validation evidence artifact at ${this.validationEvidencePath(parsed.resultPath)} after validation run`);
+    }
     const failedCheck = checkResults.find((check) => !check.ok);
 
     if (payload.executionMode === "isolated" && !isInvestigation) {
@@ -3827,6 +3834,7 @@ export class FactoryServiceBase {
           scriptsRun,
           completion: initialCompletion,
           alignment: initialAlignment,
+          validationEvidence,
         }),
         "blocked_isolated_runtime",
       );
@@ -4152,6 +4160,7 @@ export class FactoryServiceBase {
         scriptsRun,
         completion: effectiveDeliveryCompletion,
         alignment: deliveryAlignment,
+        validationEvidence,
       }),
       reviewStatus,
     );
@@ -4174,6 +4183,10 @@ export class FactoryServiceBase {
       repoRoot: this.git.repoRoot,
       worktreesDir: this.git.worktreesDir,
     });
+    const validationEvidence = await this.readValidationEvidence(parsed.resultPath);
+    if (!validationEvidence) {
+      throw new Error(`missing validation evidence artifact at ${this.validationEvidencePath(parsed.resultPath)} after validation run`);
+    }
     const failed = results.find((result) => !result.ok);
     const raw = JSON.stringify({ results }, null, 2);
     await fs.mkdir(path.dirname(parsed.resultPath), { recursive: true });
@@ -6071,6 +6084,45 @@ export class FactoryServiceBase {
 
   private taskResultSchemaPath(resultPath: string): string {
     return resultPath.replace(/\.json$/i, ".schema.json");
+  }
+
+  private validationEvidencePath(resultPath: string): string {
+    return path.join(path.dirname(resultPath), VALIDATION_EVIDENCE_FILENAME);
+  }
+
+  private async readValidationEvidence(resultPath: string): Promise<{
+    readonly artifact: string;
+    readonly results: ReadonlyArray<{
+      readonly command: string;
+      readonly exitCode: number;
+      readonly ok: boolean;
+      readonly assertions: ReadonlyArray<string>;
+    }>;
+  } | undefined> {
+    const artifact = this.validationEvidencePath(resultPath);
+    const raw = await fs.readFile(artifact, "utf-8").catch((err) => {
+      if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+      throw err;
+    });
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed.artifact !== artifact || !Array.isArray(parsed.results)) {
+      throw new Error(`invalid validation evidence artifact at ${artifact}`);
+    }
+    return {
+      artifact,
+      results: parsed.results.map((item) => {
+        const record = item as Record<string, unknown>;
+        return {
+          command: typeof record.command === "string" ? record.command : "command",
+          exitCode: typeof record.exitCode === "number" ? record.exitCode : 1,
+          ok: Boolean(record.ok),
+          assertions: Array.isArray(record.assertions)
+            ? record.assertions.filter((value): value is string => typeof value === "string")
+            : [],
+        };
+      }),
+    };
   }
 
   private async taskPacketPresent(
