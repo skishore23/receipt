@@ -881,3 +881,41 @@ test("local codex executor can keep read-only mutation policy while bypassing sa
   expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
   expect(args).not.toContain("--sandbox");
 }, 15_000);
+
+test("codex executor records execution evidence artifacts and scriptsRun metadata", async () => {
+  const root = await mkTmp("receipt-codex-executor-evidence");
+  const scriptPath = await createSchemaCodexStub();
+  const artifactDir = path.join(root, "artifacts", "objective_123", "task_456", "candidate_789");
+  const promptPath = path.join(root, "prompt.md");
+  const lastMessagePath = path.join(root, "last-message.md");
+  const stdoutPath = path.join(root, "stdout.log");
+  const stderrPath = path.join(root, "stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      DATA_DIR: root,
+      RECEIPT_DATA_DIR: root,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    mutationPolicy: "read_only_probe",
+    disableSandboxModeInference: true,
+    objectiveId: "objective_123",
+    taskId: "task_456",
+    candidateId: "candidate_789",
+  });
+
+  expect(result.scriptsRun?.[0]?.cwd).toBe(root);
+  await expect(fs.readFile(path.join(artifactDir, "command.json"), "utf-8")).resolves.toContain(stdoutPath);
+  await expect(fs.readFile(path.join(artifactDir, "execution_evidence.json"), "utf-8")).resolves.toContain("\"repoCommit\"");
+  await expect(fs.readFile(path.join(artifactDir, "step_1.log"), "utf-8")).resolves.toContain("schema approved");
+}, 15_000);

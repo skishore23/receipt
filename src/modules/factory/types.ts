@@ -104,6 +104,12 @@ export type FactoryInvestigationEvidence = {
 
 export type FactoryExecutionScriptRun = {
   readonly command: string;
+  readonly cwd?: string;
+  readonly exitCode?: number | null;
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+  readonly stdoutPath?: string;
+  readonly stderrPath?: string;
   readonly summary?: string;
   readonly status?: "ok" | "warning" | "error";
 };

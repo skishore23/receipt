@@ -102,7 +102,7 @@ const readTextIfPresent = async (targetPath: string): Promise<string | undefined
 
 export const resolveFactoryTaskWorkerResult = async (
   payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
-  execution: { readonly lastMessage?: string; readonly tokensUsed?: number },
+  execution: { readonly lastMessage?: string; readonly tokensUsed?: number; readonly scriptsRun?: ReadonlyArray<Record<string, unknown>> },
 ): Promise<Record<string, unknown>> => {
   const rawLastMessage = execution.lastMessage?.trim()
     ? execution.lastMessage
@@ -112,9 +112,11 @@ export const resolveFactoryTaskWorkerResult = async (
   if (!result) {
     throw new FactoryServiceError(500, "missing structured factory task result from codex");
   }
-  return execution.tokensUsed !== undefined
-    ? { ...result, tokensUsed: execution.tokensUsed }
-    : result;
+  return {
+    ...result,
+    ...(execution.tokensUsed !== undefined ? { tokensUsed: execution.tokensUsed } : {}),
+    ...(execution.scriptsRun ? { scriptsRun: execution.scriptsRun } : {}),
+  };
 };
 
 export const resolveFactoryPublishWorkerResult = async (
