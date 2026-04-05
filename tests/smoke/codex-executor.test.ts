@@ -69,29 +69,39 @@ const createSchemaCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
-const createSandboxBootstrapFailureCodexStub = async (): Promise<{
+const createSandboxCapabilityCodexStub = async (opts: {
+  readonly helpOutput: string;
+  readonly helpExitCode?: number;
+}): Promise<{
   readonly scriptPath: string;
-  readonly attemptsPath: string;
+  readonly argsPath: string;
+  readonly envPath: string;
 }> => {
-  const dir = await mkTmp("receipt-codex-executor-sandbox-fallback");
-  const scriptPath = path.join(dir, "codex-sandbox-fallback-stub");
-  const attemptsPath = path.join(dir, "attempts.log");
+  const dir = await mkTmp("receipt-codex-executor-capabilities");
+  const scriptPath = path.join(dir, "codex-capability-stub");
+  const argsPath = path.join(dir, "args.json");
+  const envPath = path.join(dir, "env.json");
   const body = [
     "#!/usr/bin/env bun",
     "const fs = require('node:fs');",
     "const args = process.argv.slice(2);",
-    "const sandboxMode = args[args.indexOf('--sandbox') + 1];",
+    "if (args[0] === '--help') {",
+    `  process.stdout.write(${JSON.stringify(opts.helpOutput)});`,
+    `  process.exit(${opts.helpExitCode ?? 0});`,
+    "}",
     "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
-    "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
-    "if (!sandboxMode || !lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
-    "fs.appendFileSync(attemptsPath, `${sandboxMode}\\n`, 'utf8');",
-    "process.stderr.write('bwrap: Unknown option --argv0\\n');",
-    "process.exit(1);",
+    "const argsPath = process.env.ARGV_CAPTURE_PATH;",
+    "const envPath = process.env.ENV_CAPTURE_PATH;",
+    "if (!lastMessagePath || !argsPath || !envPath) throw new Error('missing capability test args');",
+    "fs.writeFileSync(argsPath, JSON.stringify(args), 'utf8');",
+    "fs.writeFileSync(envPath, JSON.stringify({ home: process.env.HOME, pwd: process.env.PWD, tmpdir: process.env.TMPDIR }), 'utf8');",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'capability approved', handoff: 'ok' }), 'utf8');",
+    "process.stdout.write('capability-captured');",
     "",
   ].join("\n");
   await fs.writeFile(scriptPath, body, "utf-8");
   await fs.chmod(scriptPath, 0o755);
-  return { scriptPath, attemptsPath };
+  return { scriptPath, argsPath, envPath };
 };
 
 const createArgvCaptureCodexStub = async (): Promise<{
@@ -814,9 +824,11 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
 }, 15_000);
 
-test("local codex executor fails closed when sandbox bootstrap fails", async () => {
+test("local codex executor falls back when sandbox help does not advertise argv0", async () => {
   const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
-  const { scriptPath, attemptsPath } = await createSandboxBootstrapFailureCodexStub();
+  const { scriptPath, argsPath, envPath } = await createSandboxCapabilityCodexStub({
+    helpOutput: "usage: codex\n  --sandbox\n",
+  });
   const artifactDir = path.join(root, ".receipt", "factory");
   const promptPath = path.join(artifactDir, "task.prompt.md");
   const lastMessagePath = path.join(artifactDir, "task.last-message.md");
@@ -827,11 +839,12 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     timeoutMs: 60_000,
     env: {
       ...process.env,
-      SANDBOX_ATTEMPTS_PATH: attemptsPath,
+      ARGV_CAPTURE_PATH: argsPath,
+      ENV_CAPTURE_PATH: envPath,
     },
   });
 
-  await expect(executor.run({
+  const result = await executor.run({
     prompt: "# Task\nReturn the final JSON only.\n",
     workspacePath: root,
     promptPath,
@@ -840,12 +853,99 @@ test("local codex executor fails closed when sandbox bootstrap fails", async () 
     stderrPath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  })).rejects.toThrow(/Unknown option --argv0|codex exited with 1/);
+  });
 
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\n");
+  expect(result.exitCode).toBe(0);
+  const args = JSON.parse(await fs.readFile(argsPath, "utf-8")) as string[];
+  expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(args).not.toContain("--sandbox");
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
-  expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).not.toContain("retrying with danger-full-access");
+  expect(stderrLog).toContain("\"event\":\"sandbox_capabilities\"");
+  expect(stderrLog).toContain("\"used_fallback\":true");
+  const env = JSON.parse(await fs.readFile(envPath, "utf-8")) as { readonly home: string; readonly pwd: string; readonly tmpdir: string };
+  expect(env.home).toBe(root);
+  expect(env.pwd).toBe(root);
+  expect(env.tmpdir).toContain(path.join(root, ".tmp"));
+}, 15_000);
+
+test("local codex executor preserves sandbox path when help advertises argv0", async () => {
+  const root = await mkTmp("receipt-codex-executor-sandbox-help-argv0");
+  const { scriptPath, argsPath, envPath } = await createSandboxCapabilityCodexStub({
+    helpOutput: "usage: codex\n  --argv0\n  --sandbox\n",
+  });
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      ARGV_CAPTURE_PATH: argsPath,
+      ENV_CAPTURE_PATH: envPath,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  expect(result.exitCode).toBe(0);
+  const args = JSON.parse(await fs.readFile(argsPath, "utf-8")) as string[];
+  expect(args).toContain("--sandbox");
+  expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  const stderrLog = await fs.readFile(stderrPath, "utf-8");
+  expect(stderrLog).toContain("\"used_fallback\":false");
+  const env = JSON.parse(await fs.readFile(envPath, "utf-8")) as { readonly home: string; readonly pwd: string; readonly tmpdir: string };
+  expect(env.home).not.toBe(root);
+  expect(env.pwd).not.toBe(root);
+}, 15_000);
+
+test("local codex executor falls back unsandboxed when the help probe fails", async () => {
+  const root = await mkTmp("receipt-codex-executor-sandbox-missing");
+  const { scriptPath, argsPath, envPath } = await createSandboxCapabilityCodexStub({
+    helpOutput: "usage: codex\n",
+    helpExitCode: 1,
+  });
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      ARGV_CAPTURE_PATH: argsPath,
+      ENV_CAPTURE_PATH: envPath,
+    },
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  expect(result.exitCode).toBe(0);
+  const stderrLog = await fs.readFile(stderrPath, "utf-8");
+  expect(stderrLog).toContain("\"probe_source\":\"probe-error\"");
+  expect(stderrLog).toContain("\"used_fallback\":true");
 }, 15_000);
 
 test("local codex executor can keep read-only mutation policy while bypassing sandbox inference", async () => {

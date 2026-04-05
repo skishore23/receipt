@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 
 export type CodexRunInput = {
   readonly prompt: string;
@@ -123,6 +124,15 @@ type LocalCodexExecutorOptions = {
   readonly stallTimeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
 };
+
+type SandboxCapabilityRecord = {
+  readonly bin: string;
+  readonly supportedFlags: string[];
+  readonly usedFallback: boolean;
+  readonly probeSource: "help" | "missing" | "probe-error";
+};
+
+const sandboxCapabilityCache = new Map<string, Promise<SandboxCapabilityRecord>>();
 
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -383,6 +393,60 @@ const progressFromCodexJsonEvent = (
   return undefined;
 };
 
+const probeSandboxCapabilities = async (bin: string): Promise<SandboxCapabilityRecord> => {
+  const cached = sandboxCapabilityCache.get(bin);
+  if (cached) return cached;
+  const probe = (async (): Promise<SandboxCapabilityRecord> => {
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(bin, ["--help"], { timeout: 5_000 }, (err, stdout, stderr) => {
+          if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+            reject(err);
+            return;
+          }
+          if (err && !stdout && !stderr) {
+            reject(err);
+            return;
+          }
+          resolve(`${stdout ?? ""}\n${stderr ?? ""}`);
+        });
+      });
+      const supportedFlags = output.includes("--argv0") ? ["--argv0"] : [];
+      return {
+        bin,
+        supportedFlags,
+        usedFallback: supportedFlags.length === 0,
+        probeSource: "help",
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT") {
+        return {
+          bin,
+          supportedFlags: [],
+          usedFallback: true,
+          probeSource: "missing",
+        };
+      }
+      return {
+        bin,
+        supportedFlags: [],
+        usedFallback: true,
+        probeSource: "probe-error",
+      };
+    }
+  })();
+  sandboxCapabilityCache.set(bin, probe);
+  return probe;
+};
+
+const fallbackEnvForUnsandboxedExecution = (env: NodeJS.ProcessEnv, workspacePath: string): NodeJS.ProcessEnv => ({
+  ...env,
+  HOME: workspacePath,
+  PWD: workspacePath,
+  TMPDIR: path.join(workspacePath, ".tmp"),
+});
+
 export class LocalCodexExecutor implements CodexExecutor {
   private readonly bin: string;
   private readonly timeoutMs: number;
@@ -412,6 +476,8 @@ export class LocalCodexExecutor implements CodexExecutor {
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };
+    const sandboxCapabilities = await probeSandboxCapabilities(this.bin);
+    const sandboxCompatibilityFallback = sandboxCapabilities.usedFallback || !sandboxCapabilities.supportedFlags.includes("--argv0");
     const childEnv: NodeJS.ProcessEnv = {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
@@ -420,6 +486,9 @@ export class LocalCodexExecutor implements CodexExecutor {
       isolatedCodexHome = await prepareIsolatedCodexHome(childEnv, input.workspacePath);
       if (isolatedCodexHome) childEnv.CODEX_HOME = isolatedCodexHome;
     }
+    const executionEnv = sandboxCompatibilityFallback
+      ? fallbackEnvForUnsandboxedExecution(childEnv, input.workspacePath)
+      : childEnv;
 
     try {
       const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
@@ -443,7 +512,7 @@ export class LocalCodexExecutor implements CodexExecutor {
           `model_reasoning_effort=${JSON.stringify(input.reasoningEffort ?? "medium")}`,
           "--cd",
           input.workspacePath,
-          ...(sandboxMode
+          ...(sandboxMode && !sandboxCompatibilityFallback
             ? ["--sandbox", sandboxMode]
             : ["--dangerously-bypass-approvals-and-sandbox"]),
           "--skip-git-repo-check",
@@ -461,7 +530,7 @@ export class LocalCodexExecutor implements CodexExecutor {
 
         const child = spawn(this.bin, args, {
           cwd: input.workspacePath,
-          env: childEnv,
+          env: executionEnv,
           stdio: ["pipe", "pipe", "pipe"],
         });
         const childStartedAt = Date.now();
@@ -494,6 +563,12 @@ export class LocalCodexExecutor implements CodexExecutor {
         let lastMessageWriteChain = Promise.resolve();
         const stdoutFile = fs.createWriteStream(input.stdoutPath, { flags: "a", encoding: "utf-8" });
         const stderrFile = fs.createWriteStream(input.stderrPath, { flags: "a", encoding: "utf-8" });
+        void stderrFile.write(`${JSON.stringify({
+          event: "sandbox_capabilities",
+          sandbox_supported_flags: sandboxCapabilities.supportedFlags,
+          used_fallback: sandboxCompatibilityFallback,
+          probe_source: sandboxCapabilities.probeSource,
+        })}\n`);
         const observeOutputActivity = (): void => {
           const now = Date.now();
           lastOutputAt = now;
