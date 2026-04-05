@@ -29,6 +29,7 @@ type ResonateRoleWorkerOptions = {
 };
 
 const TERMINAL = new Set<QueueJob["status"]>(["completed", "failed", "canceled"]);
+const LEASE_MAX_RENEW_FAILURES = 3;
 
 const toError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
@@ -134,7 +135,65 @@ const runDriver = async (
     }
     if (TERMINAL.has(leased.status)) return summarizeResult(leased);
 
-    await queue.heartbeat(leased.id, workerId, leaseMs);
+    let renewAttempts = 0;
+    let renewFailures = 0;
+    let leaseLost = false;
+    let renewTimer: ReturnType<typeof setTimeout> | undefined;
+    const renewIntervalMs = Math.max(1_000, Math.floor(leaseMs / 3));
+    const scheduleRenew = (): void => {
+      if (leaseLost) return;
+      const jitter = Math.max(0, Math.floor(renewIntervalMs * 0.15 * Math.random()));
+      const delay = Math.max(100, renewIntervalMs + jitter - Math.floor(jitter / 2));
+      if (renewTimer) clearTimeout(renewTimer);
+      renewTimer = setTimeout(() => {
+        void renewLease().catch(() => undefined);
+      }, delay);
+    };
+    const failLeaseLost = async (reason: string, result: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+      leaseLost = true;
+      if (renewTimer) clearTimeout(renewTimer);
+      await queue.fail(leased.id, workerId, `ERR_LEASE_LOST: ${reason}`, true, {
+        ...result,
+        errorCode: "ERR_LEASE_LOST",
+        lease_ttl_ms: leaseMs,
+        renew_interval_ms: renewIntervalMs,
+        renew_attempt: renewAttempts,
+        renew_fail_reason: reason,
+      });
+      const latest = await queue.getJob(leased.id);
+      return summarizeResult(latest);
+    };
+    const renewLease = async (): Promise<void> => {
+      if (leaseLost) return;
+      renewAttempts += 1;
+      const started = Date.now();
+      try {
+        const renewed = await queue.heartbeat(leased.id, workerId, leaseMs);
+        const renewLatencyMs = Date.now() - started;
+        if (!renewed || renewed.status === "completed" || renewed.status === "failed" || renewed.status === "canceled") {
+          await failLeaseLost("lease was no longer active during renewal", {
+            renew_latency_ms: renewLatencyMs,
+          });
+          return;
+        }
+        renewFailures = 0;
+        scheduleRenew();
+      } catch (err) {
+        renewFailures += 1;
+        const reason = err instanceof Error ? err.message : String(err);
+        if (renewFailures >= LEASE_MAX_RENEW_FAILURES) {
+          await failLeaseLost(reason, {
+            renew_latency_ms: Date.now() - started,
+          });
+          return;
+        }
+        scheduleRenew();
+      }
+    };
+
+    scheduleRenew();
+    await renewLease();
+    if (leaseLost) return summarizeResult(await queue.getJob(leased.id));
 
     const attemptJob = await queue.getJob(leased.id) ?? leased;
     const attemptId = `${attemptJob.id}:attempt:${attemptJob.attempt}`;
@@ -161,8 +220,10 @@ const runDriver = async (
       result = {
         ok: false,
         error: toError(err).message,
+        errorCode: "ERR_EXECUTION_RPC",
       };
     }
+    if (renewTimer) clearTimeout(renewTimer);
 
     const latest = await queue.getJob(attemptJob.id);
     if (!latest) return { jobId: attemptJob.id, status: "missing" };
@@ -173,7 +234,7 @@ const runDriver = async (
     } else if (result.ok) {
       await queue.complete(latest.id, workerId, result.result);
     } else {
-      await queue.fail(latest.id, workerId, result.error ?? "job failed", result.noRetry, result.result);
+      await queue.fail(latest.id, workerId, `${result.errorCode ? `${result.errorCode}: ` : ""}${result.error ?? "job failed"}`, result.noRetry, result.result);
     }
 
     const settled = await queue.getJob(attemptJob.id);
