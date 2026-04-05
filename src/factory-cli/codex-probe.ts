@@ -77,6 +77,9 @@ const sleep = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+const backoffDelay = (attempt: number, baseMs: number, maxMs: number): number =>
+  Math.min(maxMs, Math.floor(baseMs * (2 ** Math.max(0, attempt - 1))));
+
 const isTerminalJobStatus = (status: string | undefined): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
@@ -308,7 +311,8 @@ const runQueueProbe = async (
     jobId = queued.id;
     pushSnapshot(snapshots, seen, snapshotFromQueueJob(queued, startedAt));
     const deadline = Date.now() + opts.timeoutMs + 15_000;
-    while (Date.now() <= deadline) {
+    const maxAttempts = 8;
+    for (let attempt = 1; attempt <= maxAttempts && Date.now() <= deadline; attempt += 1) {
       const current = await queue.getJob(jobId);
       if (current) {
         pushSnapshot(snapshots, seen, snapshotFromQueueJob(current, startedAt));
@@ -327,7 +331,8 @@ const runQueueProbe = async (
           };
         }
       }
-      await sleep(opts.pollMs);
+      const remaining = Math.max(50, deadline - Date.now());
+      await sleep(Math.min(backoffDelay(attempt, Math.max(opts.pollMs, 50), 2_000), remaining));
     }
     await queue.queueCommand({
       jobId,
@@ -344,8 +349,8 @@ const runQueueProbe = async (
       artifacts: probeArtifacts(opts.dataDir, jobId),
       snapshots,
       finalStatus: aborted?.status ?? "failed",
-      finalSummary: (aborted ? queueSummary(aborted) : undefined) ?? "codex probe timed out before terminal status was captured",
-      error: "codex probe timed out before terminal status was captured",
+      finalSummary: (aborted ? queueSummary(aborted) : undefined) ?? `codex probe timed out before terminal status was captured after ${maxAttempts} attempts`,
+      error: `codex probe timed out before terminal status was captured after ${maxAttempts} attempts`,
       rawFinal: aborted,
     };
   } finally {

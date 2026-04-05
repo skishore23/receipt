@@ -22,6 +22,10 @@ export type ActiveChildProgress = {
   readonly detail?: string;
 };
 
+export type AbortableWaitOptions = {
+  readonly signal?: AbortSignal;
+};
+
 const INITIAL_FACTORY_LIVE_WAIT_MS = 120;
 const LIVE_PROGRESS_FINAL_TEXT_RE =
   /\b(queued|running|active|keep this chat open|live update|live updates|in progress|waiting|monitoring|watching|not finished|ask for status|check status)\b/i;
@@ -47,14 +51,25 @@ export const waitForSnapshotChange = async <T>(
   initial: T,
   waitMs: number,
   snapshot: () => Promise<T>,
+  options?: AbortableWaitOptions,
 ): Promise<{ readonly value: T; readonly waitedMs: number; readonly changed: boolean }> => {
   if (waitMs <= 0) return { value: initial, waitedMs: 0, changed: false };
   const startedAt = Date.now();
   const initialFingerprint = JSON.stringify(initial);
   let current = initial;
   while (Date.now() - startedAt < waitMs) {
+    if (options?.signal?.aborted) {
+      const error = new Error("operation aborted");
+      error.name = "AbortError";
+      throw error;
+    }
     const remaining = waitMs - (Date.now() - startedAt);
     await delay(Math.min(1_000, Math.max(50, remaining)));
+    if (options?.signal?.aborted) {
+      const error = new Error("operation aborted");
+      error.name = "AbortError";
+      throw error;
+    }
     current = await snapshot();
     if (JSON.stringify(current) !== initialFingerprint) {
       return {
