@@ -93,6 +93,7 @@ const HASH_RE = /^[0-9a-f]{4,64}$/i;
 const RECORD_SEP = "\x1e";
 const FIELD_SEP = "\x1f";
 const REMOTE_LOCK_STALE_MS = 30_000;
+const REMOTE_CHECK_TIMEOUT_MS = 15_000;
 
 const clean = (value: string): string => value.trim();
 
@@ -103,6 +104,10 @@ const pathExists = async (value: string): Promise<boolean> => {
   } catch {
     return false;
   }
+};
+
+const emitWorkspaceTelemetry = (event: string, data: Record<string, unknown>): void => {
+  console.log(JSON.stringify({ event, ...data }));
 };
 
 const delay = (ms: number): Promise<void> =>
@@ -664,11 +669,16 @@ export class HubGit {
     const gitOk = await this.execBare(["--version"]).then(() => true).catch(() => false);
     if (!gitOk) throw new HubGitError(503, "git is not available on PATH");
 
-    const isRepo = await this.execGit(["rev-parse", "--show-toplevel"], { cwd: this.repoRoot })
-      .then(() => true)
-      .catch(() => false);
+    const repoValid = await this.validateWorkdir(this.repoRoot);
+    emitWorkspaceTelemetry("workspace.repo_valid", {
+      workdir: this.repoRoot,
+      valid: repoValid.exists,
+      insideWorkTree: repoValid.insideWorkTree,
+      gitDir: repoValid.gitDir ?? null,
+    });
+    const isRepo = repoValid.exists && repoValid.insideWorkTree;
     if (!isRepo) {
-      throw new HubGitError(503, "HUB_REPO_ROOT is not a git repository");
+      throw new HubGitError(503, `HUB_REPO_ROOT is not a git repository: workdir=${this.repoRoot}`);
     }
 
     await fs.promises.mkdir(path.dirname(this.bareDir), { recursive: true });
@@ -680,6 +690,43 @@ export class HubGit {
     }
 
     await this.ensureRemote();
+    await this.validateRemote();
+  }
+
+  private async validateWorkdir(workdir: string): Promise<{ readonly exists: boolean; readonly insideWorkTree: boolean; readonly gitDir?: string }> {
+    const exists = await pathExists(workdir);
+    if (!exists) return { exists: false, insideWorkTree: false };
+    const gitDir = path.join(workdir, ".git");
+    const gitMetaExists = await pathExists(gitDir);
+    const insideWorkTree = await this.execGit(["rev-parse", "--is-inside-work-tree"], { cwd: workdir })
+      .then((output) => output === "true")
+      .catch(() => false);
+    return { exists: true, insideWorkTree: gitMetaExists || insideWorkTree, gitDir: gitMetaExists ? gitDir : undefined };
+  }
+
+  private async validateRemote(): Promise<void> {
+    const remoteUrl = clean(await this.execGit(["remote", "get-url", this.remoteName], { gitDir: this.bareDir }).catch(() => ""));
+    if (!remoteUrl) {
+      emitWorkspaceTelemetry("workspace.remote_ok", {
+        workdir: this.repoRoot,
+        remote: this.remoteName,
+        ok: false,
+        reason: "missing",
+      });
+      throw new HubGitError(503, `missing remote '${this.remoteName}' for workdir=${this.repoRoot}`);
+    }
+    const reachable = await this.execGit(["ls-remote", "--heads", remoteUrl], {
+      timeoutMs: REMOTE_CHECK_TIMEOUT_MS,
+    }).then(() => true).catch(() => false);
+    emitWorkspaceTelemetry("workspace.remote_ok", {
+      workdir: this.repoRoot,
+      remote: this.remoteName,
+      remoteUrl,
+      ok: reachable,
+    });
+    if (!reachable) {
+      throw new HubGitError(503, `remote '${this.remoteName}' is unreachable for workdir=${this.repoRoot} remoteUrl=${remoteUrl}`);
+    }
   }
 
   private async ensureRemote(): Promise<void> {
@@ -788,6 +835,7 @@ export class HubGit {
 
   private async fetchSourceMirror(): Promise<void> {
     const refspec = this.sourceFetchRefspec();
+    await this.validateRemote();
     try {
       await this.execGit(["fetch", "--prune", this.remoteName, refspec], { gitDir: this.bareDir });
       return;

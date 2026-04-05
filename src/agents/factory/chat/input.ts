@@ -384,7 +384,7 @@ export const createDisposableProbeWorkspace = async (
       encoding: "utf-8",
       maxBuffer: 1024 * 1024,
     });
-    await execFileAsync("git", ["worktree", "add", "--detach", workspacePath, "HEAD"], {
+    await execFileAsync("git", ["clone", "--local", "--no-hardlinks", repoRoot, workspacePath], {
       cwd: repoRoot,
       encoding: "utf-8",
       maxBuffer: 4 * 1024 * 1024,
@@ -394,11 +394,6 @@ export const createDisposableProbeWorkspace = async (
     return {
       workspacePath,
       cleanup: async () => {
-        await execFileAsync("git", ["worktree", "remove", "--force", workspacePath], {
-          cwd: repoRoot,
-          encoding: "utf-8",
-          maxBuffer: 4 * 1024 * 1024,
-        }).catch(() => undefined);
         await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
       },
     };
