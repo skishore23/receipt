@@ -90,11 +90,13 @@ import {
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
+  describeMissingDeliveryFinalizationEvidence,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
   renderDeliveryResultText,
+  renderMissingDeliveryFinalizationEvidenceError,
   renderInvestigationReportText,
 } from "../result-contracts";
 import {
@@ -3752,6 +3754,58 @@ export class FactoryServiceBase {
           this.defaultDeliveryAlignment(state, initialCompletion),
         )
       : undefined;
+    const missingDeliveryEvidence = state.objectiveMode === "delivery"
+      ? describeMissingDeliveryFinalizationEvidence({
+          alignment: rawResult.alignment,
+          scriptsRun,
+          completion: initialCompletion,
+        })
+      : [];
+    if (state.objectiveMode === "delivery" && missingDeliveryEvidence.length > 0) {
+      const blockedReason = renderMissingDeliveryFinalizationEvidenceError(missingDeliveryEvidence);
+      await commitFactoryTaskMemory(
+        this.memoryTools,
+        state,
+        task,
+        payload.candidateId,
+        renderDeliveryResultText({
+          summary: effectiveSummary,
+          handoff: blockedReason,
+          scriptsRun,
+          completion: initialCompletion,
+          alignment: initialAlignment,
+        }),
+        "blocked_missing_evidence",
+      );
+      await this.emitTaskResultPlannerEffects(payload.objectiveId, planTaskResult({
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        outcome: "blocked",
+        workspaceDirty: false,
+        hasFailedCheck: false,
+        blockedReason,
+        candidate: {
+          headCommit: payload.baseCommit,
+          summary: effectiveSummary,
+          handoff: blockedReason,
+          completion: initialCompletion,
+          alignment: initialAlignment,
+          checkResults: [],
+          scriptsRun,
+          artifactRefs: {},
+          producedAt: completedAt,
+        },
+        review: {
+          status: "changes_requested",
+          summary: effectiveSummary,
+          handoff: blockedReason,
+          reviewedAt: completedAt,
+        },
+      }), {
+        workerHandoff,
+      });
+      return;
+    }
 
     if (outcome === "blocked" && !hasStructuredInvestigationReport) {
       await commitFactoryTaskMemory(
