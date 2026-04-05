@@ -1,0 +1,9 @@
+{
+  "clusterName": "{{CLUSTER_NAME}}",
+  "tags": [
+    {
+      "key": "managed-by",
+      "value": "receipt"
+    }
+  ]
+}

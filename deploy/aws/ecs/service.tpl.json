@@ -1,0 +1,19 @@
+{
+  "serviceName": "{{SERVICE_NAME}}",
+  "cluster": "{{CLUSTER_NAME}}",
+  "taskDefinition": "{{TASK_DEFINITION_ARN}}",
+  "desiredCount": {{DESIRED_COUNT}},
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "deploymentConfiguration": {
+    "maximumPercent": 200,
+    "minimumHealthyPercent": 100
+  },
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["{{SUBNET_ID}}"],
+      "securityGroups": ["{{SECURITY_GROUP_ID}}"],
+      "assignPublicIp": "ENABLED"
+    }
+  }
+}
