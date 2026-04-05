@@ -18,6 +18,16 @@ const parsePositiveInt = (value: string | undefined, fallback: number): number =
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 };
 
+const readJobLeaseHint = (job: QueueJob): number | undefined => {
+  const hints = [job.payload.leaseTtlMs, job.payload.leaseMs, job.payload.timeoutMs];
+  for (const value of hints) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+  }
+  return undefined;
+};
+
 export const resolveProcessRole = (value: string | undefined): ReceiptProcessRole => {
   switch (value) {
     case "api":
@@ -95,12 +105,15 @@ export const resolveDriverInvocationTimeoutMs = (job: QueueJob): number =>
 export const resolveExecutionLeaseMs = (job: QueueJob): number => {
   const defaultLeaseMs = parsePositiveInt(process.env.JOB_LEASE_MS, 300_000);
   const defaultCodexLeaseMs = parsePositiveInt(process.env.CODEX_JOB_LEASE_MS, 900_000);
+  const defaultWorkerLeaseMs = parsePositiveInt(process.env.JOB_WORKER_LEASE_MS, defaultLeaseMs);
+  const p95LeaseMs = parsePositiveInt(process.env[`JOB_P95_LEASE_MS_${job.agentId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`], 0);
+  const leaseHint = readJobLeaseHint(job);
   const payloadTimeoutMs = typeof job.payload.timeoutMs === "number" && Number.isFinite(job.payload.timeoutMs)
     ? Math.floor(job.payload.timeoutMs)
     : undefined;
   if (job.agentId === "codex") {
     const buffered = payloadTimeoutMs !== undefined ? payloadTimeoutMs + 300_000 : defaultCodexLeaseMs;
-    return Math.max(defaultCodexLeaseMs, Math.min(buffered, 3_600_000));
+    return Math.max(defaultCodexLeaseMs, p95LeaseMs, leaseHint ?? 0, Math.min(buffered, 3_600_000));
   }
-  return defaultLeaseMs;
+  return Math.max(defaultLeaseMs, defaultWorkerLeaseMs, p95LeaseMs, leaseHint ?? 0);
 };

@@ -43,9 +43,16 @@ export type JobWorkerOptions = {
 type ActiveLeaseState = {
   readonly jobId: string;
   readonly startedAt: number;
+  readonly leaseMs: number;
   nextHeartbeatAt: number;
+  renewAttempts: number;
+  lastRenewOkAt?: number;
   process?: JobLeaseProcessRegistration;
 };
+
+const MAX_RENEW_ATTEMPTS = 5;
+const RENEW_BASE_BACKOFF_MS = 250;
+const RENEW_MAX_BACKOFF_MS = 5_000;
 
 export class JobWorker {
   private readonly queue: JsonlQueue;
@@ -134,7 +141,9 @@ export class JobWorker {
     const state: ActiveLeaseState = {
       jobId,
       startedAt: Date.now(),
+      leaseMs: this.leaseMs,
       nextHeartbeatAt: 0,
+      renewAttempts: 0,
     };
     this.activeLeases.set(jobId, state);
     return state;
@@ -145,12 +154,33 @@ export class JobWorker {
   }
 
   private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
-    const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
-    if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
-      this.clearActiveLease(state.jobId);
-      return;
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(this.leaseHeartbeatMs / 10)));
+    const deadline = Date.now() + jitter;
+    if (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now()));
     }
-    state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+    const startedAt = Date.now();
+    let attempt = 0;
+    while (attempt < MAX_RENEW_ATTEMPTS && this.running) {
+      attempt += 1;
+      state.renewAttempts += 1;
+      try {
+        const current = await this.queue.heartbeat(state.jobId, this.workerId, state.leaseMs);
+        state.lastRenewOkAt = Date.now();
+        if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
+          this.clearActiveLease(state.jobId);
+          return;
+        }
+        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+        return;
+      } catch (err) {
+        if (attempt >= MAX_RENEW_ATTEMPTS) break;
+        const backoff = Math.min(RENEW_MAX_BACKOFF_MS, RENEW_BASE_BACKOFF_MS * (2 ** (attempt - 1)));
+        await new Promise((resolve) => setTimeout(resolve, backoff + Math.floor(Math.random() * backoff * 0.25)));
+      }
+    }
+    this.clearActiveLease(state.jobId);
+    throw new Error(`lease renewal failed for job ${state.jobId} after ${state.renewAttempts} attempts (lease_ttl_ms=${state.leaseMs}, renew_latency_ms=${Date.now() - startedAt}, last_renew_ok_at=${state.lastRenewOkAt ?? 0})`);
   }
 
   private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
@@ -175,8 +205,7 @@ export class JobWorker {
       try {
         await this.heartbeatLease(state);
       } catch (err) {
-        this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
-        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+        this.reportError(err instanceof Error ? err : new Error(String(err)));
       }
     }
   }
