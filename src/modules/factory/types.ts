@@ -108,6 +108,11 @@ export type FactoryExecutionScriptRun = {
   readonly status?: "ok" | "warning" | "error";
 };
 
+export type FactoryExecutionSignal = {
+  readonly missingScriptsRun: boolean;
+  readonly scriptsAttempted: ReadonlyArray<string>;
+};
+
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
 
 export type FactoryTaskAlignmentVerdict =
@@ -135,6 +140,23 @@ export type FactoryTaskCompletionRecord = {
   readonly changed: ReadonlyArray<string>;
   readonly proof: ReadonlyArray<string>;
   readonly remaining: ReadonlyArray<string>;
+};
+
+export type FactoryEvidenceEnvelope = {
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly timestamp: number;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly actions: ReadonlyArray<string>;
+  readonly artifacts: ReadonlyArray<{
+    readonly label: string;
+    readonly path: string | null;
+    readonly summary: string | null;
+  }>;
+  readonly results: Readonly<Record<string, unknown>>;
+  readonly checks: ReadonlyArray<unknown>;
+  readonly errors: ReadonlyArray<string>;
 };
 
 export type FactoryInvestigationReport = {

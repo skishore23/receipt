@@ -2,7 +2,9 @@ import type { GraphRef } from "@receipt/core/graph";
 import { trimmedString } from "../../framework/http";
 import type {
   FactoryCheckResult,
+  FactoryEvidenceEnvelope,
   FactoryExecutionScriptRun,
+  FactoryExecutionSignal,
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
@@ -69,6 +71,49 @@ export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
     status: { type: ["string", "null"], enum: ["ok", "warning", "error", null] },
   },
   required: ["command", "summary", "status"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_EXECUTION_SIGNAL_SCHEMA = {
+  type: "object",
+  properties: {
+    missingScriptsRun: { type: "boolean" },
+    scriptsAttempted: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["missingScriptsRun", "scriptsAttempted"],
+  additionalProperties: false,
+} as const;
+
+export const FACTORY_EVIDENCE_ENVELOPE_SCHEMA = {
+  type: "object",
+  properties: {
+    objectiveId: { type: "string" },
+    taskId: { type: "string" },
+    candidateId: { type: "string" },
+    timestamp: { type: "number" },
+    inputs: { type: "object" },
+    actions: {
+      type: "array",
+      items: { type: "string" },
+    },
+    artifacts: {
+      type: "array",
+      items: FACTORY_TASK_ARTIFACT_SCHEMA,
+    },
+    results: { type: "object" },
+    checks: {
+      type: "array",
+      items: { type: "object" },
+    },
+    errors: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["objectiveId", "taskId", "candidateId", "timestamp", "inputs", "actions", "artifacts", "results", "checks", "errors"],
   additionalProperties: false,
 } as const;
 
@@ -217,6 +262,20 @@ export const normalizeExecutionScriptsRun = (
       } satisfies FactoryExecutionScriptRun))
     : [];
 
+export const normalizeExecutionSignal = (
+  value: unknown,
+  fallback?: FactoryExecutionSignal,
+): FactoryExecutionSignal => {
+  const record = isRecord(value) ? value : {};
+  const scriptsAttempted = asReadonlyStringArray(record.scriptsAttempted);
+  return {
+    missingScriptsRun: typeof record.missingScriptsRun === "boolean"
+      ? record.missingScriptsRun
+      : (fallback?.missingScriptsRun ?? false),
+    scriptsAttempted: scriptsAttempted.length > 0 ? scriptsAttempted : (fallback?.scriptsAttempted ?? []),
+  };
+};
+
 export const normalizeTaskCompletionRecord = (
   value: unknown,
   fallback?: FactoryTaskCompletionRecord,
@@ -311,6 +370,20 @@ export const buildDefaultTaskCompletion = (input: {
     proof: [...new Set([...scriptProof, ...reportProof, ...validationProof])],
     remaining: [],
   };
+};
+
+export const ensureTaskEvidenceEnvelope = (input: {
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly evidence: FactoryEvidenceEnvelope;
+}): FactoryEvidenceEnvelope => {
+  if (input.evidence.artifacts.length === 0 && Object.keys(input.evidence.results).length === 0) {
+    throw new Error(
+      `factory task ${input.taskId} cannot complete without evidence artifacts or structured results`,
+    );
+  }
+  return input.evidence;
 };
 
 export const renderDeliveryResultText = (input: {

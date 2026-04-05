@@ -87,10 +87,12 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  ensureTaskEvidenceEnvelope,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
   normalizeExecutionScriptsRun,
+  normalizeExecutionSignal,
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
@@ -3696,6 +3698,7 @@ export class FactoryServiceBase {
       ).join("\n")}`
       : undefined;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
+    const executionSignal = normalizeExecutionSignal(rawResult.executionSignal);
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
@@ -3746,6 +3749,32 @@ export class FactoryServiceBase {
         scriptsRun,
       }),
     );
+    ensureTaskEvidenceEnvelope({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      evidence: {
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        timestamp: completedAt,
+        inputs: {
+          objectiveMode: state.objectiveMode,
+          executionMode: payload.executionMode,
+          outcome,
+          executionSignal,
+        },
+        actions: scriptsRun.map((item) => item.command),
+        artifacts: workerArtifacts,
+        results: {
+          summary: effectiveSummary,
+          completion: initialCompletion,
+          alignment: rawResult.alignment ?? null,
+        },
+        checks: [],
+        errors: artifactIssues.map((item) => item.summary),
+      },
+    });
     const initialAlignment = state.objectiveMode === "delivery"
       ? normalizeTaskAlignmentRecord(
           rawResult.alignment,
