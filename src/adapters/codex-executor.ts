@@ -2,7 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export type CodexRunInput = {
   readonly prompt: string;
@@ -229,6 +229,38 @@ const prepareIsolatedCodexHome = async (
   return isolatedHome;
 };
 
+type BubblewrapCapabilities = {
+  readonly argv0Supported: boolean;
+};
+
+const bubblewrapCapabilityCache = new Map<string, BubblewrapCapabilities>();
+
+const probeBubblewrapCapabilities = (env: NodeJS.ProcessEnv): BubblewrapCapabilities => {
+  const binary = env.RECEIPT_BWRAP_BIN?.trim() || env.BWRAP_BIN?.trim() || "bwrap";
+  const cached = bubblewrapCapabilityCache.get(binary);
+  if (cached) return cached;
+  const help = spawnSync(binary, ["--help"], { encoding: "utf-8" });
+  const helpOutput = `${help.stdout ?? ""}\n${help.stderr ?? ""}`;
+  const capabilities = { argv0Supported: /\b--argv0\b/.test(helpOutput) };
+  bubblewrapCapabilityCache.set(binary, capabilities);
+  return capabilities;
+};
+
+const emitSandboxRetryEvent = async (
+  control: CodexRunControl | undefined,
+  stderrPath: string,
+  removedFlags: ReadonlyArray<string>,
+): Promise<void> => {
+  const update: CodexProgressUpdate = {
+    status: "running",
+    progressAt: Date.now(),
+    eventType: "sandbox_start_retry",
+    summary: `Sandbox start retry without ${removedFlags.join(", ")}`,
+  };
+  await Promise.resolve(control?.onProgress?.(update)).catch(() => undefined);
+  await fsp.appendFile(stderrPath, `${JSON.stringify({ eventType: "sandbox_start_retry", removedFlags })}\n`, "utf-8").catch(() => undefined);
+};
+
 const closeStream = (stream: fs.WriteStream): Promise<void> =>
   new Promise((resolve, reject) => {
     stream.on("error", reject);
@@ -412,6 +444,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };
+    const bwrapCapabilities = probeBubblewrapCapabilities(mergedEnv);
     const childEnv: NodeJS.ProcessEnv = {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
@@ -422,7 +455,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     }
 
     try {
-      const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
+      const execute = async (sandboxMode: CodexRunInput["sandboxMode"], retrying = false): Promise<CodexRunResult> => {
         await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
         await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
         await fsp.mkdir(path.dirname(input.stdoutPath), { recursive: true });
@@ -719,6 +752,18 @@ export class LocalCodexExecutor implements CodexExecutor {
           });
         });
 
+        const stderrLog = `${result.stderr}\n${result.stdout}\n${await fsp.readFile(input.stderrPath, "utf-8").catch(() => "")}`;
+        const unknownOptionMatch = /(?:bwrap:\s*)?Unknown option (--[A-Za-z0-9-]+)/i.exec(stderrLog);
+        if (!retrying && sandboxMode && (unknownOptionMatch || !bwrapCapabilities.argv0Supported)) {
+          const removedFlags = new Set<string>();
+          if (!bwrapCapabilities.argv0Supported) removedFlags.add("--argv0");
+          if (unknownOptionMatch) removedFlags.add(unknownOptionMatch[1]);
+          if (removedFlags.size > 0) {
+            await emitSandboxRetryEvent(control, input.stderrPath, [...removedFlags]);
+            return execute(undefined, true);
+          }
+        }
+
         await completionLoop;
         await stallLoop;
         await abortLoop;
@@ -742,7 +787,12 @@ export class LocalCodexExecutor implements CodexExecutor {
         return result;
       };
 
-      return await execute(initialSandboxMode);
+      let sandboxMode = initialSandboxMode;
+      if (sandboxMode && !bwrapCapabilities.argv0Supported) {
+        await emitSandboxRetryEvent(control, input.stderrPath, ["--argv0"]);
+        sandboxMode = undefined;
+      }
+      return await execute(sandboxMode);
     } finally {
       if (isolatedCodexHome) {
         await fsp.rm(isolatedCodexHome, { recursive: true, force: true }).catch(() => undefined);
