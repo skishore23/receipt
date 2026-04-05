@@ -22,6 +22,14 @@ export const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 export const DATA_DIR = FACTORY_RUNTIME.dataDir;
 export const JOB_BACKEND = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
 
+console.log(JSON.stringify({
+  level: "info",
+  event: "factory_runtime_startup",
+  shellPath: FACTORY_RUNTIME.shell.shellPath ?? null,
+  execMode: FACTORY_RUNTIME.shell.execMode,
+  shellSource: FACTORY_RUNTIME.shell.source,
+}));
+
 export const getJsonlQueue = () => {
   const runtime = createRuntime<JobCmd, JobEvent, JobState>(
     jsonlStore<JobEvent>(DATA_DIR),

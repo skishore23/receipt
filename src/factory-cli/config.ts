@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { logStructuredShellWarning, resolveShell, selfTestShell, type ShellResolution } from "../lib/command-exec";
 import type { HeartbeatSpec } from "../adapters/heartbeat";
 import type { JobLane } from "../modules/job";
 import type { FactoryObjectivePolicy } from "../modules/factory";
@@ -33,6 +34,7 @@ export type FactoryRuntimeConfig = {
   readonly repoRoot: string;
   readonly dataDir: string;
   readonly codexBin: string;
+  readonly shell: ShellResolution;
   readonly configPath?: string;
   readonly schedules: ReadonlyArray<HeartbeatSpec>;
 };
@@ -191,12 +193,30 @@ export const resolveFactoryRuntimeConfig = async (
   cwd: string,
   repoRootOverride?: string,
 ): Promise<FactoryRuntimeConfig> => {
+  const resolvedShell = resolveShell({
+    configuredShell: process.env.RECEIPT_SHELL,
+    envShell: process.env.SHELL,
+  });
+  if (resolvedShell.source === "fallback") {
+    logStructuredShellWarning({
+      configuredShell: process.env.RECEIPT_SHELL?.trim() || null,
+      fallbackShell: resolvedShell.shellPath ?? null,
+      source: resolvedShell.source,
+    });
+  }
+  if (resolvedShell.execMode === "shell") {
+    await selfTestShell(resolvedShell).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`unable to execute commands with resolved shell '${resolvedShell.shellPath ?? "unknown"}': ${message}`);
+    });
+  }
   const loaded = await loadFactoryConfig(cwd, repoRootOverride);
   if (loaded) {
     return {
       repoRoot: loaded.repoRoot,
       dataDir: loaded.dataDir,
       codexBin: loaded.codexBin,
+      shell: resolvedShell,
       configPath: loaded.configPath,
       schedules: loaded.schedules,
     };
@@ -209,6 +229,7 @@ export const resolveFactoryRuntimeConfig = async (
     repoRoot: fallbackRepoRoot,
     dataDir: explicitDataDir ? path.resolve(explicitDataDir) : path.join(fallbackRepoRoot, ".receipt", "data"),
     codexBin: envString(process.env.RECEIPT_CODEX_BIN, process.env.HUB_CODEX_BIN) ?? "codex",
+    shell: resolvedShell,
     schedules: [],
   };
 };

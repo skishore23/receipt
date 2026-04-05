@@ -60,6 +60,13 @@ const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(process.cwd());
 const WORKSPACE_ROOT = FACTORY_RUNTIME.repoRoot;
 const DATA_DIR = FACTORY_RUNTIME.dataDir;
 const JOB_BACKEND = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
+console.log(JSON.stringify({
+  level: "info",
+  event: "factory_server_startup",
+  shellPath: FACTORY_RUNTIME.shell.shellPath ?? null,
+  execMode: FACTORY_RUNTIME.shell.execMode,
+  shellSource: FACTORY_RUNTIME.shell.source,
+}));
 const STARTUP_SETTLE_MS = (() => {
   const fallback = JOB_BACKEND === "resonate" ? 1_000 : 0;
   const parsed = Number(process.env.RESONATE_STARTUP_SETTLE_MS ?? fallback);
