@@ -308,6 +308,49 @@ test("factory scheduling: resume ignores archived objectives instead of re-enque
   expect(active.scheduler.slotState).toBe("active");
 }, 120_000);
 
+test("factory scheduling: canceling an active objective drains in-flight work without spawning replacements", async () => {
+  const dataDir = await createTempDir("receipt-factory-cancel-drain");
+  const repoRoot = await createSourceRepo();
+  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+    },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Cancelable active objective",
+    prompt: "Start a task, then cancel it mid-run.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const beforeCancel = await service.getObjective(created.objectiveId);
+  const rebracketsBefore = beforeCancel.recentReceipts.filter((receipt) => receipt.type === "rebracket.applied").length;
+  const controlJobsBefore = await countObjectiveControlJobs(queue, created.objectiveId);
+  const taskJob = await findLatestObjectiveJob(queue, created.objectiveId, "factory.task.run");
+  expect(taskJob).toBeTruthy();
+
+  await service.cancelObjective(created.objectiveId, "ui cancellation");
+
+  const afterCancel = await service.getObjective(created.objectiveId);
+  expect(afterCancel.status).toBe("canceled");
+  expect(afterCancel.recentReceipts.filter((receipt) => receipt.type === "rebracket.applied").length).toBe(rebracketsBefore);
+  expect(await countObjectiveControlJobs(queue, created.objectiveId)).toBe(controlJobsBefore);
+  expect(taskJob ? (await queue.getJob(taskJob.id))?.status : undefined).toBe("canceled");
+  const controlJobsAfter = (await queue.listJobs({ limit: 80 }))
+    .filter((job) => {
+      const payload = job.payload as { readonly kind?: string; readonly objectiveId?: string };
+      return payload.kind === "factory.objective.control" && payload.objectiveId === created.objectiveId;
+    });
+  expect(controlJobsAfter.some((job) => job.status === "queued" || job.status === "running" || job.status === "leased")).toBe(false);
+}, 120_000);
+
 test("factory runtime: blocked tasks stay blocked instead of spawning mutation follow-ups", async () => {
   const dataDir = await createTempDir("receipt-factory-mutation");
   const repoRoot = await createSourceRepo();
