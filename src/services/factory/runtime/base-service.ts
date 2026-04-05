@@ -94,6 +94,9 @@ import {
   normalizeInvestigationReport,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
+  normalizeStructuredEvidence,
+  normalizeTaskAlignmentReport,
+  requireDeliveryTaskResultEvidence,
   renderDeliveryResultText,
   renderInvestigationReportText,
 } from "../result-contracts";
@@ -3690,12 +3693,14 @@ export class FactoryServiceBase {
         }))
       : [];
     const nextAction = optionalTrimmedString(rawResult.nextAction);
+    const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
+    const structuredEvidence = normalizeStructuredEvidence(rawResult.structuredEvidence);
+    const alignmentReport = normalizeTaskAlignmentReport(rawResult.alignmentReport);
     const workerArtifactSummary = workerArtifacts.length > 0
       ? `Artifacts:\n${workerArtifacts.map((item) =>
         `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`
       ).join("\n")}`
       : undefined;
-    const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
@@ -3763,6 +3768,8 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          structuredEvidence,
+          alignmentReport,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -3814,6 +3821,13 @@ export class FactoryServiceBase {
       });
     const failedCheck = checkResults.find((check) => !check.ok);
 
+    requireDeliveryTaskResultEvidence({
+      scriptsRun,
+      structuredEvidence,
+      alignmentReport,
+      validationEnabled: state.checks.length > 0,
+    });
+
     if (payload.executionMode === "isolated" && !isInvestigation) {
       const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${effectiveSummary}`;
       await commitFactoryTaskMemory(
@@ -3825,6 +3839,8 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          structuredEvidence,
+          alignmentReport,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -4150,6 +4166,8 @@ export class FactoryServiceBase {
         summary: reviewSummary,
         handoff: reviewHandoff,
         scriptsRun,
+        structuredEvidence,
+        alignmentReport,
         completion: effectiveDeliveryCompletion,
         alignment: deliveryAlignment,
       }),
