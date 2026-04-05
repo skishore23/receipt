@@ -4745,6 +4745,7 @@ export class FactoryServiceBase {
           "Inspect `git remote -v`, push the current branch to a GitHub remote (prefer `origin` when present), open the PR with gh, then fetch the final PR metadata from the current branch.",
           "Before creating a new PR, check whether the current branch already has one with `gh pr view --json url,number,headRefName,baseRefName`.",
           "If `git push`, `gh pr create`, or `gh pr view` fail with a transient GitHub or network error, retry the command up to two more times with short backoff. After a failed `gh pr create`, check `gh pr view` once before concluding the PR was not created.",
+          "Before publishing, require `artifacts/alignment/alignment.md`; fail the publish attempt if it is missing. Append or paste the alignment report into the PR description or release notes so the delivery output carries explicit objective alignment evidence.",
           "Do not run builds or tests.",
           "Return exactly one JSON object matching this schema:",
           `{"summary":"short publish summary","handoff":"explicit publish handoff for the controller","prUrl":"https://github.com/...","prNumber":123,"headRefName":"branch-name","baseRefName":"main"}`,
