@@ -40,6 +40,7 @@ import {
   type FactoryObjectiveStatus,
   type FactoryState,
   type FactoryTaskAlignmentRecord,
+  type FactoryTaskAlignmentSignal,
   type FactoryTaskCompletionRecord,
   type FactoryTaskExecutionMode,
   type FactoryTaskResultOutcome,
@@ -1810,6 +1811,17 @@ export class FactoryServiceBase {
         },
       });
 
+      await this.emitTaskAlignment(monitorPayload.objectiveId, {
+        taskId: monitorPayload.taskId,
+        candidateId: monitorPayload.candidateId,
+        alignment: {
+          status: result.assessment === "off_track" || result.assessment === "failing" ? "drifted" : "uncertain",
+          rationale: result.reasoning,
+          evidenceRefs: [monitorPayload.stdoutPath, monitorPayload.stderrPath],
+        },
+        recordedAt: Date.now(),
+      });
+
       // Emit checkpoint receipt
       await this.emitObjective(monitorPayload.objectiveId, {
         type: "monitor.checkpoint",
@@ -2963,6 +2975,16 @@ export class FactoryServiceBase {
       if ((job.status === "failed" || job.status === "canceled") && (task.status === "running" || task.status === "reviewing")) {
         const reason = job.lastError ?? job.canceledReason ?? "factory task failed";
         const blockedAt = Date.now();
+        await this.emitTaskAlignment(state.objectiveId, {
+          taskId,
+          candidateId: task.candidateId,
+          alignment: {
+            status: "blocked",
+            rationale: reason,
+            evidenceRefs: [task.jobId, task.workspacePath ?? task.taskId].filter((item): item is string => Boolean(item)),
+          },
+          recordedAt: blockedAt,
+        });
         await this.emitObjectiveBatch(state.objectiveId, [
           this.buildWorkerHandoffEvent({
             objectiveId: state.objectiveId,
@@ -3741,6 +3763,16 @@ export class FactoryServiceBase {
       handoff,
       handedOffAt: completedAt,
     });
+    await this.emitTaskAlignment(payload.objectiveId, {
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      alignment: {
+        status: "aligned",
+        rationale: "Task run started and execution signals were captured before completion.",
+        evidenceRefs: [payload.jobId, payload.workspacePath].filter((item): item is string => Boolean(item)),
+      },
+      recordedAt: completedAt,
+    });
     const initialCompletion = normalizeTaskCompletionRecord(
       rawResult.completion,
       buildDefaultTaskCompletion({
@@ -3774,6 +3806,21 @@ export class FactoryServiceBase {
         checks: [],
         errors: artifactIssues.map((item) => item.summary),
       },
+    });
+    await this.emitTaskAlignment(payload.objectiveId, {
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      alignment: {
+        status: outcome === "approved" ? "aligned" : "uncertain",
+        rationale: outcome === "approved"
+          ? "Task completion emitted structured evidence and a completion payload."
+          : "Task completion emitted structured evidence but the outcome remained non-final.",
+        evidenceRefs: [
+          payload.resultPath,
+          ...workerArtifacts.map((item) => item.path).filter((item): item is string => Boolean(item)),
+        ],
+      },
+      recordedAt: completedAt,
     });
     const initialAlignment = state.objectiveMode === "delivery"
       ? normalizeTaskAlignmentRecord(
@@ -5269,6 +5316,25 @@ export class FactoryServiceBase {
     this.sse.publish("receipt");
   }
 
+  private async emitTaskAlignment(
+    objectiveId: string,
+    event: {
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly alignment: FactoryTaskAlignmentSignal;
+      readonly recordedAt: number;
+    },
+  ): Promise<void> {
+    await this.emitObjective(objectiveId, {
+      type: "task.alignment",
+      objectiveId,
+      taskId: event.taskId,
+      candidateId: event.candidateId,
+      alignment: event.alignment,
+      recordedAt: event.recordedAt,
+    });
+  }
+
   private async emitObjective(objectiveId: string, event: FactoryEvent): Promise<void> {
     await this.emitObjectiveBatch(objectiveId, [event]);
   }
@@ -5350,6 +5416,8 @@ export class FactoryServiceBase {
         return `Objective ${event.status} handoff: ${event.summary}`;
       case "task.blocked":
         return `${event.taskId} blocked: ${event.reason}`;
+      case "task.alignment":
+        return `${event.taskId} alignment ${event.alignment.status}: ${event.alignment.rationale}`;
       case "task.unblocked":
         return `${event.taskId} unblocked`;
       case "task.noop_completed":
@@ -5401,6 +5469,7 @@ export class FactoryServiceBase {
           ? { taskId: event.taskId, candidateId: event.candidateId }
           : { taskId: event.taskId };
       case "task.dispatched":
+      case "task.alignment":
       case "task.intervention.applied":
       case "task.intervention.restarted":
         return { taskId: event.taskId, candidateId: event.candidateId };

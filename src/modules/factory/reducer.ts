@@ -457,6 +457,11 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         updatedAt: event.producedAt,
       };
     }
+    case "task.alignment":
+      return {
+        ...state,
+        updatedAt: event.recordedAt,
+      };
     case "candidate.reviewed": {
       const taskStatus: FactoryTaskStatus =
         event.status === "approved" ? "approved" : event.status === "changes_requested" ? "ready" : "superseded";

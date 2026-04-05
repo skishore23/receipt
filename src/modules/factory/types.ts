@@ -120,12 +120,22 @@ export type FactoryTaskAlignmentVerdict =
   | "uncertain"
   | "drifted";
 
+export type FactoryTaskAlignmentSignalStatus =
+  | FactoryTaskAlignmentVerdict
+  | "blocked";
+
 export type FactoryTaskAlignmentRecord = {
   readonly verdict: FactoryTaskAlignmentVerdict;
   readonly satisfied: ReadonlyArray<string>;
   readonly missing: ReadonlyArray<string>;
   readonly outOfScope: ReadonlyArray<string>;
   readonly rationale: string;
+};
+
+export type FactoryTaskAlignmentSignal = {
+  readonly status: FactoryTaskAlignmentSignalStatus;
+  readonly rationale: string;
+  readonly evidenceRefs: ReadonlyArray<string>;
 };
 
 export type FactoryObjectiveContractRecord = {

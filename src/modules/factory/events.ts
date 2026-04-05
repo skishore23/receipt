@@ -14,6 +14,7 @@ import type {
   FactoryObjectiveSeverity,
   FactoryRebracketRecord,
   FactoryTaskAlignmentRecord,
+  FactoryTaskAlignmentSignal,
   FactoryTaskRecord,
   FactoryTaskCompletionRecord,
   FactoryTaskResultOutcome,
@@ -213,6 +214,14 @@ export type FactoryEvent =
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
       readonly tokensUsed?: number;
       readonly producedAt: number;
+    }
+  | {
+      readonly type: "task.alignment";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly alignment: FactoryTaskAlignmentSignal;
+      readonly recordedAt: number;
     }
   | {
       readonly type: "candidate.reviewed";
