@@ -183,6 +183,17 @@ const prepareAttemptLog = async (targetPath: string, label: "stdout" | "stderr")
   await fsp.writeFile(targetPath, "", "utf-8");
 };
 
+const SANDBOX_BOOTSTRAP_COMPATIBILITY_RE = /\bbwrap:\s*Unknown option --argv0\b/i;
+
+const isSandboxBootstrapCompatibilityError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(message)) return true;
+  if (!error || typeof error !== "object" || !("result" in error)) return false;
+  const result = (error as { readonly result?: { readonly stderr?: string; readonly stdout?: string } }).result;
+  return SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stderr ?? "")
+    || SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stdout ?? "");
+};
+
 const isMissingPathError = (err: unknown): boolean => {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -422,6 +433,14 @@ export class LocalCodexExecutor implements CodexExecutor {
     }
 
     try {
+      const appendFallbackNote = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<void> => {
+        await fsp.appendFile(
+          input.stderrPath,
+          `[codex] sandbox compatibility fallback: bwrap rejected --argv0; retrying with ${sandboxMode ?? "no sandbox"}.\n`,
+          "utf-8",
+        ).catch(() => undefined);
+      };
+
       const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
         await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
         await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
@@ -742,7 +761,17 @@ export class LocalCodexExecutor implements CodexExecutor {
         return result;
       };
 
-      return await execute(initialSandboxMode);
+      try {
+        return await execute(initialSandboxMode);
+      } catch (err) {
+        if (!isSandboxBootstrapCompatibilityError(err) || initialSandboxMode !== "workspace-write") throw err;
+        const result = await execute(undefined);
+        await appendFallbackNote(undefined);
+        return {
+          ...result,
+          stderr: `${result.stderr}${result.stderr && !result.stderr.endsWith("\n") ? "\n" : ""}[codex] sandbox compatibility fallback: bwrap rejected --argv0; retrying with no sandbox.\n`,
+        };
+      }
     } finally {
       if (isolatedCodexHome) {
         await fsp.rm(isolatedCodexHome, { recursive: true, force: true }).catch(() => undefined);
