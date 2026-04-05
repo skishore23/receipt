@@ -93,6 +93,7 @@ import {
 } from "../../../views/receipt";
 import { runtimeShell } from "../../../views/runtime";
 import { parseOrder, parseLimit, parseInspectorDepth } from "../../../framework/http";
+import { isAbortError, isTimeoutError, retryOnceWithBackoff } from "../../../lib/async";
 import { buildChatItemsForRun, renderObjectiveHandoffMessage } from "../chat-items";
 import {
   groupFactoryChatConversationByRunId,
@@ -3336,6 +3337,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
       app.post("/factory/compose", async (c) => {
         const req = c.req.raw;
+        const startedAt = Date.now();
+        let outcome = "ok";
         try {
           const body = await readRecordBody(req, (message) => new FactoryServiceError(400, message));
           const prompt = optionalTrimmedString(body.prompt);
@@ -3349,11 +3352,20 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           const focusKind = normalizeFocusKind(requestedFocusKind(req));
           const focusId = requestedFocusId(req);
           const filter = requestedWorkbenchFilter(req);
-          const resolved = await resolveFactoryChatProfile({
-            repoRoot: service.git.repoRoot,
-            profileRoot,
-            requestedId: profileId,
-          });
+          const signal = req.signal;
+          const helpUnavailable = () => navigationError(req, 503, "Help is temporarily unavailable - try again. [FACTORY_HELP_UNAVAILABLE]");
+          if (signal.aborted) {
+            outcome = "canceled";
+            return helpUnavailable();
+          }
+          const resolved = await retryOnceWithBackoff(
+            () => resolveFactoryChatProfile({
+              repoRoot: service.git.repoRoot,
+              profileRoot,
+              requestedId: profileId,
+            }),
+            { label: "factory profile resolution", signal, timeoutMs: 5_000 },
+          );
 
           if (prompt.startsWith("/")) {
             const parsed = parseComposerDraft(prompt, objectiveId);
@@ -3396,18 +3408,22 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
                 });
               }
               case "new": {
+                const profiles = await retryOnceWithBackoff(
+                  () => loadFactoryProfiles(),
+                  { label: "factory profile catalog load", signal, timeoutMs: 5_000 },
+                );
                 const targetProfileId = objectiveProfileIdForPrompt({
                   prompt: command.prompt,
                   resolvedProfile: resolved.root,
-                  profiles: await loadFactoryProfiles(),
+                  profiles,
                 });
-                const created = await service.createObjective({
+                const created = await retryOnceWithBackoff(() => service.createObjective({
                   title: command.title ?? "Factory objective",
                   prompt: command.prompt,
                   objectiveMode: command.objectiveMode,
                   profileId: targetProfileId,
                   startImmediately: true,
-                });
+                }), { label: "factory objective creation", signal, timeoutMs: 5_000 });
                 ctx.sse.publish("factory", created.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3423,7 +3439,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               }
               case "react": {
                 if (!objectiveId) return navigationError(req, 409, "Select an objective before reacting to it.");
-                const detail = await service.reactObjectiveWithNote(objectiveId, command.message);
+                const detail = await retryOnceWithBackoff(
+                  () => service.reactObjectiveWithNote(objectiveId, command.message),
+                  { label: "factory objective reaction", signal, timeoutMs: 5_000 },
+                );
                 ctx.sse.publish("factory", detail.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3439,7 +3458,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               }
               case "promote": {
                 if (!objectiveId) return navigationError(req, 409, "Select an objective before promoting it.");
-                const detail = await service.promoteObjective(objectiveId);
+                const detail = await retryOnceWithBackoff(
+                  () => service.promoteObjective(objectiveId),
+                  { label: "factory objective promotion", signal, timeoutMs: 5_000 },
+                );
                 ctx.sse.publish("factory", detail.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3455,7 +3477,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               }
               case "cancel": {
                 if (!objectiveId) return navigationError(req, 409, "Select an objective before canceling it.");
-                const detail = await service.cancelObjective(objectiveId, command.reason ?? "canceled from workbench");
+                const detail = await retryOnceWithBackoff(
+                  () => service.cancelObjective(objectiveId, command.reason ?? "canceled from workbench"),
+                  { label: "factory objective cancellation", signal, timeoutMs: 5_000 },
+                );
                 ctx.sse.publish("factory", detail.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3471,7 +3496,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               }
               case "cleanup": {
                 if (!objectiveId) return navigationError(req, 409, "Select an objective before cleaning workspaces.");
-                const detail = await service.cleanupObjectiveWorkspaces(objectiveId);
+                const detail = await retryOnceWithBackoff(
+                  () => service.cleanupObjectiveWorkspaces(objectiveId),
+                  { label: "factory workspace cleanup", signal, timeoutMs: 5_000 },
+                );
                 ctx.sse.publish("factory", detail.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3487,7 +3515,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               }
               case "archive": {
                 if (!objectiveId) return navigationError(req, 409, "Select an objective before archiving it.");
-                const detail = await service.archiveObjective(objectiveId);
+                const detail = await retryOnceWithBackoff(
+                  () => service.archiveObjective(objectiveId),
+                  { label: "factory objective archive", signal, timeoutMs: 5_000 },
+                );
                 ctx.sse.publish("factory", detail.objectiveId);
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3502,11 +3533,17 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
                 });
               }
               case "abort-job": {
-                const job = await resolveComposerJob(objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
-                const queued = await service.queueJobAbort(
-                  job.id,
-                  command.reason ?? "abort requested from workbench",
-                  "factory.workbench",
+                const job = await retryOnceWithBackoff(
+                  () => resolveComposerJob(objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req)),
+                  { label: "factory job resolution", signal, timeoutMs: 5_000 },
+                );
+                const queued = await retryOnceWithBackoff(
+                  () => service.queueJobAbort(
+                    job.id,
+                    command.reason ?? "abort requested from workbench",
+                    "factory.workbench",
+                  ),
+                  { label: "factory job abort", signal, timeoutMs: 5_000 },
                 );
                 return workbenchNavigationResponse(req, buildWorkbenchLink({
                   profileId,
@@ -3529,7 +3566,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
           const stream = factoryChatSessionStream(service.git.repoRoot, resolved.root.id, chatId);
           const runId = makeFactoryRunId();
-          const created = await ctx.queue.enqueue({
+          const created = await retryOnceWithBackoff(() => ctx.queue.enqueue({
             agentId: "factory",
             lane: "chat",
             sessionKey: `factory-chat:${stream}`,
@@ -3544,7 +3581,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               chatId,
               ...(objectiveId ? { objectiveId } : {}),
             },
-          });
+          }), { label: "factory chat enqueue", signal, timeoutMs: 5_000 });
           ctx.sse.publish("jobs", created.id);
           return workbenchNavigationResponse(req, buildWorkbenchLink({
             profileId,
@@ -3569,10 +3606,18 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
             },
           });
         } catch (err) {
+          if (isAbortError(err) || isTimeoutError(err)) {
+            outcome = isTimeoutError(err) ? "timeout" : "canceled";
+            return navigationError(req, 503, "Help is temporarily unavailable - try again. [FACTORY_HELP_UNAVAILABLE]");
+          }
           if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);
           const message = err instanceof Error ? err.message : "factory server error";
           console.error(err);
+          outcome = "error";
           return navigationError(req, 500, message);
+        } finally {
+          const durationMs = Date.now() - startedAt;
+          console.info(`[factory.compose] duration_ms=${durationMs} outcome=${outcome}`);
         }
       });
 
