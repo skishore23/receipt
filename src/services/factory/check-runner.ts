@@ -37,6 +37,28 @@ const runtimeBunPathEntries = (): ReadonlyArray<string> => {
   return [...new Set(candidates.filter((entry): entry is string => Boolean(entry)))];
 };
 
+const standardExecutablePathEntries = (): ReadonlyArray<string> => {
+  if (process.platform === "win32") {
+    const candidates = [
+      process.env.ProgramFiles?.trim() ? path.join(process.env.ProgramFiles.trim(), "GitHub CLI") : undefined,
+      process.env.ProgramFiles?.trim() ? path.join(process.env.ProgramFiles.trim(), "Git", "cmd") : undefined,
+      process.env["ProgramFiles(x86)"]?.trim() ? path.join(process.env["ProgramFiles(x86)"].trim(), "GitHub CLI") : undefined,
+      process.env.SystemRoot?.trim() ? path.join(process.env.SystemRoot.trim(), "System32") : undefined,
+    ];
+    return [...new Set(candidates.filter((entry): entry is string => Boolean(entry)))];
+  }
+  return [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+};
+
 const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
   const relative = path.relative(rootPath, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -156,7 +178,14 @@ export const ensureFactoryWorkspaceCommandEnv = async (input: {
   return {
     receiptBinDir,
     path: prependPaths(
-      [receiptBinDir, workspaceNodeModulesBin, repoNodeModulesBin, repoReceiptBinDir, ...runtimeBunPathEntries()],
+      [
+        receiptBinDir,
+        workspaceNodeModulesBin,
+        repoNodeModulesBin,
+        repoReceiptBinDir,
+        ...runtimeBunPathEntries(),
+        ...standardExecutablePathEntries(),
+      ],
       process.env.PATH,
     ),
   };

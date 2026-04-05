@@ -1,63 +1,50 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { Hono } from "hono";
+import { gte, max, sql } from "drizzle-orm";
 
 import { LocalCodexExecutor } from "../../../adapters/codex-executor";
 import type { MemoryTools } from "../../../adapters/memory-tools";
+import type { Receipt } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
 import {
-  html,
-  makeEventId,
-  json,
   optionalTrimmedString,
-  readRecordBody,
   text,
 } from "../../../framework/http";
 import type { AgentLoaderContext, AgentRouteModule } from "../../../framework/agent-types";
 import { agentRunStream } from "../../agent.streams";
 import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
-import type { JobRecord } from "../../../modules/job";
 import {
   factoryChatStream,
   factoryChatSessionStream,
+  assertFactoryProfileCreateModeAllowed,
+  assertFactoryProfileDispatchActionAllowed,
+  factoryChatResolvedProfileActionSubject,
+  repoKeyForRoot,
   type FactoryChatProfile,
+  type FactoryChatProfileObjectiveMode,
   discoverFactoryChatProfiles,
   resolveFactoryChatProfile,
 } from "../../../services/factory-chat-profiles";
 import {
   FactoryService,
   FactoryServiceError,
-  type FactoryLiveOutputTargetKind,
 } from "../../../services/factory-service";
 import {
-  buildFactoryWorkbenchShellSnapshot,
-  factoryWorkbenchBlockIsland,
-  factoryWorkbenchChatIsland,
-  factoryWorkbenchHeaderIsland,
-  factoryWorkbenchShell,
-  factoryWorkbenchWorkspaceIsland,
-} from "../../../views/factory/workbench/page";
-import {
   toFactorySelectedObjectiveCard,
-  toFactoryStateSelectedObjectiveCard,
 } from "../../../views/factory/objective-presenters";
 import { buildFactoryWorkbench } from "../../../views/factory-workbench";
+import type { FactoryWorkbenchHeaderIslandModel } from "../../../views/factory/workbench/page";
 import {
   type FactoryChatIslandModel,
   type FactoryChatItem,
   type FactoryChatObjectiveNav,
-  type FactoryChatProfileNav,
-  type FactoryChatShellModel,
   type FactoryChatJobNav,
   type FactoryInspectorPanel,
   type FactoryInspectorTab,
   type FactoryLiveRunCard,
   type FactorySelectedObjectiveCard,
-  type FactoryNavModel,
   type FactoryInspectorModel,
-  type FactoryInspectorTabsModel,
-  type FactoryViewMode,
   type FactoryWorkbenchBlockModel,
   type FactoryWorkbenchDetailTab,
   type FactoryWorkbenchFilterKey,
@@ -69,31 +56,13 @@ import {
 } from "../../../views/factory-models";
 import type { QueueJob } from "../../../adapters/jsonl-queue";
 import { readObjectiveAnalysis } from "../../../factory-cli/analyze";
-import {
-  inferObjectiveProfileHint,
-  parseComposerDraft,
-} from "../../../factory-cli/composer";
-import {
-  sliceReceiptRecords,
-  buildReceiptTimeline,
-  type ReceiptFileInfo,
-  type ReceiptRecord,
-} from "../../../adapters/receipt-tools";
-import {
-  getReceiptDb,
-  listReceiptStreams,
-  readReceiptsByStream,
-  countReceiptsInStream,
-} from "../../../db/client";
-import {
-  receiptShell,
-  receiptFoldsHtml,
-  receiptRecordsHtml,
-  receiptSideHtml,
-} from "../../../views/receipt";
-import { runtimeShell } from "../../../views/runtime";
-import { parseOrder, parseLimit, parseInspectorDepth } from "../../../framework/http";
-import { buildChatItemsForRun, renderObjectiveHandoffMessage } from "../chat-items";
+import { inferObjectiveProfileHint } from "../../../factory-cli/composer";
+import { sliceReceiptRecords } from "../../../adapters/receipt-tools";
+import { getReceiptDb } from "../../../db/client";
+import * as receiptSchema from "../../../db/schema";
+import { toneForValue } from "../../../views/ui";
+import type { RuntimeDashboardModel } from "../../../views/runtime";
+import { buildChatItemsForRun, buildChatItemsFromConversation, renderObjectiveHandoffMessage } from "../chat-items";
 import {
   groupFactoryChatConversationByRunId,
   projectFactoryChatContextFromReceipts,
@@ -128,6 +97,8 @@ import { projectAgentRun } from "../run-projection";
 import {
   asString,
   compareJobsByRecency,
+  displayJobStatus,
+  displayJobUpdatedAt,
   isActiveJobStatus,
   isRelevantShellJob,
   jobAnyRunId,
@@ -144,38 +115,61 @@ import {
 } from "../../../db/projectors";
 import {
   buildWorkbenchLink,
-  navigationError,
-  workbenchNavigationResponse,
 } from "./navigation";
 import { createFactoryRouteCache } from "./cache";
 import { createFactoryRouteEvents } from "./events";
+import { registerFactoryApiRoutes } from "./register-factory-api-routes";
+import { registerFactoryUiRoutes } from "./register-factory-ui-routes";
+import { registerReceiptRoutes } from "./register-receipt-routes";
+import { registerRuntimeRoutes } from "./register-runtime-routes";
+import { createRuntimeDashboardLoader } from "./runtime-dashboard";
+import { createFactoryRouteSessionRuntime } from "./session-runtime";
+import type { FactoryDispatchAction } from "../dispatch";
+import { summarizeUserPreferences } from "../../../services/conversation-memory";
 import {
   isTerminalObjectiveStatus,
-  makeFactoryChatId,
-  makeFactoryRunId,
-  normalizeFocusKind,
   normalizedDefaultInspectorTab,
   normalizedWorkbenchDetailTab,
   normalizedWorkbenchInspectorTab,
-  objectiveProfileIdForPrompt,
-  requestedChatId,
-  requestedFocusId,
-  requestedFocusKind,
-  requestedInspectorTab,
-  requestedJobId,
-  requestedObjectiveId,
-  requestedProfileId,
-  requestedRunId,
-  requestedWorkbenchDetailTab,
-  requestedWorkbenchFilter,
 } from "./params";
+import {
+  readWorkbenchRequest,
+  type FactoryWorkbenchRequestState,
+} from "./workbench-request";
 
 type FactoryObjectiveListItem = Awaited<ReturnType<FactoryService["listObjectives"]>>[number];
 type FactoryObjectiveDetailRecord = Awaited<ReturnType<FactoryService["getObjective"]>>;
 type FactoryObjectiveStateRecord = Awaited<ReturnType<FactoryService["getObjectiveState"]>>;
 
+const RUNTIME_JOB_WINDOW = 200;
+const RUNTIME_OBJECTIVE_LIMIT = 10;
+const RUNTIME_JOB_LIMIT = 12;
+const RUNTIME_RUN_LIMIT = 10;
+const RUNTIME_ACTIVITY_LIMIT = 12;
+const RUNTIME_RECEIPT_WINDOW_MINUTES = 5;
+const TERMINAL_OBJECTIVE_STATUSES = new Set(["completed", "blocked", "failed", "canceled"]);
+
+const isActiveObjectiveStatus = (status: string | undefined): boolean =>
+  typeof status === "string" && !TERMINAL_OBJECTIVE_STATUSES.has(status);
+
+type ObjectiveHandoffPresence = {
+  readonly problem: boolean;
+  readonly binding: boolean;
+  readonly handoff: boolean;
+  readonly finalized: boolean;
+  readonly status: boolean;
+};
+
+const hasCompleteObjectiveHandoff = (presence: ObjectiveHandoffPresence): boolean =>
+  presence.problem
+  && presence.binding
+  && presence.handoff
+  && presence.finalized
+  && presence.status;
+
 const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const helpers = ctx.helpers ?? {};
+  const memoryTools = helpers.memoryTools as MemoryTools | undefined;
   const service = (helpers.factoryService as FactoryService | undefined) ?? new FactoryService({
     dataDir: ctx.dataDir,
     queue: ctx.queue,
@@ -204,7 +198,6 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
     loadChatContextProjectionForSession,
     withProjectionCache,
     projectionCacheTtlMs,
-    chatShellCache,
   } = routeCache;
 
   const wrap = async <T>(
@@ -218,6 +211,28 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
       const message = err instanceof Error ? err.message : "factory server error";
       console.error(err);
       return text(500, message);
+    }
+  };
+
+  const assertComposeDispatchActionAllowed = (
+    profile: Awaited<ReturnType<typeof resolveFactoryChatProfile>>,
+    action: FactoryDispatchAction,
+  ): void => {
+    try {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(profile), action);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile action is not allowed");
+    }
+  };
+
+  const assertComposeCreateModeAllowed = (
+    profile: Awaited<ReturnType<typeof resolveFactoryChatProfile>>,
+    objectiveMode: FactoryChatProfileObjectiveMode,
+  ): void => {
+    try {
+      assertFactoryProfileCreateModeAllowed(factoryChatResolvedProfileActionSubject(profile), objectiveMode);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile create mode is not allowed");
     }
   };
 
@@ -260,17 +275,21 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     throw new FactoryServiceError(409, "Selected objective has no active job to control.");
   };
 
-  const sidebarCache = new Map<string, {
-    readonly expiresAt: number;
-    readonly value: Promise<{ readonly nav: FactoryNavModel; readonly selectedObjective?: FactorySelectedObjectiveCard }>;
-  }>();
-  const inspectorTabsCache = new Map<string, {
-    readonly expiresAt: number;
-    readonly value: Promise<FactoryInspectorTabsModel>;
-  }>();
   const inspectorPanelCache = new Map<string, {
     readonly expiresAt: number;
     readonly value: Promise<FactoryInspectorModel>;
+  }>();
+  const workbenchSessionRuntimeCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<Awaited<ReturnType<typeof buildWorkbenchSessionRuntime>>>;
+  }>();
+  const workbenchWorkspaceCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryWorkbenchWorkspaceModel>;
+  }>();
+  const workbenchChatCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryChatIslandModel>;
   }>();
   const workbenchPageCache = new Map<string, {
     readonly expiresAt: number;
@@ -399,456 +418,12 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     };
   };
 
-  type ObjectiveHandoffView = {
-    readonly objectiveId: string;
-    readonly title: string;
-    readonly status: string;
-    readonly phase: string;
-    readonly updatedAt?: number;
-    readonly summary?: string;
-    readonly latestSummary?: string;
-    readonly blockedReason?: string;
-    readonly blockedExplanation?: string | { readonly summary: string };
-    readonly nextAction?: string;
-    readonly latestDecision?: {
-      readonly summary: string;
-      readonly at: number;
-    };
-    readonly latestDecisionSummary?: string;
-    readonly latestDecisionAt?: number;
-    readonly latestHandoff?: {
-      readonly status: "blocked" | "completed" | "failed" | "canceled";
-      readonly summary: string;
-      readonly output?: string;
-      readonly blocker?: string;
-      readonly nextAction?: string;
-      readonly handoffKey: string;
-      readonly sourceUpdatedAt: number;
-    };
-  };
-
-  const objectiveHandoffStatus = (
-    objective: Pick<ObjectiveHandoffView, "status" | "phase">,
-  ): "blocked" | "completed" | "failed" | "canceled" | undefined => {
-    const phase = optionalTrimmedString(objective.phase)?.toLowerCase();
-    if (phase === "blocked" || phase === "completed" || phase === "failed" || phase === "canceled") return phase;
-    const status = optionalTrimmedString(objective.status)?.toLowerCase();
-    if (status === "blocked" || status === "completed" || status === "failed" || status === "canceled") return status;
-    return undefined;
-  };
-
-  const objectiveBlockedExplanation = (
-    objective: Pick<ObjectiveHandoffView, "blockedExplanation" | "blockedReason">,
-  ): string | undefined => {
-    const structured = objective.blockedExplanation;
-    if (typeof structured === "string") return optionalTrimmedString(structured);
-    return optionalTrimmedString(structured?.summary) ?? optionalTrimmedString(objective.blockedReason);
-  };
-
-  const isGenericCompletedNextAction = (value?: string): boolean => {
-    const normalized = optionalTrimmedString(value)?.toLowerCase();
-    return normalized === "investigation is complete." || normalized === "objective is complete.";
-  };
-
-  const buildObjectiveHandoffPayload = (
-    objective: ObjectiveHandoffView,
-  ): Extract<AgentEvent, { readonly type: "objective.handoff" }> | undefined => {
-    if (objective.latestHandoff) {
-      return {
-        type: "objective.handoff",
-        runId: `run_objective_handoff_${objective.objectiveId}_${objective.latestHandoff.handoffKey}`,
-        agentId: "orchestrator",
-        objectiveId: objective.objectiveId,
-        title: objective.title,
-        status: objective.latestHandoff.status,
-        summary: objective.latestHandoff.summary,
-        ...(objective.latestHandoff.output ? { output: objective.latestHandoff.output } : {}),
-        ...(objective.latestHandoff.blocker ? { blocker: objective.latestHandoff.blocker } : {}),
-        ...(objective.latestHandoff.nextAction ? { nextAction: objective.latestHandoff.nextAction } : {}),
-        handoffKey: objective.latestHandoff.handoffKey,
-        sourceUpdatedAt: objective.latestHandoff.sourceUpdatedAt,
-      };
-    }
-    const status = objectiveHandoffStatus(objective);
-    if (!status) return undefined;
-    const summary = optionalTrimmedString(
-      objective.summary
-      ?? objective.latestSummary
-      ?? objectiveBlockedExplanation(objective)
-      ?? objective.latestDecision?.summary
-      ?? objective.latestDecisionSummary
-      ?? `${objective.title} is ${status}.`,
-    ) ?? `${objective.title} is ${status}.`;
-    const blocker = status === "blocked" ? objectiveBlockedExplanation(objective) : undefined;
-    const nextAction = optionalTrimmedString(objective.nextAction);
-    const effectiveNextAction = status === "completed" && isGenericCompletedNextAction(nextAction)
-      ? undefined
-      : nextAction;
-    const sourceUpdatedAt = objective.latestDecision?.at
-      ?? objective.latestDecisionAt
-      ?? objective.updatedAt
-      ?? 0;
-    const handoffKey = createHash("sha1")
-      .update(JSON.stringify({
-        objectiveId: objective.objectiveId,
-        status,
-        summary,
-        blocker,
-        nextAction: effectiveNextAction,
-        sourceUpdatedAt,
-      }))
-      .digest("hex")
-      .slice(0, 16);
-    return {
-      type: "objective.handoff",
-      runId: `run_objective_handoff_${objective.objectiveId}_${handoffKey}`,
-      agentId: "orchestrator",
-      objectiveId: objective.objectiveId,
-      title: objective.title,
-      status,
-      summary,
-      ...(blocker ? { blocker } : {}),
-      ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),
-      handoffKey,
-      sourceUpdatedAt,
-    };
-  };
-
-  const ensureObjectiveHandoffInSession = async (input: {
-    readonly profileId: string;
-    readonly chatId?: string;
-    readonly objective?: ObjectiveHandoffView;
-  }): Promise<void> => {
-    if (!input.chatId || !input.objective) return;
-    const handoff = buildObjectiveHandoffPayload(input.objective);
-    if (!handoff) return;
-    const renderedHandoff = renderObjectiveHandoffMessage(handoff);
-    const sessionStream = factoryChatSessionStream(service.git.repoRoot, input.profileId, input.chatId);
-    const sessionChain = await agentRuntime.chain(sessionStream);
-    const latestSessionHandoff = [...sessionChain].reverse().find((receipt) =>
-      receipt.body.type === "objective.handoff"
-      && receipt.body.objectiveId === handoff.objectiveId,
-    )?.body;
-    const runStream = agentRunStream(sessionStream, handoff.runId);
-    const runChain = await agentRuntime.chain(runStream);
-    const sessionHasHandoff = latestSessionHandoff?.type === "objective.handoff"
-      && latestSessionHandoff.handoffKey === handoff.handoffKey;
-    const runHasHandoff = runChain.some((receipt) =>
-      receipt.body.type === "objective.handoff"
-      && receipt.body.handoffKey === handoff.handoffKey
-    );
-    const sessionHasFinal = sessionChain.some((receipt) =>
-      receipt.body.type === "response.finalized"
-      && receipt.body.runId === handoff.runId,
-    );
-    const runHasFinal = runChain.some((receipt) =>
-      receipt.body.type === "response.finalized"
-      && receipt.body.runId === handoff.runId,
-    );
-    const sessionHasProblem = sessionChain.some((receipt) =>
-      receipt.body.type === "problem.set"
-      && receipt.body.runId === handoff.runId,
-    );
-    const runHasProblem = runChain.some((receipt) =>
-      receipt.body.type === "problem.set"
-      && receipt.body.runId === handoff.runId,
-    );
-    const sessionHasBinding = sessionChain.some((receipt) =>
-      receipt.body.type === "thread.bound"
-      && receipt.body.runId === handoff.runId
-      && receipt.body.objectiveId === handoff.objectiveId
-      && receipt.body.chatId === input.chatId,
-    );
-    const runHasBinding = runChain.some((receipt) =>
-      receipt.body.type === "thread.bound"
-      && receipt.body.runId === handoff.runId
-      && receipt.body.objectiveId === handoff.objectiveId
-      && receipt.body.chatId === input.chatId,
-    );
-    const sessionHasStatus = sessionChain.some((receipt) =>
-      receipt.body.type === "run.status"
-      && receipt.body.runId === handoff.runId
-      && receipt.body.status === "completed",
-    );
-    const runHasStatus = runChain.some((receipt) =>
-      receipt.body.type === "run.status"
-      && receipt.body.runId === handoff.runId
-      && receipt.body.status === "completed",
-    );
-    if (sessionHasHandoff && runHasHandoff && sessionHasFinal && runHasFinal && sessionHasProblem && runHasProblem && sessionHasBinding && runHasBinding && sessionHasStatus && runHasStatus) {
-      return;
-    }
-    const problemEvent: Extract<AgentEvent, { readonly type: "problem.set" }> = {
-      type: "problem.set",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      problem: `Objective handoff for ${handoff.title}`,
-    };
-    const threadBoundEvent: Extract<AgentEvent, { readonly type: "thread.bound" }> = {
-      type: "thread.bound",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      objectiveId: handoff.objectiveId,
-      chatId: input.chatId,
-      reason: "dispatch_update",
-    };
-    const finalEvent: Extract<AgentEvent, { readonly type: "response.finalized" }> = {
-      type: "response.finalized",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      content: renderedHandoff.body,
-    };
-    const statusEvent: Extract<AgentEvent, { readonly type: "run.status" }> = {
-      type: "run.status",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      status: "completed",
-      note: `objective ${handoff.status} handoff`,
-    };
-    const emitMissingEvents = async (
-      stream: string,
-      events: ReadonlyArray<AgentEvent>,
-    ): Promise<void> => {
-      for (const event of events) {
-        await agentRuntime.execute(stream, {
-          type: "emit",
-          eventId: makeEventId(stream),
-          event,
-        });
-      }
-    };
-    const runEvents: AgentEvent[] = [
-      ...(!runHasProblem ? [problemEvent] : []),
-      ...(!runHasBinding ? [threadBoundEvent] : []),
-      ...(!runHasHandoff ? [handoff] : []),
-      ...(!runHasFinal ? [finalEvent] : []),
-      ...(!runHasStatus ? [statusEvent] : []),
-    ];
-    const sessionEvents: AgentEvent[] = [
-      ...(!sessionHasProblem ? [problemEvent] : []),
-      ...(!sessionHasBinding ? [threadBoundEvent] : []),
-      ...(!sessionHasHandoff ? [handoff] : []),
-      ...(!sessionHasFinal ? [finalEvent] : []),
-      ...(!sessionHasStatus ? [statusEvent] : []),
-    ];
-    if (runEvents.length > 0) await emitMissingEvents(runStream, runEvents);
-    if (sessionEvents.length > 0) await emitMissingEvents(sessionStream, sessionEvents);
-  };
-
-  const queueJobFromRecord = (job: JobRecord): QueueJob => ({
-    id: job.id,
-    agentId: job.agentId,
-    lane: job.lane,
-    sessionKey: job.sessionKey,
-    singletonMode: job.singletonMode,
-    payload: { ...job.payload },
-    status: job.status,
-    attempt: job.attempt,
-    maxAttempts: job.maxAttempts,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    leaseOwner: job.workerId,
-    leaseUntil: job.leaseUntil,
-    lastError: job.lastError,
-    result: job.result ? { ...job.result } : undefined,
-    canceledReason: job.canceledReason,
-    abortRequested: job.abortRequested,
-    commands: job.commands.map((command) => ({
-      ...command,
-      payload: command.payload ? { ...command.payload } : undefined,
-    })),
+  const loadRuntimeDashboard = createRuntimeDashboardLoader({
+    ctx,
+    service,
+    agentRuntime,
+    loadRecentJobs,
   });
-
-  const collectExplicitObjectiveJobs = async (
-    detail: Awaited<ReturnType<FactoryService["getObjective"]>> | undefined,
-    selectedJobId?: string,
-  ): Promise<{
-    readonly jobs: ReadonlyArray<QueueJob>;
-    readonly selectedJob?: QueueJob;
-  }> => {
-    const jobsById = new Map<string, QueueJob>();
-    for (const task of detail?.tasks ?? []) {
-      if (!task.job) continue;
-      jobsById.set(task.job.id, queueJobFromRecord(task.job));
-    }
-    let selectedJob = selectedJobId ? jobsById.get(selectedJobId) : undefined;
-    if (!selectedJob && selectedJobId) {
-      selectedJob = await ctx.queue.getJob(selectedJobId);
-    }
-    const jobs = [...jobsById.values()].sort(compareJobsByRecency);
-    return {
-      jobs,
-      selectedJob,
-    };
-  };
-
-  const buildWorkbenchSessionRuntime = async (input: {
-    readonly repoRoot: string;
-    readonly profileId: string;
-    readonly profileLabel: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly seedJobs?: ReadonlyArray<QueueJob>;
-    readonly mode?: FactoryViewMode;
-  }): Promise<{
-    readonly stream?: string;
-    readonly scopedJobs: ReadonlyArray<QueueJob>;
-    readonly runIds: ReadonlyArray<string>;
-    readonly runChains: ReadonlyArray<AgentRunChain>;
-    readonly activeRunId?: string;
-    readonly activeRun?: FactoryLiveRunCard;
-    readonly activeCodex?: FactoryInspectorModel["activeCodex"];
-    readonly liveChildren: ReadonlyArray<NonNullable<FactoryInspectorModel["liveChildren"]>[number]>;
-  }> => {
-    if (!input.chatId) {
-      const scopedJobs = [...(input.seedJobs ?? [])].sort(compareJobsByRecency).slice(0, 24);
-      return {
-        scopedJobs,
-        runIds: [],
-        runChains: [],
-        activeRunId: undefined,
-        activeRun: undefined,
-        activeCodex: buildActiveCodexCard(scopedJobs),
-        liveChildren: [],
-      };
-    }
-    const stream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
-    const indexChain = await agentRuntime.chain(stream);
-    const runIds = collectRunIds(indexChain);
-    const recentJobs = runIds.length > 0 ? await loadRecentJobs(80) : [];
-    const jobsById = new Map<string, QueueJob>();
-    for (const job of input.seedJobs ?? []) jobsById.set(job.id, job);
-    for (const job of recentJobs) jobsById.set(job.id, job);
-    const scopedJobs = [...jobsById.values()]
-      .filter((job) =>
-        asString(job.payload.chatId) === input.chatId
-        || isRelevantShellJob(job, stream, input.objectiveId))
-      .sort(compareJobsByRecency)
-      .slice(0, 24);
-    const collectedRunChains = await Promise.all(
-      runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))),
-    );
-    const scopedRunTimeline = scopeRunTimelineToObjective({
-      objectiveId: input.objectiveId,
-      runIds,
-      runChains: collectedRunChains,
-      jobs: scopedJobs,
-    });
-    const scopedRunIds = scopedRunTimeline.runIds;
-    const runChains = scopedRunTimeline.runChains;
-    const runChainsById = new Map(scopedRunIds.map((runId, index) => [runId, runChains[index]!] as const));
-    const activeRunId = scopedRunIds.at(-1);
-    const activeRunLineageIds = activeRunId
-      ? collectRunLineageIds([activeRunId], runChainsById, scopedJobs)
-      : new Set<string>();
-    const activeRunJobs = activeRunLineageIds.size > 0
-      ? scopedJobs.filter((job) => jobMatchesRunIds(job, activeRunLineageIds))
-      : scopedJobs.filter((job) => jobMatchesRunIds(job, new Set([activeRunId].filter(Boolean) as string[])));
-    const activeRunIndex = activeRunId ? scopedRunIds.indexOf(activeRunId) : -1;
-    const activeRun = activeRunIndex >= 0
-      ? summarizeActiveRunCard({
-          mode: input.mode,
-          runId: activeRunId!,
-          runChain: runChains[activeRunIndex]!,
-          relatedJobs: activeRunJobs,
-          profileLabel: input.profileLabel,
-          profileId: input.profileId,
-          chatId: input.chatId,
-          objectiveId: input.objectiveId,
-        })
-      : undefined;
-    return {
-      stream,
-      scopedJobs,
-      runIds: scopedRunIds,
-      runChains,
-      activeRunId,
-      activeRun,
-      activeCodex: buildActiveCodexCard(scopedJobs),
-      liveChildren: buildLiveChildCards(scopedJobs, stream, input.objectiveId),
-    };
-  };
-
-  const mergeExplicitObjectiveIntoCards = (
-    objectives: ReadonlyArray<FactoryObjectiveListItem>,
-    detail: FactoryObjectiveDetailRecord | undefined,
-  ): ReadonlyArray<FactoryObjectiveListItem> => {
-    if (!detail || objectives.some((objective) => objective.objectiveId === detail.objectiveId)) return objectives;
-    return [detail, ...objectives];
-  };
-
-  const loadExplicitObjectiveContext = async (input: {
-    readonly profileId?: string;
-    readonly objectiveId: string;
-    readonly selectedJobId?: string;
-  }): Promise<{
-    readonly objectiveId: string;
-    readonly resolvedProfile: FactoryChatProfile;
-    readonly effectiveProfile: FactoryChatProfile;
-    readonly profiles: ReadonlyArray<FactoryChatProfile>;
-    readonly objectives: ReadonlyArray<FactoryObjectiveListItem>;
-    readonly state?: FactoryObjectiveStateRecord;
-    readonly detail?: FactoryObjectiveDetailRecord;
-    readonly selectedObjective?: FactorySelectedObjectiveCard;
-    readonly recentJobs: ReadonlyArray<QueueJob>;
-    readonly selectedJob?: QueueJob;
-  }> => {
-    await service.ensureBootstrap();
-    const repoRoot = service.git.repoRoot;
-    const [resolved, profiles, state, detail, objectives] = await Promise.all([
-      resolveFactoryChatProfile({
-        repoRoot,
-        profileRoot,
-        requestedId: input.profileId,
-      }),
-      loadFactoryProfiles(),
-      service.getObjectiveState(input.objectiveId).catch(() => undefined),
-      service.getObjective(input.objectiveId).catch((err) => {
-        if (err instanceof FactoryServiceError && err.status === 404) return undefined;
-        throw err;
-      }),
-      service.listObjectives(),
-    ]);
-    const effectiveProfileId = detail?.profile.rootProfileId ?? state?.profile.rootProfileId;
-    const effectiveProfile = profiles.find((profile) => profile.id === effectiveProfileId) ?? resolved.root;
-    const { jobs: objectiveJobs, selectedJob } = await collectExplicitObjectiveJobs(detail, input.selectedJobId);
-    const recentJobs = selectedJob && !objectiveJobs.some((job) => job.id === selectedJob.id)
-      ? [selectedJob, ...objectiveJobs]
-      : objectiveJobs;
-    return {
-      objectiveId: input.objectiveId,
-      resolvedProfile: resolved.root,
-      effectiveProfile,
-      profiles,
-      objectives: mergeExplicitObjectiveIntoCards(objectives, detail),
-      state,
-      detail,
-      selectedObjective: detail
-        ? toFactorySelectedObjectiveCard(detail)
-        : state
-          ? toFactoryStateSelectedObjectiveCard(state)
-          : undefined,
-      recentJobs,
-      selectedJob,
-    };
-  };
-
-  const matchesObjectiveProfile = (
-    objective: Pick<FactoryObjectiveListItem, "profile"> | Pick<FactorySelectedObjectiveCard, "profileId"> | undefined,
-    profileId: string | undefined,
-  ): boolean => {
-    if (!objective || !profileId) return false;
-    const objectiveProfileId = "profile" in objective
-      ? objective.profile.rootProfileId
-      : objective.profileId;
-    return objectiveProfileId === profileId;
-  };
-
-  const filterObjectivesByProfile = (
-    objectives: ReadonlyArray<FactoryObjectiveListItem>,
-    profileId: string,
-  ): ReadonlyArray<FactoryObjectiveListItem> =>
-    objectives.filter((objective) => objective.profile.rootProfileId === profileId);
 
   const resolveSessionObjectiveId = async (input: {
     readonly repoRoot: string;
@@ -858,41 +433,48 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly selectedJob?: QueueJob;
     readonly jobs: ReadonlyArray<QueueJob>;
     readonly liveObjectives?: ReadonlyArray<{ readonly objectiveId: string }>;
-    readonly allowExplicitFallback?: boolean;
   }): Promise<string | undefined> => {
-    const liveObjectives = input.liveObjectives ?? [];
-    const requestedObjectiveId = normalizeKnownObjectiveId(input.objectiveId, liveObjectives);
+    const normalizeSessionObjectiveId = (candidate: string | undefined): string | undefined => {
+      const objectiveId = candidate?.trim();
+      if (!objectiveId) return undefined;
+      return input.liveObjectives
+        ? normalizeKnownObjectiveId(objectiveId, input.liveObjectives)
+        : objectiveId;
+    };
+    const requestedObjectiveId = normalizeSessionObjectiveId(input.objectiveId);
     if (requestedObjectiveId) return requestedObjectiveId;
-    const explicitObjectiveId = input.objectiveId?.trim();
-    if (input.allowExplicitFallback && explicitObjectiveId) return explicitObjectiveId;
-    const selectedJobObjectiveId = normalizeKnownObjectiveId(jobObjectiveId(input.selectedJob), liveObjectives);
+    const selectedJobObjectiveId = normalizeSessionObjectiveId(jobObjectiveId(input.selectedJob));
     if (selectedJobObjectiveId) return selectedJobObjectiveId;
-    if (!selectedJobObjectiveId && input.allowExplicitFallback) {
-      const explicitSelectedJobObjectiveId = jobObjectiveId(input.selectedJob);
-      if (explicitSelectedJobObjectiveId) return explicitSelectedJobObjectiveId;
-    }
     if (!input.chatId) return undefined;
     const stream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
     const projected = await loadChatContextProjectionForSession({ sessionStream: stream });
-    const projectedObjectiveId = normalizeKnownObjectiveId(projected?.bindings.objectiveId, liveObjectives);
+    const projectedObjectiveId = normalizeSessionObjectiveId(projected?.bindings.objectiveId);
     if (projectedObjectiveId) return projectedObjectiveId;
-    if (!projectedObjectiveId && input.allowExplicitFallback && projected?.bindings.objectiveId) {
-      return projected.bindings.objectiveId;
-    }
     const indexChain = await agentRuntime.chain(stream);
     const runIds = collectRunIds(indexChain);
     const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))));
     const discoveredObjectiveId = latestObjectiveIdFromRunChains(runChains)
       ?? latestObjectiveIdFromJobs(input.jobs, stream, input.chatId);
-    return normalizeKnownObjectiveId(
-      discoveredObjectiveId,
-      liveObjectives,
-    ) ?? (
-      input.allowExplicitFallback
-        ? discoveredObjectiveId
-        : undefined
-    );
+    return normalizeSessionObjectiveId(discoveredObjectiveId);
   };
+
+  const {
+    ensureObjectiveHandoffInSession,
+    collectExplicitObjectiveJobs,
+    buildWorkbenchSessionRuntime,
+    mergeExplicitObjectiveIntoCards,
+    loadExplicitObjectiveContext,
+  } = createFactoryRouteSessionRuntime({
+    service,
+    agentRuntime,
+    profileRoot,
+    loadRecentJobs,
+    loadFactoryProfiles,
+    resolveSessionObjectiveId,
+    scopeRunTimelineToObjective,
+    loadChatContextProjectionForSession,
+    getJob: (jobId) => ctx.queue.getJob(jobId),
+  });
 
   const routeEvents = createFactoryRouteEvents({
     ctx,
@@ -906,741 +488,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     subscribeChatEventStream,
   } = routeEvents;
 
-  const buildChatShellModel = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: "task" | "job";
-    readonly focusId?: string;
-    readonly showAll?: boolean;
-  }): Promise<FactoryChatShellModel> => {
-    await service.ensureBootstrap();
-    const explicitObjectiveId = input.objectiveId?.trim();
-    const repoRoot = service.git.repoRoot;
-    const [resolved, profiles] = await Promise.all([
-      resolveFactoryChatProfile({
-        repoRoot,
-        profileRoot,
-        requestedId: input.profileId,
-      }),
-      loadFactoryProfiles(),
-    ]);
-    let objectivesPromise: Promise<Awaited<ReturnType<FactoryService["listObjectives"]>>> | undefined;
-    const loadObjectives = (): Promise<Awaited<ReturnType<FactoryService["listObjectives"]>>> => {
-      objectivesPromise ??= service.listObjectives({ profileId: resolved.root.id });
-      return objectivesPromise;
-    };
-    let initialSessionStream: string | undefined;
-    let initialIndexChain: Awaited<ReturnType<typeof agentRuntime.chain>> = [];
-    let initialChatContext: FactoryChatContextProjection | undefined;
-    let jobs: ReadonlyArray<QueueJob> = [];
-    let chatMatchesExplicitObjective = false;
-
-    if (!explicitObjectiveId && (input.jobId || input.runId)) {
-      jobs = await loadRecentJobs();
-    } else if (input.chatId) {
-      initialSessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
-      initialIndexChain = await agentRuntime.chain(initialSessionStream);
-      initialChatContext = await loadChatContextProjectionForSession({
-        sessionStream: initialSessionStream,
-        fallbackChain: initialIndexChain,
-      });
-      const initialRunIds = collectRunIds(initialIndexChain);
-      if (initialRunIds.length > 0) {
-        jobs = await loadRecentJobs();
-        if (explicitObjectiveId) {
-          const discoveredObjectiveId = initialChatContext?.bindings.objectiveId
-            ?? latestObjectiveIdFromRunChains(await Promise.all(
-              initialRunIds.map((runId) => agentRuntime.chain(agentRunStream(initialSessionStream!, runId))),
-            ))
-            ?? latestObjectiveIdFromJobs(jobs, initialSessionStream, input.chatId);
-          chatMatchesExplicitObjective = discoveredObjectiveId === explicitObjectiveId;
-        }
-      }
-    }
-
-    if (explicitObjectiveId && (!input.chatId || !chatMatchesExplicitObjective)) {
-      const {
-        resolvedProfile,
-        effectiveProfile,
-        profiles,
-        objectives,
-        state,
-        detail,
-        selectedObjective,
-        recentJobs: relevantObjectiveJobs,
-        selectedJob,
-      } = await loadExplicitObjectiveContext({
-        profileId: input.profileId,
-        objectiveId: explicitObjectiveId,
-        selectedJobId: input.jobId,
-      });
-      if (!state && !detail) {
-        return buildMissingExplicitThreadShellModel({
-          mode: input.mode,
-          resolvedProfile,
-          profiles,
-          objectives,
-          objectiveId: explicitObjectiveId,
-          runId: input.runId,
-          jobId: input.jobId,
-          panel: input.panel,
-          focusKind: input.focusKind,
-          focusId: input.focusId,
-          showAll: input.showAll,
-        });
-      }
-      const activeProfileOverview = describeProfileMarkdown(effectiveProfile);
-      const jobsById = new Map(relevantObjectiveJobs.map((job) => [job.id, job] as const));
-      await ensureObjectiveHandoffInSession({
-        profileId: effectiveProfile.id,
-        chatId: input.chatId,
-        objective: selectedObjective,
-      });
-      const sessionChatContext = input.chatId
-        ? withChatContextViewImports(
-            await loadChatContextProjectionForSession({
-              sessionStream: factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId),
-              fallbackChain: initialSessionStream === factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
-                ? initialIndexChain
-                : await agentRuntime.chain(factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)),
-            }),
-            {
-              selectedObjective,
-              workbench: undefined,
-              activeCodex: undefined,
-              liveChildren: undefined,
-            },
-          )
-        : undefined;
-      const stream = resolveChatViewStream({
-        repoRoot,
-        profileId: effectiveProfile.id,
-        objectiveId: explicitObjectiveId,
-        job: selectedJob,
-      });
-      const indexChain = stream ? await agentRuntime.chain(stream) : [];
-      const allRunIds = collectRunIds(indexChain);
-      const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
-      const runIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
-      const conversationByRunId = groupFactoryChatConversationByRunId(sessionChatContext?.conversation);
-      const runChains = await Promise.all(runIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])));
-      const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(
-        runIds[index]!,
-        runChain,
-        jobsById,
-        { conversation: conversationByRunId.get(runIds[index]!) },
-      ));
-      const activeRunId = runIds.at(-1) ?? input.runId;
-      const initialWorkbench = detail
-        ? buildFactoryWorkbench({
-            detail,
-            recentJobs: relevantObjectiveJobs,
-            requestedFocusKind: input.focusKind,
-            requestedFocusId: input.focusId,
-          })
-        : undefined;
-      const liveOutput = detail && initialWorkbench?.focus
-        ? await service.getObjectiveLiveOutput(
-            explicitObjectiveId,
-            initialWorkbench.focus.focusKind,
-            initialWorkbench.focus.focusId,
-          ).catch(() => undefined)
-        : undefined;
-      const workbench = detail
-        ? buildFactoryWorkbench({
-            detail,
-            recentJobs: relevantObjectiveJobs,
-            requestedFocusKind: initialWorkbench?.focus?.focusKind ?? input.focusKind,
-            requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
-            liveOutput,
-          })
-        : undefined;
-      const resolvedFocusKind = workbench?.focus?.focusKind ?? input.focusKind;
-      const resolvedFocusId = workbench?.focus?.focusId ?? input.focusId;
-      const inspectorPanel = input.panel ?? (workbench?.hasActiveExecution ? "live" : "overview");
-      const relevantJobs = relevantObjectiveJobs
-        .slice(0, 12)
-        .map((job) => ({
-          jobId: job.id,
-          agentId: job.agentId,
-          status: job.status,
-          summary: summarizeJob(job),
-          runId: jobAnyRunId(job),
-          objectiveId: jobObjectiveId(job),
-          updatedAt: job.updatedAt,
-          selected: job.id === input.jobId,
-          link: buildChatLink({
-            mode: input.mode,
-            profileId: effectiveProfile.id,
-            objectiveId: explicitObjectiveId,
-            runId: jobAnyRunId(job),
-            jobId: job.id,
-            panel: inspectorPanel,
-            inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-            focusKind: "job",
-            focusId: job.id,
-          }),
-        } satisfies FactoryChatJobNav));
-      const scopedObjectives = filterObjectivesByProfile(objectives, effectiveProfile.id);
-      const profileNav = buildProfileNav({
-        profiles,
-        selectedProfileId: effectiveProfile.id,
-        mode: input.mode,
-        objectiveId: explicitObjectiveId,
-        runId: activeRunId,
-        jobId: input.jobId,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        focusKind: resolvedFocusKind,
-        focusId: resolvedFocusId,
-        objectiveProfileId: selectedObjective?.profileId,
-      });
-      const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = buildObjectiveNavCards(
-        scopedObjectives,
-        explicitObjectiveId,
-        { includeArchivedSelectedOnly: true },
-      );
-      const activeCodex = buildActiveCodexCard(relevantObjectiveJobs);
-      const liveChildren = stream
-        ? buildLiveChildCards(relevantObjectiveJobs, stream, explicitObjectiveId)
-        : [];
-      const hydratedChatContext = withChatContextViewImports(sessionChatContext, {
-        selectedObjective,
-        workbench,
-        activeCodex,
-        liveChildren,
-      });
-      const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
-      const activeRun = activeRunIndex >= 0
-        ? summarizeActiveRunCard({
-            mode: input.mode,
-            runId: activeRunId!,
-            runChain: runChains[activeRunIndex]!,
-            relatedJobs: relevantObjectiveJobs,
-            profileLabel: effectiveProfile.label,
-            profileId: effectiveProfile.id,
-            objectiveId: explicitObjectiveId,
-          })
-        : selectedJob
-          ? summarizePendingRunJob(selectedJob, effectiveProfile.label, input.mode)
-          : undefined;
-      const chatModel: FactoryChatIslandModel = {
-        mode: input.mode,
-        activeProfileId: effectiveProfile.id,
-        activeProfileLabel: effectiveProfile.label,
-        objectiveId: explicitObjectiveId,
-        runId: activeRunId,
-        knownRunIds: runIds,
-        terminalRunIds: collectTerminalRunIds(runIds, runChains),
-        jobId: input.jobId,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        focusKind: resolvedFocusKind,
-        focusId: resolvedFocusId,
-        activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-        activeProfileRoles: activeProfileOverview.roles,
-        activeProfileResponsibilities: activeProfileOverview.responsibilities,
-        activeProfileSummary: activeProfileOverview.summary,
-        activeProfileSoulSummary: activeProfileOverview.soulSummary,
-        activeProfileProfileSummary: activeProfileOverview.profileSummary,
-        activeProfileSections: activeProfileOverview.sections,
-        selectedThread: selectedObjective,
-        jobs: relevantJobs,
-        activeCodex,
-        liveChildren,
-        activeRun,
-        workbench,
-        chatContext: hydratedChatContext,
-        items: chatItems,
-      };
-      const navModel: FactoryNavModel = {
-        mode: input.mode,
-        activeProfileId: effectiveProfile.id,
-        activeProfileLabel: effectiveProfile.label,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        profiles: profileNav,
-        objectives: objectiveNav,
-        showAll: input.showAll,
-      };
-      const inspectorModel: FactoryInspectorModel = {
-        mode: input.mode,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        activeProfileId: effectiveProfile.id,
-        activeProfileLabel: effectiveProfile.label,
-        activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-        activeProfileSummary: activeProfileOverview.summary,
-        activeProfileSoulSummary: activeProfileOverview.soulSummary,
-        activeProfileProfileSummary: activeProfileOverview.profileSummary,
-        activeProfileResponsibilities: activeProfileOverview.responsibilities,
-        activeProfileSections: activeProfileOverview.sections,
-        objectiveId: explicitObjectiveId,
-        runId: activeRunId,
-        jobId: input.jobId,
-        focusKind: resolvedFocusKind,
-        focusId: resolvedFocusId,
-        selectedObjective,
-        activeCodex,
-        liveChildren,
-        activeRun,
-        workbench,
-        chatContext: hydratedChatContext,
-        jobs: relevantJobs,
-        tasks: detail?.tasks,
-      };
-      return {
-        mode: input.mode,
-        activeProfileId: effectiveProfile.id,
-        activeProfileLabel: effectiveProfile.label,
-        objectiveId: explicitObjectiveId,
-        runId: activeRunId,
-        jobId: input.jobId,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        focusKind: resolvedFocusKind,
-        focusId: resolvedFocusId,
-        chat: chatModel,
-        nav: navModel,
-        inspector: inspectorModel,
-        };
-      }
-
-    if (input.chatId && !input.runId && !input.jobId && initialIndexChain.length === 0) {
-      return buildUnselectedThreadShellModel({
-        mode: input.mode,
-        resolvedProfile: resolved.root,
-        profiles,
-        chatId: input.chatId,
-        panel: input.panel,
-        inspectorTab: input.inspectorTab,
-        focusKind: input.focusKind,
-        focusId: input.focusId,
-        showAll: input.showAll,
-      });
-    }
-
-    const objectives = await loadObjectives();
-    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
-    const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
-    const liveObjectives = objectives.filter((objective) => !objective.archivedAt);
-    const resolvedObjectiveId = await resolveSessionObjectiveId({
-      repoRoot,
-      profileId: resolved.root.id,
-      chatId: input.chatId,
-      objectiveId: input.objectiveId,
-      selectedJob,
-      jobs,
-      liveObjectives,
-      allowExplicitFallback: true,
-    });
-    const stream = resolveChatViewStream({
-      repoRoot,
-      profileId: resolved.root.id,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      job: selectedJob,
-    });
-    const selectedObjective = resolvedObjectiveId
-      ? await service.getObjective(resolvedObjectiveId).catch(err => {
-          if (err instanceof FactoryServiceError && err.status === 404) return undefined;
-          throw err;
-        })
-      : undefined;
-    await ensureObjectiveHandoffInSession({
-      profileId: resolved.root.id,
-      chatId: input.chatId,
-      objective: selectedObjective,
-    });
-    const indexChain = stream
-      ? stream === initialSessionStream
-        ? initialIndexChain
-        : await agentRuntime.chain(stream)
-      : [];
-    const sessionChatContext = input.chatId && initialSessionStream
-      ? await loadChatContextProjectionForSession({
-          sessionStream: initialSessionStream,
-          fallbackChain: indexChain,
-        })
-      : undefined;
-
-    const allRunIds = collectRunIds(indexChain);
-    const requestedRunIndex = input.runId ? allRunIds.indexOf(input.runId) : -1;
-    const requestedRunIds = requestedRunIndex >= 0 ? allRunIds.slice(requestedRunIndex) : allRunIds;
-    const collectedRunChains = await Promise.all(
-      requestedRunIds.map((runId) => stream ? agentRuntime.chain(agentRunStream(stream, runId)) : Promise.resolve([])),
-    );
-    const scopedRunTimeline = scopeRunTimelineToObjective({
-      objectiveId: resolvedObjectiveId,
-      runIds: requestedRunIds,
-      runChains: collectedRunChains,
-      jobs,
-    });
-    const runIds = scopedRunTimeline.runIds;
-    const runChains = scopedRunTimeline.runChains;
-    const activeRunId = runIds.at(-1);
-    const runChainsById = new Map(runIds.map((runId, index) => [runId, runChains[index]!] as const));
-    const conversationByRunId = groupFactoryChatConversationByRunId(sessionChatContext?.conversation);
-    const chatItems = runChains.flatMap((runChain, index) => buildChatItemsForRun(
-      runIds[index]!,
-      runChain,
-      jobsById,
-      { conversation: conversationByRunId.get(runIds[index]!) },
-    ));
-    const activeProfileOverview = describeProfileMarkdown(resolved.root);
-    const baseQueueJobs = stream
-      ? jobs.filter((job) => isRelevantShellJob(job, stream, resolvedObjectiveId))
-      : [];
-    const selectedRunIds = collectRunLineageIds(
-      [
-        input.runId,
-        selectedJob ? jobRunId(selectedJob) : undefined,
-        selectedJob ? jobParentRunId(selectedJob) : undefined,
-      ],
-      runChainsById,
-      baseQueueJobs,
-    );
-    const relevantQueueJobs = selectedRunIds.size > 0 || input.jobId
-      ? baseQueueJobs.filter((job) =>
-          job.id === input.jobId
-          || jobMatchesRunIds(job, selectedRunIds)
-        )
-      : baseQueueJobs;
-    if (selectedJob && !relevantQueueJobs.some((job) => job.id === selectedJob.id)) {
-      relevantQueueJobs.unshift(selectedJob);
-    }
-    const activeRunLineageIds = activeRunId
-      ? collectRunLineageIds([activeRunId], runChainsById, relevantQueueJobs)
-      : new Set<string>();
-    const activeRunJobs = activeRunLineageIds.size > 0
-      ? relevantQueueJobs.filter((job) => jobMatchesRunIds(job, activeRunLineageIds))
-      : relevantQueueJobs.filter((job) => jobMatchesRunIds(job, new Set([activeRunId].filter(Boolean) as string[])));
-    const activeCodex = buildActiveCodexCard(relevantQueueJobs);
-    const liveChildren = stream
-      ? buildLiveChildCards(relevantQueueJobs, stream, resolvedObjectiveId)
-      : [];
-    const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
-    const activeRun = activeRunIndex >= 0
-      ? summarizeActiveRunCard({
-          mode: input.mode,
-          runId: activeRunId!,
-          runChain: runChains[activeRunIndex]!,
-          relatedJobs: activeRunJobs,
-          profileLabel: resolved.root.label,
-          profileId: resolved.root.id,
-          chatId: input.chatId,
-          objectiveId: resolvedObjectiveId,
-        })
-      : selectedJob
-          ? summarizePendingRunJob(selectedJob, resolved.root.label, input.mode)
-          : undefined;
-    const relevantJobs = relevantQueueJobs
-      .slice(0, 12)
-      .map((job) => ({
-        jobId: job.id,
-        agentId: job.agentId,
-        status: job.status,
-        summary: summarizeJob(job),
-        runId: jobAnyRunId(job),
-        objectiveId: jobObjectiveId(job),
-        updatedAt: job.updatedAt,
-        selected: job.id === input.jobId,
-        link: buildChatLink({
-          mode: input.mode,
-          profileId: resolved.root.id,
-          chatId: input.chatId,
-          objectiveId: jobObjectiveId(job),
-          runId: jobAnyRunId(job),
-          jobId: job.id,
-          panel: input.panel,
-          focusKind: "job",
-          focusId: job.id,
-        }),
-      } satisfies FactoryChatJobNav));
-    const selectedObjectiveCard: FactorySelectedObjectiveCard | undefined = selectedObjective
-      ? toFactorySelectedObjectiveCard(selectedObjective)
-      : undefined;
-    const initialWorkbench = buildFactoryWorkbench({
-      detail: selectedObjective,
-      recentJobs: relevantQueueJobs,
-      requestedFocusKind: input.focusKind,
-      requestedFocusId: input.focusId,
-    });
-    const liveOutput = selectedObjective && initialWorkbench?.focus
-      ? await service.getObjectiveLiveOutput(
-          selectedObjective.objectiveId,
-          initialWorkbench.focus.focusKind,
-          initialWorkbench.focus.focusId,
-        ).catch(() => undefined)
-      : undefined;
-    const workbench = buildFactoryWorkbench({
-      detail: selectedObjective,
-      recentJobs: relevantQueueJobs,
-      requestedFocusKind: initialWorkbench?.focus?.focusKind ?? input.focusKind,
-      requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
-      liveOutput,
-    });
-    const inspectorPanel = input.panel ?? (workbench?.hasActiveExecution ? "live" : "overview");
-    const resolvedFocusKind = workbench?.focus?.focusKind;
-    const resolvedFocusId = workbench?.focus?.focusId;
-    const hydratedChatContext = withChatContextViewImports(sessionChatContext, {
-      selectedObjective: selectedObjectiveCard,
-      workbench,
-      activeCodex,
-      liveChildren,
-    });
-    const profileNav = buildProfileNav({
-      profiles,
-      selectedProfileId: resolved.root.id,
-      mode: input.mode,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: activeRunId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: resolvedFocusKind,
-      focusId: resolvedFocusId,
-      objectiveProfileId: selectedObjectiveCard?.profileId,
-    });
-    const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = buildObjectiveNavCards(
-      objectives,
-      resolvedObjectiveId,
-      { includeArchivedSelectedOnly: true },
-    );
-
-    const chatModel: FactoryChatIslandModel = {
-      mode: input.mode,
-      activeProfileId: resolved.root.id,
-      activeProfileLabel: resolved.root.label,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: activeRunId,
-      knownRunIds: runIds,
-      terminalRunIds: collectTerminalRunIds(runIds, runChains),
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: resolvedFocusKind,
-      focusId: resolvedFocusId,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileRoles: activeProfileOverview.roles,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileSections: activeProfileOverview.sections,
-      activeProfileTools: resolved.toolAllowlist,
-      selectedThread: selectedObjectiveCard,
-      jobs: relevantJobs,
-      activeCodex,
-      liveChildren,
-      activeRun,
-      workbench,
-      chatContext: hydratedChatContext,
-      items: chatItems,
-    };
-    const navModel: FactoryNavModel = {
-      mode: input.mode,
-      activeProfileId: resolved.root.id,
-      activeProfileLabel: resolved.root.label,
-      chatId: input.chatId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      profiles: profileNav,
-      objectives: objectiveNav,
-      showAll: input.showAll,
-    };
-    const inspectorModel: FactoryInspectorModel = {
-      mode: input.mode,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      activeProfileId: resolved.root.id,
-      activeProfileLabel: resolved.root.label,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSections: activeProfileOverview.sections,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: activeRunId,
-      jobId: input.jobId,
-      focusKind: resolvedFocusKind,
-      focusId: resolvedFocusId,
-      selectedObjective: selectedObjectiveCard,
-      activeCodex,
-      liveChildren,
-      activeRun,
-      workbench,
-      chatContext: hydratedChatContext,
-      jobs: relevantJobs,
-      tasks: selectedObjective?.tasks,
-      analysis: inspectorPanel === "analysis" && resolvedObjectiveId
-        ? await readObjectiveAnalysis(service.dataDir, resolvedObjectiveId).catch(() => undefined)
-        : undefined,
-    };
-    return {
-      mode: input.mode,
-      activeProfileId: resolved.root.id,
-      activeProfileLabel: resolved.root.label,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: activeRunId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: resolvedFocusKind,
-      focusId: resolvedFocusId,
-      chat: chatModel,
-      nav: navModel,
-      inspector: inspectorModel,
-    };
-  };
-
-  const buildSidebarModel = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly showAll?: boolean;
-  }): Promise<{ readonly nav: FactoryNavModel; readonly selectedObjective?: FactorySelectedObjectiveCard }> => {
-    await service.ensureBootstrap();
-    const repoRoot = service.git.repoRoot;
-    const explicitObjectiveId = input.objectiveId?.trim();
-    if (explicitObjectiveId) {
-      const explicitContext = await loadExplicitObjectiveContext({
-        profileId: input.profileId,
-        objectiveId: explicitObjectiveId,
-        selectedJobId: input.jobId,
-      });
-      const scopedObjectives = filterObjectivesByProfile(
-        explicitContext.objectives,
-        explicitContext.effectiveProfile.id,
-      );
-      return {
-        nav: {
-          mode: input.mode,
-          activeProfileId: explicitContext.effectiveProfile.id,
-          activeProfileLabel: explicitContext.effectiveProfile.label,
-          panel: input.panel,
-          inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-          profiles: buildProfileNav({
-            profiles: explicitContext.profiles,
-            selectedProfileId: explicitContext.effectiveProfile.id,
-            mode: input.mode,
-            chatId: input.chatId,
-            objectiveId: explicitObjectiveId,
-            runId: input.runId,
-            jobId: input.jobId,
-            panel: input.panel,
-            inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-            objectiveProfileId: explicitContext.selectedObjective?.profileId,
-          }),
-          objectives: buildObjectiveNavCards(
-            scopedObjectives,
-            explicitObjectiveId,
-            { includeArchivedSelectedOnly: true },
-          ),
-          showAll: input.showAll,
-        },
-        selectedObjective: explicitContext.selectedObjective,
-      };
-    }
-    const resolved = await resolveFactoryChatProfile({
-      repoRoot,
-      profileRoot,
-      requestedId: input.profileId,
-    });
-    const profilesPromise = loadFactoryProfiles();
-    let jobs: ReadonlyArray<QueueJob> = [];
-    if (!explicitObjectiveId && (input.jobId || input.runId)) {
-      jobs = await loadRecentJobs();
-    } else if (input.chatId) {
-      const initialSessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
-      const indexChain = await agentRuntime.chain(initialSessionStream);
-      if (collectRunIds(indexChain).length > 0) {
-        jobs = await loadRecentJobs();
-      }
-    }
-    const profiles = await profilesPromise;
-    const objectives = await service.listObjectives({ profileId: resolved.root.id });
-    const liveObjectives = objectives.filter((objective) => !objective.archivedAt);
-    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
-    const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
-    const resolvedObjectiveId = explicitObjectiveId ?? await resolveSessionObjectiveId({
-      repoRoot,
-      profileId: resolved.root.id,
-      chatId: input.chatId,
-      objectiveId: input.objectiveId,
-      selectedJob,
-      jobs,
-      liveObjectives,
-      allowExplicitFallback: true,
-    });
-    const stream = !explicitObjectiveId
-      ? resolveChatViewStream({
-          repoRoot,
-          profileId: resolved.root.id,
-          chatId: input.chatId,
-          objectiveId: resolvedObjectiveId,
-          job: selectedJob,
-        })
-      : undefined;
-    const scopedJobs = !explicitObjectiveId && stream
-      ? jobs.filter((job) => isRelevantShellJob(job, stream, resolvedObjectiveId))
-      : [];
-    if (selectedJob && !scopedJobs.some((job) => job.id === selectedJob.id)) {
-      scopedJobs.unshift(selectedJob);
-    }
-    const selectedObjective = objectives.find((objective) => objective.objectiveId === resolvedObjectiveId);
-    const selectedObjectiveCard = selectedObjective ? toFactorySelectedObjectiveCard(selectedObjective) : undefined;
-    const profileNav = buildProfileNav({
-      profiles,
-      selectedProfileId: resolved.root.id,
-      mode: input.mode,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: input.panel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      objectiveProfileId: selectedObjectiveCard?.profileId,
-    });
-    const objectiveNav: ReadonlyArray<FactoryChatObjectiveNav> = buildObjectiveNavCards(
-      objectives,
-      resolvedObjectiveId,
-      { includeArchivedSelectedOnly: true },
-    );
-    return {
-      nav: {
-        mode: input.mode,
-        activeProfileId: resolved.root.id,
-        activeProfileLabel: resolved.root.label,
-        chatId: input.chatId,
-        panel: input.panel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        profiles: profileNav,
-        objectives: objectiveNav,
-        showAll: input.showAll,
-      },
-      selectedObjective: selectedObjectiveCard,
-    };
-  };
-
   const buildMissingInspectorModel = (input: {
-    readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
     readonly activeProfileLabel?: string;
     readonly activeProfilePrimaryRole?: string;
@@ -1657,7 +505,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   }): FactoryInspectorModel => ({
-    mode: input.mode,
     panel: input.panel ?? "overview",
     inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
     activeProfileId: input.activeProfileId,
@@ -1681,283 +528,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     objectiveMissing: true,
   });
 
-  const buildProfileNav = (
-    input: {
-      readonly profiles: ReadonlyArray<FactoryChatProfile>;
-      readonly selectedProfileId: string;
-      readonly mode?: FactoryViewMode;
-      readonly chatId?: string;
-      readonly objectiveId?: string;
-      readonly runId?: string;
-      readonly jobId?: string;
-      readonly panel?: FactoryInspectorPanel;
-      readonly inspectorTab?: FactoryInspectorTab;
-      readonly focusKind?: "task" | "job";
-      readonly focusId?: string;
-      readonly objectiveProfileId?: string;
-    },
-  ): ReadonlyArray<FactoryChatProfileNav> => input.profiles.map((profile) => {
-    const overview = describeProfileMarkdown(profile);
-    const preserveSelection = input.objectiveId && input.objectiveProfileId === profile.id;
-    return {
-      id: profile.id,
-      label: profile.label,
-      href: buildChatLink({
-        mode: input.mode,
-        profileId: profile.id,
-        chatId: input.chatId,
-        objectiveId: preserveSelection ? input.objectiveId : undefined,
-        runId: preserveSelection ? input.runId : undefined,
-        jobId: preserveSelection ? input.jobId : undefined,
-        panel: preserveSelection ? input.panel : undefined,
-        inspectorTab: preserveSelection ? input.inspectorTab : undefined,
-        focusKind: preserveSelection ? input.focusKind : undefined,
-        focusId: preserveSelection ? input.focusId : undefined,
-      }),
-      summary: overview.summary,
-      selected: profile.id === input.selectedProfileId,
-    } satisfies FactoryChatProfileNav;
-  });
-
-  const buildUnselectedInspectorModel = (input: {
-    readonly mode?: FactoryViewMode;
-    readonly activeProfileId: string;
-    readonly activeProfileLabel?: string;
-    readonly activeProfilePrimaryRole?: string;
-    readonly activeProfileSummary?: string;
-    readonly activeProfileSoulSummary?: string;
-    readonly activeProfileProfileSummary?: string;
-    readonly activeProfileResponsibilities?: ReadonlyArray<string>;
-    readonly activeProfileSections?: ReturnType<typeof describeProfileMarkdown>["sections"];
-    readonly chatId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: "task" | "job";
-    readonly focusId?: string;
-  }): FactoryInspectorModel => ({
-    mode: input.mode,
-    panel: input.panel ?? "overview",
-    inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-    activeProfileId: input.activeProfileId,
-    activeProfileLabel: input.activeProfileLabel,
-    activeProfilePrimaryRole: input.activeProfilePrimaryRole,
-    activeProfileSummary: input.activeProfileSummary,
-    activeProfileSoulSummary: input.activeProfileSoulSummary,
-    activeProfileProfileSummary: input.activeProfileProfileSummary,
-    activeProfileResponsibilities: input.activeProfileResponsibilities,
-    activeProfileSections: input.activeProfileSections,
-    chatId: input.chatId,
-    runId: input.runId,
-    jobId: input.jobId,
-    focusKind: input.focusKind,
-    focusId: input.focusId,
-    activeCodex: undefined,
-    liveChildren: [],
-    activeRun: undefined,
-    workbench: undefined,
-    jobs: [],
-  });
-
-  const buildUnselectedThreadShellModel = (input: {
-    readonly mode?: FactoryViewMode;
-    readonly resolvedProfile: FactoryChatProfile;
-    readonly profiles: ReadonlyArray<FactoryChatProfile>;
-    readonly chatId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: "task" | "job";
-    readonly focusId?: string;
-    readonly showAll?: boolean;
-  }): FactoryChatShellModel => {
-    const activeProfileOverview = describeProfileMarkdown(input.resolvedProfile);
-    const inspectorPanel = input.panel ?? "overview";
-    const profileNav = buildProfileNav({
-      profiles: input.profiles,
-      selectedProfileId: input.resolvedProfile.id,
-      mode: input.mode,
-      chatId: input.chatId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-    });
-    const chatModel: FactoryChatIslandModel = {
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      chatId: input.chatId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileRoles: activeProfileOverview.roles,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileSections: activeProfileOverview.sections,
-      items: [],
-    };
-    const navModel: FactoryNavModel = {
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      chatId: input.chatId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      profiles: profileNav,
-      objectives: [],
-      showAll: input.showAll,
-    };
-    const inspectorModel = buildUnselectedInspectorModel({
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSections: activeProfileOverview.sections,
-      chatId: input.chatId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-    });
-    return {
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      chatId: input.chatId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-      chat: chatModel,
-      nav: navModel,
-      inspector: inspectorModel,
-    };
-  };
-
-  const buildMissingExplicitThreadShellModel = (input: {
-    readonly mode?: FactoryViewMode;
-    readonly resolvedProfile: FactoryChatProfile;
-    readonly profiles: ReadonlyArray<FactoryChatProfile>;
-    readonly objectives: Awaited<ReturnType<FactoryService["listObjectives"]>>;
-    readonly objectiveId: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: "task" | "job";
-    readonly focusId?: string;
-    readonly showAll?: boolean;
-  }): FactoryChatShellModel => {
-    const activeProfileOverview = describeProfileMarkdown(input.resolvedProfile);
-    const inspectorPanel = input.panel ?? "overview";
-    const profileNav = buildProfileNav({
-      profiles: input.profiles,
-      selectedProfileId: input.resolvedProfile.id,
-      mode: input.mode,
-      objectiveId: input.objectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-    });
-    const chatModel: FactoryChatIslandModel = {
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      objectiveId: input.objectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileRoles: activeProfileOverview.roles,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileSections: activeProfileOverview.sections,
-      items: [{
-        key: `missing-objective-${input.objectiveId}`,
-        kind: "system",
-        title: "Objective not found",
-        body: `The current thread URL points to Factory data that no longer exists.\n\nThread: ${input.objectiveId}`,
-        meta: "warning",
-      }],
-    };
-    const navModel: FactoryNavModel = {
-      mode: input.mode,
-        activeProfileId: input.resolvedProfile.id,
-        activeProfileLabel: input.resolvedProfile.label,
-        panel: inspectorPanel,
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        profiles: profileNav,
-        objectives: buildObjectiveNavCards(
-          filterObjectivesByProfile(input.objectives, input.resolvedProfile.id),
-          input.objectiveId,
-          { includeArchivedSelectedOnly: true },
-        ),
-      showAll: input.showAll,
-    };
-    const inspectorModel = buildMissingInspectorModel({
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
-      activeProfileSummary: activeProfileOverview.summary,
-      activeProfileSoulSummary: activeProfileOverview.soulSummary,
-      activeProfileProfileSummary: activeProfileOverview.profileSummary,
-      activeProfileResponsibilities: activeProfileOverview.responsibilities,
-      activeProfileSections: activeProfileOverview.sections,
-      objectiveId: input.objectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-    });
-    return {
-      mode: input.mode,
-      activeProfileId: input.resolvedProfile.id,
-      activeProfileLabel: input.resolvedProfile.label,
-      objectiveId: input.objectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      panel: inspectorPanel,
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      focusKind: input.focusKind,
-      focusId: input.focusId,
-      chat: chatModel,
-      nav: navModel,
-      inspector: inspectorModel,
-    };
-  };
-
   const buildExplicitInspectorModel = async (input: {
-    readonly mode?: FactoryViewMode;
     readonly profileId?: string;
     readonly chatId?: string;
     readonly objectiveId: string;
@@ -1997,7 +568,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
     if (!selectedObjective && (panel === "overview" || panel === "receipts")) {
       return buildMissingInspectorModel({
-        mode: input.mode,
         activeProfileId: effectiveProfile.id,
         objectiveId,
         runId: input.runId,
@@ -2011,7 +581,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
     if (panel === "overview") {
       return {
-        mode: input.mode,
         panel,
         inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
@@ -2039,7 +608,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
     if (panel === "receipts") {
       return {
-        mode: input.mode,
         panel,
         inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
@@ -2067,7 +635,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
     if (!detail) {
       return buildMissingInspectorModel({
-        mode: input.mode,
         activeProfileId: effectiveProfile.id,
         objectiveId,
         runId: input.runId,
@@ -2089,7 +656,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         updatedAt: job.updatedAt,
         selected: job.id === input.jobId,
         link: buildChatLink({
-          mode: input.mode,
           profileId: effectiveProfile.id,
           objectiveId,
           runId: jobAnyRunId(job),
@@ -2127,7 +693,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       liveChildren: [],
     });
       return {
-        mode: input.mode,
         panel,
         inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
         activeProfileId: effectiveProfile.id,
@@ -2150,74 +715,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     };
   };
 
-  const buildInspectorTabsModel = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: string;
-    readonly focusId?: string;
-  }): Promise<FactoryInspectorTabsModel> => {
-    await service.ensureBootstrap();
-    const explicitObjectiveId = input.objectiveId?.trim();
-    if (explicitObjectiveId) {
-      const explicitContext = await loadExplicitObjectiveContext({
-        profileId: input.profileId,
-        objectiveId: explicitObjectiveId,
-        selectedJobId: input.jobId,
-      });
-      return {
-        mode: input.mode,
-        panel: input.panel ?? "overview",
-        inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-        activeProfileId: explicitContext.effectiveProfile.id,
-        objectiveId: explicitObjectiveId,
-        runId: input.runId,
-        jobId: input.jobId,
-        focusKind: normalizeFocusKind(input.focusKind),
-        focusId: input.focusId,
-      };
-    }
-    const repoRoot = service.git.repoRoot;
-    const resolved = await resolveFactoryChatProfile({
-      repoRoot,
-      profileRoot,
-      requestedId: input.profileId,
-    });
-    const jobs = explicitObjectiveId
-      ? []
-      : await loadRecentJobs();
-    const jobsById = new Map(jobs.map((job) => [job.id, job] as const));
-    const selectedJob = input.jobId ? jobsById.get(input.jobId) : undefined;
-    const resolvedObjectiveId = explicitObjectiveId ?? await resolveSessionObjectiveId({
-      repoRoot,
-      profileId: resolved.root.id,
-      chatId: input.chatId,
-      objectiveId: input.objectiveId,
-      selectedJob,
-      jobs,
-      allowExplicitFallback: true,
-    });
-    return {
-      mode: input.mode,
-      panel: input.panel ?? "overview",
-      inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
-      activeProfileId: resolved.root.id,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      runId: input.runId,
-      jobId: input.jobId,
-      focusKind: normalizeFocusKind(input.focusKind),
-      focusId: input.focusId,
-    };
-  };
-
   const buildInspectorModel = async (input: {
-    readonly mode?: FactoryViewMode;
     readonly profileId?: string;
     readonly chatId?: string;
     readonly objectiveId?: string;
@@ -2231,7 +729,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const explicitObjectiveId = input.objectiveId?.trim();
     if (explicitObjectiveId) {
       return buildExplicitInspectorModel({
-        mode: input.mode,
         profileId: input.profileId,
         objectiveId: explicitObjectiveId,
         runId: input.runId,
@@ -2259,7 +756,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       objectiveId: input.objectiveId,
       selectedJob,
       jobs,
-      allowExplicitFallback: true,
     });
     const stream = resolveChatViewStream({
       repoRoot,
@@ -2331,7 +827,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const activeRunIndex = activeRunId ? runIds.indexOf(activeRunId) : -1;
     const activeRun = activeRunIndex >= 0
       ? summarizeActiveRunCard({
-          mode: input.mode,
           runId: activeRunId!,
           runChain: runChains[activeRunIndex]!,
           relatedJobs: activeRunJobs,
@@ -2341,7 +836,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           objectiveId: resolvedObjectiveId,
         })
       : selectedJob
-          ? summarizePendingRunJob(selectedJob, resolved.root.label, input.mode)
+          ? summarizePendingRunJob(selectedJob, resolved.root.label)
           : undefined;
     const relevantJobs = relevantQueueJobs
       .slice(0, 12)
@@ -2355,7 +850,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         updatedAt: job.updatedAt,
         selected: job.id === input.jobId,
         link: buildChatLink({
-          mode: input.mode,
           profileId: resolved.root.id,
           chatId: input.chatId,
           objectiveId: jobObjectiveId(job),
@@ -2394,7 +888,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       liveChildren,
     });
     return {
-      mode: input.mode,
       panel,
       inspectorTab: normalizedDefaultInspectorTab(input.inspectorTab),
       activeProfileId: resolved.root.id,
@@ -2415,95 +908,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     };
   };
 
-  const buildChatShellModelCached = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: "task" | "job";
-    readonly focusId?: string;
-    readonly showAll?: boolean;
-  }): Promise<FactoryChatShellModel> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
-    return withProjectionCache(
-      chatShellCache,
-      JSON.stringify({
-        input,
-        queueVersion: ctx.queue.snapshot?.().version ?? 0,
-        objectiveVersion,
-        sessionVersion,
-      }),
-      () => buildChatShellModel(input),
-    );
-  };
-
-  const buildSidebarModelCached = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly showAll?: boolean;
-  }): Promise<{ readonly nav: FactoryNavModel; readonly selectedObjective?: FactorySelectedObjectiveCard }> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
-    return withProjectionCache(
-      sidebarCache,
-      JSON.stringify({
-        input,
-        queueVersion: ctx.queue.snapshot?.().version ?? 0,
-        objectiveVersion,
-        sessionVersion,
-      }),
-      () => buildSidebarModel(input),
-    );
-  };
-
-  const buildInspectorTabsModelCached = async (input: {
-    readonly mode?: FactoryViewMode;
-    readonly profileId?: string;
-    readonly chatId?: string;
-    readonly objectiveId?: string;
-    readonly runId?: string;
-    readonly jobId?: string;
-    readonly panel?: FactoryInspectorPanel;
-    readonly inspectorTab?: FactoryInspectorTab;
-    readonly focusKind?: string;
-    readonly focusId?: string;
-  }): Promise<FactoryInspectorTabsModel> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
-    return withProjectionCache(
-      inspectorTabsCache,
-      JSON.stringify({
-        input,
-        queueVersion: ctx.queue.snapshot?.().version ?? 0,
-        objectiveVersion,
-        sessionVersion,
-      }),
-      () => buildInspectorTabsModel(input),
-    );
-  };
-
   const buildInspectorModelCached = async (input: {
-    readonly mode?: FactoryViewMode;
     readonly profileId?: string;
     readonly chatId?: string;
     readonly objectiveId?: string;
@@ -2552,6 +957,9 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     status: objective.status,
     phase: objective.phase,
     displayState: objective.displayState,
+    phaseDetail: objective.phaseDetail,
+    statusAuthority: objective.statusAuthority,
+    hasAuthoritativeLiveJob: objective.hasAuthoritativeLiveJob,
     blockedReason: objective.blockedReason,
     blockedExplanation: objective.blockedExplanation,
     summary: objective.bottomLine ?? objective.summary ?? objective.nextAction,
@@ -2820,7 +1228,9 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           items: [selectedObjectiveNavCard(selectedObjective)],
         }
       : undefined;
-    const objectiveBlockSections = objectiveSections;
+    const objectiveBlockSections = selectedObjectiveSection
+      ? [selectedObjectiveSection, ...objectiveSections]
+      : objectiveSections;
     const activitySection: FactoryWorkbenchSectionModel = {
       key: "activity",
       title: focus || input.activeRun ? "Execution Log" : "Timeline",
@@ -2877,14 +1287,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         key: "activity",
         layout: "full",
         sections: [activitySection],
-      });
-    }
-
-    if (selectedObjectiveSection) {
-      blocks.push({
-        key: "selected-overflow",
-        layout: "full",
-        sections: [selectedObjectiveSection],
       });
     }
 
@@ -2986,15 +1388,47 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
       liveOutput,
     });
-    const sessionRuntime = await buildWorkbenchSessionRuntime({
-      repoRoot,
-      profileId: effectiveProfile.id,
-      profileLabel: effectiveProfile.label,
-      chatId: input.chatId,
-      objectiveId: resolvedObjectiveId,
-      seedJobs: recentJobs,
-    });
-    const activeCodex = sessionRuntime.activeCodex ?? (recentJobs.length > 0 ? buildActiveCodexCard(recentJobs) : undefined);
+    const sessionStream = input.chatId
+      ? factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
+      : undefined;
+    const sessionChatContext = sessionStream
+      ? await loadChatContextProjectionForSession({
+          sessionStream,
+          fallbackChain: chatProjectionDataDir ? undefined : await agentRuntime.chain(sessionStream),
+        })
+      : undefined;
+    const activeRun = (() => {
+      const projectedRuns = resolvedObjectiveId
+        ? (sessionChatContext?.runs ?? []).filter((run) => run.objectiveId === resolvedObjectiveId)
+        : (sessionChatContext?.runs ?? []);
+      const latestRun = projectedRuns.at(-1);
+      if (!latestRun) return undefined;
+      const latestAssistantMessage = [...(sessionChatContext?.conversation ?? [])]
+        .reverse()
+        .find((message) => message.runId === latestRun.runId && message.role === "assistant");
+      const summary = latestAssistantMessage?.text?.trim()
+        || (workbench?.focus?.summary?.trim() || undefined)
+        || `${effectiveProfile.label} is working on the selected objective.`;
+      return {
+        runId: latestRun.runId,
+        profileLabel: effectiveProfile.label,
+        status: latestRun.status ?? (latestRun.terminal ? "completed" : "running"),
+        summary,
+        updatedAt: latestRun.updatedAt,
+        link: buildChatLink({
+          profileId: effectiveProfile.id,
+          chatId: input.chatId,
+          objectiveId: resolvedObjectiveId,
+          runId: latestRun.runId,
+          focusKind: workbench?.focus?.focusKind,
+          focusId: workbench?.focus?.focusId,
+        }),
+      } satisfies FactoryLiveRunCard;
+    })();
+    const activeCodex = recentJobs.length > 0 ? buildActiveCodexCard(recentJobs) : undefined;
+    const liveChildren = sessionStream
+      ? buildLiveChildCards(recentJobs, sessionStream, resolvedObjectiveId)
+      : [];
     const filters = workbenchFilterModels(board, input.filter);
     const blockedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "needs_attention")
@@ -3022,10 +1456,13 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         : [],
     ).slice(0, 10);
     const hasActiveExecution = Boolean(
-      sessionRuntime.activeRun
-      || workbench?.focus?.active
+      activeRun
+      ||
+      workbench?.focus?.active
       || workbench?.focus?.status === "running"
-      || workbench?.focus?.status === "queued",
+      || workbench?.focus?.status === "queued"
+      || activeCodex?.running
+      || liveChildren.some((child) => child.running),
     );
     const detailTab = input.detailTab === "review" || input.detailTab === "queue" || input.detailTab === "action"
       ? input.detailTab
@@ -3044,8 +1481,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       filters,
       selectedObjective,
       activeCodex,
-      liveChildren: sessionRuntime.liveChildren,
-      activeRun: sessionRuntime.activeRun,
+      liveChildren,
+      activeRun,
       workbench,
       board,
       activeObjectives,
@@ -3057,12 +1494,62 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         runningObjectives,
         queuedObjectives,
         pastObjectives,
-        activeRun: sessionRuntime.activeRun,
+        activeRun,
         workbench,
         detailTab,
         filter: input.filter,
       }),
     };
+  };
+
+  const buildWorkbenchSessionRuntimeCached = async (input: {
+    readonly repoRoot: string;
+    readonly profileId: string;
+    readonly profileLabel: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly seedJobs?: ReadonlyArray<QueueJob>;
+  }): Promise<Awaited<ReturnType<typeof buildWorkbenchSessionRuntime>>> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    return withProjectionCache(
+      workbenchSessionRuntimeCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        sessionVersion,
+      }),
+      () => buildWorkbenchSessionRuntime(input),
+    );
+  };
+
+  const buildWorkbenchWorkspaceModelCached = async (input: {
+    readonly profileId?: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): Promise<FactoryWorkbenchWorkspaceModel> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    return withProjectionCache(
+      workbenchWorkspaceCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        objectiveVersion,
+        sessionVersion,
+      }),
+      () => buildWorkbenchWorkspaceModel(input),
+    );
   };
 
   const buildWorkbenchChatModel = async (input: {
@@ -3079,26 +1566,77 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       requestedId: input.profileId,
     });
     const activeProfileOverview = describeProfileMarkdown(resolved.root);
-    const runtime = await buildWorkbenchSessionRuntime({
-      repoRoot,
-      profileId: resolved.root.id,
-      profileLabel: resolved.root.label,
-      chatId: input.chatId,
-      objectiveId: input.selectedObjectiveId,
+    const userPreferencesSummary = memoryTools
+      ? await summarizeUserPreferences({
+          memoryTools,
+          repoKey: repoKeyForRoot(repoRoot),
+          runId: "factory_workbench_chat",
+          actor: "factory-ui",
+        })
+      : undefined;
+    const sessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
+    const fallbackSessionChain = chatProjectionDataDir
+      ? undefined
+      : await agentRuntime.chain(sessionStream);
+    const chatContext = await loadChatContextProjectionForSession({
+      sessionStream,
+      fallbackChain: fallbackSessionChain,
     });
-    const jobsById = new Map(runtime.scopedJobs.map((job) => [job.id, job] as const));
-    const discoveredObjectiveId = latestObjectiveIdFromRunChains(runtime.runChains)
-      ?? (runtime.stream
-        ? latestObjectiveIdFromJobs(runtime.scopedJobs, runtime.stream, input.chatId)
-        : undefined);
+    const projectedRuns = chatContext?.runs ?? [];
+    const canScopeProjectedConversation = !input.selectedObjectiveId
+      || projectedRuns.some((run) => run.objectiveId === input.selectedObjectiveId);
+    if (!chatContext || !canScopeProjectedConversation) {
+      const runtime = await buildWorkbenchSessionRuntimeCached({
+        repoRoot,
+        profileId: resolved.root.id,
+        profileLabel: resolved.root.label,
+        chatId: input.chatId,
+        objectiveId: input.selectedObjectiveId,
+      });
+      const jobsById = new Map(runtime.scopedJobs.map((job) => [job.id, job] as const));
+      const discoveredObjectiveId = latestObjectiveIdFromRunChains(runtime.runChains)
+        ?? (runtime.stream
+          ? latestObjectiveIdFromJobs(runtime.scopedJobs, runtime.stream, input.chatId)
+          : undefined);
+      return {
+        activeProfileId: resolved.root.id,
+        activeProfileLabel: resolved.root.label,
+        chatId: input.chatId,
+        objectiveId: input.selectedObjectiveId,
+        runId: runtime.activeRunId,
+        knownRunIds: runtime.runIds,
+        terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
+        inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+        activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+        activeProfileRoles: activeProfileOverview.roles,
+        activeProfileResponsibilities: activeProfileOverview.responsibilities,
+        activeProfileSummary: activeProfileOverview.summary,
+        activeProfileSoulSummary: activeProfileOverview.soulSummary,
+        activeProfileProfileSummary: activeProfileOverview.profileSummary,
+        activeProfileSections: activeProfileOverview.sections,
+        activeProfileTools: resolved.toolAllowlist,
+        activeCodex: runtime.activeCodex,
+        liveChildren: runtime.liveChildren,
+        activeRun: runtime.activeRun,
+        userPreferencesSummary,
+        jobs: [],
+        chatContext,
+        items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
+      };
+    }
+    const scopedRuns = input.selectedObjectiveId
+      ? projectedRuns.filter((run) => run.objectiveId === input.selectedObjectiveId)
+      : projectedRuns;
+    const discoveredObjectiveId = input.selectedObjectiveId
+      ?? chatContext.bindings.objectiveId;
     return {
       activeProfileId: resolved.root.id,
       activeProfileLabel: resolved.root.label,
       chatId: input.chatId,
-      objectiveId: input.selectedObjectiveId,
-      runId: runtime.activeRunId,
-      knownRunIds: runtime.runIds,
-      terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
+      objectiveId: discoveredObjectiveId,
+      runId: scopedRuns.at(-1)?.runId ?? chatContext.bindings.latestRunId,
+      knownRunIds: scopedRuns.map((run) => run.runId),
+      terminalRunIds: scopedRuns.filter((run) => run.terminal).map((run) => run.runId),
       inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       activeProfilePrimaryRole: activeProfileOverview.primaryRole,
       activeProfileRoles: activeProfileOverview.roles,
@@ -3108,12 +1646,40 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       activeProfileProfileSummary: activeProfileOverview.profileSummary,
       activeProfileSections: activeProfileOverview.sections,
       activeProfileTools: resolved.toolAllowlist,
-      activeCodex: runtime.activeCodex,
-      liveChildren: runtime.liveChildren,
-      activeRun: runtime.activeRun,
+      activeCodex: undefined,
+      liveChildren: [],
+      activeRun: undefined,
+      userPreferencesSummary,
       jobs: [],
-      items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
+      chatContext,
+      items: buildChatItemsFromConversation(chatContext.conversation, {
+        runs: projectedRuns,
+        selectedObjectiveId: input.selectedObjectiveId,
+      }),
     };
+  };
+
+  const buildWorkbenchChatModelCached = async (input: {
+    readonly profileId: string;
+    readonly chatId: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly selectedObjectiveId?: string;
+  }): Promise<FactoryChatIslandModel> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    return withProjectionCache(
+      workbenchChatCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        objectiveVersion,
+        sessionVersion,
+      }),
+      () => buildWorkbenchChatModel(input),
+    );
   };
 
   const buildWorkbenchPageModel = async (input: {
@@ -3126,7 +1692,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
   }): Promise<FactoryWorkbenchPageModel> => {
-    const workspace = await buildWorkbenchWorkspaceModel({
+    const workspace = await buildWorkbenchWorkspaceModelCached({
       profileId: input.profileId,
       chatId: input.chatId,
       objectiveId: input.objectiveId,
@@ -3141,21 +1707,12 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       chatId: input.chatId,
       objective: workspace.selectedObjective,
     });
-    const [baseChat, inspector, profiles] = await Promise.all([
-      buildWorkbenchChatModel({
+    const [baseChat, profiles] = await Promise.all([
+      buildWorkbenchChatModelCached({
         profileId: workspace.activeProfileId,
         chatId: input.chatId,
         inspectorTab: input.inspectorTab,
         selectedObjectiveId: workspace.objectiveId,
-      }),
-      buildInspectorModelCached({
-        mode: "default",
-        profileId: workspace.activeProfileId,
-        chatId: input.chatId,
-        objectiveId: workspace.objectiveId,
-        inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
-        focusKind: workspace.focusKind,
-        focusId: workspace.focusId,
       }),
       loadFactoryProfiles(),
     ]);
@@ -3199,7 +1756,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       })),
       workspace,
       chat,
-      inspector,
     };
   };
 
@@ -3230,42 +1786,103 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     );
   };
 
-  const hydrateInspectorPanel = async (model: FactoryInspectorModel): Promise<FactoryInspectorModel> => {
-    const objectiveId = model.objectiveId ?? model.selectedObjective?.objectiveId;
-    const panel = model.panel;
-    let analysis: FactoryInspectorModel["analysis"];
-    let receipts: FactoryInspectorModel["receipts"];
-    let tasks: FactoryInspectorModel["tasks"];
+  const loadWorkbenchRequestModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchPageModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const model = await buildWorkbenchPageModelCached(request);
+    return { request, model };
+  };
 
-    if (objectiveId) {
-      if (panel === "analysis" && !model.analysis) {
-        analysis = await readObjectiveAnalysis(service.dataDir, objectiveId).catch(() => undefined);
-      } else if (panel === "receipts" && !model.receipts) {
-        try {
-          receipts = await service.listObjectiveReceipts(objectiveId, 100);
-        } catch {
-          // Ignore if not initialized
-        }
-      } else if (panel === "execution") {
-        tasks = model.tasks;
-        if (!tasks) {
-          try {
-            const detail = await service.getObjective(objectiveId);
-            tasks = detail.tasks;
-          } catch {
-            // Ignore if not initialized
-          }
-        }
-      }
-    }
+  const loadWorkbenchRequestWorkspaceModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchWorkspaceModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const model = await buildWorkbenchWorkspaceModelCached(request);
+    return { request, model };
+  };
 
+  const loadWorkbenchRequestHeaderModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchHeaderIslandModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const workspace = await buildWorkbenchWorkspaceModelCached(request);
+    const profiles = await loadFactoryProfiles();
+    const activeProfile = profiles.find((profile) => profile.id === workspace.activeProfileId);
+    const activeProfileOverview = !workspace.selectedObjective && activeProfile
+      ? describeProfileMarkdown(activeProfile)
+      : undefined;
+    const currentRole = activeProfileOverview?.primaryRole
+      ?? activeProfileOverview?.roles?.[0]
+      ?? activeProfileOverview?.summary;
+    const currentPresence = (() => {
+      const summary = activeProfileOverview?.summary?.trim();
+      const role = currentRole?.trim();
+      return summary && summary !== role ? summary : undefined;
+    })();
     return {
-      ...model,
-      panel,
-      analysis: analysis ?? model.analysis,
-      receipts: receipts ?? model.receipts,
-      tasks: tasks ?? model.tasks,
+      request,
+      model: {
+        activeProfileId: workspace.activeProfileId,
+        activeProfileLabel: workspace.activeProfileLabel,
+        profiles: profiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          href: buildWorkbenchLink({
+            profileId: profile.id,
+            chatId: request.chatId,
+            objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
+            inspectorTab: workspace.selectedObjective?.profileId === profile.id
+              ? normalizedWorkbenchInspectorTab(request.inspectorTab)
+              : undefined,
+            detailTab: workspace.detailTab,
+            focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
+            focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
+            filter: workspace.filter,
+          }),
+          summary: describeProfileMarkdown(profile).summary,
+          selected: profile.id === workspace.activeProfileId,
+        })),
+        workspace,
+        currentRole,
+        currentPresence,
+      },
     };
+  };
+
+  const loadWorkbenchRequestChatModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryChatIslandModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    if (request.inspectorTab === "chat") {
+      const model = await buildWorkbenchChatModelCached({
+        profileId: request.profileId,
+        chatId: request.chatId,
+        inspectorTab: request.inspectorTab,
+        selectedObjectiveId: request.objectiveId,
+      });
+      return { request, model };
+    }
+    const workspace = await buildWorkbenchWorkspaceModelCached(request);
+    const model = await buildWorkbenchChatModelCached({
+      profileId: workspace.activeProfileId,
+      chatId: request.chatId,
+      inspectorTab: request.inspectorTab,
+      selectedObjectiveId: workspace.objectiveId,
+    });
+    return { request, model };
   };
 
   return {
@@ -3277,723 +1894,38 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       events: "/factory/events",
     },
     register: (app: Hono) => {
-      app.get("/factory/control", async (c) => {
-        const url = new URL(c.req.raw.url);
-        const location = `/factory${url.search}`;
-        return new Response(null, {
-          status: 303,
-          headers: {
-            Location: location,
-            "Cache-Control": "no-store",
-          },
-        });
+      registerFactoryUiRoutes({
+        app,
+        wrap,
+        loadWorkbenchRequestModel,
+        loadWorkbenchRequestHeaderModel,
+        loadWorkbenchRequestWorkspaceModel,
+        loadWorkbenchRequestChatModel,
       });
-
-      app.get("/factory/workbench", async (c) => wrap(
-        async () => {
-          const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
-          const requestedChat = requestedChatId(c.req.raw) ?? makeFactoryChatId();
-          const requestedObjective = requestedObjectiveId(c.req.raw);
-          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
-          const requestedDetail = normalizedWorkbenchDetailTab(
-            requestedWorkbenchDetailTab(c.req.raw),
-            Boolean(requestedObjective),
-          );
-          const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
-          const requestedFocusIdValue = requestedFocusId(c.req.raw);
-          const requestedFilter = requestedWorkbenchFilter(c.req.raw);
-          const model = await buildWorkbenchPageModelCached({
-            profileId: requestedProfile,
-            chatId: requestedChat,
-            objectiveId: requestedObjective,
-            inspectorTab: requestedInspector,
-            detailTab: requestedDetail,
-            focusKind: requestedFocusKindValue,
-            focusId: requestedFocusIdValue,
-            filter: requestedFilter,
-          });
-          return {
-            redirect: buildWorkbenchLink({
-              profileId: model.activeProfileId,
-              chatId: requestedChat,
-              objectiveId: model.objectiveId ?? requestedObjective,
-              inspectorTab: model.inspectorTab,
-              detailTab: model.detailTab,
-              filter: model.filter,
-              focusKind: model.focusKind,
-              focusId: model.focusId,
-            }),
-          };
-        },
-        (result) => new Response(null, {
-          status: 303,
-          headers: {
-            Location: result.redirect,
-            "Cache-Control": "no-store",
-          },
-        })
-      ));
-
-      app.post("/factory/compose", async (c) => {
-        const req = c.req.raw;
-        try {
-          const body = await readRecordBody(req, (message) => new FactoryServiceError(400, message));
-          const prompt = optionalTrimmedString(body.prompt);
-          if (!prompt) return navigationError(req, 400, "Enter a chat message or slash command.");
-
-          const profileId = requestedProfileId(req) ?? "generalist";
-          const chatId = requestedChatId(req) ?? makeFactoryChatId();
-          const objectiveId = requestedObjectiveId(req);
-          const inspectorTab = normalizedWorkbenchInspectorTab(requestedInspectorTab(req));
-          const detailTab = normalizedWorkbenchDetailTab(requestedWorkbenchDetailTab(req), Boolean(objectiveId));
-          const focusKind = normalizeFocusKind(requestedFocusKind(req));
-          const focusId = requestedFocusId(req);
-          const filter = requestedWorkbenchFilter(req);
-          const resolved = await resolveFactoryChatProfile({
-            repoRoot: service.git.repoRoot,
-            profileRoot,
-            requestedId: profileId,
-          });
-
-          if (prompt.startsWith("/")) {
-            const parsed = parseComposerDraft(prompt, objectiveId);
-            if (!parsed.ok) return navigationError(req, 400, parsed.error);
-            const command = parsed.command;
-            switch (command.type) {
-              case "help":
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                  focusKind,
-                  focusId,
-                }), {
-                  chatId,
-                  objectiveId,
-                  focusKind,
-                  focusId,
-                });
-              case "watch": {
-                const nextObjectiveId = await resolveWatchedObjectiveId(command.objectiveId ?? objectiveId);
-                if (!nextObjectiveId) {
-                  return navigationError(req, 404, command.objectiveId
-                    ? `Objective '${command.objectiveId}' was not found.`
-                    : "Select an objective or provide one to /watch.");
-                }
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: nextObjectiveId,
-                  inspectorTab,
-                  detailTab: "action",
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: nextObjectiveId,
-                });
-              }
-              case "new": {
-                const targetProfileId = objectiveProfileIdForPrompt({
-                  prompt: command.prompt,
-                  resolvedProfile: resolved.root,
-                  profiles: await loadFactoryProfiles(),
-                });
-                const created = await service.createObjective({
-                  title: command.title ?? "Factory objective",
-                  prompt: command.prompt,
-                  objectiveMode: command.objectiveMode,
-                  profileId: targetProfileId,
-                  startImmediately: true,
-                });
-                ctx.sse.publish("factory", created.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: created.objectiveId,
-                  inspectorTab,
-                  detailTab: "action",
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: created.objectiveId,
-                });
-              }
-              case "react": {
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before reacting to it.");
-                const detail = await service.reactObjectiveWithNote(objectiveId, command.message);
-                ctx.sse.publish("factory", detail.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                });
-              }
-              case "promote": {
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before promoting it.");
-                const detail = await service.promoteObjective(objectiveId);
-                ctx.sse.publish("factory", detail.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                });
-              }
-              case "cancel": {
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before canceling it.");
-                const detail = await service.cancelObjective(objectiveId, command.reason ?? "canceled from workbench");
-                ctx.sse.publish("factory", detail.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                });
-              }
-              case "cleanup": {
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before cleaning workspaces.");
-                const detail = await service.cleanupObjectiveWorkspaces(objectiveId);
-                ctx.sse.publish("factory", detail.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                });
-              }
-              case "archive": {
-                if (!objectiveId) return navigationError(req, 409, "Select an objective before archiving it.");
-                const detail = await service.archiveObjective(objectiveId);
-                ctx.sse.publish("factory", detail.objectiveId);
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                }), {
-                  chatId,
-                  objectiveId: detail.objectiveId,
-                });
-              }
-              case "abort-job": {
-                const job = await resolveComposerJob(objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
-                const queued = await service.queueJobAbort(
-                  job.id,
-                  command.reason ?? "abort requested from workbench",
-                  "factory.workbench",
-                );
-                return workbenchNavigationResponse(req, buildWorkbenchLink({
-                  profileId,
-                  chatId,
-                  objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
-                  inspectorTab,
-                  detailTab,
-                  filter,
-                  focusKind: "job",
-                  focusId: queued.job.id,
-                }), {
-                  chatId,
-                  objectiveId: jobObjectiveId(queued.job) ?? objectiveId,
-                  focusKind: "job",
-                  focusId: queued.job.id,
-                });
-              }
-            }
-          }
-
-          const stream = factoryChatSessionStream(service.git.repoRoot, resolved.root.id, chatId);
-          const runId = makeFactoryRunId();
-          const created = await ctx.queue.enqueue({
-            agentId: "factory",
-            lane: "chat",
-            sessionKey: `factory-chat:${stream}`,
-            singletonMode: "steer",
-            maxAttempts: 1,
-            payload: {
-              kind: "factory.run",
-              stream,
-              runId,
-              problem: prompt,
-              profileId: resolved.root.id,
-              chatId,
-              ...(objectiveId ? { objectiveId } : {}),
-            },
-          });
-          ctx.sse.publish("jobs", created.id);
-          return workbenchNavigationResponse(req, buildWorkbenchLink({
-            profileId,
-            chatId,
-            objectiveId,
-            inspectorTab,
-            detailTab,
-            filter,
-            focusKind,
-            focusId,
-          }), {
-            chatId,
-            objectiveId,
-            focusKind,
-            focusId,
-            live: {
-              profileId,
-              chatId,
-              objectiveId,
-              runId,
-              jobId: created.id,
-            },
-          });
-        } catch (err) {
-          if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);
-          const message = err instanceof Error ? err.message : "factory server error";
-          console.error(err);
-          return navigationError(req, 500, message);
-        }
+      registerFactoryApiRoutes({
+        app,
+        wrap,
+        ctx,
+        service,
+        profileRoot,
+        loadFactoryProfiles,
+        loadWorkbenchRequestModel,
+        loadWorkbenchRequestWorkspaceModel,
+        resolveWatchedObjectiveId,
+        resolveComposerJob,
+        assertComposeDispatchActionAllowed,
+        assertComposeCreateModeAllowed,
+        resolveChatEventSubscriptions,
+        subscribeChatEventStream,
+        memoryTools,
+        dataDir: chatProjectionDataDir,
       });
-
-      app.get("/factory/events", async (c) => wrap(
-        async () => {
-          return resolveChatEventSubscriptions({
-            profileId: requestedProfileId(c.req.raw) ?? "generalist",
-            chatId: requestedChatId(c.req.raw),
-            objectiveId: requestedObjectiveId(c.req.raw),
-            runId: requestedRunId(c.req.raw),
-            jobId: requestedJobId(c.req.raw),
-          });
-        },
-        (body) => subscribeChatEventStream(body, c.req.raw.signal)
-      ));
-
-      app.get("/factory/chat/events", async (c) => wrap(
-        async () => resolveChatEventSubscriptions({
-          profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          chatId: requestedChatId(c.req.raw),
-          objectiveId: requestedObjectiveId(c.req.raw),
-          runId: requestedRunId(c.req.raw),
-          jobId: requestedJobId(c.req.raw),
-        }),
-        (body) => subscribeChatEventStream(body, c.req.raw.signal)
-      ));
-
-      app.get("/factory/background/events", async (c) => wrap(
-        async () => {
-          const chatId = requestedChatId(c.req.raw) ?? makeFactoryChatId();
-          const inspectorTab = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
-          const model = await buildWorkbenchPageModelCached({
-            profileId: requestedProfileId(c.req.raw) ?? "generalist",
-            chatId,
-            objectiveId: requestedObjectiveId(c.req.raw),
-            inspectorTab,
-            detailTab: requestedWorkbenchDetailTab(c.req.raw),
-            focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
-            focusId: requestedFocusId(c.req.raw),
-            filter: requestedWorkbenchFilter(c.req.raw),
-          });
-          return {
-            profileId: model.activeProfileId,
-            objectiveId: model.objectiveId,
-          };
-        },
-        (body) => ctx.sse.subscribeMany([
-          { topic: "profile-board" as const, stream: body.profileId },
-          ...(body.objectiveId ? [{ topic: "objective-runtime" as const, stream: body.objectiveId }] : []),
-        ], c.req.raw.signal)
-      ));
-
-      app.get("/factory/island/workbench/header", async (c) => wrap(
-        async () => buildWorkbenchPageModelCached({
-          profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
-          objectiveId: requestedObjectiveId(c.req.raw),
-          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
-          detailTab: requestedWorkbenchDetailTab(c.req.raw),
-          focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
-          focusId: requestedFocusId(c.req.raw),
-          filter: requestedWorkbenchFilter(c.req.raw),
-        }),
-        (model) => html(factoryWorkbenchHeaderIsland(model))
-      ));
-
-      app.get("/factory/island/workbench/block", async (c) => wrap(
-        async () => {
-          const model = await buildWorkbenchPageModelCached({
-            profileId: requestedProfileId(c.req.raw) ?? "generalist",
-            chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
-            objectiveId: requestedObjectiveId(c.req.raw),
-            inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
-            detailTab: requestedWorkbenchDetailTab(c.req.raw),
-            focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
-            focusId: requestedFocusId(c.req.raw),
-            filter: requestedWorkbenchFilter(c.req.raw),
-          });
-          const blockKey = optionalTrimmedString(c.req.query("block"));
-          return {
-            model,
-            blockKey,
-          };
-        },
-        ({ model, blockKey }) => html(factoryWorkbenchBlockIsland(model.workspace, {
-          profileId: model.activeProfileId,
-          chatId: model.chatId,
-          objectiveId: model.objectiveId,
-          inspectorTab: model.inspectorTab,
-          detailTab: model.detailTab,
-          focusKind: model.focusKind,
-          focusId: model.focusId,
-          filter: model.filter,
-        }, blockKey ?? "summary"))
-      ));
-
-      app.get("/factory/island/workbench", async (c) => wrap(
-        async () => buildWorkbenchPageModelCached({
-          profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
-          objectiveId: requestedObjectiveId(c.req.raw),
-          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
-          detailTab: requestedWorkbenchDetailTab(c.req.raw),
-          focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
-          focusId: requestedFocusId(c.req.raw),
-          filter: requestedWorkbenchFilter(c.req.raw),
-        }),
-        (model) => html(factoryWorkbenchWorkspaceIsland(model.workspace, {
-          profileId: model.activeProfileId,
-          chatId: model.chatId,
-          objectiveId: model.objectiveId,
-          inspectorTab: model.inspectorTab,
-          detailTab: model.detailTab,
-          focusKind: model.focusKind,
-          focusId: model.focusId,
-          filter: model.filter,
-        }))
-      ));
-
-      app.get("/factory/island/chat", async (c) => wrap(
-        async () => buildWorkbenchPageModelCached({
-          profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          chatId: requestedChatId(c.req.raw) ?? makeFactoryChatId(),
-          objectiveId: requestedObjectiveId(c.req.raw),
-          inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw)),
-          detailTab: requestedWorkbenchDetailTab(c.req.raw),
-          focusKind: normalizeFocusKind(requestedFocusKind(c.req.raw)),
-          focusId: requestedFocusId(c.req.raw),
-          filter: requestedWorkbenchFilter(c.req.raw),
-        }),
-        (model) => html(factoryWorkbenchChatIsland(model.chat, {
-          profileId: model.activeProfileId,
-          chatId: model.chatId,
-          objectiveId: model.objectiveId,
-          inspectorTab: model.inspectorTab,
-          detailTab: model.detailTab,
-          focusKind: model.focusKind,
-          focusId: model.focusId,
-          filter: model.filter,
-        }))
-      ));
-
-      app.get("/factory/api/workbench-shell", async (c) => wrap(
-        async () => {
-          const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
-          const requestedChat = requestedChatId(c.req.raw) ?? makeFactoryChatId();
-          const requestedObjective = requestedObjectiveId(c.req.raw);
-          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
-          const requestedDetail = normalizedWorkbenchDetailTab(
-            requestedWorkbenchDetailTab(c.req.raw),
-            Boolean(requestedObjective),
-          );
-          const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
-          const requestedFocusIdValue = requestedFocusId(c.req.raw);
-          const requestedFilter = requestedWorkbenchFilter(c.req.raw);
-          const model = await buildWorkbenchPageModelCached({
-            profileId: requestedProfile,
-            chatId: requestedChat,
-            objectiveId: requestedObjective,
-            inspectorTab: requestedInspector,
-            detailTab: requestedDetail,
-            focusKind: requestedFocusKindValue,
-            focusId: requestedFocusIdValue,
-            filter: requestedFilter,
-          });
-          const shouldRedirectForProfile = (
-            requestedProfileId(c.req.raw) !== undefined
-            || Boolean(requestedObjective)
-          ) && requestedProfile !== model.activeProfileId;
-          const shouldRedirectForObjective = Boolean(requestedObjective) && requestedObjective !== model.objectiveId;
-          const shouldRedirectForFocus = (
-            requestedFocusKindValue !== undefined
-            || requestedFocusIdValue !== undefined
-          ) && (
-            requestedFocusKindValue !== model.focusKind
-            || requestedFocusIdValue !== model.focusId
-          );
-          const shouldRedirectForInspector = requestedInspector !== model.inspectorTab;
-          const shouldRedirectForDetail = requestedDetail !== model.detailTab;
-          const shouldRedirectForFilter = requestedFilter !== model.filter;
-          const snapshot = buildFactoryWorkbenchShellSnapshot(model);
-          return {
-            snapshot: (
-              shouldRedirectForProfile
-              || shouldRedirectForObjective
-              || shouldRedirectForInspector
-              || shouldRedirectForDetail
-              || shouldRedirectForFocus
-              || shouldRedirectForFilter
-            )
-              ? {
-                  ...snapshot,
-                  location: buildWorkbenchLink({
-                    profileId: model.activeProfileId,
-                    chatId: requestedChat,
-                    objectiveId: model.objectiveId,
-                    inspectorTab: model.inspectorTab,
-                    detailTab: model.detailTab,
-                    focusKind: model.focusKind,
-                    focusId: model.focusId,
-                    filter: model.filter,
-                  }),
-                }
-              : snapshot,
-          };
-        },
-        (result) => json(200, result.snapshot)
-      ));
-
-      app.get("/factory", async (c) => wrap(
-        async () => {
-          const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
-          const explicitChat = requestedChatId(c.req.raw);
-          const requestedChat = explicitChat ?? makeFactoryChatId();
-          const requestedObjective = requestedObjectiveId(c.req.raw);
-          const requestedInspector = normalizedWorkbenchInspectorTab(requestedInspectorTab(c.req.raw));
-          const requestedDetail = normalizedWorkbenchDetailTab(
-            requestedWorkbenchDetailTab(c.req.raw),
-            Boolean(requestedObjective),
-          );
-          const requestedFocusKindValue = normalizeFocusKind(requestedFocusKind(c.req.raw));
-          const requestedFocusIdValue = requestedFocusId(c.req.raw);
-          const requestedFilter = requestedWorkbenchFilter(c.req.raw);
-          const model = await buildWorkbenchPageModelCached({
-            profileId: requestedProfile,
-            chatId: requestedChat,
-            objectiveId: requestedObjective,
-            inspectorTab: requestedInspector,
-            detailTab: requestedDetail,
-            focusKind: requestedFocusKindValue,
-            focusId: requestedFocusIdValue,
-            filter: requestedFilter,
-          });
-          const shouldRedirectForProfile = (
-            requestedProfileId(c.req.raw) !== undefined
-            || Boolean(requestedObjective)
-          ) && requestedProfile !== model.activeProfileId;
-          const shouldRedirectForObjective = Boolean(requestedObjective) && requestedObjective !== model.objectiveId;
-          const shouldRedirectForFocus = (
-            requestedFocusKindValue !== undefined
-            || requestedFocusIdValue !== undefined
-          ) && (
-            requestedFocusKindValue !== model.focusKind
-            || requestedFocusIdValue !== model.focusId
-          );
-          const shouldRedirectForInspector = requestedInspector !== model.inspectorTab;
-          const shouldRedirectForDetail = requestedDetail !== model.detailTab;
-          const shouldRedirectForFilter = requestedFilter !== model.filter;
-          if (
-            shouldRedirectForProfile
-            || shouldRedirectForObjective
-            || shouldRedirectForInspector
-            || shouldRedirectForDetail
-            || shouldRedirectForFocus
-            || shouldRedirectForFilter
-          ) {
-            return {
-              redirect: buildWorkbenchLink({
-                profileId: model.activeProfileId,
-                chatId: requestedChat,
-                objectiveId: model.objectiveId,
-                inspectorTab: model.inspectorTab,
-                detailTab: model.detailTab,
-                focusKind: model.focusKind,
-                focusId: model.focusId,
-                filter: model.filter,
-              }),
-            };
-          }
-          return {
-            model,
-          };
-        },
-        (result) => "redirect" in result
-          ? new Response(null, {
-              status: 303,
-              headers: {
-                Location: result.redirect ?? "/factory",
-                "Cache-Control": "no-store",
-              },
-            })
-          : html(factoryWorkbenchShell(result.model))
-      ));
-
-      app.get("/factory/new-chat", async (c) => wrap(
-        async () => buildWorkbenchLink({
-          profileId: requestedProfileId(c.req.raw) ?? "generalist",
-          chatId: makeFactoryChatId(),
-          inspectorTab: "chat",
-          detailTab: requestedWorkbenchDetailTab(c.req.raw) ?? "queue",
-          filter: requestedWorkbenchFilter(c.req.raw),
-        }),
-        (location) => new Response(null, {
-          status: 303,
-          headers: {
-            Location: location,
-            "Cache-Control": "no-store",
-          },
-        })
-      ));
-
-      app.get("/factory/api/live-output", async (c) => wrap(
-        async () => {
-          const objectiveId = requestedObjectiveId(c.req.raw);
-          const focusKind = requestedFocusKind(c.req.raw);
-          const focusId = requestedFocusId(c.req.raw);
-          return {
-            liveOutput: objectiveId && focusId && (focusKind === "task" || focusKind === "job")
-              ? await service.getObjectiveLiveOutput(objectiveId, focusKind as FactoryLiveOutputTargetKind, focusId)
-              : undefined,
-          };
-        },
-        (body) => json(200, body)
-      ));
-
-      app.get("/factory/api/objectives", async (c) => wrap(
-        async () => ({
-          objectives: await service.listObjectives(),
-          board: await service.buildBoardProjection(optionalTrimmedString(c.req.query("objective"))),
-        }),
-        (body) => json(200, body)
-      ));
-
-      app.get("/factory/api/objectives/:id", async (c) => wrap(
-        async () => ({ objective: await service.getObjective(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.get("/factory/api/objectives/:id/debug", async (c) => wrap(
-        async () => ({ debug: await service.getObjectiveDebug(c.req.param("id")) }),
-        (body) => json(200, body)
-      ));
-
-      app.get("/factory/api/objectives/:id/receipts", async (c) => wrap(
-        async () => ({
-          receipts: await service.listObjectiveReceipts(
-            c.req.param("id"),
-            Number.parseInt(c.req.query("limit") ?? "40", 10),
-          ),
-        }),
-        (body) => json(200, body)
-      ));
-
-      // ── Receipt browser routes ──────────────────────────────────────
-      const receiptDataDir = ctx.dataDir;
-      const receiptSse = ctx.sse;
-      const receiptDb = getReceiptDb(receiptDataDir);
-
-      const dbStreamsToFileInfo = (streams: ReadonlyArray<{ name: string; receiptCount: number; updatedAt: number }>): ReceiptFileInfo[] =>
-        streams.map((s) => ({ name: s.name, size: s.receiptCount, mtime: s.updatedAt }));
-
-      const dbReceiptsToRecords = (rows: ReadonlyArray<{ globalSeq: number; streamSeq: number; ts: number; hash: string; eventType: string; bodyJson: string }>): ReceiptRecord[] =>
-        rows.map((row) => {
-          const envelope = { stream: "", seq: row.streamSeq, ts: row.ts, hash: row.hash, body: JSON.parse(row.bodyJson) };
-          const raw = JSON.stringify(envelope);
-          return { raw, data: envelope };
-        });
-
-      app.get("/receipt", async (c) => {
-        const file = c.req.query("file") ?? "";
-        const order = parseOrder(c.req.query("order"));
-        const limit = parseLimit(c.req.query("limit"));
-        const depth = parseInspectorDepth(c.req.query("depth"));
-        const files = dbStreamsToFileInfo(listReceiptStreams(receiptDb));
-        const selected = files.find((f) => f.name === file)?.name ?? files[0]?.name;
-        return html(receiptShell({ selected, limit, order, depth }));
+      registerReceiptRoutes({ app, ctx });
+      registerRuntimeRoutes({
+        app,
+        wrap,
+        loadRuntimeDashboard,
       });
-
-      app.get("/runtime", async () => html(runtimeShell()));
-
-      app.get("/receipt/island/folds", async (c) => {
-        const selected = c.req.query("selected") ?? "";
-        const order = parseOrder(c.req.query("order"));
-        const limit = parseLimit(c.req.query("limit"));
-        const depth = parseInspectorDepth(c.req.query("depth"));
-        const files = dbStreamsToFileInfo(listReceiptStreams(receiptDb));
-        return html(receiptFoldsHtml(files, selected, order, limit, depth));
-      });
-
-      app.get("/receipt/island/records", async (c) => {
-        const file = c.req.query("file") ?? "";
-        if (!file) return html(receiptRecordsHtml({ selected: undefined, records: [], order: "desc", limit: 200, total: 0 }));
-        const order = parseOrder(c.req.query("order"));
-        const limit = parseLimit(c.req.query("limit"));
-        const rows = readReceiptsByStream(receiptDb, file, { order, limit });
-        if (rows.length === 0) return html(`<div class="empty">Stream not found.</div>`);
-        const records = dbReceiptsToRecords(rows);
-        const total = countReceiptsInStream(receiptDb, file);
-        return html(receiptRecordsHtml({ selected: file, records, order, limit, total }));
-      });
-
-      app.get("/receipt/island/side", async (c) => {
-        const file = c.req.query("file") ?? "";
-        const order = parseOrder(c.req.query("order"));
-        const limit = parseLimit(c.req.query("limit"));
-        const depth = parseInspectorDepth(c.req.query("depth"));
-        if (!file) {
-          return html(receiptSideHtml({ selected: undefined, order, limit, depth, total: 0, shown: 0 }));
-        }
-        const total = countReceiptsInStream(receiptDb, file);
-        if (total === 0) {
-          return html(receiptSideHtml({ selected: file, order, limit, depth, total: 0, shown: 0 }));
-        }
-        const rows = readReceiptsByStream(receiptDb, file, { order, limit });
-        const records = dbReceiptsToRecords(rows);
-        const allRecords = order === "desc" || rows.length < total
-          ? dbReceiptsToRecords(readReceiptsByStream(receiptDb, file, { order: "asc", limit: total }))
-          : records;
-        const timeline = buildReceiptTimeline(allRecords, depth);
-        return html(receiptSideHtml({
-          selected: file,
-          order,
-          limit,
-          depth,
-          total,
-          shown: records.length,
-          timeline,
-        }));
-      });
-
-      app.get("/receipt/stream", async (c) => receiptSse.subscribe("receipt", undefined, c.req.raw.signal));
     },
   };
 };

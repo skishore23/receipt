@@ -179,6 +179,11 @@ export const buildObjectiveCardRecord = (input: {
   readonly state: FactoryState;
   readonly queuePosition?: number;
   readonly slotState: FactoryObjectiveCard["scheduler"]["slotState"];
+  readonly displayState?: FactoryObjectiveCard["displayState"];
+  readonly phaseDetail?: FactoryObjectiveCard["phaseDetail"];
+  readonly statusAuthority?: FactoryObjectiveCard["statusAuthority"];
+  readonly hasAuthoritativeLiveJob?: FactoryObjectiveCard["hasAuthoritativeLiveJob"];
+  readonly executionStalled?: boolean;
   readonly blockedExplanation?: FactoryObjectiveCard["blockedExplanation"];
   readonly latestDecision?: FactoryObjectiveCard["latestDecision"];
   readonly nextAction?: string;
@@ -196,6 +201,10 @@ export const buildObjectiveCardRecord = (input: {
   title: input.state.title,
   status: input.state.status,
   phase: input.phase,
+  displayState: input.displayState,
+  phaseDetail: input.phaseDetail,
+  statusAuthority: input.statusAuthority,
+  hasAuthoritativeLiveJob: input.hasAuthoritativeLiveJob,
   objectiveMode: input.state.objectiveMode,
   severity: input.state.severity,
   scheduler: {
@@ -206,6 +215,7 @@ export const buildObjectiveCardRecord = (input: {
   updatedAt: input.state.updatedAt,
   latestSummary: input.state.latestSummary,
   latestHandoff: input.state.latestHandoff,
+  executionStalled: input.executionStalled,
   blockedReason: input.state.blockedReason,
   sourceWarnings: input.state.sourceWarnings,
   blockedExplanation: input.blockedExplanation,

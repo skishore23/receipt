@@ -1,4 +1,4 @@
-export { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory/objective/read-service";
+export { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory/runtime/service";
 export {
   FACTORY_PROFILE_SUMMARY,
   FactoryServiceError,
@@ -11,6 +11,9 @@ export type {
   FactoryComposeModel,
   FactoryContextSources,
   FactoryDebugProjection,
+  FactoryObjectiveDisplayState,
+  FactoryObjectiveLiveJobAuthority,
+  FactoryObjectivePhaseDetail,
   FactoryIntegrationJobPayload,
   FactoryIntegrationPublishJobPayload,
   FactoryLiveOutputSnapshot,
@@ -21,8 +24,10 @@ export type {
   FactoryObjectiveControlJobPayload,
   FactoryObjectiveDetail,
   FactoryObjectiveInput,
+  FactoryObjectiveSelfImprovement,
   FactoryObjectiveReceiptQuery,
   FactoryObjectiveReceiptSummary,
+  FactoryObjectiveStatusAuthority,
   FactoryQueuedJobCommand,
   FactoryServiceOptions,
   FactoryTaskJobPayload,

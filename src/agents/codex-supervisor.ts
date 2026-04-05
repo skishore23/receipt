@@ -351,6 +351,9 @@ const createFactoryDispatchTool = (input: {
   readonly getCurrentObjectiveId: () => string | undefined;
 }): AgentToolExecutor =>
   async (toolInput) => {
+    if (asRecord(toolInput) && Object.prototype.hasOwnProperty.call(toolInput, "profileId")) {
+      throw new Error("factory.dispatch does not accept profileId; use profile.handoff to change owners.");
+    }
     const normalized = normalizeFactoryDispatchInput(toolInput);
     const objectiveId = normalized.objectiveId ?? input.getCurrentObjectiveId();
     const currentObjective = objectiveId
@@ -369,7 +372,6 @@ const createFactoryDispatchTool = (input: {
         severity: normalized.severity ?? currentObjective?.severity,
         checks: normalized.checks,
         channel: normalized.channel,
-        profileId: normalized.profileId,
         startImmediately: true,
       };
       detail = await input.factoryService.createObjective(payload);
@@ -388,7 +390,6 @@ const createFactoryDispatchTool = (input: {
           severity: normalized.severity ?? currentObjective.severity,
           checks: normalized.checks,
           channel: normalized.channel,
-          profileId: normalized.profileId,
           startImmediately: true,
         });
         action = "create";

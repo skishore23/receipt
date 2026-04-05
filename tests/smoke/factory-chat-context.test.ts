@@ -11,9 +11,9 @@ import { agentRunStream } from "../../src/agents/agent.streams";
 import { buildChatItemsForRun } from "../../src/agents/factory/chat-items";
 import type { FactoryChatContextProjection } from "../../src/agents/factory/chat-context";
 import { readChatContextProjection, syncChangedChatContextProjections } from "../../src/db/projectors";
+import { readSessionHistory, searchSessionHistory } from "../../src/services/session-history";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent, type AgentState } from "../../src/modules/agent";
 import { factoryChatSessionStream } from "../../src/services/factory-chat-profiles";
-import { factoryInspectorIsland } from "../../src/views/factory-inspector";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -51,7 +51,7 @@ const emitIndexedAgentEvent = async (
 };
 
 const createChatContextFixture = (overrides: Partial<FactoryChatContextProjection> = {}): FactoryChatContextProjection => ({
-  version: 1,
+  version: 2,
   chatId: "chat_demo",
   profileId: "generalist",
   updatedAt: 1,
@@ -77,6 +77,14 @@ const createChatContextFixture = (overrides: Partial<FactoryChatContextProjectio
       ts: 2,
       receiptHash: "hash_final",
     }],
+  }],
+  runs: [{
+    runId: "run_01",
+    objectiveId: "objective_demo",
+    status: "completed",
+    firstTs: 1,
+    updatedAt: 2,
+    terminal: true,
   }],
   bindings: {
     chatId: "chat_demo",
@@ -188,6 +196,14 @@ test("factory chat context projection: builds a conversation-only transcript and
   expect(JSON.stringify(projection)).not.toContain("internal thought that should not appear");
   expect(JSON.stringify(projection)).not.toContain("checked status");
   expect(projection?.bindings.objectiveId).toBe("objective_demo");
+  expect(projection?.runs).toEqual([
+    expect.objectContaining({
+      runId: "run_01",
+      objectiveId: "objective_demo",
+      status: "completed",
+      terminal: true,
+    }),
+  ]);
   expect(projection?.source.runStreams).toContain(agentRunStream(sessionStream, "run_01"));
 });
 
@@ -240,6 +256,10 @@ test("factory chat context projection: refreshes from change log and only binds 
   const refreshedProjection = readChatContextProjection(dataDir, sessionStream);
   expect(refreshedProjection?.bindings.objectiveId).toBe("objective_bound");
   expect(refreshedProjection?.bindings.latestRunId).toBe("run_02");
+  expect(refreshedProjection?.runs).toEqual([
+    expect.objectContaining({ runId: "run_01", objectiveId: "objective_bound" }),
+    expect.objectContaining({ runId: "run_02" }),
+  ]);
   expect(refreshedProjection?.conversation.map((message) => message.runId)).toEqual([
     "run_01",
     "run_01",
@@ -286,7 +306,60 @@ test("factory chat context projection: prefers finalized handoff interpretations
   ]);
 });
 
-test("factory chat UI: chat items and inspector consume projected chat context", () => {
+test("factory chat context projection: rebuilds session message history and supports FTS search", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-session-search");
+  const repoRoot = await createTempDir("receipt-factory-chat-session-search-repo");
+  const runtime = createAgentRuntime(dataDir);
+  const sessionStream = factoryChatSessionStream(repoRoot, "generalist", "chat_search");
+
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_01", {
+    type: "problem.set",
+    runId: "run_01",
+    problem: "Please use PostgreSQL on port 5433 for staging.",
+    agentId: "orchestrator",
+  });
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_01", {
+    type: "response.finalized",
+    runId: "run_01",
+    agentId: "orchestrator",
+    content: "PostgreSQL is configured for staging on port 5433.",
+  });
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_02", {
+    type: "problem.set",
+    runId: "run_02",
+    problem: "The Docker container needs PostgreSQL credentials as well.",
+    agentId: "orchestrator",
+  });
+  await emitIndexedAgentEvent(runtime, sessionStream, "run_02", {
+    type: "response.finalized",
+    runId: "run_02",
+    agentId: "orchestrator",
+    content: "I noted the Docker credentials requirement.",
+  });
+
+  await syncChangedChatContextProjections(dataDir);
+  const messages = await readSessionHistory({
+    dataDir,
+    sessionStream,
+  });
+  const hits = await searchSessionHistory({
+    dataDir,
+    query: "postgres docker 5433",
+    limit: 3,
+  });
+
+  expect(messages.map((message) => message.text)).toEqual([
+    "Please use PostgreSQL on port 5433 for staging.",
+    "PostgreSQL is configured for staging on port 5433.",
+    "The Docker container needs PostgreSQL credentials as well.",
+    "I noted the Docker credentials requirement.",
+  ]);
+  expect(hits.length).toBeGreaterThan(0);
+  expect(hits[0]?.sessionStream).toBe(sessionStream);
+  expect(hits.map((hit) => `${hit.role}:${hit.text}`).join("\n")).toContain("Docker container");
+});
+
+test("factory chat UI: chat items consume projected chat context", () => {
   const sessionStream = "agents/factory/demo/sessions/chat_demo";
   const chain = [
     receipt(agentRunStream(sessionStream, "run_01"), undefined, {
@@ -308,26 +381,4 @@ test("factory chat UI: chat items and inspector consume projected chat context",
   });
   expect(items.find((item) => item.kind === "user" && item.body === "Who are you?")).toBeTruthy();
   expect(items.find((item) => item.kind === "assistant" && item.body.includes("active engineer"))).toBeTruthy();
-
-  const markup = factoryInspectorIsland({
-    mode: "mission-control",
-    panel: "overview",
-    activeProfileId: "generalist",
-    chatId: "chat_demo",
-    objectiveId: "objective_demo",
-    selectedObjective: {
-      objectiveId: "objective_demo",
-      title: "Demo objective",
-      status: "active",
-      phase: "executing",
-      debugLink: "/factory?objective=objective_demo",
-      receiptsLink: "/factory?objective=objective_demo&panel=receipts",
-      summary: "Demo objective is executing.",
-    },
-    jobs: [],
-    chatContext,
-  });
-  expect(markup).toContain("Chat Context");
-  expect(markup).toContain("objective_demo");
-  expect(markup).toContain("task task_01 is still running.");
 });

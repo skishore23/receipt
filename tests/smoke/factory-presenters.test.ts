@@ -22,6 +22,10 @@ const makeObjectiveDetail = (): FactoryObjectiveDetail => ({
   title: "Demo objective",
   status: "executing",
   phase: "executing",
+  displayState: "Running",
+  phaseDetail: "executing",
+  statusAuthority: "objective",
+  hasAuthoritativeLiveJob: false,
   objectiveMode: "delivery",
   severity: 1,
   scheduler: { slotState: "active" },
@@ -42,6 +46,26 @@ const makeObjectiveDetail = (): FactoryObjectiveDetail => ({
   latestCommitHash: "abc12345",
   prUrl: "https://example.com/pr/42",
   prNumber: 42,
+  selfImprovement: {
+    auditedAt: 7,
+    auditStatus: "ready",
+    auditStatusMessage: undefined,
+    stale: false,
+    recommendationStatus: "ready",
+    recommendationError: undefined,
+    recommendations: [{
+      summary: "Persist structured audit recommendations in the UI model.",
+      anomalyPatterns: ["missing-visibility"],
+      scope: "ui",
+      confidence: "high",
+      suggestedFix: "Expose the latest audit payload on selected objectives.",
+    }],
+    autoFixObjectiveId: "objective_auto_fix",
+    recurringPatterns: [{
+      pattern: "missing-visibility",
+      count: 3,
+    }],
+  },
   headRefName: "feature/demo",
   baseRefName: "main",
   profile: {
@@ -197,6 +221,89 @@ test("factory presenters: selected objective card keeps detail-only fields intac
   expect(card.latestDecisionSummary).toBe("Keep the active task running.");
   expect(card.checks).toEqual(["bun test"]);
   expect(card.prUrl).toBe("https://example.com/pr/42");
+  expect(card.displayState).toBe("Running");
+  expect(card.phaseDetail).toBe("executing");
+  expect(card.statusAuthority).toBe("objective");
+  expect(card.hasAuthoritativeLiveJob).toBe(false);
+  expect(card.selfImprovement).toEqual({
+    auditedAt: 7,
+    auditStatus: "ready",
+    auditStatusMessage: undefined,
+    stale: false,
+    recommendationStatus: "ready",
+    recommendationError: undefined,
+    recommendations: [{
+      summary: "Persist structured audit recommendations in the UI model.",
+      anomalyPatterns: ["missing-visibility"],
+      scope: "ui",
+      confidence: "high",
+      suggestedFix: "Expose the latest audit payload on selected objectives.",
+    }],
+    autoFixObjectiveId: "objective_auto_fix",
+    recurringPatterns: [{
+      pattern: "missing-visibility",
+      count: 3,
+    }],
+  });
+});
+
+test("factory presenters: queued objective detail surfaces queued display state", () => {
+  const card = toFactorySelectedObjectiveCard({
+    ...makeObjectiveDetail(),
+    status: "planning",
+    phase: "waiting_for_slot",
+    displayState: "Queued",
+    phaseDetail: "queued",
+    scheduler: {
+      slotState: "queued",
+      queuePosition: 12,
+    },
+    activeTaskCount: 0,
+    readyTaskCount: 1,
+    taskCount: 1,
+  });
+
+  expect(card.displayState).toBe("Queued");
+});
+
+test("factory presenters: active objective detail keeps a coarse running badge with phase detail", () => {
+  const executing = toFactorySelectedObjectiveCard({
+    ...makeObjectiveDetail(),
+    status: "executing",
+    phase: "executing",
+    phaseDetail: "executing",
+  });
+  const integrating = toFactorySelectedObjectiveCard({
+    ...makeObjectiveDetail(),
+    status: "integrating",
+    phase: "integrating",
+    phaseDetail: "integrating",
+  });
+  const promoting = toFactorySelectedObjectiveCard({
+    ...makeObjectiveDetail(),
+    status: "promoting",
+    phase: "promoting",
+    phaseDetail: "promoting",
+  });
+
+  expect(executing.displayState).toBe("Running");
+  expect(executing.phaseDetail).toBe("executing");
+  expect(integrating.displayState).toBe("Running");
+  expect(integrating.phaseDetail).toBe("integrating");
+  expect(promoting.displayState).toBe("Running");
+  expect(promoting.phaseDetail).toBe("promoting");
+});
+
+test("factory presenters: stalled objective detail surfaces stalled display state", () => {
+  const card = toFactorySelectedObjectiveCard({
+    ...makeObjectiveDetail(),
+    executionStalled: true,
+    displayState: "Stalled",
+    phaseDetail: "stalled",
+  });
+
+  expect(card.displayState).toBe("Stalled");
+  expect(card.phaseDetail).toBe("stalled");
 });
 
 test("factory presenters: state-selected card derives counts, latest commit, and token totals", () => {
@@ -209,6 +316,51 @@ test("factory presenters: state-selected card derives counts, latest commit, and
   expect(card.latestCommitHash).toBe("fedcba98");
   expect(card.tokensUsed).toBe(123);
   expect(card.prNumber).toBe(99);
+});
+
+test("factory presenters: queued state-selected card surfaces queued display state", () => {
+  const card = toFactoryStateSelectedObjectiveCard({
+    ...makeState(),
+    status: "planning",
+    scheduler: {
+      slotState: "queued",
+    },
+  });
+
+  expect(card.displayState).toBe("Queued");
+  expect(card.phaseDetail).toBe("queued");
+});
+
+test("factory presenters: state-selected card keeps active objective phases in phase detail", () => {
+  expect(toFactoryStateSelectedObjectiveCard({
+    ...makeState(),
+    status: "executing",
+  })).toMatchObject({
+    displayState: "Running",
+    phaseDetail: "executing",
+    statusAuthority: "objective",
+    hasAuthoritativeLiveJob: false,
+  });
+
+  expect(toFactoryStateSelectedObjectiveCard({
+    ...makeState(),
+    status: "integrating",
+  })).toMatchObject({
+    displayState: "Running",
+    phaseDetail: "integrating",
+    statusAuthority: "objective",
+    hasAuthoritativeLiveJob: false,
+  });
+
+  expect(toFactoryStateSelectedObjectiveCard({
+    ...makeState(),
+    status: "promoting",
+  })).toMatchObject({
+    displayState: "Running",
+    phaseDetail: "promoting",
+    statusAuthority: "objective",
+    hasAuthoritativeLiveJob: false,
+  });
 });
 
 test("factory presenters: shared queue job helpers preserve snapshot and summary behavior", () => {

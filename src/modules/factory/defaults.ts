@@ -41,6 +41,10 @@ export const DEFAULT_FACTORY_OBJECTIVE_PROFILE: FactoryObjectiveProfileSnapshot 
   promptHash: "",
   promptPath: "profiles/generalist/PROFILE.md",
   selectedSkills: [],
+  actionPolicy: {
+    allowedDispatchActions: ["create", "react", "promote", "cancel", "cleanup", "archive"],
+    allowedCreateModes: ["delivery", "investigation"],
+  },
   objectivePolicy: {
     allowedWorkerTypes: ["codex", "infra", "agent"],
     defaultWorkerType: "codex",

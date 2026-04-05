@@ -49,21 +49,46 @@ export const displayStateTone = (value?: string): "neutral" | "info" | "success"
   const normalized = value?.trim().toLowerCase() ?? "";
   if (!normalized) return "neutral";
   if (normalized === "completed" || normalized === "archived") return "success";
-  if (normalized === "blocked") return "warning";
+  if (normalized === "blocked" || normalized === "stalled") return "warning";
   if (normalized === "failed" || normalized === "canceled") return "danger";
-  if (normalized === "running" || normalized === "awaiting review") return "info";
-  if (normalized === "ready" || normalized === "draft" || normalized === "discussing") return "warning";
+  if (normalized === "running" || normalized === "awaiting review") {
+    return "info";
+  }
+  if (normalized === "queued" || normalized === "draft" || normalized === "discussing") return "warning";
   return "neutral";
+};
+
+export const displayStateForObjectiveStatus = (
+  status: FactoryObjectiveCard["status"] | FactoryObjectiveDetail["status"],
+): FactoryDisplayState => {
+  switch (status) {
+    case "planning":
+      return "Running";
+    case "executing":
+    case "integrating":
+    case "promoting":
+      return "Running";
+    case "completed":
+      return "Completed";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    case "canceled":
+      return "Canceled";
+  }
 };
 
 export const deriveObjectiveDisplayState = (
   objective: FactoryObjectiveCard | FactoryObjectiveDetail,
 ): FactoryDisplayState => {
+  if (objective.displayState) return objective.displayState;
   if (objective.archivedAt) return "Archived";
   if (objective.status === "completed") return "Completed";
   if (objective.status === "blocked") return "Blocked";
   if (objective.status === "failed") return "Failed";
   if (objective.status === "canceled") return "Canceled";
+  if (objective.executionStalled) return "Stalled";
   if (objective.integrationStatus === "ready_to_promote") return "Awaiting Review";
   if (isObjectiveDetail(objective)) {
     const hasReviewingTask = objective.tasks.some((task) => task.status === "reviewing");
@@ -71,15 +96,8 @@ export const deriveObjectiveDisplayState = (
     if (hasReviewingTask || hasAwaitingReviewCandidate) return "Awaiting Review";
   }
   if (objective.status === "planning" && objective.taskCount === 0) return "Draft";
-  if (objective.scheduler.slotState === "queued" || objective.status === "planning") return "Ready";
-  if (
-    objective.status === "executing"
-    || objective.status === "integrating"
-    || objective.status === "promoting"
-  ) {
-    return "Running";
-  }
-  return "Running";
+  if (objective.scheduler.slotState === "queued") return "Queued";
+  return displayStateForObjectiveStatus(objective.status);
 };
 
 const lifecycleStageKey = (
@@ -257,15 +275,7 @@ export const buildObjectiveTimelineGroups = (
 
 const objectivePrimaryAction = (objective: FactorySelectedObjectiveCard): FactoryActionModel => {
   const displayState = objective.displayState
-    ?? (objective.status === "completed"
-      ? "Completed"
-      : objective.status === "blocked"
-        ? "Blocked"
-        : objective.status === "failed"
-          ? "Failed"
-          : objective.status === "canceled"
-            ? "Canceled"
-            : "Running");
+    ?? displayStateForObjectiveStatus(objective.status as FactoryObjectiveCard["status"]);
   const currentLifecycle = objective.lifecycleSteps?.find((step) => step.state === "current" || step.state === "paused")?.key;
   if (displayState === "Completed" || displayState === "Archived" || displayState === "Failed" || displayState === "Canceled") {
     return { label: "Start follow-up", command: "/obj ", tone: "primary" };
@@ -281,15 +291,7 @@ const objectivePrimaryAction = (objective: FactorySelectedObjectiveCard): Factor
 
 const objectiveSecondaryActions = (objective: FactorySelectedObjectiveCard): ReadonlyArray<FactoryActionModel> => {
   const displayState = objective.displayState
-    ?? (objective.status === "completed"
-      ? "Completed"
-      : objective.status === "blocked"
-        ? "Blocked"
-        : objective.status === "failed"
-          ? "Failed"
-          : objective.status === "canceled"
-            ? "Canceled"
-            : "Running");
+    ?? displayStateForObjectiveStatus(objective.status as FactoryObjectiveCard["status"]);
   if (displayState === "Completed" || displayState === "Archived" || displayState === "Failed" || displayState === "Canceled") {
     return [
       { label: "Ask engineer", focusOnly: true, tone: "secondary" },
@@ -340,17 +342,26 @@ export const buildEngineerPerspectiveOverview = (input: {
 } => {
   const objective = input.objective;
   const displayState = objective?.displayState ?? objective?.status;
+  const phaseDetail = "phaseDetail" in (objective ?? {}) && typeof objective?.phaseDetail === "string"
+    ? objective.phaseDetail
+    : undefined;
   const bottomLine = objective?.bottomLine ?? objective?.summary;
   const focus = !objective
     ? "I'm available for a new objective. Start in chat if you want to talk through the work first, or promote a concrete request into tracked execution."
     : displayState === "Blocked"
       ? `I'm blocked on "${objective.title}". ${bottomLine ?? "I need guidance or better evidence to continue."}`
+      : displayState === "Stalled"
+        ? `Execution stalled on "${objective.title}". ${bottomLine ?? "The current run stopped making visible progress and needs intervention."}`
       : displayState === "Completed" || displayState === "Archived"
         ? `I finished "${objective.title}". ${bottomLine ?? "The work is wrapped and ready for follow-up or archive."}`
         : displayState === "Awaiting Review"
           ? `I've completed the main pass on "${objective.title}" and I'm ready for review. ${bottomLine ?? ""}`.trim()
           : displayState === "Failed" || displayState === "Canceled"
             ? `I had to stop "${objective.title}". ${bottomLine ?? "The current run is stopped and needs a follow-up decision."}`
+            : phaseDetail === "reconciling"
+              ? `I'm reconciling "${objective.title}" after a worker handoff. ${bottomLine ?? "The controller is deciding the next step."}`
+              : phaseDetail === "cleaning_up"
+                ? `I'm closing out "${objective.title}". ${bottomLine ?? "The result is terminal and the controller is retiring leftover jobs."}`
             : `I'm working on "${objective.title}". ${bottomLine ?? "The objective is moving through execution."}`;
   const need = objective?.nextAction
     ? `Next, I need: ${objective.nextAction}`
@@ -358,8 +369,12 @@ export const buildEngineerPerspectiveOverview = (input: {
       ? "Give me a clear objective when you want durable work tracked."
       : displayState === "Blocked"
         ? "I need a decision, more evidence, or a revised direction before I continue."
+        : displayState === "Stalled"
+          ? "I need you to review the stalled execution, react with guidance, or cancel the current pass."
         : displayState === "Completed" || displayState === "Archived"
           ? "I can take a follow-up objective or help you review the result."
+          : phaseDetail === "reconciling"
+            ? "I need the controller reconcile pass to finish before I know whether to resume or stop."
           : "I can keep going without interruption unless you want to change direction.";
   const operating = `I'm operating as ${input.role ?? input.engineerLabel}. Current status: ${input.status}. Current load: ${input.load}.`;
   return { focus, need, operating };

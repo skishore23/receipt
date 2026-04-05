@@ -19,6 +19,15 @@ export type FactoryChatContextMessage = {
   readonly refs: ReadonlyArray<FactoryChatContextSourceRef>;
 };
 
+export type FactoryChatContextRun = {
+  readonly runId: string;
+  readonly objectiveId?: string;
+  readonly status?: "running" | "failed" | "completed";
+  readonly firstTs: number;
+  readonly updatedAt: number;
+  readonly terminal: boolean;
+};
+
 export type FactoryChatContextObjectiveImport = {
   readonly objectiveId: string;
   readonly title?: string;
@@ -44,11 +53,12 @@ export type FactoryChatContextImports = {
 };
 
 export type FactoryChatContextProjection = {
-  readonly version: 1;
+  readonly version: 2;
   readonly chatId: string;
   readonly profileId: string;
   readonly updatedAt: number;
   readonly conversation: ReadonlyArray<FactoryChatContextMessage>;
+  readonly runs: ReadonlyArray<FactoryChatContextRun>;
   readonly bindings: {
     readonly chatId: string;
     readonly profileId: string;
@@ -57,7 +67,7 @@ export type FactoryChatContextProjection = {
   };
   readonly imports: FactoryChatContextImports;
   readonly style: {
-    readonly responseStyle: FactoryChatResponseStyle;
+    readonly responseStyle?: FactoryChatResponseStyle;
     readonly latestUserText?: string;
   };
   readonly source: {
@@ -84,19 +94,9 @@ const asString = (value: unknown): string | undefined =>
 const normalizeForGrouping = (value: string): string =>
   value.replace(/\s+/g, " ").trim();
 
-export const classifyFactoryResponseStyle = (problem: string): FactoryChatResponseStyle => {
-  const compact = problem.replace(/\s+/g, " ").trim();
-  if (!compact) return "work";
-  if (compact.length <= 140) return "conversational";
-  return "work";
-};
-
 export const renderFactoryResponseStyleGuidance = (
-  styleOrProblem: FactoryChatResponseStyle | string,
+  style: FactoryChatResponseStyle | undefined,
 ): string => {
-  const style = styleOrProblem === "conversational" || styleOrProblem === "work"
-    ? styleOrProblem
-    : classifyFactoryResponseStyle(styleOrProblem);
   if (style === "conversational") {
     return [
       "- This turn is conversational or meta. Answer like a human engineer talking to another person.",
@@ -106,8 +106,8 @@ export const renderFactoryResponseStyleGuidance = (
     ].join("\n");
   }
   return [
-    "- This turn is work-focused. Use structure only when it genuinely helps the operator.",
-    "- Keep the answer direct and specific; do not default to a report template if a short paragraph would do.",
+    "- Choose the amount of structure that best fits the user turn instead of defaulting to a canned format.",
+    "- Keep the answer direct and specific.",
     "- Mention workflow mechanics only when they materially affect the next step or the freshness of the answer.",
   ].join("\n");
 };
@@ -127,14 +127,15 @@ export const chatSessionStreamFromStream = (stream: string | undefined): string 
 };
 
 export const parseFactoryChatSessionStream = (stream: string): {
+  readonly repoKey: string;
   readonly profileId: string;
   readonly chatId: string;
 } | undefined => {
   const normalized = chatSessionStreamFromStream(stream);
   if (!normalized) return undefined;
-  const match = normalized.match(/^agents\/factory\/[^/]+\/([^/]+)\/sessions\/(.+)$/);
+  const match = normalized.match(/^agents\/factory\/([^/]+)\/([^/]+)\/sessions\/(.+)$/);
   if (!match) return undefined;
-  const [, encodedProfileId, encodedChatId] = match;
+  const [, repoKey, encodedProfileId, encodedChatId] = match;
   const decode = (value: string): string => {
     try {
       return decodeURIComponent(value);
@@ -143,6 +144,7 @@ export const parseFactoryChatSessionStream = (stream: string): {
     }
   };
   return {
+    repoKey,
     profileId: decode(encodedProfileId),
     chatId: decode(encodedChatId),
   };
@@ -163,6 +165,30 @@ const mergeSourceRefs = (
 ): ReadonlyArray<FactoryChatContextSourceRef> => {
   if (existing.some((ref) => ref.receiptHash === next.receiptHash && ref.stream === next.stream)) return existing;
   return [...existing, next];
+};
+
+const runObjectiveIdFromEvent = (event: AgentEvent): string | undefined => {
+  switch (event.type) {
+    case "thread.bound":
+      return event.objectiveId;
+    case "objective.handoff":
+      return event.objectiveId;
+    case "profile.handoff":
+      return event.objectiveId;
+    default:
+      return undefined;
+  }
+};
+
+const runStatusFromEvent = (
+  event: AgentEvent,
+): FactoryChatContextRun["status"] | undefined => {
+  switch (event.type) {
+    case "run.status":
+      return event.status;
+    default:
+      return undefined;
+  }
 };
 
 export const projectFactoryChatContextFromReceipts = (input: {
@@ -200,9 +226,33 @@ export const projectFactoryChatContextFromReceipts = (input: {
     refs: ReadonlyArray<FactoryChatContextSourceRef>;
     orderKey: number;
   }>();
+  const runs = new Map<string, {
+    runId: string;
+    objectiveId?: string;
+    status?: FactoryChatContextRun["status"];
+    firstTs: number;
+    updatedAt: number;
+    terminal: boolean;
+  }>();
 
   for (const receipt of candidateConversationReceipts) {
     const body = receipt.body;
+    const runId = asString((body as { readonly runId?: unknown }).runId);
+    if (runId) {
+      const existing = runs.get(runId);
+      const status = runStatusFromEvent(body)
+        ?? existing?.status
+        ?? (finalizedRunIds.has(runId) ? "completed" : undefined);
+      const objectiveId = runObjectiveIdFromEvent(body) ?? existing?.objectiveId;
+      runs.set(runId, {
+        runId,
+        objectiveId,
+        status,
+        firstTs: existing ? Math.min(existing.firstTs, receipt.ts) : receipt.ts,
+        updatedAt: existing ? Math.max(existing.updatedAt, receipt.ts) : receipt.ts,
+        terminal: status === "completed" || status === "failed",
+      });
+    }
     const role = body.type === "problem.set"
       ? "user"
       : body.type === "response.finalized"
@@ -253,9 +303,20 @@ export const projectFactoryChatContextFromReceipts = (input: {
         || left.ts - right.ts
         || left.receiptHash.localeCompare(right.receiptHash)),
     }) satisfies FactoryChatContextMessage);
+  const projectedRuns = [...runs.values()]
+    .sort((left, right) => left.firstTs - right.firstTs || left.runId.localeCompare(right.runId))
+    .map((run) => ({
+      runId: run.runId,
+      objectiveId: run.objectiveId,
+      status: run.status,
+      firstTs: run.firstTs,
+      updatedAt: run.updatedAt,
+      terminal: run.terminal,
+    }) satisfies FactoryChatContextRun);
 
   const latestBindingReceipt = [...ordered].reverse().find((receipt) => receipt.body.type === "thread.bound");
   const latestRunId = [...conversation].reverse().find((message) => Boolean(message.runId))?.runId
+    ?? projectedRuns.at(-1)?.runId
     ?? (latestBindingReceipt?.body.type === "thread.bound" ? latestBindingReceipt.body.runId : undefined);
   const latestUserText = [...conversation].reverse().find((message) => message.role === "user")?.text;
   const receiptRefs = [
@@ -277,11 +338,12 @@ export const projectFactoryChatContextFromReceipts = (input: {
     ?? Date.now();
 
   return {
-    version: 1,
+    version: 2,
     chatId: parsed.chatId,
     profileId: parsed.profileId,
     updatedAt,
     conversation,
+    runs: projectedRuns,
     bindings: {
       chatId: parsed.chatId,
       profileId: parsed.profileId,
@@ -292,7 +354,6 @@ export const projectFactoryChatContextFromReceipts = (input: {
     },
     imports: {},
     style: {
-      responseStyle: classifyFactoryResponseStyle(latestUserText ?? ""),
       latestUserText,
     },
     source: {

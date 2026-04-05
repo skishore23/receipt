@@ -1,22 +1,18 @@
 import type { ObjectiveAnalysis } from "../factory-cli/analyze";
 import type { FactoryState } from "../modules/factory";
-import type { FactoryBoardProjection, FactoryObjectiveDetail } from "../services/factory-types";
+import type {
+  FactoryBoardProjection,
+  FactoryObjectiveDisplayState,
+  FactoryObjectiveDetail,
+  FactoryObjectivePhaseDetail,
+  FactoryObjectiveSelfImprovement,
+  FactoryObjectiveStatusAuthority,
+} from "../services/factory-types";
 import type { FactoryWorkbenchModel } from "./factory-workbench";
 import type { FactoryChatContextProjection } from "../agents/factory/chat-context";
 
-export type FactoryViewMode = "default" | "mission-control";
-export type FactoryInspectorTab = "overview" | "chat" | "notes";
-export type FactoryDisplayState =
-  | "Draft"
-  | "Discussing"
-  | "Ready"
-  | "Running"
-  | "Blocked"
-  | "Awaiting Review"
-  | "Completed"
-  | "Archived"
-  | "Failed"
-  | "Canceled";
+export type FactoryInspectorTab = "overview" | "chat";
+export type FactoryDisplayState = FactoryObjectiveDisplayState;
 export type FactoryLifecycleStepState = "done" | "current" | "upcoming" | "paused";
 
 export type FactoryLifecycleStepModel = {
@@ -71,6 +67,9 @@ export type FactoryChatObjectiveNav = {
   readonly status: string;
   readonly phase: string;
   readonly displayState?: FactoryDisplayState;
+  readonly phaseDetail?: FactoryObjectivePhaseDetail;
+  readonly statusAuthority?: FactoryObjectiveStatusAuthority;
+  readonly hasAuthoritativeLiveJob?: boolean;
   readonly blockedReason?: string;
   readonly blockedExplanation?: string;
   readonly summary?: string;
@@ -104,6 +103,9 @@ export type FactorySelectedObjectiveCard = {
   readonly status: string;
   readonly phase: string;
   readonly displayState?: FactoryDisplayState;
+  readonly phaseDetail?: FactoryObjectivePhaseDetail;
+  readonly statusAuthority?: FactoryObjectiveStatusAuthority;
+  readonly hasAuthoritativeLiveJob?: boolean;
   readonly summary?: string;
   readonly bottomLine?: string;
   readonly debugLink: string;
@@ -124,6 +126,7 @@ export type FactorySelectedObjectiveCard = {
   readonly latestCommitHash?: string;
   readonly prUrl?: string;
   readonly prNumber?: number;
+  readonly selfImprovement?: FactoryObjectiveSelfImprovement;
   readonly contract?: {
     readonly acceptanceCriteria: ReadonlyArray<string>;
     readonly allowedScope: ReadonlyArray<string>;
@@ -295,7 +298,6 @@ export type FactoryChatItem =
     };
 
 export type FactoryChatIslandModel = {
-  readonly mode?: FactoryViewMode;
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
   readonly chatId?: string;
@@ -316,6 +318,7 @@ export type FactoryChatIslandModel = {
   readonly activeProfileProfileSummary?: string;
   readonly activeProfileSections?: ReadonlyArray<FactoryProfileSectionView>;
   readonly activeProfileTools?: ReadonlyArray<string>;
+  readonly userPreferencesSummary?: string;
   readonly selectedThread?: FactorySelectedObjectiveCard;
   readonly jobs?: ReadonlyArray<FactoryChatJobNav>;
   readonly activeCodex?: FactoryLiveCodexCard;
@@ -326,22 +329,9 @@ export type FactoryChatIslandModel = {
   readonly items: ReadonlyArray<FactoryChatItem>;
 };
 
-export type FactoryNavModel = {
-  readonly mode?: FactoryViewMode;
-  readonly activeProfileId: string;
-  readonly activeProfileLabel: string;
-  readonly chatId?: string;
-  readonly panel?: FactoryInspectorPanel;
-  readonly inspectorTab?: FactoryInspectorTab;
-  readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
-  readonly objectives: ReadonlyArray<FactoryChatObjectiveNav>;
-  readonly showAll?: boolean;
-};
-
 export type FactoryInspectorPanel = "overview" | "analysis" | "execution" | "live" | "receipts";
 
 export type FactoryInspectorRouteModel = {
-  readonly mode?: FactoryViewMode;
   readonly panel: FactoryInspectorPanel;
   readonly inspectorTab?: FactoryInspectorTab;
   readonly activeProfileId: string;
@@ -352,8 +342,6 @@ export type FactoryInspectorRouteModel = {
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
 };
-
-export type FactoryInspectorTabsModel = FactoryInspectorRouteModel;
 
 export type FactoryInspectorModel = FactoryInspectorRouteModel & {
   readonly objectiveMissing?: boolean;
@@ -375,23 +363,6 @@ export type FactoryInspectorModel = FactoryInspectorRouteModel & {
   readonly receipts?: FactoryObjectiveDetail["recentReceipts"];
   readonly debugInfo?: FactoryState;
   readonly tasks?: FactoryObjectiveDetail["tasks"];
-};
-
-export type FactoryChatShellModel = {
-  readonly mode?: FactoryViewMode;
-  readonly activeProfileId: string;
-  readonly activeProfileLabel: string;
-  readonly chatId?: string;
-  readonly objectiveId?: string;
-  readonly runId?: string;
-  readonly jobId?: string;
-  readonly panel?: FactoryInspectorPanel;
-  readonly inspectorTab?: FactoryInspectorTab;
-  readonly focusKind?: "task" | "job";
-  readonly focusId?: string;
-  readonly chat: FactoryChatIslandModel;
-  readonly nav: FactoryNavModel;
-  readonly inspector: FactoryInspectorModel;
 };
 
 export type FactoryWorkbenchWorkspaceModel = {

@@ -16,11 +16,9 @@ import type {
   FactoryChatProfileNav,
   FactoryInspectorPanel,
   FactoryInspectorTab,
-  FactoryViewMode,
 } from "../../factory-models";
 
 export type FactoryChatRouteContext = {
-  readonly mode?: FactoryViewMode;
   readonly profileId: string;
   readonly chatId?: string;
   readonly objectiveId?: string;
@@ -34,7 +32,6 @@ export type FactoryChatRouteContext = {
 
 export const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   const params = new URLSearchParams();
-  if (input.mode === "mission-control") params.set("mode", input.mode);
   params.set("profile", input.profileId);
   if (input.chatId) params.set("chat", input.chatId);
   if (input.objectiveId) params.set("objective", input.objectiveId);
@@ -50,57 +47,6 @@ export const factoryChatQuery = (input: FactoryChatRouteContext): string => {
   return query ? `?${query}` : "";
 };
 
-export const isMissionControlMode = (mode?: FactoryViewMode): boolean => mode === "mission-control";
-
-export const chatLiveRefreshOn = [
-  { event: "agent-refresh", throttleMs: 180 },
-  { event: "job-refresh", throttleMs: 180 },
-  { event: "objective-runtime-refresh", throttleMs: 180 },
-  { event: "factory-refresh", throttleMs: 180 },
-  { kind: "body", event: "factory:chat-refresh" },
-] as const;
-
-export const objectiveLiveRefreshOn = [
-  { event: "profile-board-refresh", throttleMs: 450 },
-  { event: "objective-runtime-refresh", throttleMs: 450 },
-  { event: "factory-refresh", throttleMs: 450 },
-  { kind: "body", event: "factory:scope-changed" },
-] as const;
-
-export const modeSwitchHref = (
-  routeContext: FactoryChatRouteContext,
-  mode: FactoryViewMode,
-): string => `/factory${factoryChatQuery({ ...routeContext, mode })}`;
-
-export const workbenchHref = (routeContext: FactoryChatRouteContext): string => {
-  const params = new URLSearchParams();
-  params.set("profile", routeContext.profileId);
-  if (routeContext.chatId) params.set("chat", routeContext.chatId);
-  if (routeContext.objectiveId) params.set("objective", routeContext.objectiveId);
-  if (routeContext.inspectorTab) params.set("inspectorTab", routeContext.inspectorTab);
-  if (routeContext.focusKind && routeContext.focusId) {
-    params.set("focusKind", routeContext.focusKind);
-    params.set("focusId", routeContext.focusId);
-  }
-  const query = params.toString();
-  return `/factory/workbench${query ? `?${query}` : ""}`;
-};
-
-export const factoryShellIslandBindings = (shellQuery: string) => ({
-  sidebar: {
-    path: `/factory/island/sidebar${shellQuery}`,
-    refreshOn: objectiveLiveRefreshOn,
-  },
-  chat: {
-    path: `/factory/island/chat${shellQuery}`,
-    refreshOn: chatLiveRefreshOn,
-  },
-  inspector: {
-    path: `/factory/island/inspector${shellQuery}`,
-    refreshOn: objectiveLiveRefreshOn,
-  },
-});
-
 export const compactStatusText = (value: string, maxChars = 160): string => {
   const text = value.replace(/\s+/g, " ").trim();
   if (!text) return "";
@@ -113,11 +59,6 @@ export const titleCaseLabel = (value?: string): string => {
   const label = displayLabel(value);
   return label ? label.replace(/\b\w/g, (match) => match.toUpperCase()) : "";
 };
-
-export const withQueryParam = (query: string, key: string, value: string): string =>
-  `${query}${query.includes("?") ? "&" : "?"}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
-
-export const factoryEventsPath = (query: string): string => `/factory/events${query}`;
 
 export const shellPill = (label: string, tone: "neutral" | "info" | "success" | "warning" | "danger" = "neutral", icon?: string): string =>
   `<span class="inline-flex shrink-0 items-center gap-1.5 border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] whitespace-nowrap ${badgeToneClass(tone)}">${icon ?? ""}${esc(label)}</span>`;
@@ -185,6 +126,7 @@ export const renderShellStatusPills = (model: {
   readonly inspector: {
     readonly selectedObjective?: {
       readonly displayState?: string;
+      readonly phaseDetail?: string;
       readonly phase?: string;
       readonly status?: string;
       readonly queuePosition?: number;
@@ -199,6 +141,7 @@ export const renderShellStatusPills = (model: {
   if (objective) {
     const phaseLabel = objective.displayState ?? displayLabel(objective.phase) ?? displayLabel(objective.status) ?? "active";
     pills.push(shellPill(`Objective ${phaseLabel}`, toneForValue(objective.displayState ?? objective.phase ?? objective.status), iconProject("h-3 w-3")));
+    if (objective.phaseDetail) pills.push(shellPill(displayLabel(objective.phaseDetail) || objective.phaseDetail, "info", iconProject("h-3 w-3")));
     if (typeof objective.queuePosition === "number") pills.push(shellPill(`Queue #${objective.queuePosition}`, "warning", iconQueue("h-3 w-3")));
     if (typeof objective.tokensUsed === "number") pills.push(shellPill(`${objective.tokensUsed.toLocaleString()} tokens`, "info", iconTokens("h-3 w-3")));
   }

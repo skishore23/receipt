@@ -20,7 +20,6 @@ import {
   resolveFactoryChatProfile,
 } from "../../../services/factory-chat-profiles";
 import {
-  classifyFactoryResponseStyle,
   renderFactoryChatContextImports,
   renderFactoryChatConversationTranscript,
   renderFactoryResponseStyleGuidance,
@@ -39,8 +38,14 @@ import { buildFactorySituation } from "./status";
 import { summarizeChildProgress, asString } from "./input";
 import { codexJobSnapshot } from "./status";
 import { listChildJobsForRun } from "./input";
+import { analyzeFactoryChatTurn } from "./turn-analysis";
+import {
+  loadConversationProjection,
+  renderSessionRecallSummary,
+} from "../../../services/conversation-memory";
 
-export { classifyFactoryResponseStyle, renderFactoryResponseStyleGuidance } from "../chat-context";
+export { renderFactoryResponseStyleGuidance } from "../chat-context";
+export { analyzeFactoryChatTurn } from "./turn-analysis";
 
 export const FACTORY_CHAT_WORKFLOW_ID = "factory-chat-v1";
 export const FACTORY_CHAT_WORKFLOW_VERSION = "1.0.0";
@@ -98,6 +103,12 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "Response style:",
   "{{response_style}}",
   "",
+  "User preferences:",
+  "{{user_preferences}}",
+  "",
+  "Session recall:",
+  "{{session_recall}}",
+  "",
   "Available tools (one per step):",
   "{{available_tools}}",
   "",
@@ -126,7 +137,7 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- Do not try to steer an in-flight child. If the current attempt is wrong, inspect it, abort it, and react the objective with a clearer note.",
   "- If investigation reports disagree or reconciliation is pending, do not finalize yet. Inspect status/receipts and wait for the objective to align or block.",
   "- Match tool input keys exactly to the documented schema. For example, `codex.run` accepts `{\"prompt\": string, \"timeoutMs\"?: number}`.",
-  "- For `factory.dispatch`, use only `action`, `objectiveId`, `prompt`, `note`, `title`, `objectiveMode`, `severity`, `checks`, `channel`, `profileId`, and `reason`.",
+  "- For `factory.dispatch`, use only `action`, `objectiveId`, `prompt`, `note`, `title`, `objectiveMode`, `severity`, `checks`, `channel`, and `reason`.",
   "",
   "For final answers to the user:",
   "- write plain language, not raw JSON",
@@ -134,11 +145,16 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- mention objective, run, and job only when needed for debugging or inspection",
   "- follow the active profile's voice, but do not let older transcript or memory phrasing override it",
   "- for conversational or meta turns, prefer short natural prose instead of sections",
-  "- use structure only when the task benefits from it; choose headings that fit the situation instead of reusing canned labels",
+  "- choose the structure that best fits the question instead of defaulting to a template",
+  "- if data or evidence matters, present it clearly in markdown instead of raw JSON",
+  "- use headings only when they add real signal",
   "- do not emit headings like Conclusion, Evidence, Disagreements, Scripts Run, Artifacts, What you did well, or Next Steps unless they add real signal for this specific answer or the user explicitly asked for that structure",
   "- never compress lists into a single paragraph such as `1) a 2) b 3) c`",
   "- prefer bold lead-ins such as `**Smallest unblock:**` before a short list instead of plain label lines ending with `:`",
   "- if code changes are needed, route them through Factory objective work instead of claiming this chat changed code directly",
+  "- if the user states or strongly implies reusable preferences or defaults for future turns, include concise normalized notes in the optional `memory.preferenceNotes` array",
+  "- `memory.preferenceNotes` can capture any durable preference: formatting, tone, depth, workflow, assumptions, or tool behavior; do not limit it to a fixed taxonomy",
+  "- do not put one-off task facts or transient status updates into `memory.preferenceNotes`",
   "",
   "Respond with JSON only, no markdown. Always include every field in the action object:",
   "{",
@@ -148,12 +164,16 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "    \"name\": \"tool name when type=tool, otherwise null\",",
   "    \"input\": \"JSON object string for tool args\",",
   "    \"text\": \"final answer when type=final, otherwise null\"",
+  "  },",
+  "  \"memory\": {",
+  "    \"preferenceNotes\": [\"optional reusable user preference note\"]",
   "  }",
   "}",
   "",
   "For final actions, set \"name\": null and \"input\": \"{}\".",
   "For tool actions, set \"text\": null.",
   "The input field must always be a JSON object encoded as a string.",
+  "If there are no reusable preference notes, omit `memory` entirely.",
 ].join("\n");
 
 const resolveObjectiveIdFromSessionChain = async (
@@ -208,6 +228,25 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     : input.config.memoryScope;
   const factoryLiveWaitState = { surfaced: false };
   const supervisorConfig = readSupervisorConfig(input.extraConfig);
+  const turnAnalysisCache = new Map<string, Promise<{
+    readonly responseStyle: "conversational" | "work";
+    readonly includeBoundObjectiveContext: boolean;
+  }>>();
+  const analyzeTurn = (problem: string): Promise<{
+    readonly responseStyle: "conversational" | "work";
+    readonly includeBoundObjectiveContext: boolean;
+  }> => {
+    const key = problem.replace(/\s+/g, " ").trim();
+    const cached = turnAnalysisCache.get(key);
+    if (cached) return cached;
+    const created = analyzeFactoryChatTurn({
+      llmText: input.llmText,
+      apiReady: input.apiReady,
+      problem: key,
+    });
+    turnAnalysisCache.set(key, created);
+    return created;
+  };
   const discoveryBudget = resolvedProfile.orchestration.discoveryBudget;
   let discoveryUsed = 0;
   const consumeDiscoveryBudget = (): void => {
@@ -353,8 +392,8 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         dataDir: input.dataDir,
         sessionStream: resolvedStream,
       });
-      const responseStyle = projectedContext?.style.responseStyle
-        ?? classifyFactoryResponseStyle(promptInput.problem);
+      const turnAnalysis = await analyzeTurn(promptInput.problem);
+      const lightweightConversation = turnAnalysis.includeBoundObjectiveContext === false;
       const imports = await buildFactoryChatContextImports({
         memoryTools: input.memoryTools,
         repoKey,
@@ -368,16 +407,24 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         queue: input.queue,
         stream: resolvedStream,
         factoryService: input.factoryService,
+        includeBoundObjectiveContext: !lightweightConversation,
       });
       const explicitImports: FactoryChatContextImports = {
         ...(imports.profileMemorySummary ? { profileMemorySummary: imports.profileMemorySummary } : {}),
-        ...(getCurrentObjectiveId() || responseStyle === "work"
-          ? {
-              ...(imports.objective ? { objective: imports.objective } : {}),
-              ...(imports.runtime ? { runtime: imports.runtime } : {}),
-            }
-          : {}),
+        ...(imports.objective ? { objective: imports.objective } : {}),
+        ...(imports.runtime ? { runtime: imports.runtime } : {}),
       };
+      const conversationProjection = await loadConversationProjection({
+        memoryTools: input.memoryTools,
+        repoKey,
+        profileId: resolvedProfile.root.id,
+        sessionStream: resolvedStream,
+        dataDir: input.dataDir,
+        query: promptInput.problem,
+        runId: input.runId,
+        iteration: promptInput.iteration,
+        actor: "factory-chat",
+      });
       const chatContext = projectedContext
         ? withFactoryChatContextImports(projectedContext, explicitImports)
         : undefined;
@@ -388,8 +435,10 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         context_imports: renderFactoryChatContextImports(explicitImports),
         memory: explicitImports.profileMemorySummary ?? "(empty)",
         response_style: renderFactoryResponseStyleGuidance(
-          chatContext?.style.responseStyle ?? responseStyle,
+          projectedContext?.style.responseStyle ?? turnAnalysis.responseStyle,
         ),
+        user_preferences: conversationProjection.userPreferences ?? "(none)",
+        session_recall: renderSessionRecallSummary(conversationProjection.sessionRecall) ?? "(none)",
         situation: await buildFactorySituation({
           queue: input.queue,
           runId: input.runId,
@@ -398,6 +447,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
           getCurrentObjectiveId,
           factoryService: input.factoryService,
           dataDir: input.dataDir,
+          detailLevel: lightweightConversation ? "light" : "full",
         }),
       };
     },

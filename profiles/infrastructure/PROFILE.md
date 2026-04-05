@@ -21,6 +21,18 @@
   "handoffTargets": [
     "generalist"
   ],
+  "actionPolicy": {
+    "allowedDispatchActions": [
+      "create",
+      "react",
+      "cancel",
+      "cleanup",
+      "archive"
+    ],
+    "allowedCreateModes": [
+      "investigation"
+    ]
+  },
   "cloudProvider": "aws",
   "defaultObjectiveMode": "investigation",
   "defaultValidationMode": "none",

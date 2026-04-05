@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import {
+  FACTORY_DISPATCH_ACTIONS,
+  FACTORY_DISPATCH_OBJECTIVE_MODES,
+  type FactoryDispatchAction,
+} from "../agents/factory/dispatch";
+
 const PROFILE_DIR = "profiles";
 const PROFILE_FILENAME = "PROFILE.md";
 const SOUL_FILENAME = "SOUL.md";
@@ -19,6 +25,14 @@ const normalizeStringList = (value: unknown): ReadonlyArray<string> =>
 export type FactoryChatProfileObjectiveMode = "delivery" | "investigation";
 export type FactoryChatTaskExecutionMode = "worktree" | "isolated";
 export type FactoryChatCloudProvider = "aws" | "gcp" | "azure";
+export type FactoryChatProfileActionPolicy = {
+  readonly allowedDispatchActions?: ReadonlyArray<FactoryDispatchAction>;
+  readonly allowedCreateModes?: ReadonlyArray<FactoryChatProfileObjectiveMode>;
+};
+export type FactoryChatResolvedActionPolicy = {
+  readonly allowedDispatchActions: ReadonlyArray<FactoryDispatchAction>;
+  readonly allowedCreateModes: ReadonlyArray<FactoryChatProfileObjectiveMode>;
+};
 export type FactoryChatProfileOrchestration = {
   readonly executionMode?: "interactive" | "supervisor";
   readonly discoveryBudget?: number;
@@ -51,6 +65,7 @@ export type FactoryChatProfile = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly actionPolicy?: FactoryChatProfileActionPolicy;
   readonly orchestration?: FactoryChatProfileOrchestration;
   readonly handoffTargets: ReadonlyArray<string>;
   readonly dirPath: string;
@@ -73,6 +88,7 @@ export type FactoryChatResolvedProfile = {
   readonly handoffTargets: ReadonlyArray<string>;
   readonly skills: ReadonlyArray<string>;
   readonly cloudProvider?: FactoryChatCloudProvider;
+  readonly actionPolicy: FactoryChatResolvedActionPolicy;
   readonly orchestration: {
     readonly executionMode: "interactive" | "supervisor";
     readonly discoveryBudget?: number;
@@ -103,6 +119,7 @@ type FactoryChatProfileManifest = {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: FactoryChatTaskExecutionMode;
   readonly allowObjectiveCreation?: boolean;
+  readonly actionPolicy?: FactoryChatProfileActionPolicy;
   readonly orchestration?: {
     readonly executionMode?: "interactive" | "supervisor";
     readonly discoveryBudget?: number;
@@ -136,6 +153,8 @@ const FACTORY_TOOL_ALLOWLIST = [
   "memory.summarize",
   "memory.commit",
   "memory.diff",
+  "session.search",
+  "session.read",
   "skill.read",
   "agent.delegate",
   "agent.status",
@@ -163,6 +182,11 @@ const DEFAULT_FACTORY_OBJECTIVE_POLICY: FactoryChatResolvedObjectivePolicy = {
   allowObjectiveCreation: true,
 };
 
+const DEFAULT_FACTORY_ACTION_POLICY: FactoryChatResolvedActionPolicy = {
+  allowedDispatchActions: [...FACTORY_DISPATCH_ACTIONS],
+  allowedCreateModes: [...FACTORY_DISPATCH_OBJECTIVE_MODES],
+};
+
 const ensureProfileDir = (profileRoot: string): string =>
   path.join(profileRoot, PROFILE_DIR);
 
@@ -171,6 +195,68 @@ const normalizeCloudProvider = (value: unknown): FactoryChatCloudProvider | unde
   if (value === "aws" || value === "gcp" || value === "azure") return value;
   throw new Error(`factory profile cloudProvider must be one of aws, gcp, or azure`);
 };
+
+const normalizeEnumList = <Value extends string>(
+  value: unknown,
+  allowed: ReadonlyArray<Value>,
+  errorPrefix: string,
+): ReadonlyArray<Value> => {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${errorPrefix} must be an array`);
+  }
+  const allowedSet = new Set<string>(allowed);
+  const normalized: Value[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      throw new Error(`${errorPrefix} entries must be strings`);
+    }
+    const trimmed = item.trim();
+    if (!allowedSet.has(trimmed)) {
+      throw new Error(`${errorPrefix} contains unsupported value '${trimmed}'`);
+    }
+    normalized.push(trimmed as Value);
+  }
+  return unique(normalized) as ReadonlyArray<Value>;
+};
+
+const parseActionPolicy = (
+  value: unknown,
+  dirName: string,
+): FactoryChatProfileActionPolicy | undefined => {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`PROFILE.md for '${dirName}' actionPolicy must be a JSON object`);
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    allowedDispatchActions: record.allowedDispatchActions === undefined
+      ? undefined
+      : normalizeEnumList(
+        record.allowedDispatchActions,
+        FACTORY_DISPATCH_ACTIONS,
+        `PROFILE.md for '${dirName}' actionPolicy.allowedDispatchActions`,
+      ),
+    allowedCreateModes: record.allowedCreateModes === undefined
+      ? undefined
+      : normalizeEnumList(
+        record.allowedCreateModes,
+        FACTORY_DISPATCH_OBJECTIVE_MODES,
+        `PROFILE.md for '${dirName}' actionPolicy.allowedCreateModes`,
+      ),
+  };
+};
+
+const resolveActionPolicy = (
+  value: FactoryChatProfileActionPolicy | undefined,
+): FactoryChatResolvedActionPolicy => ({
+  allowedDispatchActions: value?.allowedDispatchActions
+    ? [...value.allowedDispatchActions]
+    : DEFAULT_FACTORY_ACTION_POLICY.allowedDispatchActions,
+  allowedCreateModes: value?.allowedCreateModes
+    ? [...value.allowedCreateModes]
+    : DEFAULT_FACTORY_ACTION_POLICY.allowedCreateModes,
+});
 
 const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): FactoryChatProfile => {
   for (const key of Object.keys(raw)) {
@@ -200,6 +286,7 @@ const parseManifest = (raw: FactoryChatProfileManifest, dirName: string): Factor
       ? raw.defaultTaskExecutionMode
       : undefined,
     allowObjectiveCreation: typeof raw.allowObjectiveCreation === "boolean" ? raw.allowObjectiveCreation : undefined,
+    actionPolicy: parseActionPolicy(raw.actionPolicy, dirName),
     orchestration: (() => {
       const orchestration = raw.orchestration;
       if (!orchestration || typeof orchestration !== "object" || Array.isArray(orchestration)) return undefined;
@@ -266,10 +353,13 @@ const parseProfileMarkdown = (
 const renderObjectivePolicy = (
   profile: FactoryChatProfile,
   objectivePolicy: FactoryChatResolvedObjectivePolicy,
+  actionPolicy: FactoryChatResolvedActionPolicy,
 ): string => [
   "## Objective Defaults",
   `- Objective creation: ${objectivePolicy.allowObjectiveCreation ? "allowed" : "forbidden"}`,
   `- Default mode: ${objectivePolicy.defaultObjectiveMode}`,
+  `- Allowed create modes: ${actionPolicy.allowedCreateModes.join(", ")}`,
+  `- Allowed dispatch actions: ${actionPolicy.allowedDispatchActions.join(", ")}`,
   `- Default validation: ${objectivePolicy.defaultValidationMode}`,
   `- Default task runtime: ${objectivePolicy.defaultTaskExecutionMode}`,
   `- Cloud provider: ${profile.cloudProvider ?? "unspecified"}`,
@@ -300,7 +390,7 @@ const renderProfileHandoffs = (profile: FactoryChatProfile): string | undefined 
     "## Profile Handoffs",
     `- Allowed handoff targets: ${profile.handoffTargets.join(", ")}`,
     "- Use `profile.handoff` only when another profile should own the next turn of work.",
-    "- Always make the handoff reason explicit.",
+    "- Always include reason, goal, current state, and done-when context in the handoff.",
   ].join("\n");
 };
 
@@ -397,6 +487,7 @@ export const resolveFactoryChatProfile = async (input: {
     defaultTaskExecutionMode: root.defaultTaskExecutionMode ?? DEFAULT_FACTORY_OBJECTIVE_POLICY.defaultTaskExecutionMode,
     allowObjectiveCreation: root.allowObjectiveCreation ?? DEFAULT_FACTORY_OBJECTIVE_POLICY.allowObjectiveCreation,
   };
+  const actionPolicy = resolveActionPolicy(root.actionPolicy);
   const promptPath = path.relative(profileRoot, root.mdPath).replace(/\\/g, "/");
   const soulPath = root.soulPath
     ? path.relative(profileRoot, root.soulPath).replace(/\\/g, "/")
@@ -415,15 +506,15 @@ export const resolveFactoryChatProfile = async (input: {
     "Sound like a real engineer with a stable point of view. Use natural conversational flow by default and only switch into workflow mechanics when the task actually needs them.",
     "Sound human. Write like an engineer talking to another person, not like a rubric, dispatcher, or workflow console. Avoid robotic fragments and canned evaluation language unless the user explicitly wants a template.",
     "Use prior transcript, receipts, and memory for facts and context, not as a template for phrasing. If older runs sound stiff or robotic, do not imitate that tone.",
-    "Format replies for the product chat UI. Lead with the answer, keep sections scannable, and prefer short paragraphs, bullets, and tables when presenting structured data.",
+    "Format replies for the product chat UI. Lead with the answer, keep sections scannable, and choose the response shape that best fits the question. Present structured data clearly in markdown instead of dumping raw JSON.",
     "Do not dump raw JSON, receipt payloads, or command output into chat when you can summarize and format them first. If exact values matter, present them cleanly in markdown.",
-    "Let the active profile's role, priorities, and risk posture shape the voice. Infrastructure answers should sound like an infra engineer, software answers should sound like a software engineer, and generalist answers should sound like a pragmatic product engineer.",
+    "Let the active profile's role, priorities, and risk posture shape the voice. Infrastructure answers should sound like an infra engineer, software answers should sound like a software engineer, and generalist answers should sound like a pragmatic tech lead.",
     "When the user asks you to evaluate your own answer, judgment, or behavior, treat that as genuine self-reflection: answer in first person, say what you got right or wrong, and do not pivot into grading the user's prompt or handoff unless they explicitly asked for that.",
     "Use available Receipt-native tools to inspect state, dispatch Factory work, inspect receipts, review artifacts, and abort child work when needed.",
     "Profiles are orchestration-only. Do not claim this chat edited code directly.",
     "",
     ...(profileSoul ? [profileSoul, ""] : []),
-    renderObjectivePolicy(root, objectivePolicy),
+    renderObjectivePolicy(root, objectivePolicy, actionPolicy),
     ...(profileIdentity ? ["", profileIdentity] : []),
     ...(profileHandoffs ? ["", profileHandoffs] : []),
     "",
@@ -443,6 +534,7 @@ export const resolveFactoryChatProfile = async (input: {
     handoffTargets: root.handoffTargets,
     skills: root.skills,
     cloudProvider: root.cloudProvider,
+    actionPolicy,
     orchestration: {
       executionMode: root.orchestration?.executionMode ?? "interactive",
       discoveryBudget: root.orchestration?.discoveryBudget,
@@ -462,6 +554,7 @@ export const resolveFactoryChatProfile = async (input: {
       objectivePolicy,
       skills: root.skills,
       cloudProvider: root.cloudProvider,
+      actionPolicy,
       handoffTargets: root.handoffTargets,
       orchestration: root.orchestration,
     })),
@@ -471,4 +564,49 @@ export const resolveFactoryChatProfile = async (input: {
     profilePaths,
     fileHashes,
   };
+};
+
+const dispatchActionLabel = (action: FactoryDispatchAction): string => {
+  switch (action) {
+    case "create":
+      return "create objectives";
+    case "react":
+      return "react objective work";
+    case "promote":
+      return "promote objectives";
+    case "cancel":
+      return "cancel objectives";
+    case "cleanup":
+      return "clean up objective workspaces";
+    case "archive":
+      return "archive objectives";
+  }
+};
+
+type FactoryChatActionPolicySubject = {
+  readonly label: string;
+  readonly actionPolicy: FactoryChatResolvedActionPolicy;
+};
+
+export const factoryChatResolvedProfileActionSubject = (
+  profile: FactoryChatResolvedProfile,
+): FactoryChatActionPolicySubject => ({
+  label: profile.root.label,
+  actionPolicy: profile.actionPolicy,
+});
+
+export const assertFactoryProfileDispatchActionAllowed = (
+  profile: FactoryChatActionPolicySubject,
+  action: FactoryDispatchAction,
+): void => {
+  if (profile.actionPolicy.allowedDispatchActions.includes(action)) return;
+  throw new Error(`${profile.label} cannot ${dispatchActionLabel(action)}.`);
+};
+
+export const assertFactoryProfileCreateModeAllowed = (
+  profile: FactoryChatActionPolicySubject,
+  objectiveMode: FactoryChatProfileObjectiveMode,
+): void => {
+  if (profile.actionPolicy.allowedCreateModes.includes(objectiveMode)) return;
+  throw new Error(`${profile.label} cannot create ${objectiveMode} objectives.`);
 };

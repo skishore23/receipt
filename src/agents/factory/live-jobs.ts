@@ -6,7 +6,6 @@ import type {
   FactoryLiveCodexCard,
   FactoryLiveRunCard,
   FactoryRunStep,
-  FactoryViewMode,
 } from "../../views/factory-models";
 
 import { buildChatLink } from "./links";
@@ -521,7 +520,6 @@ const describeRunActivity = (
 export const summarizePendingRunJob = (
   job: QueueJob,
   activeProfileLabel: string,
-  mode?: FactoryViewMode,
 ): FactoryLiveRunCard => {
   const summary = job.status === "queued"
     ? "Waiting for a worker to pick up this run."
@@ -541,7 +539,6 @@ export const summarizePendingRunJob = (
     summary,
     updatedAt: job.updatedAt,
     link: buildChatLink({
-      mode,
       profileId: asString(job.payload.profileId),
       chatId: asString(job.payload.chatId),
       objectiveId: asString(job.payload.objectiveId),
@@ -560,7 +557,6 @@ export const summarizeActiveRunCard = (input: {
   readonly profileId: string;
   readonly chatId?: string;
   readonly objectiveId?: string;
-  readonly mode?: FactoryViewMode;
 }): FactoryLiveRunCard => {
   const projection = projectAgentRun(input.runChain);
   const state = projection.state;
@@ -608,7 +604,6 @@ export const summarizeActiveRunCard = (input: {
       : state.lastTool?.summary ?? state.lastTool?.error,
     steps: buildActiveRunSteps(input.runId, input.runChain),
     link: buildChatLink({
-      mode: input.mode,
       profileId: input.profileId,
       chatId: input.chatId,
       objectiveId: input.objectiveId,

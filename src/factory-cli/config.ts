@@ -14,6 +14,7 @@ export type FactoryCliStoredConfig = {
   readonly repoRoot?: string;
   readonly dataDir?: string;
   readonly codexBin?: string;
+  readonly repoSlotConcurrency?: number;
   readonly defaultChecks?: ReadonlyArray<string>;
   readonly defaultPolicy?: FactoryObjectivePolicy;
   readonly schedules?: ReadonlyArray<FactoryCliStoredSchedule>;
@@ -24,6 +25,7 @@ export type FactoryCliConfig = {
   readonly repoRoot: string;
   readonly dataDir: string;
   readonly codexBin: string;
+  readonly repoSlotConcurrency: number;
   readonly defaultChecks: ReadonlyArray<string>;
   readonly defaultPolicy: FactoryObjectivePolicy;
   readonly schedules: ReadonlyArray<HeartbeatSpec>;
@@ -33,6 +35,7 @@ export type FactoryRuntimeConfig = {
   readonly repoRoot: string;
   readonly dataDir: string;
   readonly codexBin: string;
+  readonly repoSlotConcurrency: number;
   readonly configPath?: string;
   readonly schedules: ReadonlyArray<HeartbeatSpec>;
 };
@@ -51,9 +54,19 @@ export type FactoryCliStoredSchedule = {
 
 const CONFIG_DIR = ".receipt";
 const CONFIG_NAME = "config.json";
+const DEFAULT_FACTORY_REPO_SLOT_CONCURRENCY = 20;
 
 const envString = (...values: ReadonlyArray<string | undefined>): string | undefined =>
   values.map((value) => value?.trim()).find((value) => Boolean(value));
+
+const positiveInteger = (value: unknown, fallback: number): number => {
+  const parsed = typeof value === "number" && Number.isFinite(value)
+    ? value
+    : typeof value === "string"
+      ? Number(value)
+      : Number.NaN;
+  return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
+};
 
 const toAbsolute = (baseDir: string, value: string | undefined, fallback: string): string => {
   const selected = value?.trim() || fallback;
@@ -125,7 +138,11 @@ const defaultFactoryConfigPath = (repoRoot: string): string =>
 
 export const detectGitRoot = async (cwd: string): Promise<string | undefined> => {
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+    await execFileAsync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], {
+      cwd,
+      encoding: "utf-8",
+    });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf-8",
     });
@@ -152,7 +169,7 @@ const findFactoryConfig = async (startDir: string): Promise<string | undefined> 
 };
 
 export const loadFactoryConfig = async (cwd: string, repoRootOverride?: string): Promise<FactoryCliConfig | undefined> => {
-  const configuredRepoRoot = envString(repoRootOverride, process.env.RECEIPT_REPO_ROOT, process.env.HUB_REPO_ROOT);
+  const configuredRepoRoot = envString(repoRootOverride, process.env.RECEIPT_REPO_ROOT);
   const configPath = configuredRepoRoot
     ? defaultFactoryConfigPath(path.resolve(configuredRepoRoot))
     : await findFactoryConfig(cwd);
@@ -180,7 +197,11 @@ export const loadFactoryConfig = async (cwd: string, repoRootOverride?: string):
     configPath,
     repoRoot,
     dataDir,
-    codexBin: envString(process.env.RECEIPT_CODEX_BIN, process.env.HUB_CODEX_BIN, parsed.codexBin) ?? "codex",
+    codexBin: envString(process.env.RECEIPT_CODEX_BIN, parsed.codexBin) ?? "codex",
+    repoSlotConcurrency: positiveInteger(
+      envString(process.env.RECEIPT_FACTORY_REPO_SLOT_CONCURRENCY),
+      positiveInteger(parsed.repoSlotConcurrency, DEFAULT_FACTORY_REPO_SLOT_CONCURRENCY),
+    ),
     defaultChecks: uniqueChecks(parsed.defaultChecks),
     defaultPolicy: parsed.defaultPolicy ?? DEFAULT_FACTORY_OBJECTIVE_POLICY,
     schedules: normalizeSchedules(parsed.schedules),
@@ -191,24 +212,37 @@ export const resolveFactoryRuntimeConfig = async (
   cwd: string,
   repoRootOverride?: string,
 ): Promise<FactoryRuntimeConfig> => {
+  const normalizedCwd = path.resolve(cwd);
+  const gitRoot = await detectGitRoot(normalizedCwd);
+  const configuredRepoRoot = envString(repoRootOverride, process.env.RECEIPT_REPO_ROOT);
+  if (!gitRoot && !configuredRepoRoot) {
+    throw new Error(
+      `Factory runtime config requires a git repository or RECEIPT_REPO_ROOT. cwd=${normalizedCwd} failed: git -C ${normalizedCwd} rev-parse --is-inside-work-tree`,
+    );
+  }
+
   const loaded = await loadFactoryConfig(cwd, repoRootOverride);
   if (loaded) {
     return {
       repoRoot: loaded.repoRoot,
       dataDir: loaded.dataDir,
       codexBin: loaded.codexBin,
+      repoSlotConcurrency: loaded.repoSlotConcurrency,
       configPath: loaded.configPath,
       schedules: loaded.schedules,
     };
   }
 
-  const configuredRepoRoot = envString(repoRootOverride, process.env.RECEIPT_REPO_ROOT, process.env.HUB_REPO_ROOT);
-  const fallbackRepoRoot = path.resolve(configuredRepoRoot ?? await detectGitRoot(cwd) ?? cwd);
+  const fallbackRepoRoot = path.resolve(configuredRepoRoot ?? gitRoot ?? normalizedCwd);
   const explicitDataDir = envString(process.env.RECEIPT_DATA_DIR, process.env.DATA_DIR);
   return {
     repoRoot: fallbackRepoRoot,
     dataDir: explicitDataDir ? path.resolve(explicitDataDir) : path.join(fallbackRepoRoot, ".receipt", "data"),
-    codexBin: envString(process.env.RECEIPT_CODEX_BIN, process.env.HUB_CODEX_BIN) ?? "codex",
+    codexBin: envString(process.env.RECEIPT_CODEX_BIN) ?? "codex",
+    repoSlotConcurrency: positiveInteger(
+      envString(process.env.RECEIPT_FACTORY_REPO_SLOT_CONCURRENCY),
+      DEFAULT_FACTORY_REPO_SLOT_CONCURRENCY,
+    ),
     schedules: [],
   };
 };

@@ -12,8 +12,8 @@ It is a receipt-backed loop with four concrete parts:
 
 1. prevent drift before publish by turning the objective into an explicit worker contract
 2. require the worker to report alignment against that contract
-3. reconstruct and score completed runs with `factory investigate` and `factory audit`
-4. write compact audit summaries back into dedicated memory scopes so later humans and agents can course-correct
+3. audit terminal objectives into persisted artifacts plus compact audit memory
+4. project those audit results into the CLI and web workbenches, while `factory investigate` and `factory audit` provide deeper controller-side analysis
 
 The important design rule is:
 
@@ -40,20 +40,27 @@ It does **not** currently mean:
 ## Loop Overview
 
 ```mermaid
-flowchart LR
-  A["Objective + acceptance criteria"] --> B["Objective contract in task packet"]
-  B --> C["Codex delivery result with alignment block"]
-  C --> D{"Alignment gate"}
-  D -->|aligned| E["Validate / integrate / promote"]
-  D -->|uncertain or drifted| F["One corrective follow-up task"]
-  F --> D
-  E --> G["Automatic objective audit job"]
-  G --> H["objective.audit.json + objective.audit.md"]
-  G --> I["factory/audits/objectives/<id>"]
-  G --> J["factory/audits/repo"]
-  H --> K["factory investigate / factory audit"]
-  I --> K
+flowchart TD
+  A["Delivery objective reaches terminal status"] --> B["server.ts queues factory.objective.audit"]
+  B --> C["runFactoryObjectiveAudit in factory-runtime.ts"]
+  C --> D["readFactoryReceiptInvestigation reconstructs the run"]
+  C --> E["Read recent factory/audits/repo entries"]
+  E --> F["Cluster recurring audit patterns"]
+  D --> G["Generate structured recommendations"]
+  F --> G
+  G --> H{"High-confidence recommendation matches recurring pattern threshold?"}
+  H -->|yes| I["Create follow-up delivery objective on channel auto-fix"]
+  H -->|no| J["No auto-fix objective"]
+  I --> K["Persist objective.audit.json and objective.audit.md"]
   J --> K
+  K --> L["Commit summary to factory/audits/objectives/{objectiveId}"]
+  K --> M["Commit rollup entry to factory/audits/repo"]
+  K --> N["readPersistedObjectiveAuditMetadata"]
+  N --> O["FactoryService.getObjective"]
+  O --> P["CLI workbench overview"]
+  O --> Q["Web workbench overview"]
+  K --> R["factory investigate overlays persisted audit metadata"]
+  M --> S["factory audit builds repo-level rollup"]
 ```
 
 ## 1. Objective Contract Before Execution
@@ -163,6 +170,9 @@ The audit worker path lives in [`src/services/factory-runtime.ts`](/Users/kishor
 For each terminal objective it:
 
 - runs the same receipt investigation logic
+- reads recent repo audit memory and clusters recurring anomaly patterns
+- generates structured recommendations
+- optionally creates a follow-up delivery objective on the `auto-fix` channel when a high-confidence recommendation matches a recurring pattern threshold
 - writes `objective.audit.json`
 - writes `objective.audit.md`
 - retries transient `database is locked` failures
@@ -179,6 +189,8 @@ Memory scopes written by the audit worker:
 - `factory/audits/repo`
 
 Those memory entries are intentionally compact. They record the run verdict and improvement signals without dumping the entire task result into shared memory.
+
+The artifact JSON is the persisted source for the current workbench self-improvement snapshot.
 
 ## 6. Repo-Level Audit
 
@@ -247,26 +259,33 @@ Self-improvement signals are exposed in the current UI and CLI surfaces.
 
 ### Workbench
 
-The selected-objective view renders an `Objective Contract` card and current alignment state in [`src/views/factory-workbench-page.ts`](/Users/kishore/receipt/src/views/factory-workbench-page.ts).
+The current workbench self-improvement view is a shared projection over persisted audit metadata.
+
+`FactoryService.getObjective()` loads the audit snapshot from persisted artifacts in [`src/services/factory/runtime/base-service.ts`](/Users/kishore/receipt/src/services/factory/runtime/base-service.ts). That detail model is then projected into both:
+
+- the web workbench route and presenter path in [`src/agents/factory/route/handlers.ts`](/Users/kishore/receipt/src/agents/factory/route/handlers.ts) and [`src/views/factory/workbench/page.ts`](/Users/kishore/receipt/src/views/factory/workbench/page.ts)
+- the terminal workbench UI in [`src/factory-cli/app.tsx`](/Users/kishore/receipt/src/factory-cli/app.tsx)
 
 Operators can see:
 
-- acceptance criteria
-- required checks
-- proof expectation
-- satisfied criteria
-- missing criteria
-- out-of-scope work
-- gate status
-- controller rationale and corrective action
+- latest audit timestamp
+- audit recommendations
+- recurring patterns
+- auto-fix objective id when one was created
+
+The important implementation detail is that the workbench CLI and workbench web UI now read the same `FactoryService.getObjective()` self-improvement model.
 
 ### Investigate
 
-`factory investigate` surfaces the same contract/alignment story in text and JSON form.
+`factory investigate` is a separate analytical CLI path implemented in [`src/factory-cli/investigate.ts`](/Users/kishore/receipt/src/factory-cli/investigate.ts).
+
+It reconstructs the run from receipts and packet context, then overlays persisted audit metadata if present. It is not just a rendering of the workbench model.
 
 ### Audit
 
-`factory audit` turns those per-objective signals into repo-wide improvement signals.
+`factory audit` is the repo-level analytical rollup in [`src/factory-cli/audit.ts`](/Users/kishore/receipt/src/factory-cli/audit.ts).
+
+It samples recent objectives, reuses investigation data, adds memory-hygiene checks, and reports repo-wide signals such as high-confidence recommendations and auto-fix objective counts.
 
 ## 9. Why This Helps Codex Without Constraining It Too Much
 
@@ -290,6 +309,7 @@ Current limits include:
 - repo-level audit signals are descriptive, not automatically converted into new controller policy
 - alignment correction is capped at one corrective pass
 - audit memory is compact by design, so deeper repair still relies on receipts and artifacts
+- workbench projection parity exists today, but `factory investigate` and `factory audit` still maintain separate report-building codepaths
 
 So the system is already self-observing and partially self-correcting, but not yet self-optimizing in a broader planning sense.
 
@@ -313,8 +333,8 @@ receipt memory summarize factory/audits/repo --limit 8 --max-chars 1600
 The current loop is covered by smoke tests in:
 
 - [`tests/smoke/factory-policy.test.ts`](/Users/kishore/receipt/tests/smoke/factory-policy.test.ts) for alignment contract, delivery result schema, and corrective gate behavior
-- [`tests/smoke/factory-investigate-script.test.ts`](/Users/kishore/receipt/tests/smoke/factory-investigate-script.test.ts) for investigation output, contract/alignment reporting, and audit artifact/memory writes
-- [`tests/smoke/factory-client.test.ts`](/Users/kishore/receipt/tests/smoke/factory-client.test.ts) and [`tests/smoke/factory.test.ts`](/Users/kishore/receipt/tests/smoke/factory.test.ts) for operator-facing workbench surfaces
+- [`tests/smoke/factory-investigate-script.test.ts`](/Users/kishore/receipt/tests/smoke/factory-investigate-script.test.ts) for investigation output, persisted audit metadata, audit artifact/memory writes, and recurring-pattern auto-fix creation
+- [`tests/smoke/factory.test.ts`](/Users/kishore/receipt/tests/smoke/factory.test.ts), [`tests/smoke/factory-cli.test.ts`](/Users/kishore/receipt/tests/smoke/factory-cli.test.ts), and [`tests/smoke/factory-presenters.test.ts`](/Users/kishore/receipt/tests/smoke/factory-presenters.test.ts) for the shared workbench projection and operator-facing UI surfaces
 
 That means the self-improvement path is not only a doc concept. It is implemented as a tested combination of:
 

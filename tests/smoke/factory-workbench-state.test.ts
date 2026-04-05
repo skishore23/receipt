@@ -74,7 +74,7 @@ test("factory workbench state: replay merges only missing view state and preserv
       profileId: "generalist",
       chatId: "chat_demo",
       objectiveId: "objective_old",
-      inspectorTab: "notes",
+      inspectorTab: "notes" as unknown as "overview",
       detailTab: "queue",
       filter: "objective.completed",
       focusKind: "job",

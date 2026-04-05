@@ -45,7 +45,13 @@ const createJobRuntime = (dataDir: string) =>
 
 const noopCodex = { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) };
 
-const createService = (dataDir: string, repoRoot: string) =>
+const createService = (
+  dataDir: string,
+  repoRoot: string,
+  opts?: {
+    readonly repoSlotConcurrency?: number;
+  },
+) =>
   new FactoryService({
     dataDir,
     queue: jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" }),
@@ -53,6 +59,7 @@ const createService = (dataDir: string, repoRoot: string) =>
     sse: new SseHub(),
     codexExecutor: noopCodex,
     repoRoot,
+    repoSlotConcurrency: opts?.repoSlotConcurrency,
   });
 
 const emitEvent = async (service: FactoryService, objectiveId: string, event: Record<string, unknown>): Promise<void> => {
@@ -256,6 +263,35 @@ test("slot queueing: admitted investigation objectives do not count against deli
   expect(investigation.scheduler.slotState).toBe("active");
   expect(secondDelivery.scheduler.slotState).toBe("queued");
   expect(secondDelivery.scheduler.queuePosition).toBe(1);
+}, 30_000);
+
+test("slot admission: configured repo slot concurrency admits multiple delivery objectives in parallel", async () => {
+  const dataDir = await createTempDir("slots-parallel-delivery");
+  const repoRoot = await createSourceRepo();
+  const service = createService(dataDir, repoRoot, { repoSlotConcurrency: 3 });
+
+  const first = await service.createObjective({ title: "First", prompt: "parallel 1", checks: ["true"] });
+  const second = await service.createObjective({ title: "Second", prompt: "parallel 2", checks: ["true"] });
+  const third = await service.createObjective({ title: "Third", prompt: "parallel 3", checks: ["true"] });
+  const fourth = await service.createObjective({ title: "Fourth", prompt: "parallel 4", checks: ["true"] });
+
+  expect(first.scheduler.slotState).toBe("active");
+  expect(second.scheduler.slotState).toBe("active");
+  expect(third.scheduler.slotState).toBe("active");
+  expect(fourth.scheduler.slotState).toBe("queued");
+  expect(fourth.scheduler.queuePosition).toBe(1);
+
+  await emitEvent(service, first.objectiveId, {
+    type: "objective.completed",
+    objectiveId: first.objectiveId,
+    summary: "done",
+    completedAt: Date.now(),
+  });
+  await service.reactObjective(first.objectiveId);
+
+  const admittedFourth = await service.getObjective(fourth.objectiveId);
+  expect(admittedFourth.scheduler.slotState).toBe("active");
+  expect(admittedFourth.scheduler.queuePosition).toBeUndefined();
 }, 30_000);
 
 // ---------------------------------------------------------------------------

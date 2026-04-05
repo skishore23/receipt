@@ -3,6 +3,7 @@ import type {
   FactoryObjectiveCard,
   FactoryObjectiveDetail,
 } from "../../services/factory-types";
+import { deriveObjectiveOperationalState } from "../../services/factory/objective-status";
 import type { FactorySelectedObjectiveCard } from "../factory-models";
 import {
   buildObjectiveActionSet,
@@ -75,6 +76,9 @@ export const toFactorySelectedObjectiveCard = (
     status: selectedObjective.status,
     phase: selectedObjective.phase,
     displayState,
+    phaseDetail: selectedObjective.phaseDetail,
+    statusAuthority: selectedObjective.statusAuthority,
+    hasAuthoritativeLiveJob: selectedObjective.hasAuthoritativeLiveJob,
     summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
     bottomLine: buildObjectiveBottomLine(selectedObjective),
     debugLink: objectiveDebugLink(selectedObjective.objectiveId),
@@ -95,6 +99,7 @@ export const toFactorySelectedObjectiveCard = (
     latestCommitHash: selectedObjective.latestCommitHash,
     prUrl: selectedObjective.prUrl,
     prNumber: selectedObjective.prNumber,
+    selfImprovement: selectedObjective.selfImprovement,
     contract: selectedObjective.contract,
     alignment: selectedObjective.alignment,
     checks: "checks" in selectedObjective ? selectedObjective.checks : undefined,
@@ -114,6 +119,9 @@ export const toFactorySelectedObjectiveCard = (
     status: selectedObjective.status,
     phase: selectedObjective.phase,
     displayState,
+    phaseDetail: selectedObjective.phaseDetail,
+    statusAuthority: selectedObjective.statusAuthority,
+    hasAuthoritativeLiveJob: selectedObjective.hasAuthoritativeLiveJob,
     summary: selectedObjective.latestSummary ?? selectedObjective.nextAction,
     bottomLine: buildObjectiveBottomLine(selectedObjective),
     debugLink: objectiveDebugLink(selectedObjective.objectiveId),
@@ -134,6 +142,7 @@ export const toFactorySelectedObjectiveCard = (
     latestCommitHash: selectedObjective.latestCommitHash,
     prUrl: selectedObjective.prUrl,
     prNumber: selectedObjective.prNumber,
+    selfImprovement: selectedObjective.selfImprovement,
     contract: selectedObjective.contract,
     alignment: selectedObjective.alignment,
     checks: "checks" in selectedObjective ? selectedObjective.checks : undefined,
@@ -153,20 +162,12 @@ export const toFactoryStateSelectedObjectiveCard = (
   state: FactoryState,
 ): FactorySelectedObjectiveCard => {
   const projection = buildFactoryProjection(state);
-  const status = state.status;
-  const displayState = status === "completed"
-    ? "Completed"
-    : status === "blocked"
-      ? "Blocked"
-      : status === "failed"
-        ? "Failed"
-        : status === "canceled"
-          ? "Canceled"
-          : state.scheduler.slotState === "queued"
-            ? "Ready"
-            : state.status === "planning" && projection.tasks.length === 0
-              ? "Draft"
-              : "Running";
+  const operationalState = deriveObjectiveOperationalState({
+    state,
+    taskCount: projection.tasks.length,
+    executionStalled: false,
+    objectiveJobs: [],
+  });
   return {
     objectiveId: state.objectiveId,
     profileId: state.profile.rootProfileId,
@@ -174,7 +175,10 @@ export const toFactoryStateSelectedObjectiveCard = (
     title: state.title,
     status: state.status,
     phase: state.status,
-    displayState,
+    displayState: operationalState.displayState,
+    phaseDetail: operationalState.phaseDetail,
+    statusAuthority: operationalState.statusAuthority,
+    hasAuthoritativeLiveJob: operationalState.hasAuthoritativeLiveJob,
     summary: state.latestSummary,
     bottomLine: state.latestSummary,
     debugLink: objectiveDebugLink(state.objectiveId),

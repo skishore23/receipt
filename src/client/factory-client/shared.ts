@@ -14,18 +14,6 @@ export type FactoryCommand = {
   readonly aliases?: ReadonlyArray<string>;
 };
 
-export type RefreshKind = "chat" | "sidebar" | "inspector";
-
-export type LiveScope = FactoryLiveScopePayload & {
-  readonly search: string;
-};
-
-export type PendingSubmission = {
-  readonly prompt: string;
-  readonly optimisticHtml: string;
-  readonly scope?: LiveScope;
-};
-
 export type StreamingReply = {
   readonly runId?: string;
   readonly profileLabel?: string;
@@ -47,9 +35,6 @@ export type FactoryFetchResponse = {
 };
 
 export const DEFAULT_COMMANDS: ReadonlyArray<FactoryCommand> = [];
-export const CHAT_REFRESH_DELAY_MS = 180;
-export const SIDEBAR_REFRESH_DELAY_MS = 450;
-export const INSPECTOR_REFRESH_DELAY_MS = 450;
 export const ASSISTANT_RESPONSE_CARD_CLASS = "overflow-hidden border border-border/80 bg-card";
 export const ASSISTANT_RESPONSE_BODY_CLASS = "max-w-[72ch] px-5 py-4 sm:px-6 sm:py-5";
 
@@ -98,11 +83,6 @@ export const escapeHtml = (value: unknown): string =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-
-export const splitDelimited = (value: string | null): ReadonlyArray<string> =>
-  value
-    ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
-    : [];
 
 export const dispatchBodyEvent = (eventName: string, detail?: unknown): void => {
   if (!document.body || typeof window.CustomEvent !== "function") return;

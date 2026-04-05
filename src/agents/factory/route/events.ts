@@ -18,7 +18,6 @@ export const createFactoryRouteEvents = (input: {
     readonly objectiveId?: string;
     readonly selectedJob?: QueueJob;
     readonly jobs: ReadonlyArray<QueueJob>;
-    readonly allowExplicitFallback?: boolean;
   }) => Promise<string | undefined>;
 }) => {
   const resolveChatEventSubscriptions = async (inputEvent: {
@@ -48,7 +47,6 @@ export const createFactoryRouteEvents = (input: {
       objectiveId: inputEvent.objectiveId,
       selectedJob,
       jobs,
-      allowExplicitFallback: true,
     });
     const stream = resolveChatViewStream({
       repoRoot: input.service.git.repoRoot,

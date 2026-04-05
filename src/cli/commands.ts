@@ -10,7 +10,17 @@ import { renderReceiptDstAuditText, runReceiptDstAudit } from "./dst";
 import { runAgentLoop } from "../engine/runtime/agent-loop";
 import { createResonateAgentActionAdapter } from "../engine/runtime/resonate-agent-actions";
 import { handleFactoryCommand } from "../factory-cli/commands";
+import { detectGitRoot } from "../factory-cli/config";
 import type { JobCmd, JobEvent, JobState } from "../modules/job";
+import {
+  commitUserPreference,
+  globalUserPreferenceScope,
+  listUserPreferenceEntries,
+  removeUserPreferenceEntry,
+  repoUserPreferenceScope,
+} from "../services/conversation-memory";
+import { repoKeyForRoot } from "../services/factory-chat-profiles";
+import { readSessionHistory, searchSessionHistory } from "../services/session-history";
 import {
   asIntegerFlag,
   asString,
@@ -25,6 +35,7 @@ import {
   defaultResonateTargetGroup,
   ensureResonateDispatchReady,
   getJobBackend,
+  getMemoryRuntime,
   getMemoryTools,
   loadAgentDefault,
   looksLikeDefineAgentSpec,
@@ -383,10 +394,90 @@ const commandJobs = async (args: ReadonlyArray<string>, flags: Flags): Promise<v
   }
 };
 
+const resolveCliRepoKey = async (flags: Flags): Promise<string | undefined> => {
+  const candidate = asString(flags, "repo-root") ?? await detectGitRoot(ROOT);
+  return candidate ? repoKeyForRoot(path.resolve(candidate)) : undefined;
+};
+
+const commandMemoryPrefs = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const subcommand = args[0] ?? "list";
+  const memoryTools = getMemoryTools();
+  const memoryRuntime = getMemoryRuntime();
+  const scopeMode = (asString(flags, "scope") ?? "layered").trim().toLowerCase();
+  const repoKey = scopeMode === "global" ? undefined : await resolveCliRepoKey(flags);
+  const scopes = scopeMode === "repo"
+    ? [repoKey ? repoUserPreferenceScope(repoKey) : undefined].filter((scope): scope is string => Boolean(scope))
+    : scopeMode === "global"
+      ? [globalUserPreferenceScope()]
+      : [
+          repoKey ? repoUserPreferenceScope(repoKey) : undefined,
+          globalUserPreferenceScope(),
+        ].filter((scope): scope is string => Boolean(scope));
+
+  switch (subcommand) {
+    case "list": {
+      const entries = scopeMode === "layered"
+        ? await listUserPreferenceEntries({
+            memoryTools,
+            repoKey,
+            runId: "cli_memory_prefs_list",
+            actor: "cli",
+            scopeMode: "layered",
+          })
+        : (await Promise.all(scopes.map((scope) => memoryTools.read({
+            scope,
+            limit: 50,
+            audit: { actor: "cli", command: "memory.prefs.list" },
+          })))).flat();
+      console.log(JSON.stringify({ scopes, entries }, null, 2));
+      return;
+    }
+    case "add": {
+      const text = asString(flags, "text") ?? args.slice(1).join(" ").trim();
+      if (!text) throw new Error("memory prefs add requires --text or trailing text");
+      const entry = await commitUserPreference({
+        memoryTools,
+        text,
+        repoKey: scopeMode === "global" ? undefined : repoKey,
+        source: "explicit_user",
+        runId: "cli_memory_prefs_add",
+        actor: "cli",
+      });
+      console.log(JSON.stringify({ entry }, null, 2));
+      return;
+    }
+    case "remove": {
+      const entryId = args[1]?.trim();
+      if (!entryId) throw new Error("memory prefs remove requires an entry id");
+      const entries = (await Promise.all(scopes.map((scope) => memoryTools.read({
+        scope,
+        limit: 100,
+        audit: { actor: "cli", command: "memory.prefs.remove" },
+      })))).flat();
+      const target = entries.find((entry) => entry.id === entryId);
+      if (!target) throw new Error(`Unknown preference entry '${entryId}'`);
+      const removed = await removeUserPreferenceEntry({
+        dir: DATA_DIR,
+        runtime: memoryRuntime,
+        entryId,
+        scope: target.scope,
+      });
+      console.log(JSON.stringify({ removed, entryId, scope: target.scope }, null, 2));
+      return;
+    }
+    default:
+      throw new Error(`Unknown memory prefs subcommand '${subcommand}'`);
+  }
+};
+
 const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
   const subcommand = args[0];
-  const scope = args[1];
   if (!subcommand) throw new Error("memory subcommand is required");
+  if (subcommand === "prefs") {
+    await commandMemoryPrefs(args.slice(1), flags);
+    return;
+  }
+  const scope = args[1];
   if (!scope) throw new Error("memory scope is required");
   const memoryTools = getMemoryTools();
 
@@ -461,6 +552,45 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
   }
 };
 
+const commandSessions = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+  const subcommand = args[0];
+  if (!subcommand) throw new Error("sessions subcommand is required");
+  switch (subcommand) {
+    case "search": {
+      const query = asString(flags, "query") ?? args.slice(1).join(" ").trim();
+      if (!query) throw new Error("sessions search requires --query or trailing query text");
+      const limit = parseNumberFlag(flags, "limit");
+      const repoKey = asString(flags, "repo-key");
+      const profileId = asString(flags, "profile");
+      const sessionStream = asString(flags, "session-stream");
+      const results = await searchSessionHistory({
+        dataDir: DATA_DIR,
+        query,
+        repoKey,
+        profileId,
+        sessionStream,
+        limit,
+      });
+      console.log(JSON.stringify({ results }, null, 2));
+      return;
+    }
+    case "read": {
+      const target = args[1]?.trim();
+      if (!target) throw new Error("sessions read requires a chat id or session stream");
+      const limit = parseNumberFlag(flags, "limit");
+      const messages = await readSessionHistory({
+        dataDir: DATA_DIR,
+        ...(target.includes("/sessions/") ? { sessionStream: target } : { chatId: target }),
+        limit,
+      });
+      console.log(JSON.stringify({ messages }, null, 2));
+      return;
+    }
+    default:
+      throw new Error(`Unknown sessions subcommand '${subcommand}'`);
+  }
+};
+
 export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
   switch (parsed.command) {
     case "new": {
@@ -518,6 +648,9 @@ export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
     }
     case "memory":
       await commandMemory(parsed.args, parsed.flags);
+      return;
+    case "sessions":
+      await commandSessions(parsed.args, parsed.flags);
       return;
     case "factory":
       await handleFactoryCommand(process.cwd(), parsed.args, parsed.flags);

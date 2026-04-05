@@ -1,5 +1,19 @@
-export type FactoryDispatchAction = "create" | "react" | "promote" | "cancel" | "cleanup" | "archive";
-export type FactoryDispatchObjectiveMode = "delivery" | "investigation";
+export const FACTORY_DISPATCH_ACTIONS = [
+  "create",
+  "react",
+  "promote",
+  "cancel",
+  "cleanup",
+  "archive",
+] as const;
+
+export const FACTORY_DISPATCH_OBJECTIVE_MODES = [
+  "delivery",
+  "investigation",
+] as const;
+
+export type FactoryDispatchAction = typeof FACTORY_DISPATCH_ACTIONS[number];
+export type FactoryDispatchObjectiveMode = typeof FACTORY_DISPATCH_OBJECTIVE_MODES[number];
 
 export type NormalizedFactoryDispatchInput = {
   readonly rawAction?: string;
@@ -13,18 +27,10 @@ export type NormalizedFactoryDispatchInput = {
   readonly severity?: 1 | 2 | 3 | 4 | 5;
   readonly checks: ReadonlyArray<string>;
   readonly channel?: string;
-  readonly profileId?: string;
   readonly reason?: string;
 };
 
-const FACTORY_DISPATCH_ACTIONS = new Set<FactoryDispatchAction>([
-  "create",
-  "react",
-  "promote",
-  "cancel",
-  "cleanup",
-  "archive",
-]);
+const FACTORY_DISPATCH_ACTION_SET = new Set<FactoryDispatchAction>(FACTORY_DISPATCH_ACTIONS);
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -56,7 +62,7 @@ const parseSeverity = (value: unknown): 1 | 2 | 3 | 4 | 5 | undefined => {
 export const normalizeFactoryDispatchInput = (value: unknown): NormalizedFactoryDispatchInput => {
   const record = asRecord(value) ?? {};
   const rawAction = asString(record.action);
-  const action = rawAction && FACTORY_DISPATCH_ACTIONS.has(rawAction as FactoryDispatchAction)
+  const action = rawAction && FACTORY_DISPATCH_ACTION_SET.has(rawAction as FactoryDispatchAction)
     ? rawAction as FactoryDispatchAction
     : undefined;
   return {
@@ -71,7 +77,6 @@ export const normalizeFactoryDispatchInput = (value: unknown): NormalizedFactory
     severity: parseSeverity(record.severity),
     checks: asStringList(record.checks),
     channel: asString(record.channel),
-    profileId: asString(record.profileId),
     reason: asString(record.reason),
   };
 };

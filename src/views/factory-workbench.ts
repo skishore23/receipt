@@ -20,13 +20,28 @@ const asString = (value: unknown): string | undefined =>
 const isTerminalJobStatus = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
-const isActiveJobStatus = (status?: string): boolean =>
-  status === "queued" || status === "leased" || status === "running";
+const LIVE_JOB_STALE_AFTER_MS = 90_000;
 
-const isActiveTask = (task: Pick<FactoryTaskView, "status" | "jobStatus">): boolean =>
-  task.status === "running"
-  || task.status === "reviewing"
-  || isActiveJobStatus(task.jobStatus);
+const jobProgressAt = (job: QueueJob | undefined): number | undefined => {
+  const result = asRecord(job?.result);
+  return typeof result?.progressAt === "number" && Number.isFinite(result.progressAt)
+    ? result.progressAt
+    : undefined;
+};
+
+const displayJobStatus = (job: QueueJob | undefined, fallback?: string, now = Date.now()): string | undefined => {
+  if (!job) return fallback;
+  if (isTerminalJobStatus(job.status)) return job.status;
+  const progressAt = jobProgressAt(job);
+  if (job.status === "running" && typeof progressAt === "number" && now - progressAt >= LIVE_JOB_STALE_AFTER_MS) {
+    return "stalled";
+  }
+  if (job.status === "leased") return "running";
+  return job.status;
+};
+
+const isDisplayActiveJobStatus = (status?: string): boolean =>
+  status === "queued" || status === "running";
 
 const isTerminalTaskStatus = (status: string | undefined): boolean =>
   status === "approved" || status === "blocked" || status === "integrated" || status === "superseded";
@@ -143,6 +158,8 @@ export type FactoryWorkbenchSummary = {
   readonly title: string;
   readonly status: string;
   readonly phase: string;
+  readonly phaseDetail?: string;
+  readonly statusAuthority?: string;
   readonly integrationStatus: string;
   readonly slotState: string;
   readonly queuePosition?: number;
@@ -179,6 +196,7 @@ export const buildFactoryWorkbench = (input: {
 }): FactoryWorkbenchModel | undefined => {
   const detail = input.detail;
   if (!detail) return undefined;
+  const now = input.now ?? Date.now();
   const stoppedTaskStatus = detail.status === "canceled"
     ? "canceled"
     : detail.status === "failed"
@@ -193,9 +211,12 @@ export const buildFactoryWorkbench = (input: {
     || detail.status === "completed";
   const titleById = new Map(detail.tasks.map((task) => [task.taskId, task.title] as const));
   const tasks = detail.tasks.map((task) => {
-    const taskLooksActive = task.status === "running" || task.status === "reviewing";
-    const stoppedMidTask = objectiveStopsLiveExecution && taskLooksActive && !isActiveJobStatus(task.jobStatus);
-    const effectiveStatus = stoppedMidTask ? stoppedTaskStatus : task.status;
+    const effectiveJobStatus = displayJobStatus(task.job, task.jobStatus, now);
+    const taskLooksActive = effectiveJobStatus === "stalled"
+      ? false
+      : task.status === "running" || task.status === "reviewing" || isDisplayActiveJobStatus(effectiveJobStatus);
+    const stoppedMidTask = objectiveStopsLiveExecution && taskLooksActive && !isDisplayActiveJobStatus(effectiveJobStatus);
+    const effectiveStatus = stoppedMidTask ? stoppedTaskStatus : (effectiveJobStatus ?? task.status);
     const effectiveBlockedReason = stoppedMidTask
       ? detail.blockedReason ?? task.blockedReason ?? detail.latestSummary
       : task.blockedReason;
@@ -220,7 +241,7 @@ export const buildFactoryWorkbench = (input: {
     workspaceDirty: task.workspaceDirty,
     workspaceHead: task.workspaceHead,
     elapsedMs: task.elapsedMs,
-    isActive: !objectiveStopsLiveExecution && isActiveTask(task),
+    isActive: !objectiveStopsLiveExecution && taskLooksActive,
     isReady: !objectiveStopsLiveExecution && task.status === "ready",
     lastMessage: task.lastMessage,
     stdoutTail: task.stdoutTail,
@@ -243,11 +264,12 @@ export const buildFactoryWorkbench = (input: {
     const taskId = asString(payload.taskId);
     const linkedTask = taskId ? taskById.get(taskId) : undefined;
     const linkedTaskTerminal = linkedTask ? isTerminalTaskStatus(linkedTask.status) : false;
-    const running = !objectiveStopsLiveExecution && !linkedTaskTerminal && !isTerminalJobStatus(job.status);
+    const displayStatus = displayJobStatus(job, job.status, now) ?? job.status;
+    const running = !objectiveStopsLiveExecution && !linkedTaskTerminal && isDisplayActiveJobStatus(displayStatus);
     const effectiveStatus = running
-      ? job.status
+      ? displayStatus
       : linkedTask?.status
-        ?? (objectiveStopsLiveExecution && !isTerminalJobStatus(job.status) ? detail.status : job.status);
+        ?? (objectiveStopsLiveExecution && !isTerminalJobStatus(job.status) ? detail.status : displayStatus);
     return [{
       jobId: job.id,
       agentId: job.agentId,
@@ -277,7 +299,6 @@ export const buildFactoryWorkbench = (input: {
   const output = input.liveOutput;
   const focusedTaskStatus = focusedTask
     ? output?.status
-      ?? (isActiveJobStatus(focusedTask.jobStatus) ? focusedTask.jobStatus : undefined)
       ?? focusedTask.status
       ?? focusedTask.jobStatus
     : undefined;
@@ -310,7 +331,7 @@ export const buildFactoryWorkbench = (input: {
         artifactSummary: output?.artifactSummary ?? focusedTask.artifactSummary,
         artifactActivity: output?.artifactActivity ?? focusedTask.artifactActivity,
       } satisfies FactoryWorkbenchFocus
-    : focusedJob
+      : focusedJob
       ? {
           focusKind: "job",
           focusId: focusedJob.jobId,
@@ -329,7 +350,6 @@ export const buildFactoryWorkbench = (input: {
           artifactActivity: output?.artifactActivity,
         } satisfies FactoryWorkbenchFocus
       : undefined;
-  const now = input.now ?? Date.now();
   const elapsedMinutes = typeof detail.budgetState.elapsedMinutes === "number"
     ? detail.budgetState.elapsedMinutes
     : Math.max(0, Math.floor((now - detail.createdAt) / 60_000));
@@ -372,6 +392,8 @@ export const buildFactoryWorkbench = (input: {
       title: detail.title,
       status: detail.status,
       phase: detail.phase,
+      phaseDetail: detail.phaseDetail,
+      statusAuthority: detail.statusAuthority,
       integrationStatus: detail.integration.status,
       slotState: detail.scheduler.slotState,
       queuePosition: detail.scheduler.queuePosition,

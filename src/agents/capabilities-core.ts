@@ -6,6 +6,7 @@ import type { ZodTypeAny } from "zod";
 
 import type { DelegationTools } from "../adapters/delegation";
 import type { MemoryTools } from "../adapters/memory-tools";
+import { readSessionHistory, searchSessionHistory } from "../services/session-history";
 import {
   capabilityDefinition,
   capabilityDescriptions,
@@ -128,6 +129,12 @@ export const createBuiltinAgentCapabilities = (opts: {
   readonly memoryTools: MemoryTools;
   readonly delegationTools: DelegationTools;
   readonly memoryAuditMeta?: Readonly<Record<string, unknown>>;
+  readonly sessionHistoryDataDir?: string;
+  readonly sessionHistoryContext?: {
+    readonly repoKey?: string;
+    readonly profileId?: string;
+    readonly sessionStream?: string;
+  };
 }): ReadonlyArray<AgentCapabilitySpec> => {
   const workspaceRoot = path.resolve(opts.workspaceRoot);
   const defaultScope = opts.defaultMemoryScope;
@@ -403,6 +410,58 @@ export const createBuiltinAgentCapabilities = (opts: {
         });
         return summarize(entries);
       },
+    ),
+    createCapabilitySpec(
+      capabilityDefinition({
+        id: "session.search",
+        description: capabilityDescriptions["session.search"],
+        inputSchema: capabilityInput.sessionSearch,
+      }),
+      async (input) => {
+        if (!opts.sessionHistoryDataDir) throw new Error("session.search requires session history support");
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        if (!query) throw new Error("session.search.query is required");
+        const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
+        const entries = await searchSessionHistory({
+          dataDir: opts.sessionHistoryDataDir,
+          query,
+          repoKey: typeof input.repoKey === "string" && input.repoKey.trim().length > 0
+            ? input.repoKey.trim()
+            : opts.sessionHistoryContext?.repoKey,
+          profileId: typeof input.profileId === "string" && input.profileId.trim().length > 0
+            ? input.profileId.trim()
+            : opts.sessionHistoryContext?.profileId,
+          sessionStream: typeof input.sessionStream === "string" && input.sessionStream.trim().length > 0
+            ? input.sessionStream.trim()
+            : opts.sessionHistoryContext?.sessionStream,
+          limit,
+        });
+        return summarize(entries);
+      },
+      { isAvailable: () => Boolean(opts.sessionHistoryDataDir) },
+    ),
+    createCapabilitySpec(
+      capabilityDefinition({
+        id: "session.read",
+        description: capabilityDescriptions["session.read"],
+        inputSchema: capabilityInput.sessionRead,
+      }),
+      async (input) => {
+        if (!opts.sessionHistoryDataDir) throw new Error("session.read requires session history support");
+        const target = typeof input.target === "string" && input.target.trim().length > 0
+          ? input.target.trim()
+          : undefined;
+        const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
+        const entries = await readSessionHistory({
+          dataDir: opts.sessionHistoryDataDir,
+          ...(target?.includes("/sessions/") ? { sessionStream: target } : target ? { chatId: target } : {
+            sessionStream: opts.sessionHistoryContext?.sessionStream,
+          }),
+          limit,
+        });
+        return summarize(entries);
+      },
+      { isAvailable: () => Boolean(opts.sessionHistoryDataDir) },
     ),
     ...Object.entries(opts.delegationTools).map(([id, execute]) => createCapabilitySpec(
       capabilityDefinition({

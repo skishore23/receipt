@@ -53,6 +53,14 @@ export type FactoryObjectiveMode =
   | "delivery"
   | "investigation";
 
+export type FactoryProfileDispatchAction =
+  | "create"
+  | "react"
+  | "promote"
+  | "cancel"
+  | "cleanup"
+  | "archive";
+
 export type FactoryObjectiveSeverity =
   | 1
   | 2
@@ -102,6 +110,17 @@ export type FactoryInvestigationEvidence = {
   readonly detail?: string;
 };
 
+export type FactoryEvidenceRecord = {
+  readonly objective_id: string;
+  readonly task_id: string;
+  readonly timestamp: number;
+  readonly tool_name: string;
+  readonly command_or_api: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly outputs: Readonly<Record<string, unknown>>;
+  readonly summary_metrics: Readonly<Record<string, number | string | boolean | null>>;
+};
+
 export type FactoryExecutionScriptRun = {
   readonly command: string;
   readonly summary?: string;
@@ -140,6 +159,7 @@ export type FactoryTaskCompletionRecord = {
 export type FactoryInvestigationReport = {
   readonly conclusion: string;
   readonly evidence: ReadonlyArray<FactoryInvestigationEvidence>;
+  readonly evidenceRecords?: ReadonlyArray<FactoryEvidenceRecord>;
   readonly scriptsRun: ReadonlyArray<FactoryInvestigationScriptRun>;
   readonly disagreements: ReadonlyArray<string>;
   readonly nextSteps: ReadonlyArray<string>;
@@ -196,6 +216,11 @@ export type FactoryObjectiveProfilePolicy = {
   readonly allowObjectiveCreation: boolean;
 };
 
+export type FactoryObjectiveProfileActionPolicy = {
+  readonly allowedDispatchActions: ReadonlyArray<FactoryProfileDispatchAction>;
+  readonly allowedCreateModes: ReadonlyArray<FactoryObjectiveMode>;
+};
+
 export type FactoryObjectiveProfileSnapshot = {
   readonly rootProfileId: string;
   readonly rootProfileLabel: string;
@@ -205,6 +230,7 @@ export type FactoryObjectiveProfileSnapshot = {
   readonly selectedSkills: ReadonlyArray<string>;
   readonly cloudProvider?: FactoryProfileCloudProvider;
   readonly objectivePolicy: FactoryObjectiveProfilePolicy;
+  readonly actionPolicy: FactoryObjectiveProfileActionPolicy;
 };
 
 export type FactoryObjectivePhase =

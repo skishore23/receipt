@@ -2,10 +2,11 @@ import {
   DEFAULT_FACTORY_WORKBENCH_FILTER,
   type FactoryWorkbenchFilterKey,
 } from "../../views/factory-models";
+import { buildFactoryWorkbenchRouteKey } from "../../views/factory/workbench/route";
 
 export type { FactoryWorkbenchFilterKey };
 
-export type FactoryWorkbenchInspectorTab = "overview" | "chat" | "notes";
+export type FactoryWorkbenchInspectorTab = "overview" | "chat";
 export type FactoryWorkbenchDetailTab = "action" | "review" | "queue";
 
 export type FactoryWorkbenchFocusKind = "task" | "job";
@@ -79,7 +80,7 @@ const REPLAY_TTL_MS = 30 * 60_000;
 const LIVE_OVERLAY_TTL_MS = 60_000;
 
 const isInspectorTab = (value: unknown): value is FactoryWorkbenchInspectorTab =>
-  value === "overview" || value === "chat" || value === "notes";
+  value === "overview" || value === "chat";
 
 const normalizeWorkbenchInspectorTab = (
   value: FactoryWorkbenchInspectorTab | string | undefined,
@@ -103,30 +104,6 @@ const normalizeFilterInput = (value: unknown): FactoryWorkbenchFilterKey => {
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 
-const createSearchParams = (input?: string): {
-  set: (key: string, value: string) => void;
-  toString: () => string;
-} => {
-  if (typeof URLSearchParams !== "undefined") return new URLSearchParams(input);
-  const entries = new Map<string, string>();
-  const source = typeof input === "string" ? input.replace(/^\?/, "") : "";
-  for (const chunk of source.split("&")) {
-    if (!chunk) continue;
-    const [rawKey, rawValue = ""] = chunk.split("=");
-    entries.set(decodeURIComponent(rawKey), decodeURIComponent(rawValue));
-  }
-  return {
-    set(key: string, value: string) {
-      entries.set(key, value);
-    },
-    toString() {
-      return Array.from(entries.entries())
-        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-        .join("&");
-    },
-  };
-};
-
 export const workbenchRouteKey = (input: {
   readonly profileId: string;
   readonly chatId: string;
@@ -136,21 +113,7 @@ export const workbenchRouteKey = (input: {
   readonly filter?: FactoryWorkbenchFilterKey;
   readonly focusKind?: FactoryWorkbenchFocusKind;
   readonly focusId?: string;
-}): string => {
-  const params = createSearchParams();
-  params.set("profile", input.profileId);
-  params.set("chat", input.chatId);
-  if (input.objectiveId) params.set("objective", input.objectiveId);
-  if (input.inspectorTab && input.inspectorTab !== DEFAULT_INSPECTOR_TAB) params.set("inspectorTab", input.inspectorTab);
-  if (input.detailTab) params.set("detailTab", input.detailTab);
-  if (input.filter && input.filter !== DEFAULT_FILTER) params.set("filter", input.filter);
-  if (input.focusKind && input.focusId) {
-    params.set("focusKind", input.focusKind);
-    params.set("focusId", input.focusId);
-  }
-  const query = params.toString();
-  return `/factory${query ? `?${query}` : ""}`;
-};
+}): string => buildFactoryWorkbenchRouteKey(input);
 
 export const createWorkbenchRouteState = (input: {
   readonly profileId?: string;

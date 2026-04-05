@@ -23,6 +23,12 @@ import {
   createBuiltinAgentCapabilities,
   type AgentCapabilitySpec,
 } from "./capabilities";
+import {
+  loadConversationProjection,
+  rememberUserPreferenceNotes,
+  renderSessionRecallSummary,
+} from "../services/conversation-memory";
+import { repoKeyForRoot } from "../services/factory-chat-profiles";
 import { runStructuredFunction } from "./structured-function";
 
 export const AGENT_WORKFLOW_ID = "agent-v1";
@@ -108,6 +114,13 @@ export type AgentRunInput = {
   readonly startupEvents?: ReadonlyArray<AgentEvent>;
   readonly finalizer?: AgentFinalizer;
   readonly onIterationBudgetExhausted?: AgentIterationBudgetHandler;
+  readonly onStructuredActionParsed?: (input: {
+    readonly runId: string;
+    readonly runStream: string;
+    readonly iteration: number;
+    readonly action: ParsedAction;
+    readonly emit: (event: AgentEvent, index?: boolean) => Promise<void>;
+  }) => Promise<void>;
 };
 
 export type AgentFinalizerResult = {
@@ -195,6 +208,9 @@ const parseTimeoutMs = (value: unknown): number | undefined => {
   return undefined;
 };
 
+const asTrimmedString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+
 const resolveStructuredDecisionTimeoutMs = (extraConfig?: Readonly<Record<string, unknown>>): number => {
   const configured = parseTimeoutMs(extraConfig?.structuredTimeoutMs)
     ?? parseTimeoutMs(process.env.RECEIPT_STRUCTURED_TIMEOUT_MS)
@@ -227,12 +243,14 @@ type ParsedAction =
       readonly thought: string;
       readonly actionType: "final";
       readonly text: string;
+      readonly preferenceNotes?: ReadonlyArray<string>;
     }
   | {
       readonly thought: string;
       readonly actionType: "tool";
       readonly name: string;
       readonly input: Record<string, unknown>;
+      readonly preferenceNotes?: ReadonlyArray<string>;
     };
 
 const structuredAgentActionSchema = z.object({
@@ -243,6 +261,9 @@ const structuredAgentActionSchema = z.object({
     input: z.string(),
     text: z.string().nullable(),
   }).strict(),
+  memory: z.object({
+    preferenceNotes: z.array(z.string()).max(6).optional(),
+  }).strict().optional(),
 }).strict();
 
 type StructuredAgentAction = z.infer<typeof structuredAgentActionSchema>;
@@ -270,6 +291,10 @@ const normalizeStructuredInput = (raw: unknown): Record<string, unknown> => {
 
 const normalizeStructuredAction = (value: StructuredAgentAction): ParsedAction => {
   const thought = value.thought.trim() || "No thought provided.";
+  const preferenceNotes = value.memory?.preferenceNotes
+    ?.map((item) => item.trim())
+    .filter((item, index, items) => item.length > 0 && items.indexOf(item) === index)
+    .slice(0, 6);
   if (value.action.type === "final") {
     const text = value.action.text?.trim();
     if (!text) throw new Error("Model final action missing text");
@@ -277,6 +302,7 @@ const normalizeStructuredAction = (value: StructuredAgentAction): ParsedAction =
       thought,
       actionType: "final",
       text,
+      ...(preferenceNotes && preferenceNotes.length > 0 ? { preferenceNotes } : {}),
     };
   }
   const name = value.action.name?.trim();
@@ -286,6 +312,7 @@ const normalizeStructuredAction = (value: StructuredAgentAction): ParsedAction =
     actionType: "tool",
     name,
     input: normalizeStructuredInput((value.action as { input: unknown }).input),
+    ...(preferenceNotes && preferenceNotes.length > 0 ? { preferenceNotes } : {}),
   };
 };
 
@@ -365,6 +392,12 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
       ? input.config.workspace
       : path.join(input.workspaceRoot, input.config.workspace)
   );
+  const repoKey = asTrimmedString(input.extraConfig?.repoKey)
+    ?? (asTrimmedString(input.extraConfig?.repoRoot) ? repoKeyForRoot(asTrimmedString(input.extraConfig?.repoRoot)!) : undefined);
+  const profileId = asTrimmedString(input.extraConfig?.profileId);
+  const sessionStream = asTrimmedString(input.extraConfig?.stream)
+    ?? (baseStream.includes("/sessions/") ? baseStream : undefined);
+  const dataDir = asTrimmedString(input.extraConfig?.dataDir);
   const memoryAuditBase = {
     actor: "agent",
     runId: input.runId,
@@ -382,6 +415,12 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         memoryTools: input.memoryTools,
         delegationTools: input.delegationTools,
         memoryAuditMeta: memoryAuditBase,
+        sessionHistoryDataDir: dataDir,
+        sessionHistoryContext: {
+          repoKey,
+          profileId,
+          sessionStream,
+        },
       }),
       ...(input.capabilities ?? []),
     ],
@@ -748,6 +787,18 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
 
       const chain = await input.runtime.chain(runStream);
       const transcriptText = deriveTranscriptLines(chain, 12).join("\n\n");
+      const conversationProjection = await loadConversationProjection({
+        memoryTools: input.memoryTools,
+        repoKey,
+        profileId,
+        sessionStream,
+        dataDir,
+        query: problem,
+        runId: input.runId,
+        iteration,
+        actor: profileId ? "factory-chat" : "agent",
+      });
+      const sessionRecall = renderSessionRecallSummary(conversationProjection.sessionRecall);
       const promptVars = await input.promptContextBuilder?.({
         runId: input.runId,
         runStream,
@@ -764,6 +815,8 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         workspace: resolvedWorkspaceRoot,
         transcript: transcriptText || "(no prior steps)",
         memory: memorySummary.summary || "(empty)",
+        user_preferences: conversationProjection.userPreferences || "(none)",
+        session_recall: sessionRecall || "(none)",
         available_tools: availableTools.join(", "),
         tool_help: toolHelp || "(no tools available)",
         ...(promptVars ?? {}),
@@ -815,6 +868,24 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
         agentId: "orchestrator",
         content: parsed.thought,
       });
+
+      await input.onStructuredActionParsed?.({
+        runId: input.runId,
+        runStream,
+        iteration,
+        action: parsed,
+        emit,
+      });
+      if (parsed.preferenceNotes && parsed.preferenceNotes.length > 0) {
+        await rememberUserPreferenceNotes({
+          memoryTools: input.memoryTools,
+          preferenceNotes: parsed.preferenceNotes,
+          repoKey,
+          runId: input.runId,
+          actor: profileId ? "factory-chat" : "agent",
+          sessionStream,
+        });
+      }
 
       if (parsed.actionType === "final") {
         await emit({

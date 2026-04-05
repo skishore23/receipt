@@ -420,6 +420,45 @@ test("factory policy: objectives record a planning receipt and expose it on deta
   expect(detail.recentReceipts.some((receipt) => receipt.type === "planning.receipt")).toBe(true);
 });
 
+test("factory policy: service rejects createObjective when the profile create mode is not allowed", async () => {
+  const { service } = await createFactoryService();
+
+  await expect(service.createObjective({
+    title: "Invalid infrastructure delivery objective",
+    prompt: "Fix the dashboard route.",
+    profileId: "infrastructure",
+    objectiveMode: "delivery",
+  })).rejects.toMatchObject({
+    status: 409,
+    message: "Infrastructure cannot create delivery objectives.",
+  });
+});
+
+test("factory policy: service rejects promoteObjective when the objective profile is not allowed to promote", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Generalist-owned promotion objective",
+    prompt: "Ship a small delivery change.",
+    profileId: "generalist",
+    policy: {
+      promotion: { autoPromote: false },
+    },
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+
+  await expect(service.promoteObjective(created.objectiveId)).rejects.toMatchObject({
+    status: 409,
+    message: "Tech Lead cannot promote objectives.",
+  });
+});
+
 test("factory policy: promotion gate blocks when task completion reports remaining work", async () => {
   const { service, queue } = await createFactoryService({
     completionRemaining: ["Wire the final publish behavior before shipping."],

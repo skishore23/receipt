@@ -2,7 +2,7 @@ import type { AgentEvent, AgentState } from "../../modules/agent";
 import type { QueueJob } from "../../adapters/jsonl-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
 import { displayLabel } from "../../views/ui";
-import type { FactoryChatContextMessage } from "./chat-context";
+import type { FactoryChatContextMessage, FactoryChatContextRun } from "./chat-context";
 
 import { buildDetail, compactJsonValue, jsonRecordToMarkdown, truncateInline, tryParseJson } from "./formatters";
 import {
@@ -568,9 +568,14 @@ export const buildChatItemsForRun = (
         title: `Profile handoff to ${profileLabel(event.toProfileId)}`,
         worker: event.toProfileId,
         status: handoffJob?.status ?? "queued",
-        summary: event.reason,
+        summary: event.goal,
         detail: buildDetail(
           `From: ${profileLabel(event.fromProfileId)}`,
+          `Reason: ${event.reason}`,
+          `Current state: ${event.currentState}`,
+          `Done when: ${event.doneWhen}`,
+          event.evidence?.length ? `Evidence: ${event.evidence.join(" | ")}` : undefined,
+          event.blockers?.length ? `Blockers: ${event.blockers.join(" | ")}` : undefined,
           event.objectiveId ? `Objective: ${event.objectiveId}` : undefined,
           event.chatId ? `Chat: ${event.chatId}` : undefined,
           event.nextRunId ? `Next run: ${event.nextRunId}` : undefined,
@@ -766,4 +771,32 @@ export const buildChatItemsForRun = (
     });
   }
   return items;
+};
+
+export const buildChatItemsFromConversation = (
+  conversation: ReadonlyArray<FactoryChatContextMessage>,
+  options?: {
+    readonly runs?: ReadonlyArray<FactoryChatContextRun>;
+    readonly selectedObjectiveId?: string;
+  },
+): ReadonlyArray<FactoryChatItem> => {
+  const selectedObjectiveId = options?.selectedObjectiveId?.trim();
+  const selectedRunIds = selectedObjectiveId
+    ? new Set(
+        (options?.runs ?? [])
+          .filter((run) => run.objectiveId === selectedObjectiveId)
+          .map((run) => run.runId),
+      )
+    : undefined;
+  const scopedConversation = selectedRunIds
+    ? conversation.filter((message) => selectedRunIds.has(message.runId))
+    : conversation;
+  return scopedConversation.map((message, index) => {
+    const parsed = message.role === "assistant" ? tryParseJson(message.text) : undefined;
+    return {
+      key: `${message.runId}-${message.role}-${index}`,
+      kind: message.role,
+      body: parsed ? (jsonRecordToMarkdown(parsed) ?? message.text) : message.text,
+    } satisfies FactoryChatItem;
+  });
 };

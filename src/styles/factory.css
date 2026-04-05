@@ -1,13 +1,9 @@
 @import "tailwindcss";
 
 @source "../views/ui.ts";
-@source "../views/factory-inspector.ts";
 @source "../views/factory-live-steps.ts";
 @source "../views/factory/shared/index.ts";
-@source "../views/factory/shell/index.ts";
-@source "../views/factory/sidebar/index.ts";
 @source "../views/factory/transcript/index.ts";
-@source "../views/factory/workbench/index.ts";
 @source "../views/factory/workbench/page.ts";
 @source "../views/receipt.ts";
 @source "../views/runtime/data.ts";
@@ -433,42 +429,6 @@
 
   .factory-job-card__meta {
     overflow-wrap: anywhere;
-  }
-
-  .mission-control-shell {
-    background: var(--background);
-  }
-
-  .mission-control-panel {
-    @apply border border-border bg-card;
-  }
-
-  .mission-control-inset {
-    @apply border border-border bg-muted/45;
-  }
-
-  .mission-control-pane {
-    @apply transition-colors;
-  }
-
-  .mission-control-pane[data-pane-active="true"] {
-    @apply border-primary/35 ring-2 ring-primary/20;
-  }
-
-  .mission-control-track {
-    @apply h-2 overflow-hidden border border-border bg-background;
-  }
-
-  .mission-control-track > span {
-    @apply block h-full bg-primary;
-  }
-
-  .mission-control-log {
-    @apply font-mono text-[11px] leading-5 tracking-[0.01em];
-  }
-
-  .mission-control-log strong {
-    @apply font-semibold text-foreground;
   }
 
   .factory-workbench-shell {

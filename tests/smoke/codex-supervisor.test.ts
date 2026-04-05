@@ -545,7 +545,7 @@ test("codex supervisor can poll a completed codex child and then finalize", asyn
             status: "completed",
             summary: "Codex updated the sidebar labels.",
             lastMessage: "Profile copy updated.",
-            changedFiles: ["src/views/factory/sidebar/index.ts"],
+            changedFiles: ["src/views/factory/workbench/page.ts"],
           });
         }
         return {
@@ -593,7 +593,7 @@ test("codex supervisor can poll a completed codex child and then finalize", asyn
     expect(result.finalResponse).toContain("Codex completed");
     expect(statusObservation?.body.output ?? "").toContain('"status": "completed"');
     expect(statusObservation?.body.output ?? "").toContain('"changedFiles": [');
-    expect(statusObservation?.body.output ?? "").toContain("src/views/factory/sidebar/index.ts");
+    expect(statusObservation?.body.output ?? "").toContain("src/views/factory/workbench/page.ts");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -803,7 +803,7 @@ test("codex supervisor can inspect factory objectives, worktrees, and live outpu
       candidateId: "candidate_01",
       jobId: "job_task_01",
       lastMessage: "Prepared the sidebar patch in the worktree.",
-      stdoutTail: "changed src/views/factory/sidebar/index.ts",
+      stdoutTail: "changed src/views/factory/workbench/page.ts",
       stderrTail: "",
     }),
   } as unknown as FactoryService;
@@ -905,7 +905,7 @@ test("codex supervisor can inspect factory objectives, worktrees, and live outpu
     expect(statusObservation?.body.output ?? "").toContain("\"integrationWorktree\": {");
     expect(outputObservation?.body.output ?? "").toContain("\"focusKind\": \"task\"");
     expect(outputObservation?.body.output ?? "").toContain("\"lastMessage\": \"Prepared the sidebar patch in the worktree.\"");
-    expect(outputObservation?.body.output ?? "").toContain("\"stdoutTail\": \"changed src/views/factory/sidebar/index.ts\"");
+    expect(outputObservation?.body.output ?? "").toContain("\"stdoutTail\": \"changed src/views/factory/workbench/page.ts\"");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

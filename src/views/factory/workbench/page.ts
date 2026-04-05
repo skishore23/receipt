@@ -28,6 +28,11 @@ import {
 } from "../supervision";
 import { COMPOSER_COMMANDS } from "../../../factory-cli/composer";
 import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "../../factory-models";
+import {
+  buildFactoryWorkbenchRouteKey,
+  buildFactoryWorkbenchSearch,
+  buildFactoryWorkbenchSearchParams,
+} from "./route";
 import type {
   FactoryChatIslandModel,
   FactoryChatProfileNav,
@@ -65,6 +70,7 @@ export type FactoryWorkbenchShellSnapshot = {
   readonly backgroundEventsPath: string;
   readonly chatEventsPath: string;
   readonly workbenchHeaderPath: string;
+  readonly chatHeaderPath: string;
   readonly workbenchIslandPath: string;
   readonly chatIslandPath: string;
   readonly workbenchHeaderHtml: string;
@@ -76,17 +82,28 @@ export type FactoryWorkbenchShellSnapshot = {
   readonly streamingLabel: string;
 };
 
+export type FactoryWorkbenchHeaderIslandModel = {
+  readonly activeProfileId: string;
+  readonly activeProfileLabel: string;
+  readonly profiles: ReadonlyArray<FactoryChatProfileNav>;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly currentRole?: string;
+  readonly currentPresence?: string;
+};
+
 type WorkbenchProjection = "profile-board" | "objective-runtime";
 
-const workbenchChatRefreshOn = [
-  { event: "agent-refresh", throttleMs: 180 },
-  { event: "job-refresh", throttleMs: 180 },
-] as const;
+const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspectorTab" | "objectiveId">) => input.inspectorTab === "chat"
+  ? [
+      { event: "agent-refresh", throttleMs: 180 },
+      { event: "job-refresh", throttleMs: 180 },
+    ] as const
+  : [
+      { event: "profile-board-refresh", throttleMs: 300 },
+      ...(input.objectiveId ? [{ event: "objective-runtime-refresh", throttleMs: 300 }] : []),
+    ] as const;
 const workbenchBackgroundRefreshOn = [] as const;
-const workbenchHeaderRefreshOn = [
-  { event: "profile-board-refresh", throttleMs: 300 },
-  { event: "objective-runtime-refresh", throttleMs: 300 },
-] as const;
+const workbenchHeaderRefreshOn = [] as const;
 
 const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map((command) => ({
   name: command.name,
@@ -96,55 +113,42 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
   aliases: command.aliases ?? [],
 })));
 
-const workbenchQueryParams = (input: FactoryWorkbenchRouteContext): URLSearchParams => {
-  const params = new URLSearchParams();
-  params.set("profile", input.profileId);
-  params.set("chat", input.chatId);
-  if (input.objectiveId) params.set("objective", input.objectiveId);
-  if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
-  if (input.detailTab) params.set("detailTab", input.detailTab);
-  if (input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
-  if (input.focusKind && input.focusId) {
-    params.set("focusKind", input.focusKind);
-    params.set("focusId", input.focusId);
-  }
-  return params;
-};
-
-const workbenchQuery = (input: FactoryWorkbenchRouteContext): string => {
-  const params = workbenchQueryParams(input);
-  const query = params.toString();
-  return query ? `?${query}` : "";
-};
-
-const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "profileId" | "chatId">): string =>
-  `/factory/chat/events${workbenchQuery({
+const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "profileId" | "chatId" | "objectiveId" | "focusKind" | "focusId">): string => {
+  const params = buildFactoryWorkbenchSearchParams({
     profileId: input.profileId,
     chatId: input.chatId,
+    objectiveId: input.objectiveId,
     filter: DEFAULT_FACTORY_WORKBENCH_FILTER,
-  })}`;
+  });
+  if (input.focusKind === "job" && input.focusId) params.set("job", input.focusId);
+  const query = params.toString();
+  return `/factory/chat/events${query ? `?${query}` : ""}`;
+};
 
 const backgroundEventsPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/background/events${workbenchQuery(input)}`;
+  `/factory/background/events${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchHeaderPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/header${workbenchQuery(input)}`;
+  `/factory/island/workbench/header${buildFactoryWorkbenchSearch(input)}`;
+
+const chatHeaderPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/chat/header${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchBlockPath = (
   input: FactoryWorkbenchRouteContext,
   blockKey: FactoryWorkbenchBlockModel["key"],
 ): string => {
-  const params = workbenchQueryParams(input);
+  const params = buildFactoryWorkbenchSearchParams(input);
   params.set("block", blockKey);
   const query = params.toString();
   return `/factory/island/workbench/block${query ? `?${query}` : ""}`;
 };
 
 const workbenchIslandPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench${workbenchQuery(input)}`;
+  `/factory/island/workbench${buildFactoryWorkbenchSearch(input)}`;
 
 const chatIslandPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/chat${workbenchQuery(input)}`;
+  `/factory/island/chat${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchIslandBindings = (input: FactoryWorkbenchRouteContext) => ({
   header: {
@@ -157,7 +161,7 @@ const workbenchIslandBindings = (input: FactoryWorkbenchRouteContext) => ({
   },
   chat: {
     path: chatIslandPath(input),
-    refreshOn: workbenchChatRefreshOn,
+    refreshOn: workbenchChatRefreshOn(input),
   },
 });
 
@@ -178,13 +182,11 @@ const workbenchProjectionEvent = (projection: WorkbenchProjection): `${Workbench
   `${projection}-refresh`;
 
 const workbenchBlockProjections = (
-  block: FactoryWorkbenchBlockModel,
+  block: Pick<FactoryWorkbenchBlockModel, "key">,
 ): ReadonlyArray<WorkbenchProjection> => {
   switch (block.key) {
     case "objectives":
     case "history":
-      return ["profile-board"];
-    case "selected-overflow":
       return ["profile-board"];
     case "activity":
       return ["objective-runtime"];
@@ -210,11 +212,19 @@ const workbenchComposerPlaceholder = (objectiveId?: string): string => objective
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
+const hasMissingObjectiveSelection = (input: {
+  readonly objectiveId?: string;
+  readonly selectedObjective?: Pick<FactorySelectedObjectiveCard, "status">;
+}): boolean => Boolean(input.objectiveId && !input.selectedObjective);
+
 const workbenchComposerPlaceholderForSelection = (input: {
   readonly objectiveId?: string;
   readonly selectedObjective?: Pick<FactorySelectedObjectiveCard, "status">;
 }): string => {
   if (!input.objectiveId && !input.selectedObjective) return workbenchComposerPlaceholder();
+  if (hasMissingObjectiveSelection(input)) {
+    return "Selected objective could not be loaded. Ask a new question, or use /obj to start a replacement objective.";
+  }
   if (input.selectedObjective?.status === "blocked") {
     return "Use /react <guidance> to continue the selected objective, or plain text to stay in chat.";
   }
@@ -232,6 +242,9 @@ const workbenchComposerHelperText = (input: {
 }): string => {
   const selected = input.selectedObjective;
   if (!input.objectiveId && !selected) return "Ask a new question or use /obj to create directly.";
+  if (hasMissingObjectiveSelection(input)) {
+    return "Selected objective could not be loaded from the current Factory store. Plain text stays chat-first; use /obj to start new work.";
+  }
   if (selected?.status === "blocked") {
     return "Selected objective is blocked. Use /react <guidance> to continue it, /cancel to stop it, or plain text to stay in chat.";
   }
@@ -253,6 +266,9 @@ const renderWorkbenchComposerQuickActions = (input: {
   readonly selectedObjective?: Pick<FactorySelectedObjectiveCard, "status">;
 }): string => {
   if (!input.objectiveId && !input.selectedObjective) return "";
+  if (hasMissingObjectiveSelection(input)) {
+    return `<div class="flex flex-wrap items-center gap-2">${renderComposerPrefillButton("New Objective", "/obj ", ghostButtonClass)}</div>`;
+  }
   const selected = input.selectedObjective;
   const buttons = [
     renderComposerPrefillButton("React", "/react ", ghostButtonClass),
@@ -276,30 +292,30 @@ const objectiveHref = (
     readonly focusId?: string;
   },
   profileId?: string,
-): string => `/factory${workbenchQuery({
+): string => buildFactoryWorkbenchRouteKey({
   ...input,
   profileId: profileId ?? input.profileId,
   objectiveId,
   inspectorTab: objectiveId ? "chat" : input.inspectorTab,
   focusKind: focus?.focusKind,
   focusId: focus?.focusId,
-})}`;
+});
 
 const filterHref = (
   input: FactoryWorkbenchRouteContext,
   filter: FactoryWorkbenchFilterKey,
-): string => `/factory${workbenchQuery({
+): string => buildFactoryWorkbenchRouteKey({
   ...input,
   filter,
-})}`;
+});
 
 const routeHref = (
   input: FactoryWorkbenchRouteContext,
   overrides: Partial<FactoryWorkbenchRouteContext>,
-): string => `/factory${workbenchQuery({
+): string => buildFactoryWorkbenchRouteKey({
   ...input,
   ...overrides,
-})}`;
+});
 
 const commandHref = (
   location: string,
@@ -338,6 +354,9 @@ const titleCaseLabel = (value?: string): string => {
     .join(" ");
 };
 
+const phaseDetailLabel = (value?: string): string =>
+  titleCaseLabel(value) || "";
+
 const renderWorkbenchHeaderMetric = (input: {
   readonly icon: string;
   readonly label: string;
@@ -351,15 +370,16 @@ const renderWorkbenchHeaderMetric = (input: {
 </div>`;
 
 const resolveWorkbenchElapsedMinutes = (
-  model: FactoryWorkbenchPageModel,
+  model: FactoryWorkbenchHeaderIslandModel,
 ): number | undefined => model.workspace.workbench?.summary.elapsedMinutes;
 
 const renderWorkbenchHeaderContext = (
-  model: FactoryWorkbenchPageModel,
+  model: FactoryWorkbenchHeaderIslandModel,
 ): string => {
   const objective = model.workspace.selectedObjective;
   if (objective) {
     const status = objective.displayState ?? titleCaseLabel(objective.phase || objective.status);
+    const detail = phaseDetailLabel(objective.phaseDetail);
     const taskSummary = typeof objective.taskCount === "number"
       ? `${objective.activeTaskCount ?? 0}/${objective.taskCount} tasks`
       : undefined;
@@ -370,13 +390,14 @@ const renderWorkbenchHeaderContext = (
         <div class="mt-1 flex min-w-0 items-center gap-2">
           <span class="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground"${tooltipAttr(objective.title)}>${esc(objective.title)}</span>
           ${status ? badge(status, displayStateTone(status)) : ""}
+          ${detail ? `<span class="inline-flex shrink-0 items-center border border-white/8 bg-black/25 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">${esc(detail)}</span>` : ""}
           ${taskSummary ? `<span class="inline-flex shrink-0 items-center border border-white/8 bg-black/25 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">${esc(taskSummary)}</span>` : ""}
         </div>
       </div>
     </div>`;
   }
-  const role = engineerPrimaryRole(model.chat)?.trim();
-  const presence = engineerPresence(model.chat);
+  const role = model.currentRole?.trim();
+  const presence = model.currentPresence?.trim();
   const summary = role ?? presence;
   if (!summary) return "";
   return `<div class="hidden min-w-0 flex-1 items-center gap-3 lg:flex">
@@ -473,6 +494,10 @@ const objectiveCardStateLabel = (
   objective: FactoryChatObjectiveNav,
 ): string => objective.displayState ?? (titleCaseLabel(objective.phase || objective.status) || "Idle");
 
+const objectiveCardPhaseDetailLabel = (
+  objective: FactoryChatObjectiveNav,
+): string => phaseDetailLabel(objective.phaseDetail);
+
 const shouldSuppressObjectiveStateBadge = (
   section: FactoryWorkbenchObjectiveListSectionModel,
   objective: FactoryChatObjectiveNav,
@@ -507,6 +532,7 @@ const renderObjectiveCard = (
   const stateBadge = !section || !shouldSuppressObjectiveStateBadge(section, objective)
     ? badge(stateLabel, stateTone)
     : "";
+  const detailLabel = objectiveCardPhaseDetailLabel(objective);
   const selectedBadge = objectiveCardSelectionBadge(objective.selected);
   const cardClass = objective.selected
     ? "border border-primary/30 bg-primary/8 ring-1 ring-primary/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
@@ -525,6 +551,7 @@ const renderObjectiveCard = (
         </div>
         <div class="mt-1 text-[13px] leading-5 text-muted-foreground [overflow-wrap:anywhere]">${esc(summary)}</div>
         <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          ${detailLabel ? `<span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1">${esc(detailLabel)}</span>` : ""}
           <span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1"${tooltipAttr(objective.objectiveId)}>${esc(truncate(objective.objectiveId, 26))}</span>
           <span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1">${esc(`${objective.activeTaskCount ?? 0}/${objective.taskCount ?? 0} tasks`)}</span>
           ${objective.updatedAt ? `<span class="inline-flex items-center gap-1 border border-border bg-muted/25 px-2 py-1">${iconClock("h-3 w-3")} ${esc(formatTs(objective.updatedAt))}</span>` : ""}
@@ -717,6 +744,116 @@ const renderObjectiveContractSnapshot = (
   </section>`;
 };
 
+const recommendationConfidenceTone = (
+  confidence: NonNullable<NonNullable<FactorySelectedObjectiveCard["selfImprovement"]>["recommendations"][number]>["confidence"],
+): "neutral" | "info" | "success" | "warning" => {
+  switch (confidence) {
+    case "high":
+      return "success";
+    case "medium":
+      return "info";
+    default:
+      return "warning";
+  }
+};
+
+const renderObjectiveSelfImprovementSnapshot = (
+  objective: FactoryWorkbenchSummarySectionModel["objective"],
+  routeContext: FactoryWorkbenchRouteContext,
+  options?: {
+    readonly compact?: boolean;
+  },
+): string => {
+  const selfImprovement = objective?.selfImprovement;
+  if (!selfImprovement) return "";
+  const compact = options?.compact ?? false;
+  const recommendations = selfImprovement.recommendations.slice(0, compact ? 1 : 3);
+  const hiddenRecommendationCount = Math.max(0, selfImprovement.recommendations.length - recommendations.length);
+  const recurringPatterns = selfImprovement.recurringPatterns.slice(0, compact ? 2 : 4);
+  const autoFixHref = selfImprovement.autoFixObjectiveId
+    ? objectiveHref(routeContext, selfImprovement.autoFixObjectiveId)
+    : undefined;
+  const statusLabel = selfImprovement.auditStatus === "failed"
+    ? "Audit failed"
+    : selfImprovement.auditStatus === "running"
+      ? "Audit running"
+      : selfImprovement.auditStatus === "pending"
+        ? "Audit queued"
+        : selfImprovement.stale
+          ? "Audit stale"
+          : selfImprovement.auditStatus === "missing"
+            ? "Audit missing"
+            : selfImprovement.recommendationStatus === "failed"
+              ? "Recommendations unavailable"
+              : selfImprovement.autoFixObjectiveId
+                ? "Auto-fix linked"
+                : selfImprovement.recommendations.length > 0
+                  ? "Recommendations ready"
+                  : "Audit recorded";
+  const statusTone = selfImprovement.auditStatus === "failed"
+    ? "danger"
+    : selfImprovement.auditStatus === "running"
+      ? "info"
+      : selfImprovement.auditStatus === "pending"
+        ? "warning"
+        : selfImprovement.stale || selfImprovement.auditStatus === "missing" || selfImprovement.recommendationStatus === "failed"
+          ? "warning"
+          : selfImprovement.autoFixObjectiveId
+            ? "info"
+            : selfImprovement.recommendations.length > 0
+              ? "success"
+              : "neutral";
+  const meta = [
+    selfImprovement.auditedAt ? `Audited ${formatTs(selfImprovement.auditedAt)}` : undefined,
+    selfImprovement.stale ? "snapshot stale" : undefined,
+    `${selfImprovement.recommendations.length} recommendation${selfImprovement.recommendations.length === 1 ? "" : "s"}`,
+  ].filter((value): value is string => Boolean(value)).join(" · ");
+  return `<section class="border border-border bg-muted/25 px-4 py-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Self Improvement</div>
+      ${badge(statusLabel, statusTone)}
+    </div>
+    ${meta ? `<div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(meta)}</div>` : ""}
+    ${selfImprovement.auditStatusMessage ? `<div class="mt-3 border border-border bg-background px-3 py-2 text-sm leading-6 text-muted-foreground">${esc(selfImprovement.auditStatusMessage)}</div>` : ""}
+    ${selfImprovement.recommendationStatus === "failed" ? `<div class="mt-3 border border-warning/20 bg-warning/10 px-3 py-2 text-sm leading-6 text-warning">
+      Recommendation generation failed${selfImprovement.recommendationError ? `: ${esc(selfImprovement.recommendationError)}` : "."}
+    </div>` : ""}
+    ${recommendations.length > 0 ? `<div class="mt-3 space-y-2">
+      ${recommendations.map((recommendation) => `<div class="border border-border bg-background px-3 py-3">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold leading-6 text-foreground">${esc(recommendation.summary)}</div>
+            <div class="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(recommendation.scope)}</div>
+          </div>
+          ${badge(displayLabel(recommendation.confidence) ?? recommendation.confidence, recommendationConfidenceTone(recommendation.confidence))}
+        </div>
+        ${compact ? "" : `<div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(recommendation.suggestedFix)}</div>`}
+        ${recommendation.anomalyPatterns.length > 0 ? `<div class="mt-2 flex flex-wrap gap-2">
+          ${recommendation.anomalyPatterns.slice(0, compact ? 2 : 4).map((pattern) => `<span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground">${esc(pattern)}</span>`).join("")}
+        </div>` : ""}
+      </div>`).join("")}
+    </div>` : `<div class="mt-3 text-sm leading-6 text-muted-foreground">${esc(
+      selfImprovement.recommendationStatus === "failed"
+        ? "Audit completed, but recommendation generation failed."
+        : selfImprovement.auditStatus === "pending" || selfImprovement.auditStatus === "running"
+          ? "Audit has not produced a fresh recommendation snapshot yet."
+          : selfImprovement.auditStatus === "missing"
+            ? "No fresh audit snapshot is available for this objective yet."
+            : "Latest audit captured no actionable self-improvement to promote.",
+    )}</div>`}
+    ${hiddenRecommendationCount > 0 ? `<div class="mt-2 text-xs leading-5 text-muted-foreground">+${esc(String(hiddenRecommendationCount))} more recommendation${hiddenRecommendationCount === 1 ? "" : "s"} in the latest audit.</div>` : ""}
+    ${recurringPatterns.length > 0 ? `<div class="mt-3 flex flex-wrap gap-2">
+      ${recurringPatterns.map((pattern) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground">${esc(`${pattern.pattern} ×${pattern.count}`)}</span>`).join("")}
+    </div>` : ""}
+    ${selfImprovement.autoFixObjectiveId ? `<div class="mt-3 border border-info/20 bg-info/10 px-3 py-2 text-sm leading-6 text-foreground">
+      Auto-fix objective:
+      ${autoFixHref
+        ? `<a href="${esc(autoFixHref)}" data-factory-href="${esc(autoFixHref)}" class="font-semibold text-primary underline-offset-2 hover:underline">${esc(selfImprovement.autoFixObjectiveId)}</a>`
+        : `<span class="font-semibold">${esc(selfImprovement.autoFixObjectiveId)}</span>`}
+    </div>` : ""}
+  </section>`;
+};
+
 const renderSummarySection = (
   section: FactoryWorkbenchSummarySectionModel,
   routeContext: FactoryWorkbenchRouteContext,
@@ -770,16 +907,22 @@ const renderSummarySection = (
     ${section.focus ? renderLiveFocusControls(routeContext, section.focus) : ""}
   </section>`;
   if (section.empty || !objective) {
+    const missingObjectiveSelection = Boolean(routeContext.objectiveId);
+    const emptyTitle = missingObjectiveSelection ? "Objective not found." : "No objective selected.";
+    const emptyMessage = missingObjectiveSelection
+      ? `The current thread URL points to Factory data that no longer exists: ${routeContext.objectiveId}. Use New Chat to continue in chat, or /obj to start a replacement objective.`
+      : section.message;
     return `<section class="space-y-4 border border-border bg-card px-5 py-5">
       ${currentRunCard}
       <section class="border border-border bg-background px-4 py-4">
         <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
-        <div class="mt-2 text-lg font-semibold text-foreground">No objective selected.</div>
-        <div class="mt-2 max-w-[68ch] text-sm leading-6 text-muted-foreground">${esc(section.message)}</div>
+        <div class="mt-2 text-lg font-semibold text-foreground">${esc(emptyTitle)}</div>
+        <div class="mt-2 max-w-[68ch] text-sm leading-6 text-muted-foreground">${esc(emptyMessage)}</div>
       </section>
     </section>`;
   }
   const displayState = objective.displayState ?? titleCaseLabel(objective.status) ?? "Running";
+  const detailLabel = phaseDetailLabel(objective.phaseDetail);
   const metrics = [
     objective.profileLabel ? `Assignee: ${objective.profileLabel}` : undefined,
     typeof objective.updatedAt === "number" ? `Updated ${formatTs(objective.updatedAt)}` : undefined,
@@ -805,6 +948,7 @@ const renderSummarySection = (
         <div class="mt-3 text-[1.05rem] font-semibold leading-[1.55] text-foreground">${esc(objective.title)}</div>
         <div class="mt-3 flex flex-wrap items-center gap-2">
           ${badge(displayState, displayStateTone(displayState))}
+          ${detailLabel ? `<span class="border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">${esc(detailLabel)}</span>` : ""}
           ${typeof objective.severity === "number" ? `<span class="border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">P${esc(String(objective.severity))}</span>` : ""}
         </div>
         <div class="mt-3 text-sm leading-7 text-muted-foreground">${esc(metrics || "Waiting for more objective telemetry.")}</div>
@@ -825,6 +969,7 @@ const renderSummarySection = (
           <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Decision</div>
           <div class="mt-2 text-sm leading-6 text-foreground">${esc(section.latestDecisionSummary)}</div>
         </section>` : ""}
+        ${renderObjectiveSelfImprovementSnapshot(objective, routeContext)}
       </section>
       <aside class="border border-border bg-muted/25 px-4 py-3">
         <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Snapshot</div>
@@ -1007,21 +1152,29 @@ const renderBlock = (
   return rendered;
 };
 
+const workbenchBlockRefreshBindings = (
+  block: FactoryWorkbenchWorkspaceModel["blocks"][number],
+): ReadonlyArray<{
+  readonly event: string;
+  readonly throttleMs: number;
+}> => {
+  const projections = workbenchBlockProjections(block);
+  switch (block.key) {
+    default:
+      return workbenchBlockRefreshOn(projections);
+  }
+};
+
 const renderWorkbenchBlockIsland = (
   block: FactoryWorkbenchWorkspaceModel["blocks"][number],
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const projections = workbenchBlockProjections(block);
-  const refreshOn = block.key === "summary"
-    ? [
-        ...workbenchBlockRefreshOn(projections),
-        { event: "agent-refresh", throttleMs: 180 },
-        { event: "job-refresh", throttleMs: 180 },
-      ]
-    : workbenchBlockRefreshOn(projections);
+  const refreshOn = workbenchBlockRefreshBindings(block);
   return `<div id="factory-workbench-block-${esc(block.key)}" class="min-w-0" data-workbench-projections="${esc(projections.join(" "))}" ${liveIslandAttrs({
     path: workbenchBlockPath(routeContext, block.key),
     refreshOn,
+    clientOnly: true,
   })}>
     ${renderBlock(block, routeContext)}
   </div>`;
@@ -1235,6 +1388,7 @@ const renderEmployeeOverviewPanel = (
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Next Operator Action</div>
         <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.nextAction ?? "Ask chat for the next step.")}</div>
       </div>
+      ${renderObjectiveSelfImprovementSnapshot(objective, routeContext, { compact: true })}
       <div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(overviewNote)}</div>
       <div class="mt-4 flex flex-wrap gap-2">${actions}</div>
     </section>` : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
@@ -1244,13 +1398,28 @@ const renderEmployeeOverviewPanel = (
   </div>`;
 };
 
+const renderRememberedPreferencesPanel = (
+  model: FactoryChatIslandModel,
+): string => {
+  const summary = model.userPreferencesSummary?.trim();
+  if (!summary) return "";
+  const sections = summary.split(/\n\s*\n/g).map((value) => value.trim()).filter(Boolean);
+  return `<section class="border border-border bg-card px-4 py-4">
+    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Remembered Defaults</div>
+    <div class="mt-3 space-y-3">
+      ${sections.map((section) => `<div class="border border-border bg-muted/25 px-3 py-2.5 whitespace-pre-wrap text-sm leading-6 text-foreground">${esc(section)}</div>`).join("")}
+    </div>
+  </section>`;
+};
+
 export const factoryWorkbenchChatIsland = (
   model: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const inspectorTab = routeContext.inspectorTab ?? "overview";
   const content = inspectorTab === "chat"
-    ? `${model.items.length === 0 ? renderEngineerCard(model) : ""}
+    ? `${renderRememberedPreferencesPanel(model)}
+      ${model.items.length === 0 ? renderEngineerCard(model) : ""}
       ${renderFactoryTranscriptSection(model, {
         sectionLabel: "Chat",
         objectiveHref: (objectiveId) => objectiveHref(routeContext, objectiveId),
@@ -1280,7 +1449,7 @@ export const factoryWorkbenchBlockIsland = (
 };
 
 const renderWorkbenchHeader = (
-  model: FactoryWorkbenchPageModel,
+  model: FactoryWorkbenchHeaderIslandModel,
 ): string => {
   const tokenCount = model.workspace.workbench?.summary.tokensUsed ?? model.workspace.selectedObjective?.tokensUsed;
   const elapsedMinutes = resolveWorkbenchElapsedMinutes(model);
@@ -1331,11 +1500,26 @@ const renderWorkbenchHeader = (
   </div>`;
 };
 
-export const factoryWorkbenchHeaderIsland = (
+const toWorkbenchHeaderModel = (
   model: FactoryWorkbenchPageModel,
+): FactoryWorkbenchHeaderIslandModel => ({
+  activeProfileId: model.activeProfileId,
+  activeProfileLabel: model.activeProfileLabel,
+  profiles: model.profiles,
+  workspace: model.workspace,
+  currentRole: engineerPrimaryRole(model.chat),
+  currentPresence: engineerPresence(model.chat),
+});
+
+export const factoryWorkbenchHeaderIsland = (
+  model: FactoryWorkbenchHeaderIslandModel,
 ): string => {
   return renderWorkbenchHeader(model);
 };
+
+export const factoryWorkbenchChatHeaderIsland = (
+  model: FactoryWorkbenchPageModel,
+): string => renderWorkbenchChatHeader(model, engineerPrimaryRole(model.chat));
 
 const renderWorkbenchChatHeader = (
   model: FactoryWorkbenchPageModel,
@@ -1388,18 +1572,20 @@ export const buildFactoryWorkbenchShellSnapshot = (
     focusId: model.focusId,
     filter: model.filter,
   };
-  const pageQuery = workbenchQuery(routeContext);
+  const pageQuery = buildFactoryWorkbenchSearch(routeContext);
   const activeRole = engineerPrimaryRole(model.chat);
+  const headerModel = toWorkbenchHeaderModel(model);
   return {
     pageTitle: "Receipt Factory Workbench",
-    routeKey: `/factory${pageQuery}`,
+    routeKey: buildFactoryWorkbenchRouteKey(routeContext),
     route: routeContext,
     backgroundEventsPath: backgroundEventsPath(routeContext),
     chatEventsPath: chatEventsPath(routeContext),
     workbenchHeaderPath: workbenchHeaderPath(routeContext),
+    chatHeaderPath: chatHeaderPath(routeContext),
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
-    workbenchHeaderHtml: renderWorkbenchHeader(model),
+    workbenchHeaderHtml: renderWorkbenchHeader(headerModel),
     chatHeaderHtml: renderWorkbenchChatHeader(model, activeRole),
     workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext),
     chatHtml: factoryWorkbenchChatIsland(model.chat, routeContext),
@@ -1412,162 +1598,10 @@ export const buildFactoryWorkbenchShellSnapshot = (
   };
 };
 
-const renderWorkbenchLoadingHeader = (routeContext: FactoryWorkbenchRouteContext): string => {
-  const profileLabel = displayLabel(routeContext.profileId) || "Factory";
-  const chatLabel = routeContext.chatId ? truncate(routeContext.chatId, 24) : "Pending";
-  const focusLabel = routeContext.focusKind && routeContext.focusId
-    ? `${displayLabel(routeContext.focusKind)} ${truncate(routeContext.focusId, 20)}`
-    : undefined;
-  return `<div class="flex items-center gap-3">
-    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-white/8 bg-black/60 text-muted-foreground">
-      ${iconFactory("h-5 w-5")}
-    </div>
-    <div class="flex min-w-0 items-baseline gap-2">
-      <span class="text-lg font-extrabold uppercase tracking-[0.12em] text-foreground">Receipt</span>
-      <span class="shrink-0 text-[8px] font-medium uppercase tracking-[0.28em] text-muted-foreground/60">factory</span>
-    </div>
-    <div class="hidden h-6 w-px shrink-0 bg-white/10 sm:block"></div>
-    <div class="flex flex-wrap items-center gap-x-1.5 text-[10px] text-muted-foreground">
-      <span class="font-semibold text-foreground">${esc(profileLabel)}</span>
-      <span class="text-[12px]">${esc(chatLabel)}</span>
-      ${routeContext.objectiveId ? `<span class="inline-flex items-center gap-1">${iconFactory("h-3 w-3")} ${esc(truncate(routeContext.objectiveId, 24))}</span>` : ""}
-      ${focusLabel ? `<span class="inline-flex items-center gap-1">${iconClock("h-3 w-3")} ${esc(focusLabel)}</span>` : ""}
-    </div>
-  </div>`;
-};
-
-const renderWorkbenchLoadingChatHeader = (routeContext: FactoryWorkbenchRouteContext): string => `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
-  <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
-    <span class="text-base font-semibold text-foreground">${esc(displayLabel(routeContext.profileId) || "Factory")}</span>
-    <span class="text-[11px] text-muted-foreground">Loading…</span>
-  </div>
-  <a href="/receipt" class="inline-flex items-center text-[11px] font-medium text-muted-foreground transition hover:text-foreground">Receipts</a>
-</div>`;
-
-const renderWorkbenchLoadingWorkspace = (): string => `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)] lg:gap-4 lg:overflow-hidden">
-  <section class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-4 overflow-x-hidden lg:overflow-y-auto lg:pr-1">
-    <section class="border border-border bg-card px-5 py-5">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Loading</div>
-      <div class="mt-2 text-base font-semibold text-foreground">Preparing realtime workspace projections.</div>
-      <div class="mt-2 max-w-[56ch] text-sm leading-6 text-muted-foreground">The live board is hydrating selected-objective state, execution logs, and receipt-backed activity.</div>
-    </section>
-    <section class="border border-border bg-card px-5 py-5 text-sm leading-6 text-muted-foreground">
-      Summary and execution surfaces will replace this placeholder as soon as the first snapshot arrives.
-    </section>
-  </section>
-  <section class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35">
-    <div class="shrink-0 border-b border-border bg-background/90 px-4 py-4">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Queue Monitor</div>
-      <div class="mt-1 text-base font-semibold text-foreground">Loading objective feed</div>
-      <div class="mt-1 text-[12px] leading-5 text-muted-foreground">Profile-board cards and completed history will stream into this compact column.</div>
-    </div>
-    <div class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-4">
-      <section class="border border-border bg-card px-5 py-5 text-sm leading-6 text-muted-foreground">
-        Pending objective lists and recent history will replace this placeholder when the snapshot arrives.
-      </section>
-    </div>
-  </section>
-</div>`;
-
-const renderWorkbenchLoadingChat = (): string => `<div class="flex min-h-0 flex-col gap-4">
-  <section class="border-b border-border pb-4">
-    <div class="flex items-start gap-3">
-      <span class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center text-primary">${iconWorker("h-4 w-4")}</span>
-      <div class="min-w-0">
-        <div class="text-sm font-semibold text-foreground">Factory chat</div>
-        <div class="mt-2 max-w-[36ch] text-[12px] leading-5 text-muted-foreground">Waiting for the current transcript and live job state.</div>
-      </div>
-    </div>
-  </section>
-  <section class="flex min-h-[240px] items-center justify-center border border-border bg-card px-6 py-8">
-    <div class="mx-auto max-w-lg text-left">
-      <div class="text-base font-semibold text-foreground">Loading conversation.</div>
-      <div class="mt-2 text-sm leading-6 text-muted-foreground">The composer stays available while Receipt rebuilds the chat projection.</div>
-    </div>
-  </section>
-</div>`;
-
-export const factoryWorkbenchScaffold = (
-  routeContext: FactoryWorkbenchRouteContext,
-): string => {
-  const pageQuery = workbenchQuery(routeContext);
-  const profileLabel = displayLabel(routeContext.profileId) || "Factory";
-  const scaffoldComposerActions = renderWorkbenchComposerQuickActions({ objectiveId: routeContext.objectiveId });
-  const scaffoldComposerHelper = workbenchComposerHelperText({ objectiveId: routeContext.objectiveId });
-  return `<!doctype html>
-<html class="dark h-full">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Receipt Factory Workbench</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
-  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
-</head>
-<body data-factory-workbench data-workbench-shell-lazy="true" data-chat-id="${esc(routeContext.chatId)}" data-objective-id="${esc(routeContext.objectiveId ?? "")}" data-focus-kind="${esc(routeContext.focusKind ?? "")}" data-focus-id="${esc(routeContext.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
-  <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
-    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
-      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border">
-        ${renderWorkbenchLoadingHeader(routeContext)}
-      </header>
-      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5">
-        ${renderWorkbenchLoadingChatHeader(routeContext)}
-      </div>
-      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:border-r lg:border-border">
-        <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
-          <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
-            <div id="factory-workbench-panel" class="min-w-0 lg:h-full">
-              ${renderWorkbenchLoadingWorkspace()}
-            </div>
-          </div>
-        </div>
-      </section>
-      <aside class="flex min-w-0 flex-col bg-background lg:min-h-0">
-        <div class="factory-workbench-chat-shell flex min-h-[42rem] flex-col overflow-hidden lg:h-full lg:min-h-0">
-          <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
-            <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
-              <div id="factory-workbench-chat">
-                ${renderWorkbenchLoadingChat()}
-              </div>
-              <div id="factory-chat-live" class="mt-4 space-y-3">
-                ${renderFactoryStreamingShell(profileLabel, { liveMode: "js" })}
-                <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
-              </div>
-            </section>
-            <section class="shrink-0 border-t border-border bg-background px-4 py-4">
-              <form id="factory-composer" action="/factory/compose${esc(pageQuery)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
-                <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="" />
-                <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <div class="space-y-3">
-                  ${scaffoldComposerActions}
-                  <div class="relative">
-                    <textarea id="factory-prompt" name="prompt" class="min-h-[120px] w-full resize-none border border-border bg-background px-3 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30" rows="3" placeholder="${esc(workbenchComposerPlaceholderForSelection({ objectiveId: routeContext.objectiveId }))}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
-                  </div>
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="text-xs leading-5 text-muted-foreground">${esc(scaffoldComposerHelper)}</div>
-                    <button id="factory-composer-submit" class="inline-flex items-center justify-center  border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
-                  </div>
-                </div>
-                <div id="factory-composer-status" class="mt-3 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
-              </form>
-            </section>
-          </div>
-        </div>
-      </aside>
-    </div>
-  </div>
-  <script src="/assets/factory-client.js?v=${CSS_VERSION}"></script>
-</body>
-</html>`;
-};
-
 export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string => {
   const shell = buildFactoryWorkbenchShellSnapshot(model);
   const routeContext = shell.route;
-  const pageQuery = workbenchQuery(routeContext);
+  const pageQuery = buildFactoryWorkbenchSearch(routeContext);
   const islandBindings = workbenchIslandBindings(routeContext);
   const composerActions = renderWorkbenchComposerQuickActions({
     objectiveId: routeContext.objectiveId,
@@ -1587,21 +1621,30 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
-  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
 </head>
 <body data-factory-workbench data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
     <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
-      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border" ${liveIslandAttrs(islandBindings.header)}>
+      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border" ${liveIslandAttrs({
+        ...islandBindings.header,
+        clientOnly: true,
+      })}>
         ${shell.workbenchHeaderHtml}
       </header>
-      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5">
+      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5" ${liveIslandAttrs({
+        path: chatHeaderPath(routeContext),
+        refreshOn: [],
+        clientOnly: true,
+      })}>
         ${shell.chatHeaderHtml}
       </div>
       <section class="flex min-h-0 min-w-0 flex-col bg-background lg:border-r lg:border-border">
         <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
           <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
-            <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${liveIslandAttrs(islandBindings.background)}>
+            <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${liveIslandAttrs({
+              ...islandBindings.background,
+              clientOnly: true,
+            })}>
               ${shell.workbenchHtml}
             </div>
           </div>
@@ -1611,7 +1654,10 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
         <div class="factory-workbench-chat-shell flex min-h-[42rem] flex-col overflow-hidden lg:h-full lg:min-h-0">
           <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
             <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
-              <div id="factory-workbench-chat" ${liveIslandAttrs(islandBindings.chat)}>
+              <div id="factory-workbench-chat" ${liveIslandAttrs({
+                ...islandBindings.chat,
+                clientOnly: true,
+              })}>
                 ${shell.chatHtml}
               </div>
               <div id="factory-chat-live" class="mt-4 space-y-3">

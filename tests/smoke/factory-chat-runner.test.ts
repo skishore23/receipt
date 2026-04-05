@@ -14,7 +14,7 @@ import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent }
 import { agentRunStream } from "../../src/agents/agent.streams";
 import {
   FACTORY_CHAT_DEFAULT_CONFIG,
-  classifyFactoryResponseStyle,
+  analyzeFactoryChatTurn,
   renderFactoryResponseStyleGuidance,
   runFactoryChat,
   runFactoryCodexJob,
@@ -26,7 +26,7 @@ import {
   historicalInfrastructureObjectiveReceipts,
   historicalInfrastructureStartupObjectiveId,
 } from "../fixtures/factory-infrastructure-replay";
-import { repoKeyForRoot } from "../../src/services/factory-chat-profiles";
+import { factoryChatSessionStream, repoKeyForRoot } from "../../src/services/factory-chat-profiles";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -47,18 +47,25 @@ const createMemoryStub = (): MemoryTools => ({
   reindex: async () => 0,
 });
 
-test("factory chat prompt guidance: classifies short prompts as conversational", () => {
-  expect(classifyFactoryResponseStyle("grade your performance")).toBe("conversational");
-  expect(classifyFactoryResponseStyle("hello")).toBe("conversational");
-  expect(classifyFactoryResponseStyle("inspect AWS cost spike")).toBe("conversational");
-  expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not use headings, scorecards, grades");
-  expect(renderFactoryResponseStyleGuidance("grade your performance")).toContain("Do not turn the reply into operator-handoff analysis");
+test("factory chat prompt guidance: renders conversational guidance explicitly", () => {
+  expect(renderFactoryResponseStyleGuidance("conversational")).toContain("Do not use headings, scorecards, grades");
+  expect(renderFactoryResponseStyleGuidance("conversational")).toContain("Do not turn the reply into operator-handoff analysis");
 });
 
-test("factory chat prompt guidance: classifies long prompts as work mode", () => {
-  const long = "investigate the cost spike across all regions and accounts, compare with last month baseline, and produce a summary report with recommendations";
-  expect(classifyFactoryResponseStyle(long)).toBe("work");
-  expect(renderFactoryResponseStyleGuidance(long)).toContain("This turn is work-focused.");
+test("factory chat prompt guidance: analyzes turn shape with the model", async () => {
+  const analysis = await analyzeFactoryChatTurn({
+    apiReady: true,
+    problem: "Who are you?",
+    llmText: async () => JSON.stringify({
+      responseStyle: "conversational",
+      includeBoundObjectiveContext: false,
+    }),
+  });
+  expect(analysis).toEqual({
+    responseStyle: "conversational",
+    includeBoundObjectiveContext: false,
+  });
+  expect(renderFactoryResponseStyleGuidance("work")).toContain("Choose the amount of structure");
 });
 
 const createNoopDelegationTools = () => ({
@@ -246,6 +253,25 @@ const createJobRuntime = (dataDir: string) =>
     initialJob,
   );
 
+const emitIndexedAgentEvent = async (
+  runtime: ReturnType<typeof createAgentRuntime>,
+  sessionStream: string,
+  runId: string,
+  event: AgentEvent,
+): Promise<void> => {
+  const runStream = agentRunStream(sessionStream, runId);
+  await runtime.execute(runStream, {
+    type: "emit",
+    event,
+    eventId: `${runStream}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  });
+  await runtime.execute(sessionStream, {
+    type: "emit",
+    event,
+    eventId: `${sessionStream}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  });
+};
+
 const runGit = (repoRoot: string, args: ReadonlyArray<string>): void => {
   const result = Bun.spawnSync(["git", ...args], {
     cwd: repoRoot,
@@ -274,6 +300,10 @@ const writeProfile = async (root: string, input: {
   readonly default?: boolean;
   readonly capabilities?: ReadonlyArray<string>;
   readonly toolAllowlist?: ReadonlyArray<string>;
+  readonly actionPolicy?: {
+    readonly allowedDispatchActions?: ReadonlyArray<"create" | "react" | "promote" | "cancel" | "cleanup" | "archive">;
+    readonly allowedCreateModes?: ReadonlyArray<"delivery" | "investigation">;
+  };
   readonly handoffTargets?: ReadonlyArray<string>;
   readonly mode?: "interactive" | "supervisor";
   readonly discoveryBudget?: number;
@@ -292,12 +322,32 @@ const writeProfile = async (root: string, input: {
 }): Promise<void> => {
   const dir = path.join(root, "profiles", input.id);
   await fs.mkdir(dir, { recursive: true });
+  const defaultActionPolicy = input.id === "software"
+    ? {
+      allowedDispatchActions: ["create", "react", "promote", "cancel", "cleanup", "archive"] as const,
+      allowedCreateModes: ["delivery"] as const,
+    }
+    : input.id === "infrastructure"
+      ? {
+        allowedDispatchActions: ["create", "react", "cancel", "cleanup", "archive"] as const,
+        allowedCreateModes: ["investigation"] as const,
+      }
+      : input.id === "qa"
+        ? {
+          allowedDispatchActions: ["create", "react", "cancel", "cleanup", "archive"] as const,
+          allowedCreateModes: ["delivery"] as const,
+        }
+        : {
+          allowedDispatchActions: ["create", "react", "cancel", "cleanup", "archive"] as const,
+          allowedCreateModes: ["delivery", "investigation"] as const,
+        };
   const manifest = {
     id: input.id,
     label: input.label,
     default: input.default ?? false,
     skills: [],
     handoffTargets: input.handoffTargets ?? [],
+    actionPolicy: input.actionPolicy ?? defaultActionPolicy,
     defaultObjectiveMode: input.id === "infrastructure" ? "investigation" : "delivery",
     defaultValidationMode: input.id === "infrastructure" ? "none" : "repo_profile",
     allowObjectiveCreation: true,
@@ -1558,7 +1608,15 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
       action: {
         type: "tool",
         name: "profile.handoff",
-        input: JSON.stringify({ profileId: "software", reason: "Ship the repo fix." }),
+        input: JSON.stringify({
+          profileId: "software",
+          reason: "Ship the repo fix.",
+          goal: "Implement and verify the sidebar fix.",
+          currentState: "Triage isolated the issue to the current sidebar work.",
+          doneWhen: "The fix is landed with validation evidence.",
+          evidence: ["objective_demo", "latest receipt reviewed"],
+          blockers: ["No code change exists yet"],
+        }),
         text: null,
       },
     },
@@ -1605,16 +1663,105 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
   expect(jobs[0]?.payload.objectiveId).toBe("objective_demo");
   expect(jobs[0]?.payload.stream).toBeTruthy();
   expect(String(jobs[0]?.payload.stream)).toContain("/objectives/objective_demo");
-  expect(String(jobs[0]?.payload.problem)).toContain("Profile handoff from generalist to software.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Engineer handoff from generalist to software.");
   expect(String(jobs[0]?.payload.problem)).toContain("Reason: Ship the repo fix.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Goal: Implement and verify the sidebar fix.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Current state: Triage isolated the issue to the current sidebar work.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Done when: The fix is landed with validation evidence.");
+  expect(String(jobs[0]?.payload.problem)).toContain("Evidence:");
+  expect(String(jobs[0]?.payload.problem)).toContain("Blockers:");
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_async_handoff"));
   const handoffEvent = chain.find((receipt) => receipt.body.type === "profile.handoff")?.body;
   expect(handoffEvent?.type).toBe("profile.handoff");
   expect(handoffEvent?.toProfileId).toBe("software");
+  expect(handoffEvent?.goal).toBe("Implement and verify the sidebar fix.");
+  expect(handoffEvent?.currentState).toBe("Triage isolated the issue to the current sidebar work.");
+  expect(handoffEvent?.doneWhen).toBe("The fix is landed with validation evidence.");
+  expect(handoffEvent?.evidence).toEqual(["objective_demo", "latest receipt reviewed"]);
+  expect(handoffEvent?.blockers).toEqual(["No code change exists yet"]);
   expect(handoffEvent && "nextJobId" in handoffEvent ? handoffEvent.nextJobId : undefined).toBe(jobs[0]?.id);
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
   expect(observed && "output" in observed ? observed.output : "").toContain('"toProfileId": "software"');
+  expect(observed && "output" in observed ? observed.output : "").toContain('"goal": "Implement and verify the sidebar fix."');
+});
+
+test("factory chat runner: profile.handoff requires a structured engineer handoff", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-handoff-required");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    toolAllowlist: ["profile.handoff"],
+    handoffTargets: ["software"],
+  });
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software Engineer",
+  });
+
+  const actions = [
+    {
+      thought: "attempt an incomplete handoff",
+      action: {
+        type: "tool",
+        name: "profile.handoff",
+        input: JSON.stringify({
+          profileId: "software",
+          reason: "Ship the repo fix.",
+        }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Handoff validation failed.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_handoff_requires_structure",
+    problem: "Fix the UI bug in the sidebar.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+    objectiveId: "objective_demo",
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_handoff_requires_structure"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "profile.handoff"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("profile.handoff requires goal");
 });
 
 test("factory chat runner: agent.status rejects the current factory job id", async () => {
@@ -2923,6 +3070,286 @@ test("factory chat runner: prompt keeps profile memory separate from explicit ob
   expect(summarizeCalls).not.toContain(`repos/${repoKey}/subagents/factory`);
 });
 
+test("factory chat runner: remembers durable chat presentation preferences and reuses them on later turns", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-preferences");
+  const repoRoot = await createGitRepo("receipt-factory-chat-preferences-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-preferences-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const repoKey = repoKeyForRoot(repoRoot);
+  const profileId = "generalist";
+  const preferenceScope = `repos/${repoKey}/users/default/preferences`;
+  let seq = 0;
+  const entries = new Map<string, Array<{
+    readonly id: string;
+    readonly scope: string;
+    readonly text: string;
+    readonly tags?: ReadonlyArray<string>;
+    readonly meta?: Readonly<Record<string, unknown>>;
+    readonly ts: number;
+  }>>();
+  const memoryTools: MemoryTools = {
+    read: async ({ scope, limit }) => (entries.get(scope) ?? []).slice(0, limit ?? 20),
+    search: async () => [],
+    summarize: async () => ({ summary: "", entries: [] }),
+    commit: async ({ scope, text, tags, meta }) => {
+      const entry = {
+        id: `memory_${++seq}`,
+        scope,
+        text,
+        tags,
+        meta,
+        ts: Date.now() + seq,
+      };
+      const current = entries.get(scope) ?? [];
+      entries.set(scope, [entry, ...current]);
+      return entry;
+    },
+    diff: async () => [],
+    reindex: async () => 0,
+  };
+  await writeProfile(profileRoot, {
+    id: profileId,
+    label: "Generalist",
+    default: true,
+    toolAllowlist: [],
+  });
+
+  let firstPrompt = "";
+  const rememberedNote = "When answers rely on computed numbers, include the assumptions and caveats after the main result.";
+  const firstResult = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_chat_pref_01",
+    problem: "When answers rely on computed numbers, include the assumptions and caveats after the main result. Remember that preference for this chat.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema, user }) => {
+      firstPrompt = user;
+      const reply = {
+        thought: "apply table preference",
+        action: {
+          type: "final",
+          name: null,
+          input: "{}",
+          text: "Preference stored.",
+        },
+        memory: {
+          preferenceNotes: [rememberedNote],
+        },
+      };
+      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_preferences",
+  });
+
+  expect(firstResult.status).toBe("completed");
+  expect(firstPrompt).toContain("User preferences:");
+  expect(firstPrompt).toContain("(none)");
+  expect(entries.get(preferenceScope)?.map((entry) => entry.text)).toContain(
+    rememberedNote,
+  );
+  expect(entries.get(preferenceScope)?.[0]?.meta).toEqual(expect.objectContaining({
+    kind: "preference",
+    source: "model_inference",
+    status: "active",
+  }));
+
+  let secondPrompt = "";
+  const secondResult = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_chat_pref_02",
+    problem: "How many active jobs are there right now?",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema, user }) => {
+      secondPrompt = user;
+      const reply = {
+        thought: "reuse remembered preference",
+        action: {
+          type: "final",
+          name: null,
+          input: "{}",
+          text: "Still using the remembered preference.",
+        },
+      };
+      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_preferences",
+  });
+
+  expect(secondResult.status).toBe("completed");
+  expect(secondPrompt).toContain("User preferences:");
+  expect(secondPrompt).toContain(rememberedNote);
+});
+
+test("factory chat runner: injects session recall from older transcript messages", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-session-recall");
+  const repoRoot = await createGitRepo("receipt-factory-chat-session-recall-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-session-recall-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: [],
+  });
+
+  const priorSessionStream = factoryChatSessionStream(repoRoot, "generalist", "prior_chat");
+  await emitIndexedAgentEvent(agentRuntime, priorSessionStream, "run_01", {
+    type: "problem.set",
+    runId: "run_01",
+    problem: "Set up PostgreSQL on port 5433 for staging.",
+    agentId: "orchestrator",
+  });
+  await emitIndexedAgentEvent(agentRuntime, priorSessionStream, "run_01", {
+    type: "response.finalized",
+    runId: "run_01",
+    agentId: "orchestrator",
+    content: "Staging should use PostgreSQL on port 5433.",
+  });
+
+  let capturedUserPrompt = "";
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_session_recall_01",
+    problem: "What was the PostgreSQL staging port again?",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema, user }) => {
+      capturedUserPrompt = user;
+      const reply = {
+        thought: "reuse the recalled transcript fact",
+        action: {
+          type: "final",
+          name: null,
+          input: "{}",
+          text: "It was port 5433.",
+        },
+      };
+      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    dataDir,
+    repoRoot,
+    profileRoot,
+    chatId: "current_chat",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(capturedUserPrompt).toContain("Session recall:");
+  expect(capturedUserPrompt).toContain("5433");
+});
+
+test("factory chat runner: lightweight conversational turns skip bound objective inspection", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-lightweight");
+  const repoRoot = await createGitRepo("receipt-factory-chat-lightweight-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-lightweight-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: [],
+  });
+
+  let getObjectiveCalls = 0;
+  let getObjectiveDebugCalls = 0;
+  let listObjectiveReceiptsCalls = 0;
+  let capturedUserPrompt = "";
+  const factoryService = createFactoryServiceStub({
+    getObjective: async () => {
+      getObjectiveCalls += 1;
+      throw new Error("bound objective should not be loaded for lightweight chat turns");
+    },
+    getObjectiveDebug: async () => {
+      getObjectiveDebugCalls += 1;
+      throw new Error("objective debug should not be loaded for lightweight chat turns");
+    },
+    listObjectiveReceipts: async () => {
+      listObjectiveReceiptsCalls += 1;
+      throw new Error("objective receipts should not be loaded for lightweight chat turns");
+    },
+  });
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_lightweight_chat",
+    problem: "Who are you?",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => JSON.stringify({
+      responseStyle: "conversational",
+      includeBoundObjectiveContext: false,
+    }),
+    llmStructured: async ({ schema, user }) => {
+      capturedUserPrompt = user;
+      const reply = {
+        thought: "introduce the chat controller briefly",
+        action: {
+          type: "final",
+          name: null,
+          input: "{}",
+          text: "I handle the chat thread and hand tracked work off when needed.",
+        },
+      };
+      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_demo",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(getObjectiveCalls).toBe(0);
+  expect(getObjectiveDebugCalls).toBe(0);
+  expect(listObjectiveReceiptsCalls).toBe(0);
+  expect(capturedUserPrompt).toContain("Bound objective: objective_demo");
+  expect(capturedUserPrompt).not.toContain("Objective (bound):");
+  expect(capturedUserPrompt).not.toContain("Recent receipts:");
+});
+
 test("factory chat runner: factory.dispatch create starts a new objective instead of reusing the bound thread objective", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-dispatch-thread");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -3139,6 +3566,381 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
   const latestBound = boundEvents.at(-1);
   expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_created");
   expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_update");
+});
+
+test("factory chat runner: Tech Lead cannot promote objectives through factory.dispatch", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-promote-blocked");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let promoted = false;
+  const factoryService = createFactoryServiceStub({
+    promoteObjective: async () => {
+      promoted = true;
+      return {
+        objectiveId: "objective_demo",
+        title: "Objective demo",
+        status: "completed",
+        phase: "completed",
+        latestSummary: "Promoted.",
+        integration: { status: "promoted", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "try to promote anyway",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ action: "promote" }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Promotion is blocked for this profile.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_dispatch_promote_blocked",
+    problem: "Promote the current objective.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_demo",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(promoted).toBe(false);
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_promote_blocked"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Tech Lead cannot promote objectives.");
+});
+
+test("factory chat runner: Software Engineer can promote objectives through factory.dispatch", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-promote-allowed");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software Engineer",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let promotedObjectiveId: string | undefined;
+  const factoryService = createFactoryServiceStub({
+    promoteObjective: async (objectiveId: string) => {
+      promotedObjectiveId = objectiveId;
+      return {
+        objectiveId,
+        title: "Objective demo",
+        status: "completed",
+        phase: "completed",
+        latestSummary: "Promoted.",
+        integration: { status: "promoted", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "promote the objective",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ action: "promote" }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Promoted the objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/software",
+    runId: "run_dispatch_promote_allowed",
+    problem: "Promote the current objective.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_demo",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(promotedObjectiveId).toBe("objective_demo");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/software", "run_dispatch_promote_allowed"));
+  const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
+  expect(observed && "output" in observed ? observed.output : "").toContain('"action": "promote"');
+});
+
+test("factory chat runner: Infrastructure Engineer cannot create delivery objectives", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-infra-mode");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "infrastructure",
+    label: "Infrastructure Engineer",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  const actions = [
+    {
+      thought: "try to create delivery work",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ action: "create", prompt: "Build the dashboard fix.", objectiveMode: "delivery" }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Delivery creation is blocked.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/infrastructure",
+    runId: "run_dispatch_infra_mode_blocked",
+    problem: "Build the dashboard fix.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/infrastructure", "run_dispatch_infra_mode_blocked"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("Infrastructure Engineer cannot create delivery objectives.");
+});
+
+test("factory chat runner: QA Engineer cannot create investigation objectives", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-qa-mode");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "qa",
+    label: "QA Engineer",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  const actions = [
+    {
+      thought: "try to create investigation work",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ action: "create", prompt: "Investigate why the queue is backing up.", objectiveMode: "investigation" }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Investigation creation is blocked.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/qa",
+    runId: "run_dispatch_qa_mode_blocked",
+    problem: "Investigate why the queue is backing up.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/qa", "run_dispatch_qa_mode_blocked"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("QA Engineer cannot create investigation objectives.");
+});
+
+test("factory chat runner: factory.dispatch rejects profileId reassignment", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-profileid");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  const actions = [
+    {
+      thought: "attempt hidden reassignment",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ action: "create", prompt: "Build the dashboard fix.", profileId: "software" }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Cross-profile reassignment is blocked.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/generalist",
+    runId: "run_dispatch_profileid_rejected",
+    problem: "Build the dashboard fix.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub() as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(result.status).toBe("completed");
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/generalist", "run_dispatch_profileid_rejected"));
+  const errorCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+    && typeof receipt.body.error === "string"
+  )?.body;
+  expect(errorCall && "error" in errorCall ? errorCall.error : "").toContain("factory.dispatch does not accept profileId");
 });
 
 test("factory chat runner: terminal bound objectives create a follow-up objective instead of reacting in place", async () => {

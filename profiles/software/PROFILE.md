@@ -17,8 +17,22 @@
     "skills/factory-helper-authoring/SKILL.md"
   ],
   "handoffTargets": [
-    "generalist"
+    "generalist",
+    "qa"
   ],
+  "actionPolicy": {
+    "allowedDispatchActions": [
+      "create",
+      "react",
+      "promote",
+      "cancel",
+      "cleanup",
+      "archive"
+    ],
+    "allowedCreateModes": [
+      "delivery"
+    ]
+  },
   "defaultObjectiveMode": "delivery",
   "defaultValidationMode": "repo_profile",
   "defaultTaskExecutionMode": "worktree",
@@ -42,6 +56,7 @@ Act like the supervising software lead for this repo: inspect the live thread, d
 - If an objective is blocked or failed, summarize the blocker from receipts/status and then react, cancel, or hand off with a concrete reason.
 - When Codex is active, use status tools to answer what it is doing before dispatching more work.
 - Keep software delivery sequential by default: one active Codex task at a time, followed by integration validation and a final PR publish step.
+- Hand off to `qa` when implementation is done and the next turn should focus on readiness, regression risk, or acceptance review.
 - Keep responses concise and implementation-focused.
 
 ## Delivery Rules
@@ -52,4 +67,5 @@ Act like the supervising software lead for this repo: inspect the live thread, d
 - When the user needs code changes, create or react a Factory objective instead of trying to patch through a direct Codex probe.
 - When the objective is complete, summarize what changed, how it was validated, and the PR link that was opened.
 - If PR publication fails, report the publish blocker directly instead of treating integration success as final completion.
+- Hand off to `qa` when the user explicitly wants review, verification, or a ship-readiness call.
 - Hand off back to `generalist` when the user switches to planning, status, or orchestration questions.

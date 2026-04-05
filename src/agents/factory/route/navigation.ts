@@ -1,6 +1,7 @@
 import type { FactoryLiveScopePayload } from "../client-contract";
 import { json, text } from "../../../framework/http";
-import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "../../../views/factory-models";
+import { buildFactoryWorkbenchRouteKey } from "../../../views/factory/workbench/route";
+import type { FactoryWorkbenchFilterKey } from "../../../views/factory-models";
 
 export const wantsJsonNavigation = (req: Request): boolean =>
   (req.headers.get("accept") ?? "").includes("application/json");
@@ -68,23 +69,9 @@ export const buildWorkbenchLink = (input: {
   readonly profileId: string;
   readonly chatId: string;
   readonly objectiveId?: string;
-  readonly inspectorTab?: "overview" | "chat" | "notes";
+  readonly inspectorTab?: "overview" | "chat";
   readonly detailTab?: "review" | "queue" | "action";
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
-  readonly filter?: typeof DEFAULT_FACTORY_WORKBENCH_FILTER;
-}): string => {
-  const params = new URLSearchParams();
-  params.set("profile", input.profileId);
-  params.set("chat", input.chatId);
-  if (input.objectiveId) params.set("objective", input.objectiveId);
-  if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
-  if (input.detailTab) params.set("detailTab", input.detailTab);
-  if (input.filter && input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
-  if (input.focusKind && input.focusId) {
-    params.set("focusKind", input.focusKind);
-    params.set("focusId", input.focusId);
-  }
-  const query = params.toString();
-  return `/factory${query ? `?${query}` : ""}`;
-};
+  readonly filter?: FactoryWorkbenchFilterKey;
+}): string => buildFactoryWorkbenchRouteKey(input);

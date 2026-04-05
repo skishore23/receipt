@@ -10,9 +10,12 @@ import type {
   FactoryObjectivePolicy,
   FactoryTaskRecord,
 } from "../modules/factory";
-import { buildFactoryProjection, initialFactoryState, reduceFactory } from "../modules/factory";
 import type { JobEvent } from "../modules/job";
 import { initial as initialJob, reduce as reduceJob } from "../modules/job";
+import {
+  filterReceiptsAsOf,
+  readObjectiveReplaySnapshot,
+} from "../services/factory/objective-replay";
 
 type AnalysisSeverity = "high" | "medium" | "low";
 
@@ -258,23 +261,12 @@ type ObjectiveAnalysisReadOptions = {
   readonly asOfTs?: number;
 };
 
-const normalizedAsOfTs = (value: number | undefined): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
-
-const filterReceiptsAsOf = <T>(
-  chain: ReadonlyArray<Receipt<T>>,
-  asOfTs: number | undefined,
-): ReadonlyArray<Receipt<T>> => {
-  const cutoff = normalizedAsOfTs(asOfTs);
-  return typeof cutoff === "number"
-    ? chain.filter((receipt) => receipt.ts <= cutoff)
-    : chain;
-};
-
 export type AuditRecommendation = {
   readonly summary: string;
+  readonly anomalyPatterns: ReadonlyArray<string>;
+  readonly scope: string;
+  readonly confidence: "low" | "medium" | "high";
   readonly suggestedFix: string;
-  readonly autoFix: boolean;
 };
 
 type ToolMetricAccumulator = {
@@ -283,16 +275,6 @@ type ToolMetricAccumulator = {
   observedCount: number;
   truncatedObservations: number;
   totalDurationMs: number;
-};
-
-const objectiveReplayStream = (objectiveIdOrStream: string): {
-  readonly objectiveId: string;
-  readonly stream: string;
-} => {
-  const raw = objectiveIdOrStream.trim();
-  const stream = raw.startsWith("factory/objectives/") ? raw : `factory/objectives/${raw}`;
-  const objectiveId = stream.replace(/^factory\/objectives\//, "");
-  return { objectiveId, stream };
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
@@ -902,17 +884,15 @@ export const readObjectiveAnalysis = async (
   objectiveIdOrStream: string,
   options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ObjectiveAnalysis> => {
-  const { objectiveId, stream } = objectiveReplayStream(objectiveIdOrStream);
-  const objectiveChain = filterReceiptsAsOf(
-    await jsonlStore<FactoryEvent>(dataDir).read(stream),
-    options.asOfTs,
-  );
-  if (objectiveChain.length === 0) {
-    throw new Error(`No receipts found for ${stream}`);
-  }
-
-  const state = fold(objectiveChain, reduceFactory, initialFactoryState);
-  const projection = buildFactoryProjection(state);
+  const {
+    objectiveId,
+    stream,
+    chain: objectiveChain,
+    state,
+    projection,
+  } = await readObjectiveReplaySnapshot(dataDir, objectiveIdOrStream, {
+    asOfTs: options.asOfTs,
+  });
   const { sequence, eventCounts, maxObservedActiveTasks, knownJobIds } = buildObjectiveSequence(objectiveChain);
   const tasks = projection.tasks.map(buildTaskAnalysis);
   const candidates = projection.candidates.map(buildCandidateAnalysis);
@@ -1215,7 +1195,8 @@ export const renderObjectiveAnalysisText = (analysis: ObjectiveAnalysis): string
     "",
     "Recommendations:",
     ...(analysis.recommendations.length > 0
-      ? analysis.recommendations.map((recommendation) => `- ${recommendation}`)
+      ? analysis.recommendations.map((recommendation) =>
+          `- [${recommendation.confidence}] ${recommendation.summary} · scope=${recommendation.scope}${recommendation.anomalyPatterns.length > 0 ? ` · patterns=${recommendation.anomalyPatterns.join(",")}` : ""}`)
       : ["- none"]),
     "",
     "Top Tools:",

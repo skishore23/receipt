@@ -11,12 +11,23 @@ import { BOARD_SECTION_META, type FactoryObjectivePanel, formatList, formatTime,
 const section = (title: string, lines: ReadonlyArray<string>): string =>
   [`== ${title} ==`, ...lines].join("\n");
 
+const objectiveStateSummary = (objective: {
+  readonly displayState?: string;
+  readonly phase?: string;
+  readonly phaseDetail?: string;
+  readonly statusAuthority?: string;
+}): string => [
+  objective.displayState ?? objective.phase,
+  objective.phaseDetail,
+  objective.statusAuthority ? `authority:${objective.statusAuthority}` : undefined,
+].filter((value): value is string => Boolean(value)).join(" · ");
+
 const renderObjectiveCard = (objective: FactoryBoardProjection["objectives"][number], selected: boolean): string => {
   const marker = selected ? ">" : " ";
   const blocked = objective.blockedExplanation?.summary ?? objective.blockedReason;
   const summary = truncate(objective.nextAction ?? objective.latestSummary ?? blocked ?? "No activity yet.", 96);
   return [
-    `${marker} ${objective.title} [${objective.phase}/${objective.integrationStatus}]`,
+    `${marker} ${objective.title} [${objectiveStateSummary(objective) || `${objective.phase}/${objective.integrationStatus}`}]`,
     `  id=${objective.objectiveId} slot=${objective.scheduler.slotState}${objective.scheduler.queuePosition ? ` q=${objective.scheduler.queuePosition}` : ""} updated=${formatTime(objective.updatedAt)}`,
     `  mode=${objective.objectiveMode} severity=${objective.severity}`,
     `  tasks=${objective.taskCount} active=${objective.activeTaskCount} ready=${objective.readyTaskCount} head=${shortHash(objective.latestCommitHash)}`,
@@ -52,7 +63,7 @@ export const renderBoardText = (opts: {
     lines.push(section("Selected Objective", [
       `title=${opts.selected.title}`,
       `objective=${opts.selected.objectiveId}`,
-      `phase=${opts.selected.phase} slot=${opts.selected.scheduler.slotState} integration=${opts.selected.integration.status}`,
+      `state=${objectiveStateSummary(opts.selected) || opts.selected.phase} slot=${opts.selected.scheduler.slotState} integration=${opts.selected.integration.status}`,
       `mode=${opts.selected.objectiveMode} severity=${opts.selected.severity}`,
       `next=${truncate(opts.selected.nextAction, 180) || "none"}`,
       opts.selected.blockedExplanation ? `blocked=${truncate(opts.selected.blockedExplanation.summary, 180)}` : "blocked=none",
@@ -74,7 +85,7 @@ export const renderBoardText = (opts: {
 export const renderObjectiveHeader = (detail: FactoryObjectiveDetail): ReadonlyArray<string> => [
   `objective=${detail.objectiveId}`,
   `title=${detail.title}`,
-  `phase=${detail.phase} slot=${detail.scheduler.slotState}${detail.scheduler.queuePosition ? ` q=${detail.scheduler.queuePosition}` : ""}`,
+  `state=${objectiveStateSummary(detail) || detail.phase} slot=${detail.scheduler.slotState}${detail.scheduler.queuePosition ? ` q=${detail.scheduler.queuePosition}` : ""}`,
   `integration=${detail.integration.status}`,
   `mode=${detail.objectiveMode} severity=${detail.severity}`,
   `elapsed=${detail.budgetState.elapsedMinutes}m`,
@@ -159,11 +170,15 @@ export const renderObjectivePanelText = (
       ]);
     case "debug":
       return section("Debug", [
+        `state=${objectiveStateSummary(debug) || debug.phase}`,
         `next=${truncate(debug.nextAction, 180) || "none"}`,
         debug.latestDecision
           ? `decision=${truncate(debug.latestDecision.summary, 180)} (${debug.latestDecision.source})`
           : "decision=none",
         `active-jobs=${debug.activeJobs.length} recent-jobs=${debug.lastJobs.length}`,
+        debug.activeJobAuthorities?.length
+          ? `authorities=${debug.activeJobAuthorities.map((entry) => `${entry.jobId}:${entry.authority}`).join(", ")}`
+          : "authorities=none",
         `worktrees=${debug.taskWorktrees.length}${debug.integrationWorktree ? " + integration" : ""}`,
         `context-packs=${debug.latestContextPacks.length}`,
       ]);

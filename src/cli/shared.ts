@@ -33,6 +33,8 @@ Commands:
   receipt jobs abort <job-id> [--reason <text>]
   receipt abort <job-id> [--reason <text>]
   receipt memory <read|search|summarize|commit|diff> <scope> [options]
+  receipt memory prefs <list|add|remove> [options]
+  receipt sessions <search|read> [args] [options]
   receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|analyze|parse|investigate|audit|resume|react|promote|cancel|cleanup|archive|abort-job|steer|follow-up|experiment|codex-probe]`);
 };
 

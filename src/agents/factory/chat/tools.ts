@@ -21,13 +21,16 @@ import type { FactoryService, FactoryObjectiveInput } from "../../../services/fa
 import {
   factoryChatStream,
   factoryChatSessionStream,
+  assertFactoryProfileCreateModeAllowed,
+  assertFactoryProfileDispatchActionAllowed,
+  factoryChatResolvedProfileActionSubject,
   resolveFactoryChatProfile,
   type FactoryChatResolvedProfile,
 } from "../../../services/factory-chat-profiles";
 import { createRepoStatusTool, effectiveFactoryLiveWaitMs, waitForSnapshotChange, isActiveJobStatus, clampWaitMs, deriveObjectiveTitle } from "../../orchestration-utils";
 import { summarizeFactoryObjective } from "../../../views/factory/objective-presenters";
 import { normalizeFactoryDispatchInput, resolveFactoryDispatchAction, isObjectiveContinuationBoundary } from "../dispatch";
-import { asString, asRecord, nextId, stableCodexSessionKey, workerMemoryScope, toolSummary, latestActiveCodexJob, jobMatchesProfileContext, codexJobPriority, normalizeJobSnapshot, reusableInfrastructureRefs } from "./input";
+import { asString, asRecord, asStringList, nextId, stableCodexSessionKey, workerMemoryScope, toolSummary, latestActiveCodexJob, jobMatchesProfileContext, codexJobPriority, normalizeJobSnapshot, reusableInfrastructureRefs } from "./input";
 import { commitWorkerSummary } from "./memory";
 import { codexJobSnapshot } from "./status";
 import { FactorySupervisorConfig, queueSupervisorCommandOnce, isSupervisorStallSummary } from "./supervisor";
@@ -58,6 +61,59 @@ const isTerminalObjectiveStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
 const latestObjectiveByStream = new Map<string, string>();
+
+const dispatchRequestedCrossProfileAssignment = (toolInput: unknown): boolean => {
+  const record = asRecord(toolInput);
+  return Boolean(record && Object.prototype.hasOwnProperty.call(record, "profileId"));
+};
+
+const resolveDispatchCreateMode = (
+  input: FactoryChatToolsInput,
+  normalized: ReturnType<typeof normalizeFactoryDispatchInput>,
+  currentObjective: Awaited<ReturnType<FactoryService["getObjective"]>> | undefined,
+): "delivery" | "investigation" =>
+  normalized.objectiveMode
+  ?? currentObjective?.objectiveMode
+  ?? input.profile.objectivePolicy.defaultObjectiveMode;
+
+const renderProfileHandoffProblem = (input: {
+  readonly fromProfileId: string;
+  readonly toProfileId: string;
+  readonly reason: string;
+  readonly goal: string;
+  readonly currentState: string;
+  readonly doneWhen: string;
+  readonly evidence: ReadonlyArray<string>;
+  readonly blockers: ReadonlyArray<string>;
+  readonly originalProblem: string;
+}): string => {
+  const sections = [
+    [
+      `Engineer handoff from ${input.fromProfileId} to ${input.toProfileId}.`,
+      `Reason: ${input.reason}`,
+      `Goal: ${input.goal}`,
+      `Current state: ${input.currentState}`,
+      `Done when: ${input.doneWhen}`,
+    ].join("\n"),
+  ];
+  if (input.evidence.length > 0) {
+    sections.push([
+      "Evidence:",
+      ...input.evidence.map((entry) => `- ${entry}`),
+    ].join("\n"));
+  }
+  if (input.blockers.length > 0) {
+    sections.push([
+      "Blockers:",
+      ...input.blockers.map((entry) => `- ${entry}`),
+    ].join("\n"));
+  }
+  sections.push([
+    "Original request:",
+    input.originalProblem,
+  ].join("\n"));
+  return sections.join("\n\n");
+};
 
 const createCodexRunTool = (input: FactoryChatToolsInput): AgentToolExecutor =>
   async (toolInput) => {
@@ -351,6 +407,9 @@ const createJobControlTool = (input: FactoryChatToolsInput): AgentToolExecutor =
 
 const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecutor =>
   async (toolInput) => {
+    if (dispatchRequestedCrossProfileAssignment(toolInput)) {
+      throw new Error("factory.dispatch does not accept profileId; use profile.handoff to change owners.");
+    }
     const normalized = normalizeFactoryDispatchInput(toolInput);
     const requestedObjectiveId = normalized.objectiveId;
     const objectiveId = requestedObjectiveId ?? input.getCurrentObjectiveId();
@@ -362,14 +421,17 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
     let reused = false;
     let bindingReason: "dispatch_create" | "dispatch_reuse" | "dispatch_update" = "dispatch_update";
     if (action === "create") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       const prompt = normalized.prompt;
       if (!prompt) throw new Error("factory.dispatch create requires prompt");
+      const objectiveMode = resolveDispatchCreateMode(input, normalized, currentObjective);
+      assertFactoryProfileCreateModeAllowed(factoryChatResolvedProfileActionSubject(input.profile), objectiveMode);
       const payload: FactoryObjectiveInput = {
         objectiveId: requestedObjectiveId,
         title: normalized.title ?? deriveObjectiveTitle(prompt),
         prompt,
         baseHash: normalized.baseHash,
-        objectiveMode: normalized.objectiveMode ?? currentObjective?.objectiveMode,
+        objectiveMode,
         severity: normalized.severity ?? currentObjective?.severity,
         checks: normalized.checks,
         channel: normalized.channel,
@@ -379,17 +441,21 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
       detail = await input.factoryService.createObjective(payload);
       bindingReason = "dispatch_create";
     } else if (action === "react") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       if (!objectiveId) throw new Error("factory.dispatch react requires objectiveId");
       const followUpPrompt = normalized.note ?? normalized.prompt;
       if (currentObjective && isObjectiveContinuationBoundary(currentObjective)) {
         if (!followUpPrompt) {
           throw new Error("factory.dispatch react on a completed objective requires note or prompt to create a follow-up objective");
         }
+        assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), "create");
+        const objectiveMode = resolveDispatchCreateMode(input, normalized, currentObjective);
+        assertFactoryProfileCreateModeAllowed(factoryChatResolvedProfileActionSubject(input.profile), objectiveMode);
         detail = await input.factoryService.createObjective({
           title: normalized.title ?? deriveObjectiveTitle(followUpPrompt),
           prompt: followUpPrompt,
           baseHash: normalized.baseHash,
-          objectiveMode: normalized.objectiveMode ?? currentObjective.objectiveMode,
+          objectiveMode,
           severity: normalized.severity ?? currentObjective.severity,
           checks: normalized.checks,
           channel: normalized.channel,
@@ -405,15 +471,19 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
         );
       }
     } else if (action === "promote") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       if (!objectiveId) throw new Error("factory.dispatch promote requires objectiveId");
       detail = await input.factoryService.promoteObjective(objectiveId);
     } else if (action === "cancel") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       if (!objectiveId) throw new Error("factory.dispatch cancel requires objectiveId");
       detail = await input.factoryService.cancelObjective(objectiveId, asString(toolInput.reason));
     } else if (action === "cleanup") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       if (!objectiveId) throw new Error("factory.dispatch cleanup requires objectiveId");
       detail = await input.factoryService.cleanupObjectiveWorkspaces(objectiveId);
     } else if (action === "archive") {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(input.profile), action);
       if (!objectiveId) throw new Error("factory.dispatch archive requires objectiveId");
       detail = await input.factoryService.archiveObjective(objectiveId);
     } else {
@@ -460,6 +530,14 @@ const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecut
     }
     const reason = asString(toolInput.reason);
     if (!reason) throw new Error("profile.handoff requires reason");
+    const goal = asString(toolInput.goal);
+    if (!goal) throw new Error("profile.handoff requires goal");
+    const currentState = asString(toolInput.currentState);
+    if (!currentState) throw new Error("profile.handoff requires currentState");
+    const doneWhen = asString(toolInput.doneWhen);
+    if (!doneWhen) throw new Error("profile.handoff requires doneWhen");
+    const evidence = asStringList(toolInput.evidence);
+    const blockers = asStringList(toolInput.blockers);
     await resolveFactoryChatProfile({
       repoRoot: input.repoRoot,
       profileRoot: input.profileRoot,
@@ -481,11 +559,17 @@ const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecut
         kind: "factory.run",
         stream: targetStream,
         runId: nextRunId,
-        problem: [
-          `Profile handoff from ${input.profile.root.id} to ${targetProfileId}.`,
-          `Reason: ${reason}`,
-          input.problem,
-        ].join("\n\n"),
+        problem: renderProfileHandoffProblem({
+          fromProfileId: input.profile.root.id,
+          toProfileId: targetProfileId,
+          reason,
+          goal,
+          currentState,
+          doneWhen,
+          evidence,
+          blockers,
+          originalProblem: input.problem,
+        }),
         profileId: targetProfileId,
         ...(chatId ? { chatId } : {}),
         ...(objectiveId ? { objectiveId } : {}),
@@ -501,6 +585,11 @@ const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecut
         fromProfileId: input.profile.root.id,
         toProfileId: targetProfileId,
         reason,
+        goal,
+        currentState,
+        doneWhen,
+        ...(evidence.length > 0 ? { evidence } : {}),
+        ...(blockers.length > 0 ? { blockers } : {}),
         nextRunId,
         nextJobId: created.id,
         targetStream,
@@ -515,6 +604,11 @@ const createProfileHandoffTool = (input: FactoryChatToolsInput): AgentToolExecut
         fromProfileId: input.profile.root.id,
         toProfileId: targetProfileId,
         reason,
+        goal,
+        currentState,
+        doneWhen,
+        ...(evidence.length > 0 ? { evidence } : {}),
+        ...(blockers.length > 0 ? { blockers } : {}),
         nextRunId,
         nextJobId: created.id,
         targetStream,

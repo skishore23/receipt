@@ -100,19 +100,43 @@ const normalizeBody = (value: string): string =>
 
 const DIAGNOSTIC_INVESTIGATION_RE = /\b(investigate|investigation|debug|diagnose|diagnostic|root cause|triage|look into|find out|figure out|trace|explain why|what is causing|what's causing)\b/i;
 const FAILURE_TERMS_RE = /\b(fail|failing|failed|failure|broken|error|issue|problem|crash|hang|timeout|timed out|not working|regression|flake|flaky|build|test|tests|compile|compilation|lint|ci|deploy)\b/i;
-const EXPLICIT_DELIVERY_RE = /\b(fix|implement|add|update|change|refactor|remove|rename|support|ship|create|wire up)\b/i;
+const EXPLICIT_DELIVERY_RE = /\b(build|fix|implement|add|update|change|refactor|remove|rename|replace|support|ship|create|wire up)\b/i;
 const INVENTORY_PROMPT_RE = /\b(list|show|inventory|enumerate|count|how many|what are|which|describe)\b/i;
 const AWS_RESOURCE_RE = /\b(aws|ec2|instance|instances|container|containers|cluster|clusters|service|services|fargate|s3|bucket|buckets|rds|lambda|vpc|vpcs|subnet|subnets|security group|security groups|nat gateway|nat gateways|load balancer|load balancers|elb|ebs|volume|volumes|snapshot|snapshots|cloudwatch|iam|ecr|ecs|eks)\b/i;
+const QA_REVIEW_RE = /\b(review|verify|verification|validate|validation|regression risk|acceptance|acceptance criteria|ship[- ]?ready|ready to ship|readiness|sign off|sign-off|qa)\b/i;
+const INFRASTRUCTURE_WORK_RE = /\b(cost|billing|bill|spend|usage|permission|permissions|access|role|roles|policy|policies|latency|throughput|quota|limit|limits|throttle|throttling|config|configuration|scaling|alarm|alarms|secret|secrets)\b/i;
+const SOFTWARE_SURFACE_RE = /\b(app|repo|repository|code|dashboard|widget|ui|frontend|backend|endpoint|api|component|screen|page|button|form|migration|schema|query|handler|route|controller|typescript|javascript|react|css|html|sql)\b/i;
 
 const compactPrompt = (prompt: string): string =>
   normalizeBody(prompt).replace(/\s+/g, " ").trim();
 
-export const inferObjectiveProfileHint = (prompt: string): "infrastructure" | undefined => {
+export const inferObjectiveProfileHint = (prompt: string): "software" | "infrastructure" | "qa" | undefined => {
   const compact = compactPrompt(prompt).toLowerCase();
   if (!compact) return undefined;
-  if (EXPLICIT_DELIVERY_RE.test(compact)) return undefined;
-  if (INVENTORY_PROMPT_RE.test(compact) && AWS_RESOURCE_RE.test(compact)) return "infrastructure";
-  if (/^(what|which)\b/.test(compact) && AWS_RESOURCE_RE.test(compact)) return "infrastructure";
+  const referencesAwsResources = AWS_RESOURCE_RE.test(compact);
+  const looksLikeQaReview = QA_REVIEW_RE.test(compact) && !referencesAwsResources;
+  if (looksLikeQaReview) return "qa";
+  const looksLikeInfraWork = referencesAwsResources && (
+    INVENTORY_PROMPT_RE.test(compact)
+    || INFRASTRUCTURE_WORK_RE.test(compact)
+    || DIAGNOSTIC_INVESTIGATION_RE.test(compact)
+    || FAILURE_TERMS_RE.test(compact)
+    || /^(what|which|why|how)\b/.test(compact)
+  ) && !SOFTWARE_SURFACE_RE.test(compact);
+  if (looksLikeInfraWork) return "infrastructure";
+  if (EXPLICIT_DELIVERY_RE.test(compact)) return "software";
+  if ((DIAGNOSTIC_INVESTIGATION_RE.test(compact) || FAILURE_TERMS_RE.test(compact)) && !referencesAwsResources) {
+    return "software";
+  }
+  return undefined;
+};
+
+export const inferExplicitDeliveryObjectiveMode = (prompt: string): "delivery" | undefined => {
+  const compact = compactPrompt(prompt).toLowerCase();
+  if (!compact) return undefined;
+  if (DIAGNOSTIC_INVESTIGATION_RE.test(compact)) return undefined;
+  if (/^(why|what|how)\b/.test(compact) && FAILURE_TERMS_RE.test(compact)) return undefined;
+  if (EXPLICIT_DELIVERY_RE.test(compact)) return "delivery";
   return undefined;
 };
 
@@ -120,7 +144,6 @@ const inferObjectiveMode = (prompt: string): "investigation" | undefined => {
   const compact = compactPrompt(prompt).toLowerCase();
   if (!compact) return undefined;
   if (DIAGNOSTIC_INVESTIGATION_RE.test(compact)) return "investigation";
-  if (EXPLICIT_DELIVERY_RE.test(compact)) return undefined;
   if (/^(why|what|how)\b/.test(compact) && FAILURE_TERMS_RE.test(compact)) return "investigation";
   return undefined;
 };

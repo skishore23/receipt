@@ -153,6 +153,7 @@ export type FactoryTaskPacketPaths = {
   readonly stdoutPath: string;
   readonly stderrPath: string;
   readonly lastMessagePath: string;
+  readonly evidencePath: string;
   readonly skillBundlePath: string;
   readonly memoryScriptPath: string;
   readonly memoryConfigPath: string;
@@ -239,6 +240,7 @@ export const buildTaskFilePaths = (
     stdoutPath: path.join(root, `${taskId}.stdout.log`),
     stderrPath: path.join(root, `${taskId}.stderr.log`),
     lastMessagePath: path.join(root, `${taskId}.last-message.md`),
+    evidencePath: path.join(root, `${taskId}.evidence.json`),
     skillBundlePath: path.join(root, `${taskId}.skill-bundle.json`),
     memoryScriptPath: path.join(root, `${taskId}.memory.cjs`),
     memoryConfigPath: path.join(root, `${taskId}.memory-scopes.json`),
@@ -273,6 +275,7 @@ export const listTaskArtifactActivity = async (
     path.basename(files.stdoutPath),
     path.basename(files.stderrPath),
     path.basename(files.lastMessagePath),
+    path.basename(files.evidencePath),
     path.basename(files.skillBundlePath),
     path.basename(files.memoryScriptPath),
     path.basename(files.memoryConfigPath),

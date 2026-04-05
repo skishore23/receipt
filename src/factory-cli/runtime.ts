@@ -7,7 +7,12 @@ import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../engine/runtime/job-worker";
 import { SseHub } from "../framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job";
+import {
+  shouldQueueObjectiveControlReconcile,
+  shouldReconcileObjectiveFromJobChange,
+} from "../services/factory-job-gates";
 import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../services/factory-runtime";
+import { FACTORY_CONTROL_AGENT_ID } from "../services/factory-service";
 import type { FactoryService, FactoryTaskView } from "../services/factory-service";
 import type { FactoryCliConfig } from "./config";
 import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "../db/client";
@@ -100,16 +105,48 @@ export const createFactoryCliRuntime = (
     reduceJob,
     initialJob,
   );
+  let serviceRef: FactoryService | undefined;
   const queue = jsonlQueue({
     runtime: jobRuntime,
     stream: "jobs",
     watchDir: config.dataDir,
-    onJobChange: (jobs) => {
+    onJobChange: async (jobs) => {
       notify({
         type: "queue_changed",
         jobIds: jobs.map((job) => job.id),
         at: Date.now(),
       });
+
+      for (const job of jobs) {
+        const objectiveId = typeof job.payload.objectiveId === "string" && job.payload.objectiveId.trim().length > 0
+          ? job.payload.objectiveId.trim()
+          : undefined;
+        if (!objectiveId || !shouldReconcileObjectiveFromJobChange(job)) continue;
+        const [recentJobs, detail] = await Promise.all([
+          queue.listJobs({ limit: 200 }),
+          serviceRef?.getObjective(objectiveId).catch(() => undefined) ?? Promise.resolve(undefined),
+        ]);
+        const shouldQueue = shouldQueueObjectiveControlReconcile({
+          controlAgentId: FACTORY_CONTROL_AGENT_ID,
+          objectiveId,
+          recentJobs,
+          sourceUpdatedAt: job.updatedAt,
+          objectiveInactive: detail != null && ["blocked", "canceled", "completed", "failed"].includes(detail.status),
+        });
+        if (!shouldQueue) continue;
+        queue.enqueue({
+          agentId: FACTORY_CONTROL_AGENT_ID,
+          lane: "collect",
+          sessionKey: `factory:objective:${objectiveId}`,
+          singletonMode: "steer",
+          maxAttempts: 1,
+          payload: {
+            kind: "factory.objective.control",
+            objectiveId,
+            reason: "reconcile",
+          },
+        }).catch(() => undefined);
+      }
     },
   });
   const { service } = createFactoryServiceRuntime({
@@ -119,7 +156,9 @@ export const createFactoryCliRuntime = (
     sse,
     repoRoot: config.repoRoot,
     codexBin: config.codexBin,
+    repoSlotConcurrency: config.repoSlotConcurrency,
   });
+  serviceRef = service;
 
   const handlers = createFactoryWorkerHandlers(service);
   const worker = new JobWorker({

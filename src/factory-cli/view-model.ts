@@ -115,7 +115,7 @@ export const budgetPercent = (used: number | undefined, max: number | undefined)
 export const panelIndex = (panel: FactoryObjectivePanel): number =>
   PANEL_ORDER.indexOf(panel) + 1;
 
-export type MissionControlFocusArea = "rail" | "timeline" | "composer";
+export type FactoryWorkbenchFocusArea = "rail" | "timeline" | "composer";
 
 export type TimelineEntry = {
   readonly id: string;
@@ -128,7 +128,7 @@ export type TimelineEntry = {
   readonly body?: string;
 };
 
-export type MissionControlViewModel = {
+export type FactoryWorkbenchViewModel = {
   readonly header: {
     readonly repo: string;
     readonly dirty: boolean;
@@ -210,13 +210,13 @@ const liveLogEntries = (tasks: ReadonlyArray<FactoryTaskView>): ReadonlyArray<Ti
     return entries;
   });
 
-export const buildMissionControlViewModel = (opts: {
+export const buildFactoryWorkbenchViewModel = (opts: {
   readonly compose: FactoryComposeModel;
   readonly board: FactoryBoardProjection;
   readonly detail?: FactoryObjectiveDetail;
   readonly live?: FactoryLiveProjection;
   readonly debug?: FactoryDebugProjection;
-}): MissionControlViewModel => {
+}): FactoryWorkbenchViewModel => {
   const selected = opts.detail;
   const live = opts.live;
   const receiptEntries = selected?.recentReceipts.map((receipt) => ({

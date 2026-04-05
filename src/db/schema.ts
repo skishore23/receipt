@@ -139,6 +139,24 @@ export const chatContextProjection = sqliteTable("chat_context_projection", {
   index("chat_context_projection_objective_idx").on(table.boundObjectiveId, table.updatedAt),
 ]);
 
+export const sessionMessages = sqliteTable("session_messages", {
+  messageId: text("message_id").primaryKey(),
+  sessionStream: text("session_stream").notNull(),
+  chatId: text("chat_id").notNull(),
+  profileId: text("profile_id").notNull(),
+  repoKey: text("repo_key").notNull(),
+  runId: text("run_id").notNull(),
+  role: text("role").notNull(),
+  text: text("text").notNull(),
+  ts: integer("ts", { mode: "number" }).notNull(),
+  orderKey: integer("order_key").notNull(),
+  receiptRefsJson: text("receipt_refs_json").notNull(),
+}, (table) => [
+  index("session_messages_session_idx").on(table.sessionStream, table.orderKey),
+  index("session_messages_chat_idx").on(table.chatId, table.ts),
+  index("session_messages_repo_profile_ts_idx").on(table.repoKey, table.profileId, table.ts),
+]);
+
 export const memoryEntries = sqliteTable("memory_entries", {
   entryId: text("entry_id").primaryKey(),
   scope: text("scope").notNull(),

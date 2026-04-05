@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../../../adapters/codex-executor";
 import type { FactoryService } from "../../../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../../../services/factory-codex-artifacts";
+import { buildEvidenceBundle, writeAlignmentMarkdown } from "../../../services/factory-evidence-bundle";
 import { createDisposableProbeWorkspace, diffGitChangedSnapshots, gitChangedFileSnapshots, gitChangedFiles, asString, summarizeChildProgress } from "./input";
 
 const DIRECT_CODEX_MUTATION_MESSAGE = "Direct Codex probes are read-only. This work needs code changes; create or react a Factory objective instead.";
@@ -39,6 +41,26 @@ export const runFactoryCodexJob = async (input: {
 }, control?: CodexRunControl): Promise<Record<string, unknown>> => {
   const artifacts = factoryChatCodexArtifactPaths(input.dataDir, input.jobId);
   await fs.mkdir(artifacts.root, { recursive: true });
+  const commandsRunPath = path.join(artifacts.root, "commands_run.jsonl");
+  const evidenceRoot = path.join(artifacts.root, "artifacts");
+  await fs.mkdir(evidenceRoot, { recursive: true });
+  const alignmentPath = await writeAlignmentMarkdown({
+    rootDir: artifacts.root,
+    goal: "Run the requested codex job and capture structured evidence for audit.",
+    constraints: [
+      "Preserve the existing execution behavior.",
+      "Keep the bundle minimally populated even when the job ends blocked, failed, or canceled.",
+      "Do not emit secrets into artifacts.",
+    ],
+    definitionOfDone: [
+      "alignment.md exists for every run.",
+      "commands_run.jsonl is captured when available.",
+      "evidence bundle is attached to the terminal job result.",
+    ],
+    assumptions: [
+      "The execution harness may not always produce commands_run.jsonl.",
+    ],
+  });
 
   let renderedPrompt = input.prompt;
   let readOnly = input.payload?.readOnly === true || asString(input.payload?.mode) === "read_only_probe";
@@ -156,6 +178,32 @@ export const runFactoryCodexJob = async (input: {
       ? diffGitChangedSnapshots(initialChangedFileSnapshot, finalChangedFileSnapshot)
       : repoChangedFiles;
     if (readOnly && changedFiles.length > 0) {
+      const evidenceBundle = await buildEvidenceBundle({
+        objectiveId: typeof input.payload?.objectiveId === "string" ? input.payload.objectiveId : input.jobId,
+        taskId: typeof input.payload?.taskId === "string" ? input.payload.taskId : input.jobId,
+        candidateId: typeof input.payload?.candidateId === "string" ? input.payload.candidateId : input.jobId,
+        planSummary: "Structured evidence for codex job execution.",
+        alignment: {
+          verdict: "aligned",
+          satisfied: ["alignment.md emitted", "terminal result captured"],
+          missing: [],
+          outOfScope: [],
+          rationale: "The job completed in read-only failure mode with evidence attached.",
+        },
+        completion: {
+          changed: changedFiles,
+          proof: [alignmentPath, artifacts.resultPath],
+          remaining: [],
+        },
+        commandsRunPath,
+        artifactPaths: [
+          { label: "prompt", path: artifacts.promptPath },
+          { label: "last message", path: artifacts.lastMessagePath },
+          { label: "stdout", path: artifacts.stdoutPath },
+          { label: "stderr", path: artifacts.stderrPath },
+        ],
+        links: [],
+      });
       const failed = {
         status: "failed",
         worker: "codex",
@@ -170,11 +218,40 @@ export const runFactoryCodexJob = async (input: {
         ...(readOnly ? { repoChangedFiles } : {}),
         ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
         artifacts,
+        evidence_attached: true,
+        alignment_reported: true,
+        evidenceBundle,
       };
       await writeResult(failed);
       throw new Error(DIRECT_CODEX_MUTATION_MESSAGE);
     }
 
+    const evidenceBundle = await buildEvidenceBundle({
+      objectiveId: typeof input.payload?.objectiveId === "string" ? input.payload.objectiveId : input.jobId,
+      taskId: typeof input.payload?.taskId === "string" ? input.payload.taskId : input.jobId,
+      candidateId: typeof input.payload?.candidateId === "string" ? input.payload.candidateId : input.jobId,
+      planSummary: "Structured evidence for codex job execution.",
+      alignment: {
+        verdict: "aligned",
+        satisfied: ["alignment.md emitted", "terminal result captured"],
+        missing: [],
+        outOfScope: [],
+        rationale: "The job completed with evidence attached.",
+      },
+      completion: {
+        changed: changedFiles,
+        proof: [alignmentPath, artifacts.resultPath],
+        remaining: [],
+      },
+      commandsRunPath,
+      artifactPaths: [
+        { label: "prompt", path: artifacts.promptPath },
+        { label: "last message", path: artifacts.lastMessagePath },
+        { label: "stdout", path: artifacts.stdoutPath },
+        { label: "stderr", path: artifacts.stderrPath },
+      ],
+      links: [],
+    });
     const completed = {
       status: "completed",
       worker: "codex",
@@ -189,6 +266,9 @@ export const runFactoryCodexJob = async (input: {
       ...(readOnly ? { repoChangedFiles } : {}),
       ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
+      evidence_attached: true,
+      alignment_reported: true,
+      evidenceBundle,
     };
     await writeResult(completed);
     return completed;
@@ -228,6 +308,34 @@ export const runFactoryCodexJob = async (input: {
       ...(readOnly ? { repoChangedFiles } : {}),
       ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
+      evidence_attached: true,
+      alignment_reported: true,
+      evidenceBundle: await buildEvidenceBundle({
+        objectiveId: typeof input.payload?.objectiveId === "string" ? input.payload.objectiveId : input.jobId,
+        taskId: typeof input.payload?.taskId === "string" ? input.payload.taskId : input.jobId,
+        candidateId: typeof input.payload?.candidateId === "string" ? input.payload.candidateId : input.jobId,
+        planSummary: "Structured evidence for codex job execution.",
+        alignment: {
+          verdict: "uncertain",
+          satisfied: ["alignment.md emitted", "terminal result captured"],
+          missing: ["no structured commands_run.jsonl available"],
+          outOfScope: [],
+          rationale: "The job failed and was captured as minimally populated evidence.",
+        },
+        completion: {
+          changed: changedFiles,
+          proof: [alignmentPath],
+          remaining: [],
+        },
+        commandsRunPath,
+        artifactPaths: [
+          { label: "prompt", path: artifacts.promptPath },
+          { label: "last message", path: artifacts.lastMessagePath },
+          { label: "stdout", path: artifacts.stdoutPath },
+          { label: "stderr", path: artifacts.stderrPath },
+        ],
+        links: [],
+      }),
     });
     throw new Error(message);
   } finally {

@@ -4,7 +4,6 @@ import {
   escapeHtml,
   type FactoryComposeResponseBody,
   type FactoryLiveScopePayload,
-  type LiveScope,
 } from "./shared";
 
 const normalizeLivePayload = (value: unknown): FactoryLiveScopePayload | undefined => {
@@ -56,60 +55,11 @@ export const resolveFactoryUrl = (value: string | undefined): URL | null => {
 
 export const shellPath = () => "/factory";
 
-export const eventsUrl = (search: string) => "/factory/events" + (search || "");
-
-export const islandUrl = (kind: "chat" | "sidebar" | "inspector", search: string) => shellPath() + "/island/" + kind + (search || "");
-
-export const buildScope = (url: URL, live?: FactoryLiveScopePayload): LiveScope => ({
-  profileId: live?.profileId || asString(url.searchParams.get("profile")) || undefined,
-  chatId: live?.chatId || asString(url.searchParams.get("chat")) || undefined,
-  objectiveId: live?.objectiveId || asString(url.searchParams.get("objective")) || undefined,
-  runId: live?.runId || asString(url.searchParams.get("run")) || undefined,
-  jobId: live?.jobId || asString(url.searchParams.get("job")) || undefined,
-  search: url.search || "",
-});
-
 export const isInlineFactoryLocation = (location: string): boolean => {
   const url = resolveFactoryUrl(location);
   if (!url) return false;
   if (window.location && window.location.origin && url.origin !== window.location.origin) return false;
   return url.pathname === shellPath();
-};
-
-export const factoryNavigationTarget = (event: Event): {
-  readonly location: string;
-  readonly historyMode: "replace" | "push";
-} | null => {
-  if (event.defaultPrevented) return null;
-  const pointerEvent = event as Event & {
-    readonly button?: number;
-    readonly metaKey?: boolean;
-    readonly ctrlKey?: boolean;
-    readonly shiftKey?: boolean;
-    readonly altKey?: boolean;
-  };
-  if (
-    pointerEvent.metaKey
-    || pointerEvent.ctrlKey
-    || pointerEvent.shiftKey
-    || pointerEvent.altKey
-    || (typeof pointerEvent.button === "number" && pointerEvent.button !== 0)
-  ) {
-    return null;
-  }
-  const target = event.target instanceof Element ? event.target.closest("[data-factory-href],a[href]") : null;
-  if (!(target instanceof Element)) return null;
-  if (target.getAttribute("download") !== null) return null;
-  const linkTarget = (target.getAttribute("target") || "").toLowerCase();
-  if (linkTarget && linkTarget !== "_self") return null;
-  const href = target.getAttribute("data-factory-href") || target.getAttribute("href");
-  if (!href) return null;
-  const url = resolveFactoryUrl(href);
-  if (!url || !isInlineFactoryLocation(url.href)) return null;
-  return {
-    location: url.href,
-    historyMode: target.getAttribute("data-factory-history") === "replace" ? "replace" : "push",
-  };
 };
 
 const leadingSlashCommand = (payload: string) => {
@@ -122,17 +72,17 @@ const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "work
   const title = mode === "thread"
     ? "Updating thread"
     : mode === "workbench-chat"
-    ? "Handing off to background"
+    ? "Sending in chat"
     : "Queued thread";
   const detail = mode === "thread"
     ? "Applying your note to this thread..."
     : mode === "workbench-chat"
-    ? "Chat is handing this work to the background. You can ask the next question while the run updates on the left."
+    ? "Sending this as a normal chat turn. Background work, if any, keeps updating on the left."
     : "Creating the thread and starting work...";
   const statusLabel = mode === "thread"
     ? "Updating"
     : mode === "workbench-chat"
-    ? "Background"
+    ? "Chat"
     : "Queued";
   const statusMeta = mode === "thread" ? "Updated just now" : "Queued just now";
   return '<section class="flex justify-end">' +
@@ -207,7 +157,7 @@ export const composerFeedback = (
     return {
       buttonLabel: "Sending...",
       optimisticHtml: renderOptimisticPrompt(payload, "workbench-chat"),
-      status: "Handing off to the background...",
+      status: "Sending in chat...",
     };
   }
   return {

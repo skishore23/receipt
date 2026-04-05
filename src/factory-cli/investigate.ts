@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { readFactoryParsedRun, type FactoryParsedRun } from "./parse";
 import type { AuditRecommendation } from "./analyze";
+import { readPersistedObjectiveAuditMetadata } from "../services/factory/objective-audit-artifacts";
 
 type InvestigationFocusTaskRun = FactoryParsedRun["taskRuns"][number];
 type InvestigationTask = NonNullable<FactoryParsedRun["objectiveAnalysis"]>["tasks"][number];
@@ -96,7 +97,15 @@ export type FactoryReceiptInvestigation = {
   readonly jobs: ReadonlyArray<InvestigationJob>;
   readonly agentRuns: ReadonlyArray<InvestigationAgentRun>;
   readonly anomalies: ReadonlyArray<InvestigationAnomaly>;
+  readonly audit?: {
+    readonly generatedAt?: number;
+    readonly objectiveUpdatedAt?: number;
+    readonly stale: boolean;
+    readonly recommendationStatus: "ready" | "failed";
+    readonly recommendationError?: string;
+  };
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
+  readonly autoFixObjectiveId?: string;
   readonly interventions: InvestigationInterventions;
   readonly assessment: InvestigationRunAssessment;
 };
@@ -614,6 +623,25 @@ export const readFactoryReceiptInvestigation = async (
 ): Promise<FactoryReceiptInvestigation> => {
   const parsed = await readFactoryParsedRun(dataDir, repoRoot, requestedId, options);
   const analysis = parsed.objectiveAnalysis;
+  const warnings = [...parsed.warnings];
+  const objectiveId =
+    parsed.links.objectiveId
+    ?? (parsed.resolved.kind === "objective" ? parsed.resolved.id : undefined);
+  const persistedAudit = objectiveId
+    ? await readPersistedObjectiveAuditMetadata(dataDir, objectiveId)
+    : undefined;
+  const auditStale = Boolean(
+    persistedAudit
+    && typeof persistedAudit.objectiveUpdatedAt === "number"
+    && typeof options.asOfTs === "number"
+    && persistedAudit.objectiveUpdatedAt < options.asOfTs,
+  );
+  if (auditStale) {
+    warnings.push("Persisted objective audit is stale relative to the latest objective update.");
+  }
+  if (persistedAudit?.recommendationStatus === "failed") {
+    warnings.push(`Audit recommendation generation failed${persistedAudit.recommendationError ? `: ${persistedAudit.recommendationError}` : "."}`);
+  }
   const focusTaskRun = selectFocusTaskRun(parsed);
   const packetContext = await summarizeContextPack(focusTaskRun);
   const interventionSignals = buildInterventions(parsed);
@@ -622,7 +650,7 @@ export const readFactoryReceiptInvestigation = async (
     requestedId,
     resolved: parsed.resolved,
     links: parsed.links,
-    warnings: parsed.warnings,
+    warnings,
     summary: {
       ...parsed.summary,
       whatHappened: buildWhatHappened(parsed, packetContext, interventionSignals),
@@ -638,7 +666,19 @@ export const readFactoryReceiptInvestigation = async (
     jobs: analysis?.jobs ?? [],
     agentRuns: analysis?.agentRuns ?? [],
     anomalies: analysis?.anomalies ?? [],
-    recommendations: analysis?.recommendations ?? [],
+    audit: persistedAudit
+      ? {
+          generatedAt: persistedAudit.generatedAt > 0 ? persistedAudit.generatedAt : undefined,
+          objectiveUpdatedAt: persistedAudit.objectiveUpdatedAt,
+          stale: auditStale,
+          recommendationStatus: persistedAudit.recommendationStatus,
+          recommendationError: persistedAudit.recommendationError,
+        }
+      : undefined,
+    recommendations: persistedAudit?.recommendations.length
+      ? persistedAudit.recommendations
+      : analysis?.recommendations ?? [],
+    autoFixObjectiveId: persistedAudit?.autoFixObjectiveId,
     interventions: {
       ...interventionSignals,
       courseCorrectionWorked: assessment.courseCorrectionWorked,
@@ -785,10 +825,22 @@ export const renderFactoryReceiptInvestigationText = (
       : ["- none"]),
     "",
     "## Recommendations",
+    report.audit?.generatedAt ? `Audit snapshot: ${formatTimestamp(report.audit.generatedAt)}` : undefined,
+    report.audit?.stale ? "- Snapshot is stale relative to the latest objective state." : undefined,
+    report.audit?.recommendationStatus === "failed"
+      ? `- Recommendation generation failed: ${report.audit.recommendationError ?? "unknown error"}`
+      : undefined,
     ...(report.recommendations.length > 0
       ? report.recommendations.map((item) =>
-          `- ${item.summary}${item.autoFix ? " [auto-fix]" : ""}`)
+          `- [${item.confidence}] ${item.summary} · scope=${item.scope}${item.anomalyPatterns.length > 0 ? ` · patterns=${item.anomalyPatterns.join(",")}` : ""}`)
       : ["- none"]),
+    ...(report.autoFixObjectiveId
+      ? [
+          "",
+          "## Auto-fix",
+          `- Triggered: ${report.autoFixObjectiveId}`,
+        ]
+      : []),
     "",
     `## Timeline (first ${Math.min(timelineLimit, report.timeline.length)} of ${report.timeline.length})`,
     ...(report.timeline.length > 0

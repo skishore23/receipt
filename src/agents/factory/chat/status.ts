@@ -31,14 +31,24 @@ export const buildFactorySituation = async (input: {
   readonly getCurrentObjectiveId: () => string | undefined;
   readonly factoryService: FactoryService;
   readonly dataDir?: string;
+  readonly detailLevel?: "full" | "light";
 }): Promise<string> => {
   const lines = [`Profile: ${input.profile.root.label} (${input.profile.root.id})`];
+  const objectiveId = input.getCurrentObjectiveId();
+  if (input.detailLevel === "light") {
+    if (objectiveId) {
+      lines.push(`Bound objective: ${objectiveId}`);
+      lines.push("Chat-first conversational turn. Use objective tools or explicit work-follow-up only if current objective details are actually needed.");
+    } else {
+      lines.push("Chat-first conversational turn. No objective detail is loaded unless the turn asks for active work context.");
+    }
+    return lines.join("\n");
+  }
   const childJobs = await listChildJobsForRun(input.queue, input.runId);
   const activeChildren = childJobs.filter((job) => isActiveJobStatus(job.status));
   const canInspectObjective = typeof input.factoryService.getObjective === "function"
     && typeof input.factoryService.getObjectiveDebug === "function"
     && typeof input.factoryService.listObjectiveReceipts === "function";
-  const objectiveId = input.getCurrentObjectiveId();
   if (objectiveId && canInspectObjective) {
     try {
       const [detail, debug, receipts] = await Promise.all([

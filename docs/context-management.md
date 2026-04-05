@@ -562,7 +562,7 @@ Factory's debug projection in `buildObjectiveDebug(...)` exposes:
 - latest context pack paths
 - memory script paths
 
-The inspector and workbench views in `src/views/factory-inspector.ts` and `src/views/factory-workbench.ts` are not inventing context. They are surfacing the files and projections built by the service.
+The workbench views in `src/views/factory/workbench/page.ts` and `src/views/factory-workbench.ts` are not inventing context. They are surfacing the files and projections built by the service.
 
 That means the easiest way to inspect live Factory context is usually:
 

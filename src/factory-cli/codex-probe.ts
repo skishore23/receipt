@@ -266,6 +266,7 @@ const runQueueProbe = async (
     sse: new SseHub(),
     repoRoot: config.repoRoot,
     codexBin: config.codexBin,
+    repoSlotConcurrency: config.repoSlotConcurrency,
   });
   const handlers = createFactoryWorkerHandlers(service);
   const worker = new JobWorker({

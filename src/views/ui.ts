@@ -9,15 +9,8 @@ export const CSS_VERSION = Date.now();
 
 // ── Layout class constants ──────────────────────────────────────────────────
 
-export const panelClass = "border border-border bg-card";
 export const softPanelClass = "border border-border/80 bg-muted/45";
-export const railCardClass = `${softPanelClass} p-4`;
 export const sectionLabelClass = "text-[12px] font-medium text-muted-foreground";
-export const missionControlPanelClass = "border border-border bg-card";
-export const missionControlInsetClass = "border border-border/80 bg-muted/45";
-export const missionControlSectionLabelClass = "text-[12px] font-medium text-muted-foreground";
-export const missionControlMonoClass = "font-mono text-[11px] tracking-[0.02em]";
-export const missionControlHotkeyClass = "inline-flex items-center gap-1 border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground";
 
 // ── Badge class constants ───────────────────────────────────────────────────
 
@@ -111,9 +104,6 @@ export const statusDot = (tone: Tone): string =>
 export const formatTs = (ts?: number): string =>
   typeof ts === "number" && Number.isFinite(ts) ? new Date(ts).toLocaleString() : "";
 
-export const shortHash = (hash?: string): string =>
-  hash ? hash.slice(0, 10) : "";
-
 export const displayLabel = (value?: string): string => {
   const text = value?.trim();
   if (!text) return "";
@@ -155,9 +145,6 @@ export const iconFactory = (cls = ""): string =>
 export const iconChat = (cls = ""): string =>
   svg16(`<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`, cls);
 
-export const iconPlus = (cls = ""): string =>
-  svg16(`<path d="M12 5v14"/><path d="M5 12h14"/>`, cls);
-
 export const iconMemory = (cls = ""): string =>
   svg16(`<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>`, cls);
 
@@ -170,26 +157,14 @@ export const iconCheckCircle = (cls = ""): string =>
 export const iconClock = (cls = ""): string =>
   svg16(`<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>`, cls);
 
-export const iconCommit = (cls = ""): string =>
-  svg16(`<circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/>`, cls);
-
-export const iconPullRequest = (cls = ""): string =>
-  svg16(`<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><path d="M9 6h4a5 5 0 0 1 5 5v4"/>`, cls);
-
 export const iconTokens = (cls = ""): string =>
   svg16(`<circle cx="12" cy="12" r="9"/><path d="M9 9h6"/><path d="M9 12h6"/><path d="M9 15h4"/>`, cls);
-
-export const iconStatus = (cls = ""): string =>
-  svg16(`<path d="M3 12h4l2-4 4 8 2-4h6"/>`, cls);
 
 export const iconNext = (cls = ""): string =>
   svg16(`<circle cx="12" cy="12" r="9"/><path d="M10 8l4 4-4 4"/><path d="M8 12h6"/>`, cls);
 
 export const iconWorker = (cls = ""): string =>
   svg16(`<rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="14"/><line x1="10" y1="10" x2="10" y2="14"/><line x1="14" y1="10" x2="14" y2="14"/><line x1="18" y1="10" x2="18" y2="14"/>`, cls);
-
-export const iconLayout = (cls = ""): string =>
-  svg16(`<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path d="M9 10h12"/>`, cls);
 
 export const iconForEntity = (entity: string, cls = ""): string => {
   const key = entity.trim().toLowerCase();
@@ -295,7 +270,19 @@ export const liveIslandAttrs = (input: {
   readonly path: string;
   readonly refreshOn: ReadonlyArray<LiveRefreshSpec>;
   readonly swap?: string;
-}): string => `hx-get="${esc(input.path)}" hx-trigger="${esc(liveRefreshTrigger(input.refreshOn))}" hx-swap="${esc(input.swap ?? "innerHTML")}" data-refresh-on="${esc(liveRefreshDescriptor(input.refreshOn))}"`;
+  readonly clientOnly?: boolean;
+}): string => {
+  const attrs = [
+    `data-refresh-path="${esc(input.path)}"`,
+    `data-refresh-on="${esc(liveRefreshDescriptor(input.refreshOn))}"`,
+  ];
+  if (!input.clientOnly) {
+    attrs.push(`hx-get="${esc(input.path)}"`);
+    attrs.push(`hx-trigger="${esc(liveRefreshTrigger(input.refreshOn))}"`);
+    attrs.push(`hx-swap="${esc(input.swap ?? "innerHTML")}"`);
+  }
+  return attrs.join(" ");
+};
 
 export const sseConnectAttrs = (path: string): string =>
   `hx-ext="sse" sse-connect="${esc(path)}"`;

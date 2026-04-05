@@ -248,6 +248,11 @@ export type AgentEvent =
       readonly fromProfileId: string;
       readonly toProfileId: string;
       readonly reason: string;
+      readonly goal: string;
+      readonly currentState: string;
+      readonly doneWhen: string;
+      readonly evidence?: ReadonlyArray<string>;
+      readonly blockers?: ReadonlyArray<string>;
       readonly nextRunId?: string;
       readonly nextJobId?: string;
       readonly targetStream?: string;

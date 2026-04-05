@@ -3,6 +3,7 @@ import { trimmedString } from "../../framework/http";
 import type {
   FactoryCheckResult,
   FactoryExecutionScriptRun,
+  FactoryEvidenceRecord,
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
@@ -167,6 +168,24 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
         additionalProperties: false,
       },
     },
+    evidenceRecords: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          objective_id: { type: "string" },
+          task_id: { type: "string" },
+          timestamp: { type: "number" },
+          tool_name: { type: "string" },
+          command_or_api: { type: "string" },
+          inputs: { type: "object" },
+          outputs: { type: "object" },
+          summary_metrics: { type: "object" },
+        },
+        required: ["objective_id", "task_id", "timestamp", "tool_name", "command_or_api", "inputs", "outputs", "summary_metrics"],
+        additionalProperties: false,
+      },
+    },
     scriptsRun: {
       type: "array",
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
@@ -270,10 +289,27 @@ export const normalizeInvestigationReport = (
         detail: clipText(typeof item.detail === "string" ? item.detail : undefined, 600),
       }))
     : [];
+  const evidenceRecords: ReadonlyArray<FactoryEvidenceRecord> = Array.isArray(record.evidenceRecords)
+    ? record.evidenceRecords
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => ({
+        objective_id: clipText(typeof item.objective_id === "string" ? item.objective_id : undefined, 140) ?? "objective",
+        task_id: clipText(typeof item.task_id === "string" ? item.task_id : undefined, 140) ?? "task",
+        timestamp: typeof item.timestamp === "number" ? item.timestamp : Date.now(),
+        tool_name: clipText(typeof item.tool_name === "string" ? item.tool_name : undefined, 140) ?? "tool",
+        command_or_api: clipText(typeof item.command_or_api === "string" ? item.command_or_api : undefined, 280) ?? "command",
+        inputs: isRecord(item.inputs) ? item.inputs : {},
+        outputs: isRecord(item.outputs) ? item.outputs : {},
+        summary_metrics: isRecord(item.summary_metrics)
+          ? item.summary_metrics as Record<string, number | string | boolean | null>
+          : {},
+      }))
+    : [];
   const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);
   return {
     conclusion: clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400) ?? summary,
     evidence,
+    ...(evidenceRecords.length > 0 ? { evidenceRecords } : {}),
     scriptsRun,
     disagreements: asReadonlyStringArray(record.disagreements).map((item) => clipText(item, 280) ?? item),
     nextSteps: asReadonlyStringArray(record.nextSteps).map((item) => clipText(item, 280) ?? item),

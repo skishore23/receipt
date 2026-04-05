@@ -1,4 +1,6 @@
-import { getReceiptDb } from "../db/client";
+import { getReceiptDb, isSqliteLockError } from "../db/client";
+import * as schema from "../db/schema";
+import { and, desc, eq, like, notLike, sql, type SQL } from "drizzle-orm";
 import {
   readFactoryReceiptInvestigation,
   type FactoryReceiptInvestigation,
@@ -22,7 +24,11 @@ type AuditObjectiveSample = {
   readonly interventions: number;
   readonly restartCount: number;
   readonly courseCorrectionWorked: boolean;
+  readonly auditStale: boolean;
+  readonly recommendationStatus?: "ready" | "failed";
+  readonly recommendationError?: string;
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
+  readonly autoFixObjectiveId?: string;
   readonly latestSummary?: string;
   readonly durationMs?: number;
 };
@@ -115,13 +121,12 @@ const USAGE_LIMIT_ANOMALY_RE = /\b(usage_limit_reached|too many requests|rate li
 
 const recentObjectiveIds = (dataDir: string, limit: number): ReadonlyArray<string> => {
   const db = getReceiptDb(dataDir);
-  const rows = db.sqlite.query(`
-    SELECT name
-    FROM streams
-    WHERE name LIKE 'factory/objectives/%'
-    ORDER BY updated_at DESC, last_ts DESC, name DESC
-    LIMIT ${safeLimit(limit)}
-  `).all() as Array<{ readonly name: string }>;
+  const rows = db.orm.select({ name: schema.streams.name })
+    .from(schema.streams)
+    .where(like(schema.streams.name, "factory/objectives/%"))
+    .orderBy(desc(schema.streams.updatedAt), desc(schema.streams.lastTs), desc(schema.streams.name))
+    .limit(safeLimit(limit))
+    .all();
   return rows
     .map((row) => row.name.replace(/^factory\/objectives\//u, ""))
     .filter((value, index, values) => values.indexOf(value) === index);
@@ -129,13 +134,15 @@ const recentObjectiveIds = (dataDir: string, limit: number): ReadonlyArray<strin
 
 const objectiveSnapshotTs = (dataDir: string, objectiveId: string): number | undefined => {
   const db = getReceiptDb(dataDir);
-  const row = db.sqlite.query(`
-    SELECT COALESCE(updated_at, last_ts) AS ts
-    FROM streams
-    WHERE name = ?
-    LIMIT 1
-  `).get(`factory/objectives/${objectiveId}`) as { readonly ts?: number } | undefined;
-  const ts = Number(row?.ts);
+  const row = db.orm.select({
+    updatedAt: schema.streams.updatedAt,
+    lastTs: schema.streams.lastTs,
+  })
+    .from(schema.streams)
+    .where(eq(schema.streams.name, `factory/objectives/${objectiveId}`))
+    .limit(1)
+    .get();
+  const ts = Number(row?.updatedAt ?? row?.lastTs);
   return Number.isFinite(ts) ? ts : undefined;
 };
 
@@ -143,7 +150,7 @@ const categorizeAnomaly = (summary: string): string => {
   const normalized = summary.toLowerCase();
   if (USAGE_LIMIT_ANOMALY_RE.test(summary)) return "quota / rate limit";
   if (normalized.includes("lease expired")) return "lease expired";
-  if (normalized.includes("database is locked")) return "database is locked";
+  if (isSqliteLockError(summary)) return "database is locked";
   if (normalized.includes("iteration budget exhausted")) return "iteration budget exhausted";
   if (/workspace (branch|path) already exists/i.test(summary)) return "workspace collision";
   if (/human input|operator|clarification|approval|permission denied|access denied|unauthorized|forbidden/i.test(summary)) {
@@ -152,47 +159,80 @@ const categorizeAnomaly = (summary: string): string => {
   return truncateInline(summary, 80) ?? "other";
 };
 
-const countScalar = (dataDir: string, sql: string): number => {
+const countMemoryEntries = (dataDir: string, where?: SQL<unknown>): number => {
   const db = getReceiptDb(dataDir);
-  const row = db.sqlite.query(sql).get() as { readonly value?: number } | undefined;
+  const row = db.orm.select({ value: sql<number>`count(*)` })
+    .from(schema.memoryEntries)
+    .where(where)
+    .get();
   return Number(row?.value ?? 0);
 };
 
-const queryExamples = (dataDir: string, sql: string): ReadonlyArray<string> => {
+const listMemoryExamples = (dataDir: string, where: SQL<unknown>): ReadonlyArray<string> => {
   const db = getReceiptDb(dataDir);
-  const rows = db.sqlite.query(sql).all() as Array<{ readonly value?: string }>;
+  const rows = db.orm.select({
+    value: sql<string>`substr(replace(${schema.memoryEntries.text}, char(10), ' | '), 1, 220)`,
+  })
+    .from(schema.memoryEntries)
+    .where(where)
+    .orderBy(desc(schema.memoryEntries.ts))
+    .limit(5)
+    .all();
   return rows.map((row) => row.value?.trim()).filter((value): value is string => Boolean(value));
 };
 
+const handoffTextCondition = sql`(
+  instr(${schema.memoryEntries.text}, ${"Handoff\n"}) > 0
+  OR instr(${schema.memoryEntries.text}, ${"Handoff\r\n"}) > 0
+)`;
+
 const readMemoryHygiene = (dataDir: string): AuditMemoryHygiene => ({
-  totalFactoryEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/%'`),
-  repoSharedEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope='factory/repo/shared'`),
-  repoSharedRunScopedEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope='factory/repo/shared' AND text LIKE '[objective_%/%] %'`),
-  agentEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/agents/%'`),
-  agentRunScopedEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/agents/%' AND text LIKE '[objective_%/%] %'`),
-  objectiveEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%' AND scope NOT LIKE '%/tasks/%' AND scope NOT LIKE '%/candidates/%' AND scope NOT LIKE '%/integration' AND scope NOT LIKE '%/publish'`),
-  taskEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/tasks/%'`),
-  taskEntriesWithHandoff: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/tasks/%' AND (instr(text, 'Handoff\n') > 0 OR instr(text, 'Handoff\r\n') > 0)`),
-  candidateEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/candidates/%'`),
-  candidateEntriesWithHandoff: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/candidates/%' AND (instr(text, 'Handoff\n') > 0 OR instr(text, 'Handoff\r\n') > 0)`),
-  integrationEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/integration'`),
-  integrationEntriesWithHandoff: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/integration' AND (instr(text, 'Handoff\n') > 0 OR instr(text, 'Handoff\r\n') > 0)`),
-  publishEntries: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/publish'`),
-  publishEntriesWithHandoff: countScalar(dataDir, `SELECT COUNT(*) AS value FROM memory_entries WHERE scope LIKE 'factory/objectives/%/publish' AND (instr(text, 'Handoff\n') > 0 OR instr(text, 'Handoff\r\n') > 0)`),
-  staleSharedExamples: queryExamples(dataDir, `
-    SELECT substr(replace(text, char(10), ' | '), 1, 220) AS value
-    FROM memory_entries
-    WHERE scope='factory/repo/shared' AND text LIKE '[objective_%/%] %'
-    ORDER BY ts DESC
-    LIMIT 5
-  `),
-  staleAgentExamples: queryExamples(dataDir, `
-    SELECT substr(replace(text, char(10), ' | '), 1, 220) AS value
-    FROM memory_entries
-    WHERE scope LIKE 'factory/agents/%' AND text LIKE '[objective_%/%] %'
-    ORDER BY ts DESC
-    LIMIT 5
-  `),
+  totalFactoryEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/%")),
+  repoSharedEntries: countMemoryEntries(dataDir, eq(schema.memoryEntries.scope, "factory/repo/shared")),
+  repoSharedRunScopedEntries: countMemoryEntries(dataDir, and(
+    eq(schema.memoryEntries.scope, "factory/repo/shared"),
+    like(schema.memoryEntries.text, "[objective_%/%] %"),
+  )),
+  agentEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/agents/%")),
+  agentRunScopedEntries: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/agents/%"),
+    like(schema.memoryEntries.text, "[objective_%/%] %"),
+  )),
+  objectiveEntries: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/objectives/%"),
+    notLike(schema.memoryEntries.scope, "%/tasks/%"),
+    notLike(schema.memoryEntries.scope, "%/candidates/%"),
+    notLike(schema.memoryEntries.scope, "%/integration"),
+    notLike(schema.memoryEntries.scope, "%/publish"),
+  )),
+  taskEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/objectives/%/tasks/%")),
+  taskEntriesWithHandoff: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/objectives/%/tasks/%"),
+    handoffTextCondition,
+  )),
+  candidateEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/objectives/%/candidates/%")),
+  candidateEntriesWithHandoff: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/objectives/%/candidates/%"),
+    handoffTextCondition,
+  )),
+  integrationEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/objectives/%/integration")),
+  integrationEntriesWithHandoff: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/objectives/%/integration"),
+    handoffTextCondition,
+  )),
+  publishEntries: countMemoryEntries(dataDir, like(schema.memoryEntries.scope, "factory/objectives/%/publish")),
+  publishEntriesWithHandoff: countMemoryEntries(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/objectives/%/publish"),
+    handoffTextCondition,
+  )),
+  staleSharedExamples: listMemoryExamples(dataDir, and(
+    eq(schema.memoryEntries.scope, "factory/repo/shared"),
+    like(schema.memoryEntries.text, "[objective_%/%] %"),
+  ) as SQL<unknown>),
+  staleAgentExamples: listMemoryExamples(dataDir, and(
+    like(schema.memoryEntries.scope, "factory/agents/%"),
+    like(schema.memoryEntries.text, "[objective_%/%] %"),
+  ) as SQL<unknown>),
 });
 
 const buildImprovements = (
@@ -213,9 +253,24 @@ const buildImprovements = (
   }
 
   const allRecs = objectives.flatMap((o) => o.recommendations);
-  const autoFixCount = allRecs.filter((r) => r.autoFix).length;
-  if (autoFixCount > 0) {
-    improvements.push(`${autoFixCount} auto-fix recommendation(s) from LLM audit analysis.`);
+  const highConfidenceCount = allRecs.filter((r) => r.confidence === "high").length;
+  if (highConfidenceCount > 0) {
+    improvements.push(`${highConfidenceCount} high-confidence recommendation(s) from audit analysis.`);
+  }
+
+  const recommendationFailures = objectives.filter((objective) => objective.recommendationStatus === "failed").length;
+  if (recommendationFailures > 0) {
+    improvements.push(`${recommendationFailures} objective audit(s) failed to generate recommendations and need operator attention.`);
+  }
+
+  const autoFixObjectiveCount = objectives.filter((objective) => objective.autoFixObjectiveId).length;
+  if (autoFixObjectiveCount > 0) {
+    improvements.push(`${autoFixObjectiveCount} auto-fix objective(s) were created from audit recommendations.`);
+  }
+
+  const staleAuditCount = objectives.filter((objective) => objective.auditStale).length;
+  if (staleAuditCount > 0) {
+    improvements.push(`${staleAuditCount} objective audit snapshot(s) are stale relative to the latest objective state.`);
   }
 
   if (memoryHygiene.repoSharedRunScopedEntries > 0) {
@@ -273,7 +328,11 @@ export const readFactoryReceiptAudit = async (
     interventions: report.interventions.count,
     restartCount: report.interventions.restartCount,
     courseCorrectionWorked: report.interventions.courseCorrectionWorked,
+    auditStale: report.audit?.stale ?? false,
+    recommendationStatus: report.audit?.recommendationStatus,
+    recommendationError: report.audit?.recommendationError,
     recommendations: report.recommendations,
+    autoFixObjectiveId: report.autoFixObjectiveId,
     latestSummary: report.summary.text,
     durationMs: report.window.durationMs,
   } satisfies AuditObjectiveSample));
@@ -404,9 +463,11 @@ export const renderFactoryReceiptAuditText = (report: FactoryReceiptAuditReport)
       ? report.objectives.slice(0, 12).map((objective) => [
           `- ${objective.objectiveId} [${objective.status ?? "unknown"}] verdict=${objective.verdict} easy=${objective.easyRouteRisk} efficiency=${objective.efficiency} churn=${objective.controlChurn} jobs=${objective.jobs} tasks=${objective.tasks} anomalies=${objective.anomalies} interventions=${objective.interventions} restarts=${objective.restartCount} course_correction=${objective.courseCorrectionWorked ? "yes" : "no"}`,
           `  alignment: verdict=${objective.alignmentVerdict} corrective_steer=${objective.correctiveSteerIssued ? "yes" : "no"} aligned_after_correction=${objective.alignedAfterCorrection ? "yes" : "no"}`,
+          `  audit: recommendation_status=${objective.recommendationStatus ?? "none"}${objective.auditStale ? " stale=yes" : ""}${objective.recommendationError ? ` error=${truncateInline(objective.recommendationError, 120) ?? objective.recommendationError}` : ""}`,
           objective.title ? `  title: ${objective.title}` : "",
           objective.latestSummary ? `  summary: ${truncateInline(objective.latestSummary, 180) ?? objective.latestSummary}` : "",
           objective.recommendations[0] ? `  recommendation: ${objective.recommendations[0].summary}` : "",
+          objective.autoFixObjectiveId ? `  auto-fix: ${objective.autoFixObjectiveId}` : "",
         ].filter(Boolean).join("\n"))
       : ["- none"]),
     ...(report.warnings.length > 0

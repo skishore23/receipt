@@ -1,6 +1,11 @@
 import type { QueueJob } from "../adapters/jsonl-queue";
 
 type ObjectiveJobKind = "factory.objective.audit" | "factory.objective.control";
+type ObjectiveReconcileSignalKind =
+  | "factory.task.monitor"
+  | "factory.task.run"
+  | "factory.integration.validate"
+  | "factory.integration.publish";
 
 type ObjectiveQueueGateJob = Pick<
   QueueJob,
@@ -38,6 +43,24 @@ const latestObjectiveJob = (
 
 const isActiveJobStatus = (status: QueueJob["status"]): boolean =>
   status === "queued" || status === "leased" || status === "running";
+
+const LEASE_EXPIRED_RE = /\blease expired\b/i;
+
+const isObjectiveReconcileSignalKind = (value: unknown): value is ObjectiveReconcileSignalKind =>
+  value === "factory.task.run"
+  || value === "factory.task.monitor"
+  || value === "factory.integration.validate"
+  || value === "factory.integration.publish";
+
+export const shouldReconcileObjectiveFromJobChange = (
+  job: Pick<QueueJob, "lastError" | "payload" | "status">,
+): boolean => {
+  const kind = typeof job.payload.kind === "string" ? job.payload.kind.trim() : "";
+  if (!isObjectiveReconcileSignalKind(kind)) return false;
+  if (job.status === "failed" || job.status === "canceled") return true;
+  return job.status === "queued"
+    && LEASE_EXPIRED_RE.test(job.lastError ?? "");
+};
 
 export const shouldQueueObjectiveControlReconcile = (
   input: ObjectiveQueueGateInput & {

@@ -12,7 +12,7 @@ export type ReactiveRefreshTarget<
   ScopeKey = string,
 > = {
   readonly key: TargetKey;
-  readonly source: SourceKey;
+  readonly source?: SourceKey | ReadonlyArray<SourceKey>;
   readonly element: () => HTMLElement | null;
   readonly queue: (delayMs: number, scopeKey?: ScopeKey) => void;
 };
@@ -74,6 +74,11 @@ export const readReactiveRefreshSpecs = (target: Element | null): ReadonlyArray<
     .split(",")
     .map((part) => parseReactiveRefreshSpec(part))
     .flatMap((spec) => spec ? [spec] : []);
+};
+
+export const readReactiveRefreshPath = (target: Element | null): string | null => {
+  if (!(target instanceof HTMLElement)) return null;
+  return target.getAttribute("data-refresh-path") || target.getAttribute("hx-get");
 };
 
 export const createQueuedRefreshRunner = <
@@ -156,6 +161,16 @@ export const createReactivePushRouter = <
   const connectedSources = new Map<SourceKey, ConnectedReactiveSource>();
   const bodyHandlers = new Map<string, (event: Event) => void>();
 
+  const targetMatchesSource = (
+    target: ReactiveRefreshTarget<SourceKey, TargetKey, ScopeKey>,
+    sourceKey: SourceKey,
+  ): boolean => {
+    if (target.source === undefined) return true;
+    return Array.isArray(target.source)
+      ? target.source.includes(sourceKey)
+      : target.source === sourceKey;
+  };
+
   const closeSource = (sourceKey: SourceKey) => {
     const current = connectedSources.get(sourceKey);
     if (!current) return;
@@ -174,7 +189,7 @@ export const createReactivePushRouter = <
       ? scopeKeyOverride
       : options.getScopeKey?.();
     for (const target of options.targets()) {
-      if (target.source !== sourceKey) continue;
+      if (!targetMatchesSource(target, sourceKey)) continue;
       const element = target.element();
       if (!(element instanceof HTMLElement)) continue;
       const spec = readReactiveRefreshSpecs(element).find((entry) =>
@@ -200,7 +215,7 @@ export const createReactivePushRouter = <
   ): ReadonlyArray<string> => {
     const events = new Set<string>();
     for (const target of options.targets()) {
-      if (target.source !== sourceKey) continue;
+      if (!targetMatchesSource(target, sourceKey)) continue;
       for (const spec of readReactiveRefreshSpecs(target.element())) {
         if (spec.kind !== kind) continue;
         events.add(spec.event);

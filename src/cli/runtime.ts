@@ -43,14 +43,17 @@ export const getJobBackend = (): JobBackend => {
   });
 };
 
-export const getMemoryTools = () => {
-  const runtime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
+export const getMemoryRuntime = () =>
+  createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
     jsonlStore<MemoryEvent>(DATA_DIR),
     jsonBranchStore(DATA_DIR),
     decideMemory,
     reduceMemory,
     initialMemoryState,
   );
+
+export const getMemoryTools = () => {
+  const runtime = getMemoryRuntime();
   return createMemoryTools({
     dir: DATA_DIR,
     runtime,

@@ -197,6 +197,7 @@ export const buildFactoryChatContextImports = async (input: {
   readonly queue: JsonlQueue;
   readonly stream: string;
   readonly factoryService: FactoryService;
+  readonly includeBoundObjectiveContext?: boolean;
 }): Promise<FactoryChatContextImports> => {
   const profileMemorySummary = await resolveProfileMemorySummary({
     memoryTools: input.memoryTools,
@@ -211,6 +212,9 @@ export const buildFactoryChatContextImports = async (input: {
   const baseImports: FactoryChatContextImports = {
     ...(profileMemorySummary ? { profileMemorySummary } : {}),
   };
+  if (input.includeBoundObjectiveContext === false) {
+    return baseImports;
+  }
   if (input.objectiveId) {
     try {
       const [detail, debug] = await Promise.all([

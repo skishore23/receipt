@@ -29,6 +29,10 @@ const writeProfile = async (root: string, input: {
   readonly defaultValidationMode?: "repo_profile" | "none";
   readonly defaultTaskExecutionMode?: "worktree" | "isolated";
   readonly allowObjectiveCreation?: boolean;
+  readonly actionPolicy?: {
+    readonly allowedDispatchActions?: ReadonlyArray<"create" | "react" | "promote" | "cancel" | "cleanup" | "archive">;
+    readonly allowedCreateModes?: ReadonlyArray<"delivery" | "investigation">;
+  };
   readonly handoffTargets?: ReadonlyArray<string>;
   readonly extraManifest?: Record<string, unknown>;
 }): Promise<void> => {
@@ -46,6 +50,7 @@ const writeProfile = async (root: string, input: {
     defaultValidationMode: input.defaultValidationMode,
     defaultTaskExecutionMode: input.defaultTaskExecutionMode,
     allowObjectiveCreation: input.allowObjectiveCreation,
+    actionPolicy: input.actionPolicy,
     handoffTargets: input.handoffTargets,
     ...(input.extraManifest ?? {}),
   };
@@ -140,6 +145,15 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("none");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("isolated");
   expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
+  expect(resolved.actionPolicy.allowedDispatchActions).toEqual([
+    "create",
+    "react",
+    "promote",
+    "cancel",
+    "cleanup",
+    "archive",
+  ]);
+  expect(resolved.actionPolicy.allowedCreateModes).toEqual(["delivery", "investigation"]);
   expect(resolved.promptPath).toBe("profiles/infrastructure/PROFILE.md");
   expect(resolved.toolAllowlist).toContain("factory.dispatch");
   expect(resolved.toolAllowlist).not.toContain("profile.handoff");
@@ -243,6 +257,52 @@ test("factory chat profiles: nested orchestration settings are accepted and reso
   expect(resolved.orchestration.childDedupe).toBe("by_run_and_prompt");
 });
 
+test("factory chat profiles: actionPolicy is parsed and resolved", async () => {
+  const profileRoot = await createTempDir("receipt-factory-profile-root");
+  const repoRoot = await createTempDir("receipt-factory-target-repo");
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    actionPolicy: {
+      allowedDispatchActions: ["create", "react", "cancel"],
+      allowedCreateModes: ["delivery"],
+    },
+  });
+
+  const resolved = await resolveFactoryChatProfile({
+    repoRoot,
+    profileRoot,
+    requestedId: "generalist",
+  });
+
+  expect(resolved.actionPolicy.allowedDispatchActions).toEqual(["create", "react", "cancel"]);
+  expect(resolved.actionPolicy.allowedCreateModes).toEqual(["delivery"]);
+  expect(resolved.systemPrompt).toContain("Allowed dispatch actions: create, react, cancel");
+  expect(resolved.systemPrompt).toContain("Allowed create modes: delivery");
+});
+
+test("factory chat profiles: rejects malformed actionPolicy values", async () => {
+  const profileRoot = await createTempDir("receipt-factory-profile-root");
+  const repoRoot = await createTempDir("receipt-factory-target-repo");
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    extraManifest: {
+      actionPolicy: {
+        allowedDispatchActions: ["create", "ship"],
+      },
+    },
+  });
+
+  await expect(resolveFactoryChatProfile({
+    repoRoot,
+    profileRoot,
+    requestedId: "generalist",
+  })).rejects.toThrow("actionPolicy.allowedDispatchActions contains unsupported value 'ship'");
+});
+
 test("factory chat profiles: rejects removed manifest keys", async () => {
   const profileRoot = await createTempDir("receipt-factory-profile-root");
   const repoRoot = await createTempDir("receipt-factory-target-repo");
@@ -295,11 +355,50 @@ test("factory chat profiles: checked-in software profile resolves worktree deliv
   expect(resolved.objectivePolicy.defaultValidationMode).toBe("repo_profile");
   expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
   expect(resolved.objectivePolicy.maxParallelChildren).toBe(20);
-  expect(resolved.handoffTargets).toEqual(["generalist"]);
+  expect(resolved.handoffTargets).toEqual(["generalist", "qa"]);
+  expect(resolved.actionPolicy.allowedDispatchActions).toEqual([
+    "create",
+    "react",
+    "promote",
+    "cancel",
+    "cleanup",
+    "archive",
+  ]);
+  expect(resolved.actionPolicy.allowedCreateModes).toEqual(["delivery"]);
   expect(resolved.toolAllowlist).toContain("profile.handoff");
   expect(resolved.root.soulBody).toContain("strong staff engineer or delivery lead");
   expect(resolved.systemPrompt).toContain("published or clearly blocked");
   expect(resolved.systemPrompt).toContain("## Personality and Voice");
   expect(resolved.systemPrompt).toContain("## Profile Handoffs");
   expect(resolved.systemPrompt).toContain("PR link");
+});
+
+test("factory chat profiles: checked-in qa profile resolves delivery review guidance", async () => {
+  const repoRoot = await createTempDir("receipt-factory-target-repo");
+  const profileRoot = fileURLToPath(new URL("../../", import.meta.url));
+
+  const resolved = await resolveFactoryChatProfile({
+    repoRoot,
+    profileRoot,
+    requestedId: "qa",
+  });
+
+  expect(resolved.root.id).toBe("qa");
+  expect(resolved.root.label).toBe("QA Engineer");
+  expect(resolved.objectivePolicy.defaultObjectiveMode).toBe("delivery");
+  expect(resolved.objectivePolicy.defaultValidationMode).toBe("repo_profile");
+  expect(resolved.objectivePolicy.defaultTaskExecutionMode).toBe("worktree");
+  expect(resolved.handoffTargets).toEqual(["software", "generalist"]);
+  expect(resolved.actionPolicy.allowedDispatchActions).toEqual([
+    "create",
+    "react",
+    "cancel",
+    "cleanup",
+    "archive",
+  ]);
+  expect(resolved.actionPolicy.allowedCreateModes).toEqual(["delivery"]);
+  expect(resolved.toolAllowlist).toContain("profile.handoff");
+  expect(resolved.root.soulBody).toContain("QA engineer");
+  expect(resolved.systemPrompt).toContain("Quality gate owner");
+  expect(resolved.systemPrompt).toContain("Lead with a verdict");
 });

@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { buildTelemetryEvidenceRecord, writeTelemetryEvidenceRecord } from "../telemetry/artifacts";
 
 export type CodexRunInput = {
   readonly prompt: string;
@@ -15,6 +16,7 @@ export type CodexRunInput = {
   readonly jsonOutput?: boolean;
   readonly outputSchemaPath?: string;
   readonly completionSignalPath?: string;
+  readonly evidencePath?: string;
   readonly completionQuietMs?: number;
   readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   readonly sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
@@ -424,14 +426,13 @@ export class LocalCodexExecutor implements CodexExecutor {
   constructor(opts: LocalCodexExecutorOptions = {}) {
     this.bin = opts.bin?.trim()
       || process.env.RECEIPT_CODEX_BIN?.trim()
-      || process.env.HUB_CODEX_BIN?.trim()
       || "codex";
     this.timeoutMs = Math.max(
       30_000,
-      opts.timeoutMs ?? Number(process.env.RECEIPT_CODEX_TIMEOUT_MS ?? process.env.HUB_CODEX_TIMEOUT_MS ?? 1_800_000),
+      opts.timeoutMs ?? Number(process.env.RECEIPT_CODEX_TIMEOUT_MS ?? 1_800_000),
     );
     this.stallTimeoutMs = normalizePositiveTimeoutMs(
-      opts.stallTimeoutMs ?? process.env.RECEIPT_CODEX_STALL_TIMEOUT_MS ?? process.env.HUB_CODEX_STALL_TIMEOUT_MS,
+      opts.stallTimeoutMs ?? process.env.RECEIPT_CODEX_STALL_TIMEOUT_MS,
       1_000,
       this.timeoutMs,
     );
@@ -765,6 +766,36 @@ export class LocalCodexExecutor implements CodexExecutor {
         await completionLoop;
         await stallLoop;
         await abortLoop;
+        const evidencePath = input.evidencePath?.trim();
+        if (evidencePath) {
+          const evidence = await buildTelemetryEvidenceRecord({
+            command: [this.bin, ...args].join(" "),
+            stdout,
+            stderr,
+            exitCode: result.exitCode ?? 1,
+            startedAt,
+            finishedAt: Date.now(),
+            filePaths: [
+              input.promptPath,
+              input.lastMessagePath,
+              input.stdoutPath,
+              input.stderrPath,
+              input.outputSchemaPath,
+              input.completionSignalPath,
+            ].filter((filePath): filePath is string => Boolean(filePath)),
+            proof: {
+              verified: result.exitCode === 0 ? "task step completed successfully" : "task step failed with a non-zero exit code",
+              how: result.exitCode === 0
+                ? "checked the codex child exit code and preserved the generated response files"
+                : "checked the codex child exit code and preserved stdout/stderr for failure analysis",
+            },
+          });
+          try {
+            await writeTelemetryEvidenceRecord({ path: evidencePath, record: evidence });
+          } catch (err) {
+            throw new Error(`failed to write codex evidence artifact at ${evidencePath}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         if (timedOut) {
           const elapsed = Date.now() - startedAt;
           throw new Error(`codex exec timed out after ${elapsed}ms`);

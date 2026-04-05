@@ -341,6 +341,7 @@ test("local codex executor completes once a task result file exists and output g
   const lastMessagePath = path.join(artifactDir, "task.last-message.md");
   const stdoutPath = path.join(artifactDir, "task.stdout.log");
   const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const evidencePath = path.join(artifactDir, "task.evidence.json");
   const resultPath = path.join(artifactDir, "task.result.json");
   const executor = new LocalCodexExecutor({
     bin: stub,
@@ -355,6 +356,7 @@ test("local codex executor completes once a task result file exists and output g
     lastMessagePath,
     stdoutPath,
     stderrPath,
+    evidencePath,
     completionSignalPath: resultPath,
     completionQuietMs: 300,
     sandboxMode: "workspace-write",
@@ -367,6 +369,9 @@ test("local codex executor completes once a task result file exists and output g
   expect(result.signal).toBeNull();
   await expect(fs.readFile(resultPath, "utf-8")).resolves.toContain("\"outcome\":\"approved\"");
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("result written");
+  const evidence = JSON.parse(await fs.readFile(evidencePath, "utf-8")) as { readonly exitCode: number; readonly proof: { readonly verified: string } };
+  expect(evidence.exitCode).toBe(0);
+  expect(evidence.proof.verified).toContain("successfully");
 }, 15_000);
 
 test("local codex executor extracts tokens used from stdout", async () => {
@@ -879,7 +884,50 @@ test("local codex executor retries sandbox startup once after older bwrap compat
       BWRAP_BIN: bwrapStub,
       SANDBOX_ATTEMPTS_PATH: attemptsPath,
     },
+});
+
+test("local codex executor writes evidence for failed steps", async () => {
+  const root = await mkTmp("receipt-codex-executor-failed-step");
+  const scriptPath = path.join(root, "codex-failing-stub");
+  await fs.writeFile(scriptPath, [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "if (!lastMessagePath) throw new Error('missing last message path');",
+    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'blocked', summary: 'failed step', handoff: 'handoff' }), 'utf8');",
+    "process.stderr.write('intentional failure\\n');",
+    "process.exit(3);",
+  ].join("\n"), "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const evidencePath = path.join(artifactDir, "task.evidence.json");
+  const executor = new LocalCodexExecutor({
+    bin: scriptPath,
+    timeoutMs: 60_000,
   });
+
+  await expect(executor.run({
+    prompt: "# Task\nFail.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    evidencePath,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  })).rejects.toThrow(/codex exited with 3/);
+
+  const evidence = JSON.parse(await fs.readFile(evidencePath, "utf-8")) as { readonly exitCode: number; readonly stderr: string };
+  expect(evidence.exitCode).toBe(3);
+  expect(evidence.stderr).toContain("intentional failure");
+}, 15_000);
 
   await expect(executor.run({
     prompt: "# Task\nReturn the final JSON only.\n",

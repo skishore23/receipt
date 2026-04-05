@@ -1,20 +1,10 @@
 import { optionalTrimmedString } from "../../../framework/http";
 import { inferObjectiveProfileHint } from "../../../factory-cli/composer";
-import { DEFAULT_FACTORY_WORKBENCH_FILTER, type FactoryInspectorPanel, type FactoryInspectorTab, type FactoryViewMode, type FactoryWorkbenchDetailTab, type FactoryWorkbenchFilterKey } from "../../../views/factory-models";
+import { DEFAULT_FACTORY_WORKBENCH_FILTER, type FactoryInspectorTab, type FactoryWorkbenchDetailTab, type FactoryWorkbenchFilterKey } from "../../../views/factory-models";
 import type { FactoryChatProfile } from "../../../services/factory-chat-profiles";
 
-export const isInspectorPanel = (value: string | undefined): value is FactoryInspectorPanel =>
-  value === "overview"
-  || value === "analysis"
-  || value === "execution"
-  || value === "live"
-  || value === "receipts";
-
 export const isInspectorTab = (value: string | undefined): value is FactoryInspectorTab =>
-  value === "overview" || value === "chat" || value === "notes";
-
-export const isFactoryViewMode = (value: string | undefined): value is FactoryViewMode =>
-  value === "default" || value === "mission-control";
+  value === "overview" || value === "chat";
 
 export const isWorkbenchFilterKey = (value: string | undefined): value is FactoryWorkbenchFilterKey =>
   value === "objective.running"
@@ -61,31 +51,13 @@ export const requestedJobId = (req: Request): string | undefined =>
 export const requestedFocusId = (req: Request): string | undefined =>
   optionalTrimmedString(new URL(req.url).searchParams.get("focusId"));
 
-export const requestedPanel = (req: Request): FactoryInspectorPanel => {
-  const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-  return isInspectorPanel(panel) ? panel : "overview";
-};
-
-export const requestedMode = (req: Request): FactoryViewMode => {
-  const mode = optionalTrimmedString(new URL(req.url).searchParams.get("mode"));
-  return isFactoryViewMode(mode) ? mode : "default";
-};
-
-export const requestedPanelParam = (req: Request): FactoryInspectorPanel | undefined => {
-  const panel = optionalTrimmedString(new URL(req.url).searchParams.get("panel"));
-  return isInspectorPanel(panel) ? panel : undefined;
-};
-
-export const requestedShowAll = (req: Request): boolean =>
-  optionalTrimmedString(new URL(req.url).searchParams.get("all")) === "1";
-
 export const requestedInspectorTab = (req: Request): FactoryInspectorTab | undefined => {
   const inspectorTab = optionalTrimmedString(new URL(req.url).searchParams.get("inspectorTab"));
   return isInspectorTab(inspectorTab) ? inspectorTab : undefined;
 };
 
 export const normalizedDefaultInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
-  value === "notes" ? "notes" : "overview";
+  "overview";
 
 export const normalizedWorkbenchInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
   value === "chat" ? "chat" : "overview";

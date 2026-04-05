@@ -1,5 +1,6 @@
 import type { GraphRef } from "@receipt/core/graph";
 import type { QueueCommandRecord, QueueJob } from "../adapters/jsonl-queue";
+import type { AuditRecommendation } from "../factory-cli/analyze";
 import type {
   FactoryBudgetState,
   FactoryCandidateRecord,
@@ -51,6 +52,7 @@ export type FactoryServiceOptions = {
   readonly memoryTools?: import("../adapters/memory-tools").MemoryTools;
   readonly repoRoot?: string;
   readonly profileRoot?: string;
+  readonly repoSlotConcurrency?: number;
   readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
   readonly redriveQueuedJob?: (job: QueueJob) => Promise<void>;
 };
@@ -138,11 +140,70 @@ export type FactoryObjectiveAlignmentSummary = FactoryTaskAlignmentRecord & {
   readonly sourceCandidateId?: string;
 };
 
+export type FactoryObjectiveSelfImprovement = {
+  readonly auditedAt?: number;
+  readonly auditStatus: "ready" | "pending" | "running" | "failed" | "missing";
+  readonly auditStatusMessage?: string;
+  readonly stale: boolean;
+  readonly recommendationStatus?: "ready" | "failed";
+  readonly recommendationError?: string;
+  readonly recommendations: ReadonlyArray<AuditRecommendation>;
+  readonly autoFixObjectiveId?: string;
+  readonly recurringPatterns: ReadonlyArray<{
+    readonly pattern: string;
+    readonly count: number;
+  }>;
+};
+
+export type FactoryObjectiveDisplayState =
+  | "Draft"
+  | "Queued"
+  | "Running"
+  | "Awaiting Review"
+  | "Stalled"
+  | "Blocked"
+  | "Completed"
+  | "Archived"
+  | "Failed"
+  | "Canceled";
+
+export type FactoryObjectivePhaseDetail =
+  | "draft"
+  | "queued"
+  | "executing"
+  | "integrating"
+  | "promoting"
+  | "reconciling"
+  | "cleaning_up"
+  | "awaiting_review"
+  | "stalled"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "canceled"
+  | "archived";
+
+export type FactoryObjectiveStatusAuthority =
+  | "objective"
+  | "live_execution"
+  | "reconcile"
+  | "cleanup";
+
+export type FactoryObjectiveLiveJobAuthority =
+  | "authoritative"
+  | "reconcile"
+  | "cleanup"
+  | "non_authoritative";
+
 export type FactoryObjectiveCard = {
   readonly objectiveId: string;
   readonly title: string;
   readonly status: FactoryObjectiveStatus;
   readonly phase: FactoryObjectivePhase;
+  readonly displayState?: FactoryObjectiveDisplayState;
+  readonly phaseDetail?: FactoryObjectivePhaseDetail;
+  readonly statusAuthority?: FactoryObjectiveStatusAuthority;
+  readonly hasAuthoritativeLiveJob?: boolean;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
   readonly scheduler: {
@@ -153,6 +214,7 @@ export type FactoryObjectiveCard = {
   readonly updatedAt: number;
   readonly latestSummary?: string;
   readonly latestHandoff?: FactoryObjectiveHandoffRecord;
+  readonly executionStalled?: boolean;
   readonly blockedReason?: string;
   readonly sourceWarnings?: ReadonlyArray<string>;
   readonly tokensUsed?: number;
@@ -179,6 +241,7 @@ export type FactoryObjectiveCard = {
   readonly prNumber?: number;
   readonly headRefName?: string;
   readonly baseRefName?: string;
+  readonly selfImprovement?: FactoryObjectiveSelfImprovement;
   readonly contract?: FactoryObjectiveContractRecord;
   readonly alignment?: FactoryObjectiveAlignmentSummary;
   readonly profile: FactoryObjectiveProfileSnapshot;
@@ -289,6 +352,10 @@ export type FactoryDebugProjection = {
   readonly title: string;
   readonly status: FactoryObjectiveStatus;
   readonly phase: FactoryObjectivePhase;
+  readonly displayState?: FactoryObjectiveDisplayState;
+  readonly phaseDetail?: FactoryObjectivePhaseDetail;
+  readonly statusAuthority?: FactoryObjectiveStatusAuthority;
+  readonly hasAuthoritativeLiveJob?: boolean;
   readonly scheduler: {
     readonly slotState: FactoryObjectiveSlotState;
     readonly queuePosition?: number;
@@ -310,6 +377,10 @@ export type FactoryDebugProjection = {
     readonly summary: string;
   }>;
   readonly activeJobs: ReadonlyArray<QueueJob>;
+  readonly activeJobAuthorities?: ReadonlyArray<{
+    readonly jobId: string;
+    readonly authority: FactoryObjectiveLiveJobAuthority;
+  }>;
   readonly lastJobs: ReadonlyArray<QueueJob>;
   readonly taskWorktrees: ReadonlyArray<{
     readonly taskId: string;
@@ -351,6 +422,7 @@ export type FactoryTaskJobPayload = {
   readonly stdoutPath: string;
   readonly stderrPath: string;
   readonly lastMessagePath: string;
+  readonly evidencePath: string;
   readonly manifestPath: string;
   readonly contextSummaryPath?: string;
   readonly contextPackPath: string;

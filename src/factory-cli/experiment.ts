@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { jsonlQueue, type JsonlQueue, type QueueJob } from "../adapters/jsonl-queue";
+import { isSqliteLockError } from "../db/client";
 import type { FactoryReceiptAuditReport } from "./audit";
 import type { FactoryReceiptInvestigation } from "./investigate";
 import { resolveBunRuntime } from "../lib/runtime-paths";
@@ -136,7 +137,7 @@ const isRetryableDbLockFailure = (error: unknown): error is ExecFileFailure => {
     typeof execError.stdout === "string" ? execError.stdout : "",
     typeof execError.stderr === "string" ? execError.stderr : "",
   ];
-  return haystacks.some((value) => value.toLowerCase().includes("database is locked"));
+  return haystacks.some((value) => isSqliteLockError(value));
 };
 
 const runCli = async (

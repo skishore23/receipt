@@ -8,8 +8,10 @@ import { randomUUID } from "node:crypto";
 
 import type { Decide, Reducer } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
+import { desc, eq } from "drizzle-orm";
 import { getReceiptDb } from "../db/client";
 import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
+import * as schema from "../db/schema";
 
 export type MemoryEntry = {
   readonly id: string;
@@ -46,6 +48,11 @@ export type MemoryEvent =
       readonly type: "memory.committed";
       readonly scope: string;
       readonly entry: MemoryEntry;
+    }
+  | {
+      readonly type: "memory.forgotten";
+      readonly scope: string;
+      readonly entryId: string;
     }
   | {
       readonly type: "memory.accessed";
@@ -85,6 +92,12 @@ export const reduceMemory: Reducer<MemoryState, MemoryEvent> = (state, event) =>
     return {
       ...state,
       entries: insertNewestFirst(event.entry, state.entries),
+    };
+  }
+  if (event.type === "memory.forgotten") {
+    return {
+      ...state,
+      entries: state.entries.filter((entry) => entry.id !== event.entryId),
     };
   }
   if (event.type === "memory.accessed") {
@@ -233,6 +246,42 @@ export type MemoryToolsDeps = {
   readonly now?: () => number;
 };
 
+export const forgetMemoryEntry = async (input: {
+  readonly dir: string;
+  readonly runtime: Runtime<MemoryCmd, MemoryEvent, MemoryState>;
+  readonly entryId: string;
+  readonly scope?: string;
+  readonly now?: () => number;
+}): Promise<boolean> => {
+  const db = getReceiptDb(input.dir);
+  const now = input.now ?? Date.now;
+  const row = db.read(() => db.orm.select({
+    entryId: schema.memoryEntries.entryId,
+    scope: schema.memoryEntries.scope,
+  })
+    .from(schema.memoryEntries)
+    .where(eq(schema.memoryEntries.entryId, input.entryId))
+    .get());
+  if (!row) return false;
+  if (input.scope && row.scope !== input.scope) return false;
+  const scope = row.scope;
+  await input.runtime.execute(`memory/${safeScope(scope)}`, {
+    type: "emit",
+    eventId: nextEventId(now),
+    event: {
+      type: "memory.forgotten",
+      scope,
+      entryId: input.entryId,
+    },
+  });
+  db.write(() => {
+    db.orm.delete(schema.memoryEntries)
+      .where(eq(schema.memoryEntries.entryId, input.entryId))
+      .run();
+  });
+  return true;
+};
+
 export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
   const root = path.join(deps.dir, "memory");
   const db = getReceiptDb(deps.dir);
@@ -241,24 +290,24 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
   const streamForScope = deps.streamForScope ?? ((scope: string) => `memory/${safeScope(scope)}`);
 
   const readEntries = async (scope: string): Promise<ReadonlyArray<MemoryEntry>> =>
-    (db.sqlite.query(`
-      SELECT entry_id, scope, text, tags_json, meta_json, ts
-      FROM memory_entries
-      WHERE scope = ?
-      ORDER BY ts DESC
-    `).all(scope) as Array<{
-      readonly entry_id: string;
-      readonly scope: string;
-      readonly text: string;
-      readonly tags_json: string | null;
-      readonly meta_json: string | null;
-      readonly ts: number;
-    }>).map((row) => ({
-      id: row.entry_id,
+    db.read(() => db.orm.select({
+      entryId: schema.memoryEntries.entryId,
+      scope: schema.memoryEntries.scope,
+      text: schema.memoryEntries.text,
+      tagsJson: schema.memoryEntries.tagsJson,
+      metaJson: schema.memoryEntries.metaJson,
+      ts: schema.memoryEntries.ts,
+    })
+      .from(schema.memoryEntries)
+      .where(eq(schema.memoryEntries.scope, scope))
+      .orderBy(desc(schema.memoryEntries.ts))
+      .all())
+      .map((row) => ({
+      id: row.entryId,
       scope: row.scope,
       text: row.text,
-      tags: jsonParseOptional<ReadonlyArray<string>>(row.tags_json),
-      meta: jsonParseOptional<Readonly<Record<string, unknown>>>(row.meta_json),
+      tags: jsonParseOptional<ReadonlyArray<string>>(row.tagsJson),
+      meta: jsonParseOptional<Readonly<Record<string, unknown>>>(row.metaJson),
       ts: Number(row.ts),
     }));
 
@@ -301,39 +350,26 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
         access: record,
       },
     });
-    db.sqlite.query(`
-      INSERT INTO memory_accesses (
-        access_id,
-        scope,
-        operation,
-        strategy,
-        query,
-        "limit",
-        max_chars,
-        from_ts,
-        to_ts,
-        result_count,
-        result_ids_json,
-        summary_chars,
-        meta_json,
-        ts
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      record.id,
-      record.scope,
-      record.operation,
-      record.strategy,
-      record.query ?? null,
-      record.limit ?? null,
-      record.maxChars ?? null,
-      record.fromTs ?? null,
-      record.toTs ?? null,
-      record.resultCount,
-      jsonStringifyOptional(record.resultIds),
-      record.summaryChars ?? null,
-      jsonStringifyOptional(record.meta),
-      record.ts,
-    );
+    db.write(() => {
+      db.orm.insert(schema.memoryAccesses)
+        .values({
+          accessId: record.id,
+          scope: record.scope,
+          operation: record.operation,
+          strategy: record.strategy,
+          query: record.query ?? null,
+          limit: record.limit ?? null,
+          maxChars: record.maxChars ?? null,
+          fromTs: record.fromTs ?? null,
+          toTs: record.toTs ?? null,
+          resultCount: record.resultCount,
+          resultIdsJson: jsonStringifyOptional(record.resultIds),
+          summaryChars: record.summaryChars ?? null,
+          metaJson: jsonStringifyOptional(record.meta),
+          ts: record.ts,
+        })
+        .run();
+    });
   };
 
   return {
@@ -414,23 +450,28 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
           entry,
         },
       });
-      db.sqlite.query(`
-        INSERT INTO memory_entries (entry_id, scope, text, tags_json, meta_json, ts)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(entry_id) DO UPDATE SET
-          scope = excluded.scope,
-          text = excluded.text,
-          tags_json = excluded.tags_json,
-          meta_json = excluded.meta_json,
-          ts = excluded.ts
-      `).run(
-        entry.id,
-        entry.scope,
-        entry.text,
-        jsonStringifyOptional(entry.tags),
-        jsonStringifyOptional(entry.meta),
-        entry.ts,
-      );
+      db.write(() => {
+        db.orm.insert(schema.memoryEntries)
+          .values({
+            entryId: entry.id,
+            scope: entry.scope,
+            text: entry.text,
+            tagsJson: jsonStringifyOptional(entry.tags),
+            metaJson: jsonStringifyOptional(entry.meta),
+            ts: entry.ts,
+          })
+          .onConflictDoUpdate({
+            target: schema.memoryEntries.entryId,
+            set: {
+              scope: entry.scope,
+              text: entry.text,
+              tagsJson: jsonStringifyOptional(entry.tags),
+              metaJson: jsonStringifyOptional(entry.meta),
+              ts: entry.ts,
+            },
+          })
+          .run();
+      });
 
       if (embedFn) {
         const embFile = scopeToEmbeddingsFile(root, input.scope);

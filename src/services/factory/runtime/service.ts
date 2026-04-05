@@ -36,6 +36,7 @@ import {
   type FactoryCmd,
   type FactoryEvent,
   type FactoryObjectiveProfileSnapshot,
+  type FactoryProfileDispatchAction,
   type FactoryObjectiveSeverity,
   type FactoryObjectiveStatus,
   type FactoryState,
@@ -50,7 +51,12 @@ import {
   type FactoryWorkerType,
   type FactoryCandidateStatus,
 } from "../../../modules/factory";
-import { repoKeyForRoot, resolveFactoryChatProfile } from "../../factory-chat-profiles";
+import {
+  assertFactoryProfileCreateModeAllowed,
+  assertFactoryProfileDispatchActionAllowed,
+  repoKeyForRoot,
+  resolveFactoryChatProfile,
+} from "../../factory-chat-profiles";
 import {
   buildFactoryMemoryScriptSource,
   factoryChatCodexArtifactPaths,
@@ -74,6 +80,36 @@ import {
 import {
   buildInheritedFactoryFailureNote,
 } from "../failure-policy";
+import {
+  buildBudgetState as buildObjectiveLifecycleBudgetState,
+  deriveLatestDecision as deriveObjectiveLifecycleLatestDecision,
+  deriveNextAction as deriveObjectiveLifecycleNextAction,
+  deriveObjectivePhase as deriveLifecycleObjectivePhase,
+  isTerminalObjectiveStatus as isLifecycleTerminalObjectiveStatus,
+  objectiveElapsedMinutes as calculateObjectiveElapsedMinutes,
+} from "./objective-lifecycle";
+import {
+  buildObjectiveSelfImprovement as buildObjectiveControlSelfImprovement,
+  controlJobCancelReason as deriveControlJobCancelReason,
+  isAuditEligibleObjectiveStatus as isEligibleObjectiveAuditStatus,
+  objectiveConsumesRepoSlot as consumesObjectiveRepoSlot,
+  releasesObjectiveProjectionSlot as releasesProjectedObjectiveSlot,
+  releasesObjectiveSlot as releasesLiveObjectiveSlot,
+  shouldRedriveQueuedControlJob as shouldRequeueObjectiveControlJob,
+} from "./objective-control";
+import {
+  buildObjectiveHandoffEvent as buildTaskRunnerObjectiveHandoffEvent,
+  buildWorkerHandoffEvent as buildTaskRunnerWorkerHandoffEvent,
+  canAutonomouslyResolveDeliveryPartial as canTaskRunnerAutonomouslyResolveDeliveryPartial,
+  defaultObjectiveHandoffNextAction as defaultTaskRunnerObjectiveHandoffNextAction,
+  isRetryablePublishFailureMessage as isTaskRunnerRetryablePublishFailureMessage,
+  taskResultSchemaPath as buildTaskRunnerResultSchemaPath,
+  validateTaskEvidence,
+} from "./task-runner";
+import {
+  resolveTaskBaseCommit as resolveInvestigationTaskBaseCommit,
+  taskPromptPath as buildInvestigationTaskPromptPath,
+} from "./investigation";
 import {
   buildFactoryPlanningReceipt,
   planningReceiptFingerprint,
@@ -113,6 +149,10 @@ import {
   processObjectiveReconcileControl,
   processObjectiveStartupControl,
 } from "../objective-control";
+import {
+  type FactoryObjectiveAuditMetadata,
+  readPersistedObjectiveAuditMetadata,
+} from "../objective-audit-artifacts";
 import {
   buildIntegrationFilePaths,
   buildTaskFilePaths,
@@ -160,6 +200,14 @@ import {
   buildObjectiveEvidenceCards,
   summarizeObjectiveReceipts,
 } from "../objective-presenters";
+import {
+  classifyObjectiveLiveJobAuthority,
+  compareObjectiveScopedJobs,
+  deriveObjectiveOperationalState,
+  groupObjectiveScopedJobs,
+  isTerminalQueueJobStatusValue,
+  objectiveIdForQueueJob,
+} from "../objective-status";
 import { reactFactoryObjective } from "../objective/reactor";
 import { planTaskResult } from "../planner";
 import {
@@ -179,7 +227,15 @@ import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString
 import type { SseHub } from "../../../framework/sse-hub";
 import { resolveCliInvocation } from "../../../lib/runtime-paths";
 import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../../../modules/job";
-import { readObjectiveStatesFromProjection, syncChangedObjectiveProjections, syncObjectiveProjectionStream } from "../../../db/projectors";
+import {
+  listObjectiveProjectionRows,
+  readObjectiveProjection,
+  readObjectiveProjectionSummaries,
+  syncChangedObjectiveProjections,
+  syncObjectiveProjectionStream,
+  type StoredObjectiveProjection,
+  type StoredObjectiveProjectionSummary,
+} from "../../../db/projectors";
 
 const FACTORY_STREAM_PREFIX = "factory/objectives";
 const DEFAULT_CHECKS = ["bun run build"] as const;
@@ -191,11 +247,9 @@ const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "in
 const resolveRepoRoot = (repoRoot?: string): string =>
   repoRoot?.trim()
   || process.env.RECEIPT_REPO_ROOT?.trim()
-  || process.env.HUB_REPO_ROOT?.trim()
   || process.cwd();
 const FACTORY_TASK_CODEX_MODEL =
   process.env.RECEIPT_FACTORY_TASK_MODEL?.trim()
-  || process.env.HUB_FACTORY_TASK_MODEL?.trim()
   || "gpt-5.4-mini";
 const MAX_CONSECUTIVE_TASK_FAILURES = 5;
 const USAGE_LIMIT_BLOCK_REASON_RE = /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
@@ -368,6 +422,47 @@ const displayLiveJobStatus = (job: QueueJob | undefined, now = Date.now()): stri
 };
 const isDisplayActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "running";
+const liveExecutionObjectiveId = (job: QueueJob | undefined): string | undefined => {
+  const payload = isRecord(job?.payload) ? job.payload : undefined;
+  const kind = typeof payload?.kind === "string" ? payload.kind : undefined;
+  if (
+    kind !== "factory.task.run"
+    && kind !== "factory.integration.validate"
+    && kind !== "factory.integration.publish"
+  ) {
+    return undefined;
+  }
+  return typeof payload?.objectiveId === "string" && payload.objectiveId.trim().length > 0
+    ? payload.objectiveId
+    : undefined;
+};
+const liveExecutionSnapshotForJobs = (
+  jobs: ReadonlyArray<QueueJob>,
+  now = Date.now(),
+): {
+  readonly stalledObjectiveIds: ReadonlySet<string>;
+  readonly nextStatusChangeAt?: number;
+} => {
+  const stalledObjectiveIds = new Set<string>();
+  let nextStatusChangeAt: number | undefined;
+  for (const job of jobs) {
+    const objectiveId = liveExecutionObjectiveId(job);
+    if (!objectiveId) continue;
+    const displayStatus = displayLiveJobStatus(job, now);
+    if (displayStatus === "stalled") {
+      stalledObjectiveIds.add(objectiveId);
+      continue;
+    }
+    const progressAt = jobProgressAt(job);
+    if (job.status !== "running" || typeof progressAt !== "number") continue;
+    const staleAt = progressAt + LIVE_JOB_STALE_AFTER_MS;
+    if (staleAt <= now) continue;
+    if (nextStatusChangeAt === undefined || staleAt < nextStatusChangeAt) {
+      nextStatusChangeAt = staleAt;
+    }
+  }
+  return { stalledObjectiveIds, nextStatusChangeAt };
+};
 const INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS = new Set([
   "a",
   "an",
@@ -458,13 +553,23 @@ const preferredInfrastructureKnowledgePath = (value: { readonly storedPath?: str
   value.storedPath ?? value.originalPath;
 
 const boardSectionForObjective = (
-  objective: Pick<FactoryObjectiveCard, "status" | "scheduler">,
+  objective: Pick<FactoryObjectiveCard, "displayState">,
 ): FactoryBoardSection => {
-  if (objective.status === "completed" || objective.status === "canceled") return "completed";
-  if (objective.status === "blocked" || objective.status === "failed") return "needs_attention";
-  if (objective.scheduler.slotState === "queued") return "queued";
+  if (objective.displayState === "Completed" || objective.displayState === "Canceled" || objective.displayState === "Archived") {
+    return "completed";
+  }
+  if (objective.displayState === "Blocked" || objective.displayState === "Failed" || objective.displayState === "Stalled") {
+    return "needs_attention";
+  }
+  if (objective.displayState === "Queued") return "queued";
   return "active";
 };
+
+const objectiveJobCacheKey = (jobs: ReadonlyArray<QueueJob>): string =>
+  jobs
+    .slice(0, 10)
+    .map((job) => `${job.id}:${job.status}:${job.updatedAt}:${job.lastError ?? ""}`)
+    .join("|");
 
 const objectiveTaskStatusPriority = (status: FactoryTaskStatus): number => {
   switch (status) {
@@ -560,6 +665,7 @@ import {
   type FactoryTaskJobPayload,
   type FactoryIntegrationJobPayload,
   type FactoryIntegrationPublishJobPayload,
+  type FactoryObjectiveAuditJobPayload,
   type FactoryObjectiveControlJobPayload,
   type FactoryMonitorJobPayload,
   type FactoryObjectiveReceiptSummary,
@@ -592,6 +698,7 @@ export type {
   FactoryTaskJobPayload,
   FactoryIntegrationJobPayload,
   FactoryIntegrationPublishJobPayload,
+  FactoryObjectiveAuditJobPayload,
   FactoryObjectiveControlJobPayload,
   FactoryObjectiveReceiptSummary,
   FactoryObjectiveReceiptQuery,
@@ -695,7 +802,7 @@ const taskOrdinalId = (index: number): string => `task_${String(index + 1).padSt
 const objectiveStream = (objectiveId: string): string => `${FACTORY_STREAM_PREFIX}/${objectiveId}`;
 
 
-export class FactoryServiceBase {
+export class FactoryService {
   readonly dataDir: string;
   readonly queue: JsonlQueue;
   readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
@@ -704,6 +811,7 @@ export class FactoryServiceBase {
   readonly memoryTools?: MemoryTools;
   readonly git: HubGit;
   readonly profileRoot: string;
+  private readonly repoSlotConcurrency: number;
   private readonly cloudExecutionContextProvider?: FactoryServiceOptions["cloudExecutionContextProvider"];
   private readonly redriveQueuedJob?: FactoryServiceOptions["redriveQueuedJob"];
   private readonly baselineCheckCache = new Map<string, Promise<{
@@ -714,12 +822,18 @@ export class FactoryServiceBase {
 
   private readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
   private objectiveProjectionVersion = 0;
-  private objectiveStateListCache?: {
+  private objectiveProjectionSummaryCache?: {
     readonly version: number;
-    readonly states: ReadonlyArray<FactoryState>;
+    readonly summaries: ReadonlyArray<StoredObjectiveProjectionSummary>;
+  };
+  private objectiveProjectionRowCache?: {
+    readonly version: number;
+    readonly rows: ReadonlyArray<StoredObjectiveProjection>;
   };
   private objectiveListCache?: {
     readonly version: number;
+    readonly queueVersion: number;
+    readonly expiresAt?: number;
     readonly cards: ReadonlyArray<FactoryObjectiveCard>;
   };
   private readonly objectiveCardCache = new Map<string, {
@@ -741,6 +855,9 @@ export class FactoryServiceBase {
       repoRoot: resolveRepoRoot(opts.repoRoot),
     });
     this.profileRoot = path.resolve(opts.profileRoot ?? DEFAULT_FACTORY_PROFILE_ROOT);
+    this.repoSlotConcurrency = Number.isFinite(opts.repoSlotConcurrency)
+      ? Math.max(1, Math.floor(opts.repoSlotConcurrency as number))
+      : 1;
     this.runtime = createRuntime<FactoryCmd, FactoryEvent, FactoryState>(
       jsonlStore<FactoryEvent>(opts.dataDir),
       jsonBranchStore(opts.dataDir),
@@ -792,7 +909,8 @@ export class FactoryServiceBase {
 
   private invalidateObjectiveProjection(objectiveId?: string): void {
     this.objectiveProjectionVersion += 1;
-    this.objectiveStateListCache = undefined;
+    this.objectiveProjectionSummaryCache = undefined;
+    this.objectiveProjectionRowCache = undefined;
     this.objectiveListCache = undefined;
     if (objectiveId) {
       this.objectiveCardCache.delete(objectiveId);
@@ -1438,6 +1556,10 @@ export class FactoryServiceBase {
       promptPath: resolved.promptPath,
       selectedSkills: resolved.skills,
       cloudProvider: resolved.cloudProvider,
+      actionPolicy: {
+        allowedDispatchActions: [...resolved.actionPolicy.allowedDispatchActions],
+        allowedCreateModes: [...resolved.actionPolicy.allowedCreateModes],
+      },
       objectivePolicy: {
         allowedWorkerTypes,
         defaultWorkerType,
@@ -1449,6 +1571,34 @@ export class FactoryServiceBase {
         allowObjectiveCreation: objectivePolicy.allowObjectiveCreation,
       },
     };
+  }
+
+  private assertObjectiveProfileDispatchActionAllowed(
+    profile: FactoryObjectiveProfileSnapshot,
+    action: FactoryProfileDispatchAction,
+  ): void {
+    try {
+      assertFactoryProfileDispatchActionAllowed({
+        label: profile.rootProfileLabel,
+        actionPolicy: profile.actionPolicy,
+      }, action);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile action is not allowed");
+    }
+  }
+
+  private assertObjectiveProfileCreateModeAllowed(
+    profile: FactoryObjectiveProfileSnapshot,
+    objectiveMode: FactoryObjectiveMode,
+  ): void {
+    try {
+      assertFactoryProfileCreateModeAllowed({
+        label: profile.rootProfileLabel,
+        actionPolicy: profile.actionPolicy,
+      }, objectiveMode);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile create mode is not allowed");
+    }
   }
 
   private buildObjectiveTaskPrompt(prompt: string, note?: string): string {
@@ -1543,6 +1693,8 @@ export class FactoryServiceBase {
         `profile '${profile.rootProfileId}' is not allowed to create Factory objectives`,
       );
     }
+    this.assertObjectiveProfileDispatchActionAllowed(profile, "create");
+    this.assertObjectiveProfileCreateModeAllowed(profile, objectiveMode);
     const checks = input.checks?.length
       ? uniqueChecks(input.checks)
       : profile.objectivePolicy.defaultValidationMode === "none"
@@ -1645,37 +1797,58 @@ export class FactoryServiceBase {
     readonly objectiveIds?: ReadonlyArray<string>;
     readonly profileId?: string;
   }): Promise<ReadonlyArray<FactoryObjectiveCard>> {
+    const now = Date.now();
     const objectiveIds = (query?.objectiveIds ?? [])
       .map((objectiveId) => objectiveId.trim())
       .filter(Boolean);
     const profileId = query?.profileId?.trim();
-    await this.syncObjectiveProjectionCache();
+    const projections = await this.listStoredObjectiveProjections();
+    const queuePositions = this.queuePositionsForObjectiveSummaries(projections);
+    const recentQueueJobs = await this.queue.listJobs({ limit: 2000 });
+    const queueVersion = this.queue.snapshot().version;
+    const liveExecution = liveExecutionSnapshotForJobs(recentQueueJobs, now);
+    const objectiveJobsById = groupObjectiveScopedJobs(recentQueueJobs);
     if (objectiveIds.length > 0) {
-      const states = await this.listObjectiveStates();
-      const queuePositions = this.queuePositionsForStates(states);
       const objectiveIdSet = new Set(objectiveIds);
       const details = await Promise.all(
-        states
-          .filter((state) => objectiveIdSet.has(state.objectiveId))
-          .filter((state) => !profileId || state.profile.rootProfileId === profileId)
-          .map((state) => this.buildObjectiveCard(state, queuePositions.get(state.objectiveId))),
+        projections
+          .filter((projection) => objectiveIdSet.has(projection.objectiveId))
+          .filter((projection) => !profileId || projection.state.profile.rootProfileId === profileId)
+          .map((projection) => this.buildObjectiveCard(
+            projection.state,
+            queuePositions.get(projection.objectiveId),
+            undefined,
+            liveExecution.stalledObjectiveIds.has(projection.objectiveId),
+            objectiveJobsById.get(projection.objectiveId) ?? [],
+          )),
       );
       return details.sort((a, b) => b.updatedAt - a.updatedAt);
     }
     const cached = this.objectiveListCache;
-    if (cached && cached.version === this.objectiveProjectionVersion) {
+    if (
+      cached
+      && cached.version === this.objectiveProjectionVersion
+      && cached.queueVersion === queueVersion
+      && (cached.expiresAt === undefined || cached.expiresAt > now)
+    ) {
       return profileId
         ? cached.cards.filter((card) => card.profile.rootProfileId === profileId)
         : cached.cards;
     }
-    const states = await this.listObjectiveStates();
-    const queuePositions = this.queuePositionsForStates(states);
     const details = await Promise.all(
-      states.map((state) => this.buildObjectiveCard(state, queuePositions.get(state.objectiveId))),
+      projections.map((projection) => this.buildObjectiveCard(
+          projection.state,
+          queuePositions.get(projection.objectiveId),
+          undefined,
+          liveExecution.stalledObjectiveIds.has(projection.objectiveId),
+          objectiveJobsById.get(projection.objectiveId) ?? [],
+        )),
     );
     const cards = details.sort((a, b) => b.updatedAt - a.updatedAt);
     this.objectiveListCache = {
       version: this.objectiveProjectionVersion,
+      queueVersion,
+      expiresAt: liveExecution.nextStatusChangeAt,
       cards,
     };
     return profileId
@@ -1903,10 +2076,15 @@ export class FactoryServiceBase {
   }
 
   async getObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
-    const state = await this.getObjectiveState(objectiveId);
-    const states = await this.listObjectiveStates();
-    const queuePositions = this.queuePositionsForStates(states);
-    return this.buildObjectiveDetail(state, queuePositions.get(objectiveId));
+    await this.syncObjectiveProjectionCache();
+    const projected = readObjectiveProjection(this.dataDir, objectiveId);
+    const state = projected?.state ?? await this.getObjectiveState(objectiveId);
+    const summaries = await this.listObjectiveProjectionSummaries();
+    const queuePositions = this.queuePositionsForObjectiveSummaries(summaries);
+    return this.buildObjectiveDetail(
+      state,
+      queuePositions.get(objectiveId),
+    );
   }
 
   async inferObjectiveLiveOutputFocus(objectiveId: string): Promise<{
@@ -1920,8 +2098,8 @@ export class FactoryServiceBase {
 
   async getObjectiveDebug(objectiveId: string): Promise<FactoryDebugProjection> {
     const state = await this.getObjectiveState(objectiveId);
-    const states = await this.listObjectiveStates();
-    const queuePositions = this.queuePositionsForStates(states);
+    const summaries = await this.listObjectiveProjectionSummaries();
+    const queuePositions = this.queuePositionsForObjectiveSummaries(summaries);
     return this.buildObjectiveDebug(state, queuePositions.get(objectiveId));
   }
 
@@ -1997,8 +2175,10 @@ export class FactoryServiceBase {
       };
     }
     const detail = await this.getObjective(objectiveId);
-    const activeTasks = detail.tasks.filter((task) => isActiveJobStatus(task.jobStatus));
-    const recentJobs = this.objectiveJobsForTasks(detail.tasks).slice(0, 8);
+    const objectiveJobs = await this.listObjectiveScopedJobs(objectiveId, 12);
+    const activeTasks = detail.tasks.filter((task) =>
+      isDisplayActiveJobStatus(displayLiveJobStatus(task.job) ?? task.jobStatus ?? task.status));
+    const recentJobs = objectiveJobs.slice(0, 8);
     return {
       selectedObjectiveId: objectiveId,
       objectiveTitle: detail.title,
@@ -2137,6 +2317,8 @@ export class FactoryServiceBase {
   }
 
   async reactObjectiveWithNote(objectiveId: string, message?: string): Promise<FactoryObjectiveDetail> {
+    const state = await this.getObjectiveState(objectiveId);
+    this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "react");
     const normalized = optionalTrimmedString(message);
     if (normalized) await this.addObjectiveNote(objectiveId, normalized);
     await this.reactObjective(objectiveId);
@@ -2145,6 +2327,7 @@ export class FactoryServiceBase {
 
   async promoteObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
+    this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "promote");
     const gateBlockedReason = factoryPromotionGateBlockedReason(state);
     if (gateBlockedReason) {
       throw new FactoryServiceError(409, gateBlockedReason);
@@ -2158,6 +2341,7 @@ export class FactoryServiceBase {
 
   async cancelObjective(objectiveId: string, reason?: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
+    this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "cancel");
     await this.cancelObjectiveTaskJobs(state, reason ?? "factory objective canceled");
     const canceledAt = Date.now();
     const summary = reason ? `Objective canceled: ${reason}` : "Objective canceled.";
@@ -2182,6 +2366,7 @@ export class FactoryServiceBase {
 
   async archiveObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
+    this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "archive");
     await this.cancelObjectiveTaskJobs(state, "factory objective archived");
     if (!state.archivedAt) {
       await this.emitObjective(objectiveId, {
@@ -2196,6 +2381,7 @@ export class FactoryServiceBase {
 
   async cleanupObjectiveWorkspaces(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
+    this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "cleanup");
     const workspacePaths = new Set<string>();
     for (const taskId of state.workflow.taskIds) {
       const task = state.workflow.tasksById[taskId];
@@ -2301,26 +2487,48 @@ export class FactoryServiceBase {
       && job.payload.objectiveId.trim().length > 0;
   }
 
+  private isObjectiveAuditJob(job: QueueJob): job is QueueJob & {
+    readonly payload: FactoryObjectiveAuditJobPayload;
+  } {
+    return job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.payload.kind === "factory.objective.audit"
+      && typeof job.payload.objectiveId === "string"
+      && job.payload.objectiveId.trim().length > 0;
+  }
+
   private compareRecentQueueJobs(left: QueueJob, right: QueueJob): number {
     return right.updatedAt - left.updatedAt
       || right.createdAt - left.createdAt
       || right.id.localeCompare(left.id);
   }
 
-  private controlJobCancelReason(state: FactoryState | undefined): string | undefined {
-    if (!state) return "objective control job canceled because the objective no longer exists";
-    if (state.archivedAt) return "objective control job canceled because the objective is archived";
-    if (state.status === "blocked") return "objective control job canceled because the objective is blocked";
-    if (this.isTerminalObjectiveStatus(state.status)) {
-      return `objective control job canceled because the objective is ${state.status}`;
-    }
-    return undefined;
+  private isAuditEligibleObjectiveStatus(status: FactoryObjectiveStatus): boolean {
+    return isEligibleObjectiveAuditStatus(status);
+  }
+
+  private async latestObjectiveAuditJob(objectiveId: string): Promise<QueueJob | undefined> {
+    const jobs = await this.queue.listJobs({ limit: 500 });
+    return jobs
+      .filter((job) => this.isObjectiveAuditJob(job) && job.payload.objectiveId === objectiveId)
+      .sort((left, right) => this.compareRecentQueueJobs(left, right))[0];
+  }
+
+  private buildObjectiveSelfImprovement(
+    state: FactoryState,
+    auditMetadata: FactoryObjectiveAuditMetadata | undefined,
+    auditJob: QueueJob | undefined,
+  ): FactoryObjectiveDetail["selfImprovement"] {
+    return buildObjectiveControlSelfImprovement(state, auditMetadata, auditJob);
+  }
+
+  private controlJobCancelReason(
+    state: Pick<FactoryState, "archivedAt" | "status"> | Pick<StoredObjectiveProjectionSummary, "archivedAt" | "status"> | undefined,
+  ): string | undefined {
+    return deriveControlJobCancelReason(state);
   }
 
   private shouldRedriveQueuedControlJob(job: QueueJob, now: number): boolean {
-    if (job.commands.length > 0) return true;
-    const ageMs = Math.max(now - job.updatedAt, now - job.createdAt);
-    return ageMs >= OBJECTIVE_CONTROL_REDRIVE_AGE_MS;
+    return shouldRequeueObjectiveControlJob(job, now, OBJECTIVE_CONTROL_REDRIVE_AGE_MS);
   }
 
   private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
@@ -2328,8 +2536,8 @@ export class FactoryServiceBase {
       .filter((job) => this.isObjectiveControlJob(job));
     if (queued.length === 0) return;
 
-    const states = await this.listObjectiveStates();
-    const statesById = new Map(states.map((state) => [state.objectiveId, state] as const));
+    const summaries = await this.listObjectiveProjectionSummaries();
+    const summariesById = new Map(summaries.map((summary) => [summary.objectiveId, summary] as const));
     const grouped = new Map<string, QueueJob[]>();
     for (const job of queued) {
       const key = job.sessionKey?.trim() || `factory:objective:${job.payload.objectiveId}`;
@@ -2349,8 +2557,10 @@ export class FactoryServiceBase {
       }
 
       const objectiveId = typeof current.payload.objectiveId === "string" ? current.payload.objectiveId : "";
-      const state = statesById.get(objectiveId);
-      const cancelReason = this.controlJobCancelReason(state);
+      const summary = summariesById.get(objectiveId);
+      const cancelReason = current.payload.reason === "reconcile"
+        ? undefined
+        : this.controlJobCancelReason(summary);
       if (cancelReason) {
         await this.queue.cancel(current.id, cancelReason, "factory.resume");
         continue;
@@ -2387,26 +2597,54 @@ export class FactoryServiceBase {
   }
 
   private objectiveElapsedMinutes(state: FactoryState, now = Date.now()): number {
-    if (!state.createdAt) return 0;
-    return Math.max(0, Math.floor((now - state.createdAt) / 60_000));
+    return calculateObjectiveElapsedMinutes(state, now);
+  }
+
+  private shouldScheduleTerminalObjectiveCleanup(events: ReadonlyArray<FactoryEvent>): boolean {
+    return events.some((event) =>
+      event.type === "objective.completed"
+      || event.type === "objective.failed"
+      || event.type === "objective.canceled"
+      || event.type === "objective.archived");
+  }
+
+  private objectiveCleanupReason(
+    state: Pick<FactoryState, "archivedAt" | "status">,
+  ): string {
+    if (state.archivedAt) return "retired after terminal objective transition (archived)";
+    return `retired after terminal objective transition (${state.status})`;
+  }
+
+  private async retireObjectiveScopedLiveJobs(
+    objectiveId: string,
+    reason: string,
+  ): Promise<void> {
+    const jobs = await this.listObjectiveScopedJobs(objectiveId, 2000);
+    for (const job of jobs) {
+      if (!isActiveJobStatus(job.status)) continue;
+      if (job.payload.kind === "factory.objective.audit" || job.payload.kind === "factory.objective.control") continue;
+      await this.queue.cancel(job.id, reason, "factory.cleanup");
+    }
   }
 
   private isTerminalObjectiveStatus(status: FactoryObjectiveStatus): boolean {
-    return status === "completed" || status === "failed" || status === "canceled";
+    return isLifecycleTerminalObjectiveStatus(status);
   }
 
   private objectiveConsumesRepoSlot(
     objective: Pick<FactoryState, "objectiveMode"> | FactoryObjectiveMode,
   ): boolean {
-    const objectiveMode = typeof objective === "string" ? objective : objective.objectiveMode;
-    return objectiveMode !== "investigation";
+    return consumesObjectiveRepoSlot(objective);
   }
 
   private releasesObjectiveSlot(state: Pick<FactoryState, "status" | "integration">): boolean {
-    const { status } = state;
-    if (this.isTerminalObjectiveStatus(status) || status === "blocked" || status === "promoting") return true;
-    const is = state.integration?.status;
-    return is === "ready_to_promote" || is === "promoting" || is === "promoted";
+    return releasesLiveObjectiveSlot(state);
+  }
+
+  private releasesObjectiveProjectionSlot(
+    summary: Pick<StoredObjectiveProjectionSummary, "status" | "integrationStatus">,
+  ): boolean {
+    return releasesProjectedObjectiveSlot(summary);
   }
 
   private async cancelObjectiveTaskJobs(
@@ -2420,107 +2658,66 @@ export class FactoryServiceBase {
     }
   }
 
-  private async listObjectiveStates(): Promise<ReadonlyArray<FactoryState>> {
+  private async listObjectiveProjectionSummaries(): Promise<ReadonlyArray<StoredObjectiveProjectionSummary>> {
     await this.syncObjectiveProjectionCache();
-    const cached = this.objectiveStateListCache;
+    const cached = this.objectiveProjectionSummaryCache;
     if (cached && cached.version === this.objectiveProjectionVersion) {
-      return cached.states;
+      return cached.summaries;
     }
-    const resolvedStates = readObjectiveStatesFromProjection(this.dataDir)
-      .map((state) => normalizeFactoryState(state))
-      .filter((state) => Boolean(state.objectiveId))
+    const summaries = readObjectiveProjectionSummaries(this.dataDir)
+      .filter((summary) => Boolean(summary.objectiveId))
       .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
-    this.objectiveStateListCache = {
+    this.objectiveProjectionSummaryCache = {
       version: this.objectiveProjectionVersion,
-      states: resolvedStates,
+      summaries,
     };
-    return resolvedStates;
+    return summaries;
   }
 
-  private queuePositionsForStates(states: ReadonlyArray<FactoryState>): ReadonlyMap<string, number> {
-    const queued = states
-      .filter((state) =>
-        Boolean(state.objectiveId)
-        && !state.archivedAt
-        && this.objectiveConsumesRepoSlot(state)
-        && !this.isTerminalObjectiveStatus(state.status)
-        && state.scheduler.slotState === "queued",
+  private async listStoredObjectiveProjections(): Promise<ReadonlyArray<StoredObjectiveProjection>> {
+    await this.syncObjectiveProjectionCache();
+    const cached = this.objectiveProjectionRowCache;
+    if (cached && cached.version === this.objectiveProjectionVersion) {
+      return cached.rows;
+    }
+    const rows = listObjectiveProjectionRows(this.dataDir)
+      .filter((row) => Boolean(row.objectiveId))
+      .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
+    this.objectiveProjectionRowCache = {
+      version: this.objectiveProjectionVersion,
+      rows,
+    };
+    return rows;
+  }
+
+  private queuePositionsForObjectiveSummaries(
+    summaries: ReadonlyArray<StoredObjectiveProjectionSummary>,
+  ): ReadonlyMap<string, number> {
+    const queued = summaries
+      .filter((summary) =>
+        Boolean(summary.objectiveId)
+        && !summary.archivedAt
+        && this.objectiveConsumesRepoSlot(summary)
+        && !this.isTerminalObjectiveStatus(summary.status)
+        && summary.slotState === "queued",
       )
       .sort((a, b) => a.createdAt - b.createdAt || a.objectiveId.localeCompare(b.objectiveId));
-    return new Map(queued.map((state, index) => [state.objectiveId, index + 1] as const));
+    return new Map(queued.map((summary, index) => [summary.objectiveId, index + 1] as const));
   }
 
   private deriveObjectivePhase(
     state: FactoryState,
     projection?: { readonly activeTasks: number; readonly readyTasks: number },
   ): FactoryObjectivePhase {
-    if (state.status === "completed") return "completed";
-    if (state.status === "blocked" || state.status === "failed" || state.status === "canceled") return "blocked";
-    if (state.scheduler.slotState === "queued") return "waiting_for_slot";
-    if (state.status === "planning") return "planning";
-    if (state.status === "integrating") return "integrating";
-    if (state.status === "promoting" || state.integration.status === "ready_to_promote" || state.integration.status === "promoting" || state.integration.status === "promoted") {
-      return "promoting";
-    }
-    if (state.status === "executing" && projection && projection.activeTasks === 0 && projection.readyTasks === 0) {
-      return "blocked";
-    }
-    return "executing";
+    return deriveLifecycleObjectivePhase(state, projection);
   }
 
   private deriveLatestDecision(state: FactoryState): FactoryObjectiveCard["latestDecision"] | undefined {
-    if (state.latestRebracket) {
-      return {
-        summary: state.latestRebracket.reason,
-        at: state.latestRebracket.appliedAt,
-        source: state.latestRebracket.source,
-        selectedActionId: state.latestRebracket.selectedActionId,
-      };
-    }
-    if (state.integration.status === "ready_to_promote" && state.integration.lastSummary) {
-      return {
-        summary: state.integration.lastSummary,
-        at: state.integration.updatedAt,
-        source: "system",
-      };
-    }
-    return undefined;
+    return deriveObjectiveLifecycleLatestDecision(state);
   }
 
   private deriveNextAction(state: FactoryState, queuePosition?: number): string | undefined {
-    if (state.status === "completed") return state.objectiveMode === "investigation" ? "Investigation is complete." : "Objective is complete.";
-    if (state.status === "canceled") return "Objective was canceled.";
-    if (state.status === "failed") return "Objective failed.";
-    if (state.status === "blocked") {
-      return state.objectiveMode === "investigation"
-        ? "Review the blocking receipt, adjust the investigation, or cancel the objective."
-        : "Review the blocking receipt and react or cancel the objective.";
-    }
-    if (state.scheduler.slotState === "queued") {
-      return queuePosition
-        ? `Waiting for the repo execution slot (${queuePosition} in queue).`
-        : "Waiting for the repo execution slot.";
-    }
-    if (state.status === "planning") {
-      return state.workflow.taskIds.length === 0
-        ? "Preparing the objective."
-        : "Preparing the next task attempt.";
-    }
-    if (state.integration.status === "ready_to_promote" && !state.policy.promotion.autoPromote) {
-      return "Promote the integration branch into source when ready.";
-    }
-    if (state.integration.status === "conflicted") return "Review the integration conflict and react with the next task attempt.";
-    const readyCount = factoryReadyTasks(state).length;
-    if (readyCount > 0) {
-      return readyCount === 1
-        ? "One task is ready to dispatch."
-        : `${readyCount} tasks are ready to dispatch.`;
-    }
-    if (state.workflow.activeTaskIds.length > 0) return "Wait for the active task pass to finish.";
-    if (state.integration.status === "queued" || state.integration.status === "merging" || state.integration.status === "validating") {
-      return "Wait for integration validation to finish.";
-    }
-    return undefined;
+    return deriveObjectiveLifecycleNextAction(state, queuePosition);
   }
 
   private buildBudgetState(
@@ -2528,17 +2725,12 @@ export class FactoryServiceBase {
     now = Date.now(),
     policyBlockedReason?: string,
   ): FactoryBudgetState {
-    const failureEntries = Object.entries(state.consecutiveFailuresByTask).filter(([, v]) => v > 0);
-    return {
-      taskRunsUsed: state.taskRunsUsed,
-      candidatePassesByTask: state.candidatePassesByTask,
-      consecutiveFailuresByTask: failureEntries.length > 0
-        ? Object.fromEntries(failureEntries)
-        : {},
-      elapsedMinutes: this.objectiveElapsedMinutes(state, now),
-      lastDispatchAt: state.lastDispatchAt,
-      policyBlockedReason: policyBlockedReason ?? this.derivePolicyBlockedReason(state, now),
-    };
+    return buildObjectiveLifecycleBudgetState(
+      state,
+      (currentState, currentNow) => this.derivePolicyBlockedReason(currentState, currentNow),
+      now,
+      policyBlockedReason,
+    );
   }
 
   private derivePolicyBlockedReason(state: FactoryState, now = Date.now()): string | undefined {
@@ -2736,14 +2928,14 @@ export class FactoryServiceBase {
   }
 
   private async hasActiveObjectiveSlot(): Promise<boolean> {
-    const states = await this.listObjectiveStates();
-    return states.some((state) =>
-      !state.archivedAt
-      && this.objectiveConsumesRepoSlot(state)
-      && !this.releasesObjectiveSlot(state)
-      && state.scheduler.slotState === "active"
-      && !state.scheduler.releasedAt,
-    );
+    const summaries = await this.listObjectiveProjectionSummaries();
+    const activeCount = summaries.filter((summary) =>
+      !summary.archivedAt
+      && this.objectiveConsumesRepoSlot(summary)
+      && !this.releasesObjectiveProjectionSlot(summary)
+      && summary.slotState === "active",
+    ).length;
+    return activeCount >= this.repoSlotConcurrency;
   }
 
   private async enqueueObjectiveControl(
@@ -2781,6 +2973,16 @@ export class FactoryServiceBase {
       ? payload.reason
       : "startup";
     await this.ensureBootstrap();
+    const state = await this.getObjectiveState(objectiveId);
+    if (state.archivedAt || this.isTerminalObjectiveStatus(state.status)) {
+      await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(state));
+      await this.rebalanceObjectiveSlots();
+      return {
+        objectiveId,
+        status: "completed",
+        reason,
+      };
+    }
     if (reason === "reconcile") {
       await this.processObjectiveReconcile(objectiveId);
     } else {
@@ -2794,63 +2996,64 @@ export class FactoryServiceBase {
   }
 
   private async rebalanceObjectiveSlots(): Promise<void> {
-    const states = await this.listObjectiveStates();
-    for (const state of states) {
+    const summaries = await this.listObjectiveProjectionSummaries();
+    for (const summary of summaries) {
       if (
-        this.objectiveConsumesRepoSlot(state)
-        && state.scheduler.slotState === "active"
-        && !state.scheduler.releasedAt
-        && (this.releasesObjectiveSlot(state) || Boolean(state.archivedAt))
+        this.objectiveConsumesRepoSlot(summary)
+        && summary.slotState === "active"
+        && (this.releasesObjectiveProjectionSlot(summary) || Boolean(summary.archivedAt))
       ) {
-        await this.emitObjective(state.objectiveId, {
+        await this.emitObjective(summary.objectiveId, {
           type: "objective.slot.released",
-          objectiveId: state.objectiveId,
+          objectiveId: summary.objectiveId,
           releasedAt: Date.now(),
-          reason: state.archivedAt
+          reason: summary.archivedAt
             ? "slot released after objective archived"
-            : `slot released after objective entered ${state.status}`,
+            : `slot released after objective entered ${summary.status}`,
         });
       }
     }
 
-    const refreshed = await this.listObjectiveStates();
-    const slotFreeQueued = refreshed.filter((state) =>
-      !state.archivedAt
-      && !this.objectiveConsumesRepoSlot(state)
-      && !this.releasesObjectiveSlot(state)
-      && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt)
+    const refreshed = await this.listObjectiveProjectionSummaries();
+    const slotFreeQueued = refreshed.filter((summary) =>
+      !summary.archivedAt
+      && !this.objectiveConsumesRepoSlot(summary)
+      && !this.releasesObjectiveProjectionSlot(summary)
+      && (summary.slotState === "queued" || !summary.slotState)
     );
-    for (const state of slotFreeQueued) {
-      await this.emitObjective(state.objectiveId, {
+    for (const summary of slotFreeQueued) {
+      await this.emitObjective(summary.objectiveId, {
         type: "objective.slot.admitted",
-        objectiveId: state.objectiveId,
+        objectiveId: summary.objectiveId,
         admittedAt: Date.now(),
       });
-      await this.enqueueObjectiveControl(state.objectiveId, "admitted");
+      await this.enqueueObjectiveControl(summary.objectiveId, "admitted");
     }
 
-    const active = refreshed.find((state) =>
-      !state.archivedAt
-      && this.objectiveConsumesRepoSlot(state)
-      && !this.releasesObjectiveSlot(state)
-      && state.scheduler.slotState === "active"
-      && !state.scheduler.releasedAt,
-    );
-    if (active) return;
+    const activeCount = refreshed.filter((summary) =>
+      !summary.archivedAt
+      && this.objectiveConsumesRepoSlot(summary)
+      && !this.releasesObjectiveProjectionSlot(summary)
+      && summary.slotState === "active",
+    ).length;
+    const availableSlots = Math.max(0, this.repoSlotConcurrency - activeCount);
+    if (availableSlots <= 0) return;
 
-    const next = refreshed.find((state) =>
-      !state.archivedAt
-      && this.objectiveConsumesRepoSlot(state)
-      && !this.releasesObjectiveSlot(state)
-      && (state.scheduler.slotState === "queued" || !state.scheduler.slotState || state.scheduler.releasedAt),
-    );
-    if (!next) return;
-    await this.emitObjective(next.objectiveId, {
-      type: "objective.slot.admitted",
-      objectiveId: next.objectiveId,
-      admittedAt: Date.now(),
-    });
-    await this.enqueueObjectiveControl(next.objectiveId, "admitted");
+    const next = refreshed.filter((summary) =>
+      !summary.archivedAt
+      && this.objectiveConsumesRepoSlot(summary)
+      && !this.releasesObjectiveProjectionSlot(summary)
+      && (summary.slotState === "queued" || !summary.slotState),
+    ).slice(0, availableSlots);
+    if (next.length === 0) return;
+    for (const queued of next) {
+      await this.emitObjective(queued.objectiveId, {
+        type: "objective.slot.admitted",
+        objectiveId: queued.objectiveId,
+        admittedAt: Date.now(),
+      });
+      await this.enqueueObjectiveControl(queued.objectiveId, "admitted");
+    }
   }
 
   private async processObjectiveStartup(
@@ -3434,6 +3637,7 @@ export class FactoryServiceBase {
           lastMessagePath: parsed.lastMessagePath,
           stdoutPath: parsed.stdoutPath,
           stderrPath: parsed.stderrPath,
+          evidencePath: parsed.evidencePath,
           model: FACTORY_TASK_CODEX_MODEL,
           jsonOutput: true,
           outputSchemaPath: resultSchemaPath,
@@ -3590,17 +3794,10 @@ export class FactoryServiceBase {
     readonly nextAction?: string;
     readonly failedCheck?: FactoryCheckResult;
   }): boolean {
-    if (input.failedCheck) return false;
-    if (input.completion.changed.length === 0) return false;
-    if (input.completion.proof.length === 0) return false;
-    if (input.scriptsRun.some((item) => item.status === "error")) return false;
-    const unresolved = [
-      ...input.completion.remaining,
-      ...(input.nextAction ? [input.nextAction] : []),
-    ]
-      .map((item) => trimmedString(item))
-      .filter((item): item is string => Boolean(item));
-    return unresolved.every((item) => CONTROLLER_RESOLVABLE_DELIVERY_PARTIAL_RE.test(item));
+    return canTaskRunnerAutonomouslyResolveDeliveryPartial({
+      ...input,
+      controllerResolvableDeliveryPartialRe: CONTROLLER_RESOLVABLE_DELIVERY_PARTIAL_RE,
+    });
   }
 
   private buildWorkerHandoffEvent(input: {
@@ -3614,29 +3811,14 @@ export class FactoryServiceBase {
     readonly taskId?: string;
     readonly candidateId?: string;
   }): Extract<FactoryEvent, { readonly type: "worker.handoff" }> {
-    return {
-      type: "worker.handoff",
-      objectiveId: input.objectiveId,
-      scope: input.scope,
-      workerType: input.workerType,
-      outcome: input.outcome,
-      summary: input.summary,
-      handoff: input.handoff,
-      handedOffAt: input.handedOffAt,
-      ...(input.taskId ? { taskId: input.taskId } : {}),
-      ...(input.candidateId ? { candidateId: input.candidateId } : {}),
-    };
+    return buildTaskRunnerWorkerHandoffEvent(input);
   }
 
   private defaultObjectiveHandoffNextAction(
     state: FactoryState,
     status: FactoryObjectiveHandoffStatus,
   ): string | undefined {
-    if (status === "completed" || status === "canceled") return undefined;
-    if (status === "failed") return "Inspect the failure details, react with guidance, or cancel the objective.";
-    return state.objectiveMode === "investigation"
-      ? "Review the blocking receipt, adjust the investigation, or cancel the objective."
-      : "Review the blocking receipt and react or cancel the objective.";
+    return defaultTaskRunnerObjectiveHandoffNextAction(state, status);
   }
 
   private buildObjectiveHandoffEvent(input: {
@@ -3648,31 +3830,7 @@ export class FactoryServiceBase {
     readonly blocker?: string;
     readonly nextAction?: string;
   }): Extract<FactoryEvent, { readonly type: "objective.handoff" }> {
-    const effectiveNextAction = optionalTrimmedString(input.nextAction)
-      ?? this.defaultObjectiveHandoffNextAction(input.state, input.status);
-    const handoffKey = createHash("sha1")
-      .update(JSON.stringify({
-        objectiveId: input.state.objectiveId,
-        status: input.status,
-        summary: input.summary,
-        blocker: input.blocker,
-        nextAction: effectiveNextAction,
-        sourceUpdatedAt: input.sourceUpdatedAt,
-      }))
-      .digest("hex")
-      .slice(0, 16);
-    return {
-      type: "objective.handoff",
-      objectiveId: input.state.objectiveId,
-      title: input.state.title,
-      status: input.status,
-      summary: input.summary,
-      ...(input.output ? { output: input.output } : {}),
-      ...(input.blocker ? { blocker: input.blocker } : {}),
-      ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),
-      handoffKey,
-      sourceUpdatedAt: input.sourceUpdatedAt,
-    };
+    return buildTaskRunnerObjectiveHandoffEvent(input);
   }
 
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
@@ -3699,6 +3857,14 @@ export class FactoryServiceBase {
     const completedAt = Date.now();
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
+    if (hasStructuredInvestigationReport) {
+      const structuredEvidenceFailure = validateTaskEvidence({
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        reportEvidenceRecords: normalizeInvestigationReport(rawResult.report, summary).evidenceRecords,
+      });
+      if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
+    }
     let outcome: FactoryTaskResultOutcome;
     switch (optionalTrimmedString(rawResult.outcome)) {
       case "changes_requested":
@@ -3875,6 +4041,7 @@ export class FactoryServiceBase {
       stdout: fileRef(payload.stdoutPath, "task stdout"),
       stderr: fileRef(payload.stderrPath, "task stderr"),
       lastMessage: fileRef(payload.lastMessagePath, "task last message"),
+      evidence: fileRef(payload.evidencePath, "task evidence"),
       ...(payload.contextSummaryPath ? { contextSummary: fileRef(payload.contextSummaryPath, "task context summary") } : {}),
       contextPack: fileRef(payload.contextPackPath, "task recursive context pack"),
       memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
@@ -4310,43 +4477,15 @@ export class FactoryServiceBase {
     return this.queue.getJob(jobId);
   }
 
-  private queueJobFromRecord(job: JobRecord): QueueJob {
-    return {
-      id: job.id,
-      agentId: job.agentId,
-      lane: job.lane,
-      sessionKey: job.sessionKey,
-      singletonMode: job.singletonMode,
-      payload: { ...job.payload },
-      status: job.status,
-      attempt: job.attempt,
-      maxAttempts: job.maxAttempts,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-      leaseOwner: job.workerId,
-      leaseUntil: job.leaseUntil,
-      lastError: job.lastError,
-      result: job.result ? { ...job.result } : undefined,
-      canceledReason: job.canceledReason,
-      abortRequested: job.abortRequested,
-      commands: job.commands.map((command) => ({
-        ...command,
-        payload: command.payload ? { ...command.payload } : undefined,
-      })),
-    };
-  }
-
-  private objectiveJobsForTasks(tasks: ReadonlyArray<Pick<FactoryTaskView, "job">>): ReadonlyArray<QueueJob> {
-    const jobsById = new Map<string, QueueJob>();
-    for (const task of tasks) {
-      if (!task.job) continue;
-      jobsById.set(task.job.id, this.queueJobFromRecord(task.job));
-    }
-    return [...jobsById.values()].sort((a, b) =>
-      b.updatedAt - a.updatedAt
-      || b.createdAt - a.createdAt
-      || b.id.localeCompare(a.id)
-    );
+  private async listObjectiveScopedJobs(
+    objectiveId: string,
+    limit = 20,
+  ): Promise<ReadonlyArray<QueueJob>> {
+    const jobs = await this.queue.listJobs({ limit: 2000 });
+    return jobs
+      .filter((job) => objectiveIdForQueueJob(job) === objectiveId)
+      .sort(compareObjectiveScopedJobs)
+      .slice(0, Math.max(1, limit));
   }
 
   private nextTaskOrdinal(state: FactoryState): number {
@@ -4972,8 +5111,14 @@ export class FactoryServiceBase {
     state: FactoryState,
     queuePosition?: number,
     receipts?: ReadonlyArray<FactoryObjectiveReceiptSummary>,
+    executionStalled = false,
+    objectiveJobs: ReadonlyArray<QueueJob> = [],
   ): Promise<FactoryObjectiveCard> {
-    const cacheKey = `${state.updatedAt}:${queuePosition ?? ""}`;
+    const slotState = (this.isTerminalObjectiveStatus(state.status) || this.releasesObjectiveSlot(state) || state.scheduler.releasedAt)
+      ? "released"
+      : (state.scheduler.slotState ?? "active");
+    const effectiveQueuePosition = slotState === "queued" ? queuePosition : undefined;
+    const cacheKey = `${state.updatedAt}:${slotState}:${effectiveQueuePosition ?? ""}:${executionStalled ? "stalled" : "live"}:${objectiveJobCacheKey(objectiveJobs)}`;
     const cached = this.objectiveCardCache.get(state.objectiveId);
     if (cached?.key === cacheKey) return cached.card;
     const projection = buildFactoryProjection(state);
@@ -4989,21 +5134,36 @@ export class FactoryServiceBase {
           receiptTaskOrCandidateId: (event) => this.receiptTaskOrCandidateId(event),
         })
         : []);
-    const slotState = (this.isTerminalObjectiveStatus(state.status) || this.releasesObjectiveSlot(state) || state.scheduler.releasedAt)
-      ? "released"
-      : (state.scheduler.slotState ?? "active");
     const tokensUsed = Object.values(state.candidates).reduce((sum, c) => sum + (c.tokensUsed ?? 0), 0);
     const contract = this.objectiveContractForState(state);
     const alignment = this.objectiveAlignmentForState(state);
+    const operationalState = deriveObjectiveOperationalState({
+      state,
+      taskCount: projection.tasks.length,
+      executionStalled,
+      objectiveJobs,
+    });
     const card = buildObjectiveCardRecord({
       state,
-      queuePosition,
+      queuePosition: effectiveQueuePosition,
       slotState,
+      displayState: operationalState.displayState,
+      phaseDetail: operationalState.phaseDetail,
+      statusAuthority: operationalState.statusAuthority,
+      hasAuthoritativeLiveJob: operationalState.hasAuthoritativeLiveJob,
+      executionStalled,
       blockedExplanation: needsBlockedReceipts
         ? buildBlockedExplanation(state, resolvedReceipts)
         : undefined,
       latestDecision: this.deriveLatestDecision(state),
-      nextAction: this.deriveNextAction(state, queuePosition),
+      nextAction:
+        operationalState.phaseDetail === "reconciling"
+          ? "Controller is reconciling the objective handoff before the next pass."
+          : operationalState.phaseDetail === "cleaning_up"
+            ? "Controller is retiring lingering jobs after the objective finished."
+            : executionStalled
+              ? "Execution appears stalled. Review live output, react with guidance, or cancel the objective."
+              : this.deriveNextAction(state, effectiveQueuePosition),
       activeTaskCount: projection.activeTasks.length,
       readyTaskCount: projection.readyTasks.length,
       taskCount: projection.tasks.length,
@@ -5024,10 +5184,18 @@ export class FactoryServiceBase {
     return card;
   }
 
-  private async buildObjectiveDetail(state: FactoryState, queuePosition?: number): Promise<FactoryObjectiveDetail> {
-    const [chain, repoSkillPaths] = await Promise.all([
+  private async buildObjectiveDetail(
+    state: FactoryState,
+    queuePosition?: number,
+    executionStalled?: boolean,
+    objectiveJobsInput?: ReadonlyArray<QueueJob>,
+  ): Promise<FactoryObjectiveDetail> {
+    const [chain, repoSkillPaths, auditMetadata, latestAuditJob, objectiveJobs] = await Promise.all([
       this.runtime.chain(objectiveStream(state.objectiveId)),
       this.collectRepoSkillPaths(),
+      readPersistedObjectiveAuditMetadata(this.dataDir, state.objectiveId),
+      this.latestObjectiveAuditJob(state.objectiveId).catch(() => undefined),
+      objectiveJobsInput ? Promise.resolve(objectiveJobsInput) : this.listObjectiveScopedJobs(state.objectiveId, 40),
     ]);
     const receipts = summarizeObjectiveReceipts(chain, {
       limit: 60,
@@ -5085,15 +5253,17 @@ export class FactoryServiceBase {
         } satisfies FactoryTaskView;
       })
     );
-    const objectiveJobs = this.objectiveJobsForTasks(tasks);
+    const resolvedExecutionStalled = executionStalled
+      ?? liveExecutionSnapshotForJobs(objectiveJobs).stalledObjectiveIds.has(state.objectiveId);
     return {
-      ...await this.buildObjectiveCard(state, queuePosition, receipts),
+      ...await this.buildObjectiveCard(state, queuePosition, receipts, resolvedExecutionStalled, objectiveJobs),
       prompt: state.prompt,
       channel: state.channel,
       baseHash: state.baseHash,
       sourceWarnings: state.sourceWarnings,
       checks: state.checks,
       profile: this.objectiveProfileForState(state),
+      selfImprovement: this.buildObjectiveSelfImprovement(state, auditMetadata, latestAuditJob),
       policy: state.policy,
       contextSources: this.buildContextSources(state, repoSkillPaths, sharedArtifactRefs),
       budgetState: this.buildBudgetState(state),
@@ -5117,12 +5287,12 @@ export class FactoryServiceBase {
   }
 
   private async buildObjectiveDebug(state: FactoryState, queuePosition?: number): Promise<FactoryDebugProjection> {
+    const objectiveJobs = await this.listObjectiveScopedJobs(state.objectiveId, 40);
     const [detail, chain] = await Promise.all([
-      this.buildObjectiveDetail(state, queuePosition),
+      this.buildObjectiveDetail(state, queuePosition, undefined, objectiveJobs),
       this.runtime.chain(objectiveStream(state.objectiveId)),
     ]);
-    const objectiveJobs = this.objectiveJobsForTasks(detail.tasks);
-    const activeJobs = objectiveJobs.filter((job) => !isTerminalJobStatus(job.status)).slice(0, 12);
+    const activeJobs = objectiveJobs.filter((job) => !isTerminalQueueJobStatusValue(job.status)).slice(0, 12);
     const taskWorktrees = await Promise.all(
       detail.tasks.map(async (task) => {
         const status = task.workspacePath
@@ -5156,6 +5326,10 @@ export class FactoryServiceBase {
       title: state.title,
       status: state.status,
       phase: detail.phase,
+      displayState: detail.displayState,
+      phaseDetail: detail.phaseDetail,
+      statusAuthority: detail.statusAuthority,
+      hasAuthoritativeLiveJob: detail.hasAuthoritativeLiveJob,
       scheduler: detail.scheduler,
       latestDecision: detail.latestDecision,
       nextAction: detail.nextAction,
@@ -5178,6 +5352,10 @@ export class FactoryServiceBase {
         summary: receipt.summary,
       })),
       activeJobs,
+      activeJobAuthorities: activeJobs.map((job) => ({
+        jobId: job.id,
+        authority: classifyObjectiveLiveJobAuthority(state, job),
+      })),
       lastJobs: objectiveJobs.slice(0, 20),
       taskWorktrees,
       integrationWorktree,
@@ -5228,6 +5406,10 @@ export class FactoryServiceBase {
       throw err;
     }
     this.invalidateObjectiveProjection(objectiveId);
+    if (this.shouldScheduleTerminalObjectiveCleanup(events)) {
+      await this.rebalanceObjectiveSlots();
+      await this.enqueueObjectiveControl(objectiveId, "reconcile");
+    }
     await this.publishObjectiveProjectionRefresh(objectiveId);
   }
 
@@ -5495,16 +5677,11 @@ export class FactoryServiceBase {
   }
 
   private resolveTaskBaseCommit(state: FactoryState, task: FactoryTaskRecord): string {
-    if (task.candidateId) {
-      const candidate = state.candidates[task.candidateId];
-      if (candidate?.headCommit) return candidate.headCommit;
-    }
-    return state.integration.headCommit ?? task.baseCommit ?? state.baseHash;
+    return resolveInvestigationTaskBaseCommit(state, task);
   }
 
   private taskPromptPath(workspacePath: string, targetPath: string): string {
-    void workspacePath;
-    return targetPath;
+    return buildInvestigationTaskPromptPath(workspacePath, targetPath);
   }
 
   private async writeTaskPacket(
@@ -5686,6 +5863,7 @@ export class FactoryServiceBase {
       promptPath: "",
       selectedSkills: [],
       cloudProvider: undefined,
+      actionPolicy: DEFAULT_FACTORY_OBJECTIVE_PROFILE.actionPolicy,
       objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_PROFILE.objectivePolicy,
     }));
     const includeFactoryObjectiveSkills = Boolean(input.objectiveId);
@@ -6070,7 +6248,7 @@ export class FactoryServiceBase {
   }
 
   private taskResultSchemaPath(resultPath: string): string {
-    return resultPath.replace(/\.json$/i, ".schema.json");
+    return buildTaskRunnerResultSchemaPath(resultPath);
   }
 
   private async taskPacketPresent(
@@ -6108,10 +6286,10 @@ export class FactoryServiceBase {
   }
 
   private isRetryablePublishFailureMessage(message: string): boolean {
-    const normalized = message.trim();
-    if (!normalized) return false;
-    if (HUMAN_INPUT_BLOCK_REASON_RE.test(normalized)) return false;
-    return PUBLISH_TRANSIENT_FAILURE_RE.test(normalized);
+    return isTaskRunnerRetryablePublishFailureMessage(message, {
+      humanInputBlockReasonRe: HUMAN_INPUT_BLOCK_REASON_RE,
+      publishTransientFailureRe: PUBLISH_TRANSIENT_FAILURE_RE,
+    });
   }
 
   private async collectCheckedInRepoSkillPaths(): Promise<ReadonlyArray<string>> {

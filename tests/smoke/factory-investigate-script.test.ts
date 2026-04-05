@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,11 +22,25 @@ import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI_PATH = path.join(ROOT, "src", "cli.ts");
-const SCRIPT_PATH = path.join(ROOT, "scripts", "factory-investigate.ts");
 const BUN = resolveBunRuntime();
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
+
+const autoFixRecommendationKey = (input: {
+  readonly summary: string;
+  readonly scope: string;
+  readonly anomalyPatterns: ReadonlyArray<string>;
+}): string =>
+  createHash("sha1")
+    .update(JSON.stringify({
+      summary: input.summary.trim().toLowerCase().replace(/\s+/g, " "),
+      scope: input.scope.trim().toLowerCase().replace(/\s+/g, " "),
+      anomalyPatterns: [...new Set(input.anomalyPatterns.map((pattern) =>
+        pattern.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""))).values()].sort(),
+    }))
+    .digest("hex")
+    .slice(0, 16);
 
 const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> => {
   const { stdout } = await execFileAsync("git", [...args], {
@@ -172,82 +187,6 @@ const objectiveTaskJobs = async (
     .filter((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === objectiveId)
     .sort((a, b) => a.createdAt - b.createdAt);
 };
-
-test("factory investigate script resolves task ids and prints summary, context, and dag flow", async () => {
-  const { service, queue, repoRoot, dataDir } = await createFactoryService();
-  const created = await service.createObjective({
-    title: "Investigate receipt script output",
-    prompt: "Explain what happened in this objective using receipts and packet context.",
-    objectiveMode: "investigation",
-    severity: 2,
-    checks: [],
-    profileId: "generalist",
-  });
-  await runObjectiveStartup(service, created.objectiveId);
-  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
-  expect(job).toBeTruthy();
-  await service.runTask(job!.payload as FactoryTaskJobPayload);
-
-  const textRun = await execFileAsync(BUN, [
-    SCRIPT_PATH,
-    "task_01",
-    "--data-dir",
-    dataDir,
-    "--repo-root",
-    repoRoot,
-    "--timeline-limit",
-    "8",
-    "--context-chars",
-    "800",
-  ], {
-    cwd: ROOT,
-    encoding: "utf-8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-
-  expect(textRun.stdout).toContain("# Factory Receipt Investigation");
-  expect(textRun.stdout).toContain("Resolved: objective via task-id");
-  expect(textRun.stdout).toContain("## What Happened");
-  expect(textRun.stdout).toContain("## Assessment");
-  expect(textRun.stdout).toContain("## Context");
-  expect(textRun.stdout).toContain("## DAG Flow");
-  expect(textRun.stdout).toContain("## Timeline");
-  expect(textRun.stdout).toContain("Investigate receipt script output");
-  expect(textRun.stdout).toContain("Context summary path:");
-  expect(textRun.stdout).toContain("task_01 (root)");
-
-  const jsonRun = await execFileAsync(BUN, [
-    SCRIPT_PATH,
-    created.objectiveId,
-    "--data-dir",
-    dataDir,
-    "--repo-root",
-    repoRoot,
-    "--json",
-  ], {
-    cwd: ROOT,
-    encoding: "utf-8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-
-  const payload = JSON.parse(jsonRun.stdout) as {
-    readonly resolved: { readonly kind: string };
-    readonly links: { readonly objectiveId?: string; readonly taskId?: string };
-    readonly packetContext?: { readonly summaryPath?: string; readonly summaryText?: string };
-    readonly dag: { readonly lines: ReadonlyArray<string> };
-    readonly summary: { readonly whatHappened: ReadonlyArray<string> };
-    readonly assessment: { readonly verdict: string; readonly easyRouteRisk: string };
-  };
-  expect(payload.resolved.kind).toBe("objective");
-  expect(payload.links.objectiveId).toBe(created.objectiveId);
-  expect(payload.links.taskId).toBe("task_01");
-  expect(payload.packetContext?.summaryPath).toContain(".receipt/factory/task_01.context.md");
-  expect(payload.packetContext?.summaryText).toContain("Factory Task Context Summary");
-  expect(payload.dag.lines.some((line) => line.includes("task_01"))).toBe(true);
-  expect(payload.summary.whatHappened.length).toBeGreaterThan(0);
-  expect(payload.assessment.verdict).toBeTruthy();
-  expect(payload.assessment.easyRouteRisk).toBeTruthy();
-}, 120_000);
 
 test("factory CLI investigate exposes the same investigation flow for repair/debug work", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService();
@@ -670,17 +609,35 @@ test("factory objective audit persists objective snapshots into dedicated audit 
       objectiveStatus: "completed",
       objectiveUpdatedAt: Date.now(),
     },
+    recommendationGenerator: async () => [{
+      summary: "Persist structured investigation evidence in the audit artifact and memory surfaces.",
+      anomalyPatterns: ["missing_structured_evidence"],
+      scope: "src/services/factory-runtime.ts",
+      confidence: "medium",
+      suggestedFix: "Persist audit-generated recommendations in objective.audit.json and render them back through investigation and audit readers.",
+    }],
   }) as {
     readonly objectiveId: string;
     readonly verdict: string;
     readonly jsonPath: string;
     readonly textPath: string;
+    readonly recommendations: number;
   };
 
   expect(result.objectiveId).toBe(created.objectiveId);
   expect(result.verdict).toBeTruthy();
+  expect(result.recommendations).toBe(1);
   expect(await fs.stat(result.jsonPath).then(() => true).catch(() => false)).toBe(true);
   expect(await fs.stat(result.textPath).then(() => true).catch(() => false)).toBe(true);
+
+  const persistedAudit = JSON.parse(await fs.readFile(result.jsonPath, "utf-8")) as {
+    readonly audit?: {
+      readonly recommendations?: ReadonlyArray<{
+        readonly summary: string;
+      }>;
+    };
+  };
+  expect(persistedAudit.audit?.recommendations?.[0]?.summary ?? "").toContain("Persist structured investigation evidence");
 
   const objectiveAuditMemory = await service.memoryTools!.read({
     scope: `factory/audits/objectives/${created.objectiveId}`,
@@ -701,6 +658,252 @@ test("factory objective audit persists objective snapshots into dedicated audit 
     && entry.text.includes("Summary")
   )).toBe(true);
   expect(objectiveAuditMemory.some((entry) => entry.text.includes("alignment="))).toBe(true);
+
+  const reloaded = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(reloaded.recommendations[0]?.summary ?? "").toContain("Persist structured investigation evidence");
+}, 120_000);
+
+test("factory objective audit records recommendation generation failures instead of silently dropping them", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Record recommendation generation failures",
+    prompt: "Finish an investigation so audit failures are visible to operators instead of silently disappearing.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+    },
+    recommendationGenerator: async () => {
+      throw new Error("LLM offline during recommendation generation");
+    },
+  }) as {
+    readonly recommendationStatus: string;
+    readonly recommendationError?: string;
+    readonly jsonPath: string;
+  };
+
+  expect(result.recommendationStatus).toBe("failed");
+  expect(result.recommendationError).toContain("LLM offline during recommendation generation");
+
+  const persistedAudit = JSON.parse(await fs.readFile(result.jsonPath, "utf-8")) as {
+    readonly audit?: {
+      readonly recommendationStatus?: string;
+      readonly recommendationError?: string;
+    };
+  };
+  expect(persistedAudit.audit?.recommendationStatus).toBe("failed");
+  expect(persistedAudit.audit?.recommendationError ?? "").toContain("LLM offline during recommendation generation");
+
+  const objectiveAuditMemory = await service.memoryTools!.read({
+    scope: `factory/audits/objectives/${created.objectiveId}`,
+    limit: 5,
+  });
+  expect(objectiveAuditMemory.some((entry) =>
+    entry.text.includes("generation_failed")
+    && entry.text.includes("LLM offline during recommendation generation")
+  )).toBe(true);
+
+  const reloaded = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(reloaded.audit?.recommendationStatus).toBe("failed");
+  expect(reloaded.warnings.some((warning) => warning.includes("LLM offline during recommendation generation"))).toBe(true);
+  expect(reloaded.recommendations).toEqual([]);
+}, 120_000);
+
+test("factory objective audit creates an auto-fix objective for recurring high-confidence patterns", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Create auto-fix from recurring audit pattern",
+    prompt: "Finish an investigation so the audit job can decide whether to trigger a follow-up objective.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  for (let index = 0; index < 5; index += 1) {
+    const historicalObjectiveId = `objective_hist_audit_${index + 1}`;
+    const historicalArtifactDir = path.join(dataDir, "factory", "artifacts", historicalObjectiveId);
+    await fs.mkdir(historicalArtifactDir, { recursive: true });
+    await fs.writeFile(path.join(historicalArtifactDir, "objective.audit.json"), JSON.stringify({
+      requestedId: historicalObjectiveId,
+      links: { objectiveId: historicalObjectiveId },
+      summary: { status: "completed" },
+      audit: {
+        generatedAt: Date.now() - (index + 1) * 1_000,
+        recommendationStatus: "ready",
+        recommendations: [{
+          summary: "Stabilize lease handling for long-running Factory work.",
+          anomalyPatterns: ["lease_expired"],
+          scope: "src/services/factory-runtime.ts",
+          confidence: "high",
+          suggestedFix: "Add progress heartbeats and split long-running work into bounded steps so leases do not expire.",
+        }],
+        recurringPatterns: [{ pattern: "lease_expired", count: 1 }],
+      },
+    }, null, 2), "utf-8");
+    await service.memoryTools!.commit({
+      scope: "factory/audits/repo",
+      text: `[${historicalObjectiveId}] Summary\n${historicalObjectiveId} finished completed with verdict=weak.\n\nRecommendations\n- [high] scope=src/services/factory-runtime.ts patterns=lease_expired Stabilize lease handling for long-running Factory work.`,
+      tags: ["factory", "audit", "repo", "completed", "weak"],
+    });
+  }
+
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    factoryService: service,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+    },
+    recommendationGenerator: async () => [{
+      summary: "Reduce lease expiry during long-running Factory jobs.",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory-runtime.ts",
+      confidence: "high",
+      suggestedFix: "Add periodic heartbeats or progress updates for long-running worker steps and break large operations into smaller bounded units.",
+    }],
+  }) as {
+    readonly autoFixObjectiveId?: string;
+    readonly recommendations: number;
+  };
+
+  expect(result.recommendations).toBe(1);
+  expect(result.autoFixObjectiveId).toBeTruthy();
+  const autoFixObjective = await service.getObjective(result.autoFixObjectiveId!);
+  expect(autoFixObjective.channel).toBe("auto-fix");
+  expect(autoFixObjective.objectiveMode).toBe("delivery");
+  expect(autoFixObjective.prompt).toContain("lease_expired");
+
+  const objectiveAuditMemory = await service.memoryTools!.read({
+    scope: `factory/audits/objectives/${created.objectiveId}`,
+    limit: 5,
+  });
+  expect(objectiveAuditMemory.some((entry) =>
+    entry.text.includes("Auto-fix")
+    && entry.text.includes(result.autoFixObjectiveId!)
+  )).toBe(true);
+}, 120_000);
+
+test("factory objective audit reuses an existing open auto-fix objective for the same recurring pattern", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Reuse auto-fix objective",
+    prompt: "Finish an investigation so the audit can reuse an existing follow-up objective instead of creating duplicates.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  for (let index = 0; index < 5; index += 1) {
+    const historicalObjectiveId = `objective_hist_reuse_${index + 1}`;
+    const historicalArtifactDir = path.join(dataDir, "factory", "artifacts", historicalObjectiveId);
+    await fs.mkdir(historicalArtifactDir, { recursive: true });
+    await fs.writeFile(path.join(historicalArtifactDir, "objective.audit.json"), JSON.stringify({
+      requestedId: historicalObjectiveId,
+      links: { objectiveId: historicalObjectiveId },
+      summary: { status: "completed" },
+      audit: {
+        generatedAt: Date.now() - (index + 1) * 1_000,
+        recommendationStatus: "ready",
+        recommendations: [{
+          summary: "Reduce lease expiry during long-running Factory jobs.",
+          anomalyPatterns: ["lease_expired"],
+          scope: "src/services/factory-runtime.ts",
+          confidence: "high",
+          suggestedFix: "Add periodic heartbeats or progress updates for long-running worker steps and break large operations into smaller bounded units.",
+        }],
+        recurringPatterns: [{ pattern: "lease_expired", count: 1 }],
+      },
+    }, null, 2), "utf-8");
+    await service.memoryTools!.commit({
+      scope: "factory/audits/repo",
+      text: `[${historicalObjectiveId}] Summary\n${historicalObjectiveId} finished completed with verdict=weak.\n\nRecommendations\n- [high] scope=src/services/factory-runtime.ts patterns=lease_expired Reduce lease expiry during long-running Factory jobs.`,
+      tags: ["factory", "audit", "repo", "completed", "weak"],
+    });
+  }
+
+  const existingAutoFixKey = autoFixRecommendationKey({
+    summary: "Reduce lease expiry during long-running Factory jobs.",
+    scope: "src/services/factory-runtime.ts",
+    anomalyPatterns: ["lease_expired"],
+  });
+  const existingAutoFix = await service.createObjective({
+    title: "Reduce lease expiry during long-running Factory jobs.",
+    prompt: [
+      "Auto-fix triggered by recurring audit recommendation.",
+      "",
+      "## Recommendation",
+      "Add periodic heartbeats or progress updates for long-running worker steps and break large operations into smaller bounded units.",
+      "",
+      "## Scope",
+      "src/services/factory-runtime.ts",
+      "",
+      "## Recurring Patterns (lease_expired)",
+      "- lease_expired: 5 occurrence(s)",
+      "",
+      "## Audit Deduplication",
+      `factory_auto_fix_key:${existingAutoFixKey}`,
+    ].join("\n"),
+    objectiveMode: "delivery",
+    severity: 1,
+    channel: "auto-fix",
+    startImmediately: false,
+  });
+  const beforeObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    factoryService: service,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+    },
+    recommendationGenerator: async () => [{
+      summary: "Reduce lease expiry during long-running Factory jobs.",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory-runtime.ts",
+      confidence: "high",
+      suggestedFix: "Add periodic heartbeats or progress updates for long-running worker steps and break large operations into smaller bounded units.",
+    }],
+  }) as {
+    readonly autoFixObjectiveId?: string;
+  };
+
+  const afterObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+  expect(result.autoFixObjectiveId).toBe(existingAutoFix.objectiveId);
+  expect(afterObjectiveIds).toEqual(beforeObjectiveIds);
 }, 120_000);
 
 test("factory objective audit ignores late sidecar failures that happen after objective completion", async () => {

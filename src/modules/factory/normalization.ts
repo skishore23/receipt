@@ -11,6 +11,7 @@ import type {
   FactoryInvestigationSynthesisRecord,
   FactoryInvestigationTaskReport,
   FactoryObjectiveMode,
+  FactoryProfileDispatchAction,
   FactoryObjectivePolicy,
   FactoryObjectiveProfileSnapshot,
   FactoryObjectiveSeverity,
@@ -29,6 +30,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const normalizeObjectiveMode = (value: unknown): FactoryObjectiveMode =>
   value === "investigation" ? "investigation" : "delivery";
+
+const normalizeDispatchActionList = (value: unknown): ReadonlyArray<FactoryProfileDispatchAction> => {
+  if (!Array.isArray(value)) return DEFAULT_FACTORY_OBJECTIVE_PROFILE.actionPolicy.allowedDispatchActions;
+  const normalized = value.filter((item): item is FactoryProfileDispatchAction =>
+    item === "create"
+    || item === "react"
+    || item === "promote"
+    || item === "cancel"
+    || item === "cleanup"
+    || item === "archive");
+  return uniqueStrings(normalized) as ReadonlyArray<FactoryProfileDispatchAction>;
+};
 
 const normalizeTaskExecutionMode = (value: unknown): FactoryTaskExecutionMode =>
   value === "isolated" ? "isolated" : "worktree";
@@ -188,6 +201,7 @@ export const normalizeTaskRecord = (
 export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): FactoryObjectiveProfileSnapshot => {
   if (!isRecord(value)) return DEFAULT_FACTORY_OBJECTIVE_PROFILE;
   const policyInput = isRecord(value.objectivePolicy) ? value.objectivePolicy : {};
+  const actionPolicyInput = isRecord(value.actionPolicy) ? value.actionPolicy : {};
   return {
     rootProfileId: typeof value.rootProfileId === "string" && value.rootProfileId.trim()
       ? value.rootProfileId
@@ -208,6 +222,12 @@ export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): Factor
       ? value.selectedSkills.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
       : DEFAULT_FACTORY_OBJECTIVE_PROFILE.selectedSkills,
     cloudProvider: normalizeProfileCloudProvider(value.cloudProvider),
+    actionPolicy: {
+      allowedDispatchActions: normalizeDispatchActionList(actionPolicyInput.allowedDispatchActions),
+      allowedCreateModes: Array.isArray(actionPolicyInput.allowedCreateModes)
+        ? uniqueStrings(actionPolicyInput.allowedCreateModes.map((item) => normalizeObjectiveMode(item))) as ReadonlyArray<FactoryObjectiveMode>
+        : DEFAULT_FACTORY_OBJECTIVE_PROFILE.actionPolicy.allowedCreateModes,
+    },
     objectivePolicy: {
       allowedWorkerTypes: Array.isArray(policyInput.allowedWorkerTypes)
         ? policyInput.allowedWorkerTypes.filter((item): item is FactoryWorkerType => typeof item === "string" && item.trim().length > 0)

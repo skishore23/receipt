@@ -4,7 +4,6 @@ import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
 import type { QueueJob } from "../../../adapters/jsonl-queue";
 import type { FactoryChatProfile } from "../../../services/factory-chat-profiles";
 import { factoryChatSessionStream, discoverFactoryChatProfiles, resolveFactoryChatProfile } from "../../../services/factory-chat-profiles";
-import type { FactoryChatShellModel } from "../../../views/factory-models";
 import { projectFactoryChatContextFromReceipts } from "../chat-context";
 import {
   readChatContextProjection,
@@ -26,10 +25,6 @@ export const createFactoryRouteCache = (input: {
   readonly chatProjectionDataDir?: string;
 }) => {
   const projectionCacheTtlMs = 900;
-  const chatShellCache = new Map<string, {
-    readonly expiresAt: number;
-    readonly value: Promise<FactoryChatShellModel>;
-  }>();
   const recentJobsCache = new Map<string, {
     readonly expiresAt: number;
     readonly value: Promise<ReadonlyArray<QueueJob>>;
@@ -97,17 +92,16 @@ export const createFactoryRouteCache = (input: {
       requestedId: inputStream.profileId,
     });
     const stream = factoryChatSessionStream(input.service.git.repoRoot, resolved.root.id, inputStream.chatId);
-    const chain = await input.agentRuntime.chain(stream);
-    const head = chain.at(-1);
     if (input.chatProjectionDataDir) {
       await syncChangedChatContextProjections(input.chatProjectionDataDir).catch(() => undefined);
     }
     const projectionVersion = input.chatProjectionDataDir
       ? readChatContextProjectionVersion(input.chatProjectionDataDir, stream)
       : undefined;
-    return projectionVersion !== undefined
-      ? `chat:${projectionVersion}`
-      : (head ? `${chain.length}:${head.hash}` : "0:");
+    if (projectionVersion !== undefined) return `chat:${projectionVersion}`;
+    const chain = await input.agentRuntime.chain(stream);
+    const head = chain.at(-1);
+    return head ? `${chain.length}:${head.hash}` : "0:";
   };
 
   const fallbackChatContextFromChain = (inputChain: {
@@ -150,6 +144,5 @@ export const createFactoryRouteCache = (input: {
     loadChatContextProjectionForSession,
     withProjectionCache,
     projectionCacheTtlMs,
-    chatShellCache,
   };
 };

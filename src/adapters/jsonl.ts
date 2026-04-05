@@ -1,8 +1,10 @@
 import type { Branch, BranchStore, Chain, Receipt, Store } from "@receipt/core/types";
 import { receipt } from "@receipt/core/chain";
+import { asc, desc, eq } from "drizzle-orm";
 
 import { getReceiptDb, listStreamsByPrefix } from "../db/client";
 import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
+import * as schema from "../db/schema";
 import type { BranchMetaEvent } from "../modules/branch-meta";
 
 const BRANCH_META_STREAM = "__meta/branches";
@@ -16,50 +18,52 @@ const asEventType = (body: unknown): string => {
 };
 
 const rowToReceipt = <B>(row: {
-  readonly receipt_id: string;
+  readonly receiptId: string;
   readonly ts: number;
   readonly stream: string;
-  readonly prev_hash: string | null;
-  readonly body_json: string;
+  readonly prevHash: string | null;
+  readonly bodyJson: string;
   readonly hash: string;
-  readonly hints_json: string | null;
+  readonly hintsJson: string | null;
 }): Receipt<B> => ({
-  id: row.receipt_id,
+  id: row.receiptId,
   ts: Number(row.ts),
   stream: row.stream,
-  prev: row.prev_hash ?? undefined,
-  body: jsonParse<B>(row.body_json, {} as B),
+  prev: row.prevHash ?? undefined,
+  body: jsonParse<B>(row.bodyJson, {} as B),
   hash: row.hash,
-  hints: jsonParseOptional<Record<string, unknown>>(row.hints_json),
+  hints: jsonParseOptional<Record<string, unknown>>(row.hintsJson),
+});
+
+const rowToBranch = (row: {
+  readonly name: string;
+  readonly parent: string | null;
+  readonly forkAt: number | null;
+  readonly createdAt: number;
+}): Branch => ({
+  name: row.name,
+  parent: row.parent ?? undefined,
+  forkAt: row.forkAt ?? undefined,
+  createdAt: Number(row.createdAt),
 });
 
 export const jsonlStore = <B>(dir: string): Store<B> => {
   const db = getReceiptDb(dir);
 
   const readRows = (stream: string, limit?: number): Chain<B> => {
-    const query = limit === undefined
-      ? db.sqlite.query(`
-          SELECT receipt_id, ts, stream, prev_hash, body_json, hash, hints_json
-          FROM receipts
-          WHERE stream = ?
-          ORDER BY stream_seq ASC
-        `)
-      : db.sqlite.query(`
-          SELECT receipt_id, ts, stream, prev_hash, body_json, hash, hints_json
-          FROM receipts
-          WHERE stream = ?
-          ORDER BY stream_seq ASC
-          LIMIT ?
-        `);
-    const rows = (limit === undefined ? query.all(stream) : query.all(stream, limit)) as Array<{
-      readonly receipt_id: string;
-      readonly ts: number;
-      readonly stream: string;
-      readonly prev_hash: string | null;
-      readonly body_json: string;
-      readonly hash: string;
-      readonly hints_json: string | null;
-    }>;
+    const base = db.orm.select({
+      receiptId: schema.receipts.receiptId,
+      ts: schema.receipts.ts,
+      stream: schema.receipts.stream,
+      prevHash: schema.receipts.prevHash,
+      bodyJson: schema.receipts.bodyJson,
+      hash: schema.receipts.hash,
+      hintsJson: schema.receipts.hintsJson,
+    })
+      .from(schema.receipts)
+      .where(eq(schema.receipts.stream, stream))
+      .orderBy(asc(schema.receipts.streamSeq));
+    const rows = db.read(() => (limit === undefined ? base.all() : base.limit(limit).all()));
     return rows.map((row) => rowToReceipt<B>(row));
   };
 
@@ -67,78 +71,80 @@ export const jsonlStore = <B>(dir: string): Store<B> => {
     append: async function append(r, expectedPrev) {
       const physicalPrev = expectedPrev ?? r.prev;
       const eventType = asEventType(r.body);
-      const tx = db.sqlite.transaction(() => {
-        const current = db.sqlite.query(`
-          SELECT head_hash, receipt_count
-          FROM streams
-          WHERE name = ?
-        `).get(r.stream) as { readonly head_hash: string | null; readonly receipt_count: number } | null;
-        const headHash = current?.head_hash ?? undefined;
+      db.transaction((tx) => {
+        const current = tx.select({
+          headHash: schema.streams.headHash,
+          receiptCount: schema.streams.receiptCount,
+        })
+          .from(schema.streams)
+          .where(eq(schema.streams.name, r.stream))
+          .get();
+        const headHash = current?.headHash ?? undefined;
         if (headHash !== physicalPrev) {
           throw new Error(`Expected prev hash ${physicalPrev ?? "undefined"} but head is ${headHash ?? "undefined"}`);
         }
-        const nextStreamSeq = Number(current?.receipt_count ?? 0) + 1;
-        db.sqlite.query(`
-          INSERT INTO receipts (
-            stream,
-            stream_seq,
-            receipt_id,
-            ts,
-            prev_hash,
-            hash,
-            event_type,
-            body_json,
-            hints_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          r.stream,
-          nextStreamSeq,
-          r.id,
-          r.ts,
-          r.prev ?? null,
-          r.hash,
-          eventType,
-          jsonStringify(r.body),
-          jsonStringifyOptional(r.hints),
-        );
-        const globalSeqRow = db.sqlite.query("SELECT last_insert_rowid() AS id").get() as { readonly id: number };
-        db.sqlite.query(`
-          INSERT INTO streams (name, head_hash, receipt_count, updated_at, last_ts)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(name) DO UPDATE SET
-            head_hash = excluded.head_hash,
-            receipt_count = excluded.receipt_count,
-            updated_at = excluded.updated_at,
-            last_ts = excluded.last_ts
-        `).run(
-          r.stream,
-          r.hash,
-          nextStreamSeq,
-          Date.now(),
-          r.ts,
-        );
+        const nextStreamSeq = Number(current?.receiptCount ?? 0) + 1;
+        const globalSeqRow = tx.insert(schema.receipts)
+          .values({
+            stream: r.stream,
+            streamSeq: nextStreamSeq,
+            receiptId: r.id,
+            ts: r.ts,
+            prevHash: r.prev ?? null,
+            hash: r.hash,
+            eventType,
+            bodyJson: jsonStringify(r.body),
+            hintsJson: jsonStringifyOptional(r.hints),
+          })
+          .returning({ id: schema.receipts.globalSeq })
+          .get();
+        const updatedAt = Date.now();
+        tx.insert(schema.streams)
+          .values({
+            name: r.stream,
+            headHash: r.hash,
+            receiptCount: nextStreamSeq,
+            updatedAt,
+            lastTs: r.ts,
+          })
+          .onConflictDoUpdate({
+            target: schema.streams.name,
+            set: {
+              headHash: r.hash,
+              receiptCount: nextStreamSeq,
+              updatedAt,
+              lastTs: r.ts,
+            },
+          })
+          .run();
         if (r.stream === BRANCH_META_STREAM && eventType === BRANCH_META_EVENT) {
           const event = r.body as BranchMetaEvent;
-          db.sqlite.query(`
-            INSERT INTO branches (name, parent, fork_at, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-              parent = excluded.parent,
-              fork_at = excluded.fork_at,
-              created_at = excluded.created_at
-          `).run(
-            event.branch.name,
-            event.branch.parent ?? null,
-            event.branch.forkAt ?? null,
-            event.branch.createdAt,
-          );
+          tx.insert(schema.branches)
+            .values({
+              name: event.branch.name,
+              parent: event.branch.parent ?? null,
+              forkAt: event.branch.forkAt ?? null,
+              createdAt: event.branch.createdAt,
+            })
+            .onConflictDoUpdate({
+              target: schema.branches.name,
+              set: {
+                parent: event.branch.parent ?? null,
+                forkAt: event.branch.forkAt ?? null,
+                createdAt: event.branch.createdAt,
+              },
+            })
+            .run();
         }
-        db.sqlite.query(`
-          INSERT INTO change_log (global_seq, stream, event_type, changed_at)
-          VALUES (?, ?, ?, ?)
-        `).run(globalSeqRow.id, r.stream, eventType, Date.now());
+        tx.insert(schema.changeLog)
+          .values({
+            globalSeq: globalSeqRow.id,
+            stream: r.stream,
+            eventType,
+            changedAt: Date.now(),
+          })
+          .run();
       });
-      tx();
     },
 
     read: async (stream) => readRows(stream),
@@ -146,40 +152,42 @@ export const jsonlStore = <B>(dir: string): Store<B> => {
     take: async (stream, n) => readRows(stream, Math.max(0, n)),
 
     count: async (stream) => {
-      const row = db.sqlite.query(`
-        SELECT receipt_count
-        FROM streams
-        WHERE name = ?
-      `).get(stream) as { readonly receipt_count: number } | null;
-      return Number(row?.receipt_count ?? 0);
+      const row = db.read(() => db.orm.select({
+        receiptCount: schema.streams.receiptCount,
+      })
+        .from(schema.streams)
+        .where(eq(schema.streams.name, stream))
+        .get());
+      return Number(row?.receiptCount ?? 0);
     },
 
     head: async (stream) => {
-      const row = db.sqlite.query(`
-        SELECT receipt_id, ts, stream, prev_hash, body_json, hash, hints_json
-        FROM receipts
-        WHERE stream = ?
-        ORDER BY stream_seq DESC
-        LIMIT 1
-      `).get(stream) as {
-        readonly receipt_id: string;
-        readonly ts: number;
-        readonly stream: string;
-        readonly prev_hash: string | null;
-        readonly body_json: string;
-        readonly hash: string;
-        readonly hints_json: string | null;
-      } | null;
+      const row = db.read(() => db.orm.select({
+        receiptId: schema.receipts.receiptId,
+        ts: schema.receipts.ts,
+        stream: schema.receipts.stream,
+        prevHash: schema.receipts.prevHash,
+        bodyJson: schema.receipts.bodyJson,
+        hash: schema.receipts.hash,
+        hintsJson: schema.receipts.hintsJson,
+      })
+        .from(schema.receipts)
+        .where(eq(schema.receipts.stream, stream))
+        .orderBy(desc(schema.receipts.streamSeq))
+        .limit(1)
+        .get());
       return row ? rowToReceipt<B>(row) : undefined;
     },
 
     version: async (stream) => {
-      const row = db.sqlite.query(`
-        SELECT receipt_count, head_hash
-        FROM streams
-        WHERE name = ?
-      `).get(stream) as { readonly receipt_count: number; readonly head_hash: string | null } | null;
-      return row ? `${Number(row.receipt_count)}:${row.head_hash ?? ""}` : undefined;
+      const row = db.read(() => db.orm.select({
+        receiptCount: schema.streams.receiptCount,
+        headHash: schema.streams.headHash,
+      })
+        .from(schema.streams)
+        .where(eq(schema.streams.name, stream))
+        .get());
+      return row ? `${Number(row.receiptCount)}:${row.headHash ?? ""}` : undefined;
     },
 
     listStreams: async (prefix) => listStreamsByPrefix(db, prefix),
@@ -206,61 +214,41 @@ export const jsonBranchStore = (dir: string): BranchStore => {
   return {
     save,
     get: async (name) => {
-      const row = db.sqlite.query(`
-        SELECT name, parent, fork_at, created_at
-        FROM branches
-        WHERE name = ?
-      `).get(name) as {
-        readonly name: string;
-        readonly parent: string | null;
-        readonly fork_at: number | null;
-        readonly created_at: number;
-      } | null;
-      return row
-        ? {
-            name: row.name,
-            parent: row.parent ?? undefined,
-            forkAt: row.fork_at ?? undefined,
-            createdAt: Number(row.created_at),
-          }
-        : undefined;
+      const row = db.read(() => db.orm.select({
+        name: schema.branches.name,
+        parent: schema.branches.parent,
+        forkAt: schema.branches.forkAt,
+        createdAt: schema.branches.createdAt,
+      })
+        .from(schema.branches)
+        .where(eq(schema.branches.name, name))
+        .get());
+      return row ? rowToBranch(row) : undefined;
     },
     list: async () => {
-      const rows = db.sqlite.query(`
-        SELECT name, parent, fork_at, created_at
-        FROM branches
-        ORDER BY name ASC
-      `).all() as Array<{
-        readonly name: string;
-        readonly parent: string | null;
-        readonly fork_at: number | null;
-        readonly created_at: number;
-      }>;
-      return rows.map((row) => ({
-        name: row.name,
-        parent: row.parent ?? undefined,
-        forkAt: row.fork_at ?? undefined,
-        createdAt: Number(row.created_at),
-      }));
+      const rows = db.read(() => db.orm.select({
+        name: schema.branches.name,
+        parent: schema.branches.parent,
+        forkAt: schema.branches.forkAt,
+        createdAt: schema.branches.createdAt,
+      })
+        .from(schema.branches)
+        .orderBy(asc(schema.branches.name))
+        .all());
+      return rows.map((row) => rowToBranch(row));
     },
     children: async (parent) => {
-      const rows = db.sqlite.query(`
-        SELECT name, parent, fork_at, created_at
-        FROM branches
-        WHERE parent = ?
-        ORDER BY name ASC
-      `).all(parent) as Array<{
-        readonly name: string;
-        readonly parent: string | null;
-        readonly fork_at: number | null;
-        readonly created_at: number;
-      }>;
-      return rows.map((row) => ({
-        name: row.name,
-        parent: row.parent ?? undefined,
-        forkAt: row.fork_at ?? undefined,
-        createdAt: Number(row.created_at),
-      }));
+      const rows = db.read(() => db.orm.select({
+        name: schema.branches.name,
+        parent: schema.branches.parent,
+        forkAt: schema.branches.forkAt,
+        createdAt: schema.branches.createdAt,
+      })
+        .from(schema.branches)
+        .where(eq(schema.branches.parent, parent))
+        .orderBy(asc(schema.branches.name))
+        .all());
+      return rows.map((row) => rowToBranch(row));
     },
   };
 };

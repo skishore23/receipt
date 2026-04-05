@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
+import { createRuntime } from "@receipt/core/runtime";
 import type { DelegationTools } from "../../src/adapters/delegation";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
+import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import {
   AgentCapabilityRegistry,
   capabilityDefinition,
@@ -14,6 +16,9 @@ import {
   createCapabilitySpec,
   factoryDispatchCapability,
 } from "../../src/agents/capabilities";
+import { agentRunStream } from "../../src/agents/agent.streams";
+import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent, type AgentState } from "../../src/modules/agent";
+import { repoKeyForRoot, factoryChatSessionStream } from "../../src/services/factory-chat-profiles";
 
 const mkMemoryTools = (): MemoryTools => ({
   read: async () => [],
@@ -36,6 +41,34 @@ const mkDelegationTools = (): DelegationTools => ({
   "agent.status": async () => ({ output: "", summary: "" }),
   "agent.inspect": async () => ({ output: "", summary: "" }),
 });
+
+const createAgentRuntime = (dataDir: string) =>
+  createRuntime<AgentCmd, AgentEvent, AgentState>(
+    jsonlStore<AgentEvent>(dataDir),
+    jsonBranchStore(dataDir),
+    decideAgent,
+    reduceAgent,
+    initialAgent,
+  );
+
+const emitIndexedAgentEvent = async (
+  runtime: ReturnType<typeof createAgentRuntime>,
+  sessionStream: string,
+  runId: string,
+  event: AgentEvent,
+): Promise<void> => {
+  const runStream = agentRunStream(sessionStream, runId);
+  await runtime.execute(runStream, {
+    type: "emit",
+    event,
+    eventId: `${runStream}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  });
+  await runtime.execute(sessionStream, {
+    type: "emit",
+    event,
+    eventId: `${sessionStream}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  });
+};
 
 test("capability registry filters allowlist and unavailable capabilities", () => {
   const registry = new AgentCapabilityRegistry({
@@ -116,7 +149,55 @@ test("skill.read resolves registry-backed docs for built-in and shared capabilit
     expect(custom.output).toContain('test.custom: {"value"?: string} - Custom capability.');
     expect(codex.output).toContain('codex.run: {"prompt": string, "timeoutMs"?: number}');
     expect(factory.output).toContain('factory.dispatch: {"action"?: "create"|"react"|"promote"|"cancel"|"cleanup"|"archive"');
+    expect(factory.output).not.toContain('"profileId"?: string');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("session.search and session.read expose projected transcript recall", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-capabilities-session-"));
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-capabilities-session-repo-"));
+  try {
+    const runtime = createAgentRuntime(dir);
+    const sessionStream = factoryChatSessionStream(repoRoot, "generalist", "chat_search");
+    await emitIndexedAgentEvent(runtime, sessionStream, "run_01", {
+      type: "problem.set",
+      runId: "run_01",
+      problem: "Deploy the Docker image to staging.",
+      agentId: "orchestrator",
+    });
+    await emitIndexedAgentEvent(runtime, sessionStream, "run_01", {
+      type: "response.finalized",
+      runId: "run_01",
+      agentId: "orchestrator",
+      content: "The Docker image should go to staging after PostgreSQL is ready.",
+    });
+    const registry = new AgentCapabilityRegistry({
+      capabilities: createBuiltinAgentCapabilities({
+        workspaceRoot: repoRoot,
+        defaultMemoryScope: "agent",
+        maxToolOutputChars: 4000,
+        memoryTools: mkMemoryTools(),
+        delegationTools: mkDelegationTools(),
+        sessionHistoryDataDir: dir,
+        sessionHistoryContext: {
+          repoKey: repoKeyForRoot(repoRoot),
+          profileId: "generalist",
+          sessionStream,
+        },
+      }),
+      allowlist: ["session.search", "session.read"],
+    });
+
+    const search = await registry.execute("session.search", { query: "docker staging postgres" });
+    const read = await registry.execute("session.read", {});
+
+    expect(search.output).toContain("Docker image");
+    expect(read.output).toContain("Deploy the Docker image to staging.");
+    expect(read.output).toContain("PostgreSQL");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(repoRoot, { recursive: true, force: true });
   }
 });

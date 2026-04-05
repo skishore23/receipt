@@ -20,7 +20,7 @@ import { COMPOSER_COMMANDS, parseComposerDraft } from "./composer";
 import { FactoryThemeProvider, InlineAlert, statusColor, terminalTheme, tone } from "./theme";
 import {
   BOARD_SECTION_META,
-  buildMissionControlViewModel,
+  buildFactoryWorkbenchViewModel,
   budgetPercent,
   flattenObjectives,
   formatDuration,
@@ -32,8 +32,8 @@ import {
   panelIndex,
   shortHash,
   truncate,
+  type FactoryWorkbenchFocusArea,
   type FactoryObjectivePanel,
-  type MissionControlFocusArea,
 } from "./view-model";
 import { buildInvestigationReportSections } from "./investigation-report";
 import type {
@@ -62,7 +62,7 @@ type FactoryTerminalAppProps = {
 };
 
 
-type MissionControlSnapshot = {
+type FactoryWorkbenchSnapshot = {
   readonly compose: FactoryComposeModel;
   readonly board: FactoryBoardProjection;
   readonly detail?: FactoryObjectiveDetail;
@@ -249,7 +249,9 @@ const ObjectiveRail = ({
                 </Box>
                 <Box marginLeft={2} flexDirection="column">
                   <Text color={tone("muted")}>
-                    {labelize(objective.phase)} · {labelize(objective.scheduler.slotState)}
+                    {labelize(objective.displayState ?? objective.phase)}
+                    {objective.phaseDetail ? ` · ${labelize(objective.phaseDetail)}` : ""}
+                    · {labelize(objective.scheduler.slotState)}
                     {objective.scheduler.queuePosition ? ` · q${objective.scheduler.queuePosition}` : ""}
                   </Text>
                   <Text color={objective.blockedExplanation ? tone("warning") : tone("muted")}>
@@ -270,11 +272,11 @@ const WorkbenchPane = ({
   railVisible,
   focused,
 }: {
-  readonly snapshot: MissionControlSnapshot;
+  readonly snapshot: FactoryWorkbenchSnapshot;
   readonly railVisible: boolean;
   readonly focused: boolean;
 }): React.ReactElement => {
-  const model = buildMissionControlViewModel({
+  const model = buildFactoryWorkbenchViewModel({
     compose: snapshot.compose,
     board: snapshot.board,
     detail: snapshot.detail,
@@ -372,6 +374,57 @@ const OverviewPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
       <Text bold color={tone("text")}>Next action</Text>
       <Text color={tone("muted")}>{detail.nextAction ?? "No next action surfaced."}</Text>
     </Box>
+    {detail.selfImprovement ? (
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={tone("text")}>Self improvement</Text>
+        <Text color={tone("muted")}>
+          {detail.selfImprovement.auditStatus === "failed"
+            ? "Audit failed"
+            : detail.selfImprovement.auditStatus === "running"
+              ? "Audit running"
+              : detail.selfImprovement.auditStatus === "pending"
+                ? "Audit queued"
+                : detail.selfImprovement.stale
+                  ? "Audit stale"
+                  : detail.selfImprovement.auditStatus === "missing"
+                    ? "Audit missing"
+                    : detail.selfImprovement.auditedAt
+                      ? `Audited ${formatTime(detail.selfImprovement.auditedAt)}`
+                      : "Audit recorded"}
+          {detail.selfImprovement.stale ? " · snapshot stale" : ""}
+          {` · ${detail.selfImprovement.recommendations.length} recommendation${detail.selfImprovement.recommendations.length === 1 ? "" : "s"}`}
+        </Text>
+        {detail.selfImprovement.auditStatusMessage ? (
+          <Text color={tone("warning")}>{truncate(detail.selfImprovement.auditStatusMessage, 220)}</Text>
+        ) : null}
+        {detail.selfImprovement.recommendationStatus === "failed" ? (
+          <Text color={tone("warning")}>
+            {truncate(`Recommendation generation failed${detail.selfImprovement.recommendationError ? `: ${detail.selfImprovement.recommendationError}` : "."}`, 220)}
+          </Text>
+        ) : null}
+        {detail.selfImprovement.recommendations.length ? detail.selfImprovement.recommendations.slice(0, 3).map((recommendation, index) => (
+          <Text key={`${recommendation.summary}:${index}`} color={tone("muted")}>
+            {truncate(`- ${recommendation.summary}${recommendation.suggestedFix ? ` :: ${recommendation.suggestedFix}` : ""}`, 220)}
+          </Text>
+        )) : <Text color={tone("muted")}>
+          {detail.selfImprovement.recommendationStatus === "failed"
+            ? "Audit completed, but recommendation generation failed."
+            : detail.selfImprovement.auditStatus === "pending" || detail.selfImprovement.auditStatus === "running"
+              ? "Audit has not produced a fresh recommendation snapshot yet."
+              : detail.selfImprovement.auditStatus === "missing"
+                ? "No fresh audit snapshot is available for this objective yet."
+                : "No actionable recommendations surfaced."}
+        </Text>}
+        {detail.selfImprovement.recurringPatterns.length ? (
+          <Text color={tone("muted")}>
+            {truncate(`Patterns: ${detail.selfImprovement.recurringPatterns.map((pattern) => `${pattern.pattern} x${pattern.count}`).join(", ")}`, 220)}
+          </Text>
+        ) : null}
+        {detail.selfImprovement.autoFixObjectiveId ? (
+          <Text color={tone("selection")}>Auto-fix objective: {detail.selfImprovement.autoFixObjectiveId}</Text>
+        ) : null}
+      </Box>
+    ) : null}
     <Box marginTop={1} flexWrap="wrap">
       <MetricCell label="Queue" value={`${detail.scheduler.slotState}${detail.scheduler.queuePosition ? ` · ${detail.scheduler.queuePosition}` : ""}`} />
       <MetricCell label="Head" value={shortHash(detail.latestCommitHash)} />
@@ -670,14 +723,15 @@ const RightRail = ({
   <Surface
     kicker="Inspector"
     title={detail ? `${PANEL_LABELS[panel]} panel` : "Objective inspector"}
-    subtitle={detail ? `${detail.objectiveId} · ${labelize(detail.phase)}` : "Select an objective to inspect receipts, evidence, and controls."}
+    subtitle={detail ? `${detail.objectiveId} · ${labelize(detail.displayState ?? detail.phase)}${detail.phaseDetail ? ` · ${labelize(detail.phaseDetail)}` : ""}` : "Select an objective to inspect receipts, evidence, and controls."}
     width={compact ? 40 : 46}
     marginBottom={1}
   >
     {detail && live && debug ? (
       <Box flexDirection="column">
         <Box flexWrap="wrap" marginBottom={1}>
-          <Box marginRight={1}><StateBadge value={detail.phase} /></Box>
+          <Box marginRight={1}><StateBadge value={detail.displayState ?? detail.phase} /></Box>
+          {detail.phaseDetail ? <Box marginRight={1}><StateBadge value={detail.phaseDetail} /></Box> : null}
           <Box marginRight={1}><StateBadge value={detail.scheduler.slotState} /></Box>
           <Box marginRight={1}><StateBadge value={detail.integration.status} /></Box>
         </Box>
@@ -808,11 +862,11 @@ const FactoryWorkbenchScreen = ({
   message,
   showHelp,
 }: {
-  readonly snapshot: MissionControlSnapshot;
+  readonly snapshot: FactoryWorkbenchSnapshot;
   readonly selectedObjectiveId?: string;
   readonly panel: FactoryObjectivePanel;
   readonly draft: string;
-  readonly focusArea: MissionControlFocusArea;
+  readonly focusArea: FactoryWorkbenchFocusArea;
   readonly compact: boolean;
   readonly stacked: boolean;
   readonly railVisible: boolean;
@@ -822,7 +876,7 @@ const FactoryWorkbenchScreen = ({
   readonly message: string;
   readonly showHelp: boolean;
 }): React.ReactElement => {
-  const model = buildMissionControlViewModel({
+  const model = buildFactoryWorkbenchViewModel({
     compose: snapshot.compose,
     board: snapshot.board,
     detail: snapshot.detail,
@@ -837,7 +891,7 @@ const FactoryWorkbenchScreen = ({
           title="Factory CLI"
           subtitle="One consolidated terminal surface for objective selection, execution state, inspection, and chat."
           marginBottom={1}
-          right={<StateBadge value={snapshot.detail?.integration.status ?? "planning"} />}
+          right={<StateBadge value={snapshot.detail?.displayState ?? snapshot.detail?.integration.status ?? "planning"} />}
         >
           <Box flexWrap="wrap">
             <MetricCell label="Repo" value={model.header.repo} />
@@ -898,57 +952,11 @@ const FactoryWorkbenchScreen = ({
   );
 };
 
-export const FactoryBoardScreen = ({
-  snapshot,
-  message = "Factory ready.",
-}: {
-  readonly snapshot: MissionControlSnapshot;
-  readonly message?: string;
-}): React.ReactElement => (
-  <FactoryWorkbenchScreen
-    snapshot={snapshot}
-    selectedObjectiveId={snapshot.board.selectedObjectiveId}
-    panel="overview"
-    draft=""
-    focusArea="timeline"
-    compact={false}
-    stacked={false}
-    railVisible
-    showComposer={false}
-    message={message}
-    showHelp={false}
-  />
-);
-
-export const FactoryObjectiveScreen = ({
-  snapshot,
-  panel = "overview",
-  message = "Watching objective.",
-}: {
-  readonly snapshot: MissionControlSnapshot;
-  readonly panel?: FactoryObjectivePanel;
-  readonly message?: string;
-}): React.ReactElement => (
-  <FactoryWorkbenchScreen
-    snapshot={snapshot}
-    selectedObjectiveId={snapshot.detail?.objectiveId ?? snapshot.board.selectedObjectiveId}
-    panel={panel}
-    draft=""
-    focusArea="timeline"
-    compact={false}
-    stacked={false}
-    railVisible
-    showComposer={false}
-    message={message}
-    showHelp={false}
-  />
-);
-
 const cycleFocus = (
-  current: MissionControlFocusArea,
+  current: FactoryWorkbenchFocusArea,
   opts: { readonly hasObjectives: boolean; readonly hasDetail: boolean },
-): MissionControlFocusArea => {
-  const order: MissionControlFocusArea[] = opts.hasObjectives && opts.hasDetail
+): FactoryWorkbenchFocusArea => {
+  const order: FactoryWorkbenchFocusArea[] = opts.hasObjectives && opts.hasDetail
     ? ["rail", "timeline", "composer"]
     : opts.hasObjectives
       ? ["rail", "composer", "timeline"]
@@ -973,11 +981,11 @@ export const FactoryTerminalApp = ({
   const { exit } = useApp();
   const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | undefined>(initialObjectiveId);
   const [panel, setPanel] = useState<FactoryObjectivePanel>(initialPanel);
-  const [focusArea, setFocusArea] = useState<MissionControlFocusArea>(initialObjectiveId ? "composer" : "rail");
+  const [focusArea, setFocusArea] = useState<FactoryWorkbenchFocusArea>(initialObjectiveId ? "composer" : "rail");
   const [draft, setDraft] = useState("");
   const [showHelp, setShowHelp] = useState(false);
   const [showRail, setShowRail] = useState((process.stdout.columns ?? 120) >= 110);
-  const [snapshot, setSnapshot] = useState<MissionControlSnapshot>();
+  const [snapshot, setSnapshot] = useState<FactoryWorkbenchSnapshot>();
   const [message, setMessage] = useState<string>("Loading Factory workbench...");
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState<string | undefined>();
@@ -1378,7 +1386,7 @@ export const FactoryTerminalApp = ({
     }
   });
 
-  const renderedSnapshot = useMemo<MissionControlSnapshot>(() => {
+  const renderedSnapshot = useMemo<FactoryWorkbenchSnapshot>(() => {
     if (snapshot) return snapshot;
     return {
       compose: {

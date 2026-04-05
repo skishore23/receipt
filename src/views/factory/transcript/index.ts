@@ -2,29 +2,19 @@ import {
   badge,
   displayLabel,
   esc,
-  formatTs,
   iconChat,
   iconForEntity,
-  iconNext,
   iconProject,
-  iconRun,
-  iconStatus,
-  iconTokens,
   iconBadgeToneClass,
   renderEmptyState,
   renderJobActionCards,
   sectionLabelClass,
-  softPanelClass,
-  statusDot,
   toneForValue,
 } from "../../ui";
 import { renderFactoryRunSteps } from "../../factory-live-steps";
 import type {
   FactoryChatItem,
   FactoryChatIslandModel,
-  FactoryChatObjectiveNav,
-  FactoryViewMode,
-  FactoryLiveCodexCard,
   FactoryWorkCard,
 } from "../../factory-models";
 import {
@@ -32,24 +22,6 @@ import {
   assistantResponseCardClass,
   compactStatusText,
   factoryChatQuery,
-  isMissionControlMode,
-  renderHeaderProfileSelect,
-  renderShellStatusPills,
-  shellPill,
-  titleCaseLabel,
-  withQueryParam,
-  type FactoryChatRouteContext,
-  chatLiveRefreshOn,
-  objectiveLiveRefreshOn,
-  factoryEventsPath,
-  factoryShellIslandBindings,
-  shellHeaderTitle,
-  shellProfileSummary,
-  composerCommandsJson,
-  composerTextareaClass,
-  composerShellClass,
-  composerPanelClass,
-  composerJobId,
 } from "../shared";
 import { renderMarkdown } from "../shared/markdown";
 
@@ -194,7 +166,6 @@ const groupChatItems = (items: ReadonlyArray<FactoryChatItem>): ReadonlyArray<Ch
 const renderChatItem = (
   item: FactoryChatItem,
   context: {
-    readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
     readonly activeProfileLabel: string;
     readonly activeProfilePrimaryRole?: string;
@@ -249,7 +220,6 @@ const renderChatItem = (
     const href = context.objectiveHref
       ? context.objectiveHref(item.objectiveId)
       : `/factory${factoryChatQuery({
-          mode: context.mode,
           profileId: context.activeProfileId,
           chatId: context.chatId,
           objectiveId: item.objectiveId,
@@ -293,7 +263,6 @@ const renderChatItem = (
 const renderWorkGroup = (
   items: ReadonlyArray<Extract<FactoryChatItem, { readonly kind: "work" }>>,
   context: {
-    readonly mode?: FactoryViewMode;
     readonly activeProfileId: string;
     readonly activeProfileLabel: string;
     readonly activeProfilePrimaryRole?: string;
@@ -452,7 +421,6 @@ const renderTranscriptContent = (
   const transcriptItems = synthesizedTranscriptItems(model);
   const grouped = groupChatItems(transcriptItems);
   const renderContext = {
-    mode: model.mode,
     activeProfileId: model.activeProfileId,
     activeProfileLabel: model.activeProfileLabel,
     activeProfilePrimaryRole: model.activeProfilePrimaryRole,
@@ -530,18 +498,6 @@ export const renderFactoryStreamingTokenFragment = (input: {
 
 export const renderFactoryStreamingResetFragment = (): string =>
   '<div id="factory-chat-streaming-content" hx-swap-oob="innerHTML"></div>';
-
-export const renderMissionControlTranscriptSection = (
-  model: FactoryChatIslandModel,
-  body: string,
-  itemCount: number,
-): string => `<section class="${softPanelClass} p-4">
-  <div class="flex items-center justify-between gap-2">
-    <div class="${sectionLabelClass}">Transcript</div>
-    <div class="text-[11px] text-muted-foreground">${esc(`${itemCount}`)}</div>
-  </div>
-  <div class="mt-3 space-y-3">${body}</div>
-</section>`;
 
 export const renderFactoryTranscriptSection = (
   model: FactoryChatIslandModel,

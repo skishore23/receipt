@@ -5,17 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import React from "react";
-import { renderToString } from "ink";
 
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { createRuntime } from "@receipt/core/runtime";
-import { FactoryBoardScreen, FactoryObjectiveScreen } from "../../src/factory-cli/app.tsx";
 import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { renderObjectivePanelText } from "../../src/factory-cli/format";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
-import { FactoryThemeProvider } from "../../src/factory-cli/theme.tsx";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent } from "../../src/modules/agent";
 import { decideFactory, initialFactoryState, reduceFactory, DEFAULT_FACTORY_OBJECTIVE_POLICY, type FactoryCmd, type FactoryEvent } from "../../src/modules/factory";
 import { decide as decideJob, initial as initialJobState, reduce as reduceJob, type JobCmd, type JobEvent } from "../../src/modules/job";
@@ -33,8 +29,6 @@ const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const CLI = path.join(ROOT, "src", "cli.ts");
 const BUN = resolveBunRuntime();
 const execFileAsync = promisify(execFile);
-const stripAnsi = (value: string): string =>
-  value.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "");
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -409,6 +403,24 @@ const makeWorkbenchSnapshot = () => {
       summary: "Focus task_01 until the logs settle.",
       at: 3,
       source: "runtime",
+    },
+    selfImprovement: {
+      auditedAt: 6,
+      auditStatus: "ready",
+      stale: false,
+      recommendationStatus: "ready",
+      recommendations: [{
+        summary: "Expose self-improvement recommendations in the CLI overview.",
+        anomalyPatterns: ["missing-cli-visibility"],
+        scope: "cli",
+        confidence: "high",
+        suggestedFix: "Render the latest audit recommendations in the objective overview panel.",
+      }],
+      autoFixObjectiveId: "objective_auto_fix",
+      recurringPatterns: [{
+        pattern: "missing-cli-visibility",
+        count: 3,
+      }],
     },
     investigation: {
       reports: [],
@@ -1344,7 +1356,9 @@ test("factory cli: analyze summarizes run sequence, job control noise, and agent
       readonly kind: string;
       readonly summary: string;
     }>;
-    readonly recommendations: ReadonlyArray<string>;
+    readonly recommendations: ReadonlyArray<{
+      readonly summary: string;
+    }>;
   };
 
   expect(payload.objectiveId).toBe(objectiveId);
@@ -1363,7 +1377,7 @@ test("factory cli: analyze summarizes run sequence, job control noise, and agent
   });
   expect(payload.anomalies.some((anomaly) => anomaly.kind === "tool_error")).toBe(true);
   expect(payload.anomalies.some((anomaly) => anomaly.kind === "repeated_control_job")).toBe(true);
-  expect(payload.recommendations).toContain("Teach `factory.output` to infer a single active or nonterminal task automatically; when the objective is genuinely ambiguous, pass `taskId`, `jobId`, or both `focusKind` and `focusId`.");
+  expect(payload.recommendations).toEqual([]);
 }, 120_000);
 
 test("factory cli: parse stitches chat, objective, job, and task artifact data into one bundle", async () => {
@@ -1931,6 +1945,7 @@ test("factory runtime config: shared resolver follows .receipt/config.json", asy
   const resolved = await resolveFactoryRuntimeConfig(repoDir);
   expect(resolved.repoRoot).toBe(repoDir);
   expect(resolved.dataDir).toBe(path.join(repoDir, ".receipt", "data"));
+  expect(resolved.repoSlotConcurrency).toBe(20);
   expect(resolved.configPath).toBe(path.join(repoDir, ".receipt", "config.json"));
 }, 120_000);
 
@@ -1942,6 +1957,7 @@ test("factory runtime config: parses recurring schedules from .receipt/config.js
     repoRoot: ".",
     dataDir: ".receipt/data",
     codexBin: "codex",
+    repoSlotConcurrency: 5,
     schedules: [
       {
         id: "software-improver",
@@ -1972,6 +1988,7 @@ test("factory runtime config: parses recurring schedules from .receipt/config.js
   }, null, 2)}\n`, "utf-8");
 
   const resolved = await resolveFactoryRuntimeConfig(repoDir);
+  expect(resolved.repoSlotConcurrency).toBe(5);
   expect(resolved.schedules).toEqual([
     {
       id: "software-improver",
@@ -2012,6 +2029,7 @@ test("factory runtime config: repo default data dir is .receipt/data before init
   const resolved = await resolveFactoryRuntimeConfig(repoDir, repoDir);
   expect(resolved.repoRoot).toBe(repoDir);
   expect(resolved.dataDir).toBe(path.join(repoDir, ".receipt", "data"));
+  expect(resolved.repoSlotConcurrency).toBe(20);
   expect(resolved.configPath).toBeUndefined();
 }, 120_000);
 
@@ -2579,9 +2597,12 @@ test("factory cli: composer parser marks diagnostic prompts as investigations an
   });
 });
 
-test("factory cli: composer prompt classifier only steers simple aws inventory asks", () => {
+test("factory cli: composer prompt classifier steers implementation, infra, and QA intake from Tech Lead", () => {
   expect(inferObjectiveProfileHint("show me ec2 list")).toBe("infrastructure");
-  expect(inferObjectiveProfileHint("fix the ec2 dashboard widget")).toBeUndefined();
+  expect(inferObjectiveProfileHint("how many iam roles do we have")).toBe("infrastructure");
+  expect(inferObjectiveProfileHint("fix the ec2 dashboard widget")).toBe("software");
+  expect(inferObjectiveProfileHint("why is build failing")).toBe("software");
+  expect(inferObjectiveProfileHint("review the current patch for regression risk")).toBe("qa");
 });
 
 test("factory cli: composer parser rejects job commands without a selected objective", () => {
@@ -2625,18 +2646,4 @@ test("factory workbench: shared projection keeps rich task data and defaults foc
     contextPackPath: "/tmp/task_01.context-pack.json",
     memoryScriptPath: "/tmp/task_01.memory.cjs",
   });
-});
-
-test("factory cli: objective screen renders the running task workbench", () => {
-  const snapshot = makeWorkbenchSnapshot();
-  const output = stripAnsi(renderToString(
-    React.createElement(FactoryThemeProvider, undefined,
-      React.createElement(FactoryObjectiveScreen, { snapshot: snapshot as never }),
-    ),
-  ));
-
-  expect(output).toContain("Running Task");
-  expect(output).toContain("Focus Detail");
-  expect(output).toContain("Recent Activity");
-  expect(output).toContain("Render the running task");
 });
