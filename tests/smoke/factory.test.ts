@@ -771,7 +771,7 @@ test("factory service: duplicate objective control enqueues steer onto the exist
   const commands = await queue.consumeCommands(initialControl!.id, ["steer"]);
   expect(commands).toHaveLength(1);
   expect(commands[0]?.payload).toMatchObject({
-    fromSessionKey: `factory:objective:${created.objectiveId}`,
+    fromSessionKey: expect.stringContaining(`factory:objective:${created.objectiveId}:`),
     fromEnqueue: true,
     payload: {
       kind: "factory.objective.control",
@@ -779,6 +779,46 @@ test("factory service: duplicate objective control enqueues steer onto the exist
       reason: "reconcile",
     },
   });
+});
+
+test("factory service: repeated control decisions reuse one active control job per action key", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-idempotent");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Idempotent control",
+    prompt: "Keep rapid control decisions from spawning duplicate sessions.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    enqueueObjectiveControl(objectiveId: string, reason: "startup" | "admitted" | "reconcile"): Promise<void>;
+  };
+
+  await Promise.all([
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+  ]);
+
+  const controlJobs = (await queue.listJobs({ limit: 10 }))
+    .filter((job) => job.agentId === "factory-control");
+  expect(controlJobs).toHaveLength(1);
+  expect(controlJobs[0]?.sessionKey).toContain(`factory:objective:${created.objectiveId}:`);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).not.toBe("blocked");
+  expect(detail.blockedReason).toBeUndefined();
 });
 
 test("factory service: steered objective control jobs are redriven when the queued job already exists", async () => {

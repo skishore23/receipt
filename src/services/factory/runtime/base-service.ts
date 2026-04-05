@@ -2317,6 +2317,11 @@ export class FactoryServiceBase {
     return undefined;
   }
 
+  private objectiveControlSessionKey(state: FactoryState, action: FactoryObjectiveControlJobPayload["reason"]): string {
+    const planGeneration = state.planning ? planningReceiptFingerprint(state.planning) : `objective:${state.updatedAt}`;
+    return `factory:objective:${state.objectiveId}:${planGeneration}:${action}`;
+  }
+
   private shouldRedriveQueuedControlJob(job: QueueJob, now: number): boolean {
     if (job.commands.length > 0) return true;
     const ageMs = Math.max(now - job.updatedAt, now - job.createdAt);
@@ -2750,11 +2755,13 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const state = await this.getObjectiveState(objectiveId);
+    const sessionKey = this.objectiveControlSessionKey(state, reason);
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
-      sessionKey: `factory:objective:${objectiveId}`,
-      singletonMode: reason === "admitted" ? "cancel" : "steer",
+      sessionKey,
+      singletonMode: "steer",
       maxAttempts: 2,
       payload: {
         kind: "factory.objective.control",
@@ -2762,7 +2769,9 @@ export class FactoryServiceBase {
         reason,
       } satisfies FactoryObjectiveControlJobPayload,
     });
-    this.sse.publish("jobs", created.id);
+    if (created.sessionKey === sessionKey) {
+      this.sse.publish("jobs", created.id);
+    }
     if (
       this.redriveQueuedJob
       && created.status === "queued"
