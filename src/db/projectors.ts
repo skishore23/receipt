@@ -38,6 +38,7 @@ export type StoredJobProjection = {
   readonly agentId: string;
   readonly lane: JobRecord["lane"];
   readonly sessionKey?: string;
+  readonly idempotencyKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: Readonly<Record<string, unknown>>;
   readonly status: JobRecord["status"];
@@ -59,6 +60,7 @@ const toStoredJob = (record: JobRecord): StoredJobProjection => ({
   agentId: record.agentId,
   lane: record.lane,
   sessionKey: record.sessionKey,
+  idempotencyKey: record.idempotencyKey,
   singletonMode: record.singletonMode,
   payload: { ...record.payload },
   status: record.status,

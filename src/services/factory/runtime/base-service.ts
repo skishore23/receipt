@@ -2746,14 +2746,27 @@ export class FactoryServiceBase {
     );
   }
 
+  private objectiveControlIdempotencyKey(state: FactoryState): string {
+    const plan = state.planning
+      ?? buildFactoryPlanningReceipt({
+        state,
+        profile: this.objectiveProfileForState(state),
+        resolveTaskExecutionMode: (task) => this.resolveTaskExecutionMode(task),
+      });
+    const planHash = createHash("sha256").update(planningReceiptFingerprint(plan)).digest("hex").slice(0, 16);
+    return `${state.objectiveId}:${planHash}`;
+  }
+
   private async enqueueObjectiveControl(
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const state = await this.getObjectiveState(objectiveId).catch(() => undefined);
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
+      idempotencyKey: state ? this.objectiveControlIdempotencyKey(state) : `factory:objective:${objectiveId}`,
       singletonMode: reason === "admitted" ? "cancel" : "steer",
       maxAttempts: 2,
       payload: {

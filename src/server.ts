@@ -270,6 +270,7 @@ const baseQueue = jsonlQueue({
             agentId: "factory-control",
             lane: "collect",
             sessionKey: `factory:objective:${objectiveId}`,
+            idempotencyKey: `factory:objective:${objectiveId}`,
             singletonMode: "steer",
             maxAttempts: 1,
             payload: {
