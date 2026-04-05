@@ -4,6 +4,7 @@ import type {
   FactoryCheckResult,
   FactoryExecutionScriptRun,
   FactoryInvestigationReport,
+  FactoryObjectiveContractRecord,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
 } from "../../modules/factory";
@@ -32,6 +33,34 @@ const renderSection = (
     title,
     ...lines.map((line) => bulletize ? `- ${line}` : line),
   ].join("\n");
+
+const renderAlignment = (
+  acceptanceCriteria: ReadonlyArray<string>,
+  alignment: FactoryTaskAlignmentRecord | undefined,
+): ReadonlyArray<string> => {
+  if (acceptanceCriteria.length === 0) return ["No acceptance criteria recorded."];
+  const satisfied = new Set(alignment?.satisfied ?? []);
+  const missing = new Set(alignment?.missing ?? []);
+  return [
+    "criterion_id | criterion_text | evidence_ref | status",
+    ...acceptanceCriteria.map((criterionText, index) => {
+      const criterionId = `AC-${index + 1}`;
+      const status = satisfied.has(criterionText)
+        ? "met"
+        : missing.has(criterionText)
+          ? "unmet"
+          : alignment?.verdict === "aligned"
+            ? "met"
+            : "unmet";
+      const evidenceRef = satisfied.has(criterionText)
+        ? `alignment.satisfied[${index}]`
+        : missing.has(criterionText)
+          ? `alignment.missing[${index}]`
+          : "alignment.review";
+      return `${criterionId} | ${criterionText} | ${evidenceRef} | ${status}`;
+    }),
+  ];
+};
 
 const artifactLines = (
   artifactRefs: ReadonlyArray<Readonly<Record<string, GraphRef>>>,
@@ -319,6 +348,7 @@ export const renderDeliveryResultText = (input: {
   readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
+  readonly contract?: FactoryObjectiveContractRecord;
 }): string =>
   [
     renderSection("Summary", [input.summary || "No summary recorded."], false),
@@ -355,13 +385,8 @@ export const renderDeliveryResultText = (input: {
     renderSection(
       "Alignment",
       [
+        ...renderAlignment(input.contract?.acceptanceCriteria ?? [], input.alignment),
         `Verdict: ${input.alignment?.verdict ?? "aligned"}`,
-        ...(input.alignment?.satisfied.length
-          ? [`Satisfied: ${input.alignment.satisfied.join(" | ")}`]
-          : []),
-        ...(input.alignment?.missing.length
-          ? [`Missing: ${input.alignment.missing.join(" | ")}`]
-          : []),
         ...(input.alignment?.outOfScope.length
           ? [`Out of scope: ${input.alignment.outOfScope.join(" | ")}`]
           : []),
