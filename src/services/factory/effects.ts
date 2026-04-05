@@ -2,6 +2,7 @@ import type { GraphRef } from "@receipt/core/graph";
 
 import type {
   FactoryCandidateStatus,
+  FactoryAlignmentReportRecord,
   FactoryCheckResult,
   FactoryExecutionScriptRun,
   FactoryState,
@@ -104,6 +105,7 @@ export type FactoryPlannerEffect =
       readonly alignment?: FactoryTaskAlignmentRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
       readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
+      readonly alignmentReport?: FactoryAlignmentReportRecord;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
       readonly tokensUsed?: number;
       readonly producedAt: number;

@@ -108,6 +108,22 @@ export type FactoryExecutionScriptRun = {
   readonly status?: "ok" | "warning" | "error";
 };
 
+export type FactoryAlignmentEvidenceRef = {
+  readonly kind: string;
+  readonly ref: string;
+  readonly label?: string;
+  readonly region?: ReadonlyArray<string>;
+  readonly capturedAt: number;
+};
+
+export type FactoryAlignmentReportRecord = {
+  readonly objective_id: string;
+  readonly claims: ReadonlyArray<string>;
+  readonly evidence_refs: ReadonlyArray<FactoryAlignmentEvidenceRef>;
+  readonly scripts_run: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly verdict_rationale: string;
+};
+
 export type FactoryInvestigationScriptRun = FactoryExecutionScriptRun;
 
 export type FactoryTaskAlignmentVerdict =
