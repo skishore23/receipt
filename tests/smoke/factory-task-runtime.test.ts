@@ -10,6 +10,11 @@ import {
   materializeFactoryIsolatedTaskSupportFiles,
   removeFactoryTaskRuntimeWorkspace,
 } from "../../src/services/factory/task-runtime";
+import { FACTORY_TASK_RESULT_SCHEMA } from "../../src/services/factory/result-contracts";
+import {
+  buildFactoryTaskFinalizationArtifact,
+  finalizeFactoryTaskRunArtifact,
+} from "../../src/services/factory/finalize-run";
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -195,4 +200,43 @@ test("factory task runtime: isolated runtimes copy support files and cleanup res
     git,
   });
   expect(removedWorkspace).toBe(path.join(git.worktreesDir, "task-demo"));
+});
+
+test("factory task runtime: finalization writes a structured artifact and schema", async () => {
+  const dir = await createTempDir("receipt-factory-finalize");
+  const resultPath = path.join(dir, "task_01.result.json");
+  const schemaPath = path.join(dir, "task_01.schema.json");
+  const artifact = buildFactoryTaskFinalizationArtifact({
+    outcome: "partial",
+    summary: "Task stopped before workspace prep completed.",
+    handoff: "Workspace prep failed early, so the controller needs to inspect the block and rerun.",
+    scriptsRun: [{ command: "git worktree add", summary: "Workspace prep failed.", status: "error" }],
+    completion: {
+      changed: [],
+      proof: ["Captured the prep failure path."],
+      remaining: ["Retry worktree prep."],
+    },
+    alignment: {
+      verdict: "uncertain",
+      satisfied: ["Recorded the failure path."],
+      missing: ["No workspace was prepared."],
+      outOfScope: [],
+      rationale: "The run ended before task execution began.",
+    },
+    nextAction: "Retry worktree prep.",
+  });
+
+  await finalizeFactoryTaskRunArtifact({
+    resultPath,
+    schemaPath,
+    artifact,
+  });
+
+  const result = JSON.parse(await fs.readFile(resultPath, "utf-8"));
+  const schema = JSON.parse(await fs.readFile(schemaPath, "utf-8"));
+  expect(result.outcome).toBe("partial");
+  expect(result.scriptsRun).toHaveLength(1);
+  expect(result.alignment.verdict).toBe("uncertain");
+  expect(result.completion.proof).toContain("Captured the prep failure path.");
+  expect(schema).toEqual(FACTORY_TASK_RESULT_SCHEMA);
 });
