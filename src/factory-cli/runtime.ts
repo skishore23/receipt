@@ -130,6 +130,9 @@ export const createFactoryCliRuntime = (
     concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 12)),
     leaseAgentIds: Object.keys(handlers),
     handlers,
+    onMetric: (metric) => {
+      console.info("[job-metric]", JSON.stringify(metric));
+    },
     onError: (error) => {
       notify({
         type: "worker_error",

@@ -900,6 +900,9 @@ const workers = [
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: chatJobConcurrency,
+    onMetric: (metric) => {
+      console.info(`[job-worker ${jobWorkerId}:chat metric]`, JSON.stringify(metric));
+    },
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:chat]`, error);
     },
@@ -912,6 +915,9 @@ const workers = [
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: orchestrationJobConcurrency,
+    onMetric: (metric) => {
+      console.info(`[job-worker ${jobWorkerId}:orchestration metric]`, JSON.stringify(metric));
+    },
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
     },
@@ -924,6 +930,9 @@ const workers = [
     idleResyncMs: jobIdleResyncMs,
     leaseMs: codexJobLeaseMs,
     concurrency: codexJobConcurrency,
+    onMetric: (metric) => {
+      console.info(`[job-worker ${jobWorkerId}:codex metric]`, JSON.stringify(metric));
+    },
     onError: (error) => {
       console.error(`[job-worker ${jobWorkerId}:codex]`, error);
     },
