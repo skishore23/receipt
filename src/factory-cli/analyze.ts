@@ -1027,6 +1027,7 @@ export const readObjectiveAnalysis = async (
   }
 
   const controlJobsBySession = new Map<string, number>();
+  let repeatedControlJobs = 0;
   for (const job of jobs) {
     if (job.payloadKind === "factory.objective.control" && job.sessionKey) {
       increment(controlJobsBySession, job.sessionKey);
@@ -1034,6 +1035,7 @@ export const readObjectiveAnalysis = async (
   }
   for (const [sessionKey, count] of controlJobsBySession.entries()) {
     if (count > 1) {
+      repeatedControlJobs += count - 1;
       addAnomaly(anomalies, {
         kind: "repeated_control_job",
         severity: "medium",
@@ -1161,6 +1163,7 @@ export const readObjectiveAnalysis = async (
         retrying: jobs.filter((job) => job.retryCount > 0).length,
         abortCommands: jobs.reduce((sum, job) => sum + job.commands.filter((command) => command.command === "abort").length, 0),
         controlJobs: jobs.filter((job) => job.payloadKind === "factory.objective.control").length,
+        repeatedControlJobs,
         totalTokensUsed: jobs.reduce((sum, job) => sum + (job.tokensUsed ?? 0), 0),
       },
       agent: {

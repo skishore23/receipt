@@ -398,6 +398,8 @@ export type FactoryObjectiveControlJobPayload = {
   readonly kind: "factory.objective.control";
   readonly objectiveId: string;
   readonly reason: "startup" | "admitted" | "reconcile";
+  readonly stateVersion?: number;
+  readonly idempotencyKey?: string;
 };
 
 export type FactoryObjectiveAuditJobPayload = {
