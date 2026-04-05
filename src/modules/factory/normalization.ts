@@ -5,6 +5,7 @@ import {
   initialFactoryState,
 } from "./defaults";
 import type {
+  FactoryControlJobRecord,
   FactoryCandidateRecord,
   FactoryCheckResult,
   FactoryIntegrationRecord,
@@ -116,6 +117,24 @@ const normalizeIntegration = (value: unknown, updatedAt: number): FactoryIntegra
 
 const normalizeScheduler = (value: unknown): FactorySchedulerRecord =>
   isRecord(value) ? value as FactorySchedulerRecord : {};
+
+const normalizeControlJobs = (value: unknown): Readonly<Record<string, FactoryControlJobRecord>> => {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, record]) =>
+        isRecord(record)
+        && typeof record.idempotencyKey === "string"
+        && typeof record.status === "string"
+        && typeof record.sessionKey === "string"
+        && typeof record.kind === "string"
+        && typeof record.taskId === "string"
+        && typeof record.attempt === "number"
+        && typeof record.updatedAt === "number",
+      )
+      .map(([key, record]) => [key, record as FactoryControlJobRecord]),
+  );
+};
 
 const normalizeInvestigation = (value: unknown): FactoryState["investigation"] => {
   if (!isRecord(value)) {
@@ -326,6 +345,7 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
     },
     integration: normalizeIntegration(state.integration, state.updatedAt),
     scheduler: normalizeScheduler(state.scheduler),
+    controlJobs: normalizeControlJobs(state.controlJobs),
     investigation: normalizeInvestigation(state.investigation),
     candidatePassesByTask: isRecord(state.candidatePassesByTask) ? state.candidatePassesByTask : {},
     consecutiveFailuresByTask: isRecord(state.consecutiveFailuresByTask) ? state.consecutiveFailuresByTask : {},
