@@ -45,7 +45,10 @@
     "build": "bun run clean && bun run assets:prepare && bun run css:build",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
+    "test": "bun test ./tests/smoke",
+    "test:e2e": "bun test ./tests/e2e",
     "test:perf": "bun test ./tests/perf",
+    "validate": "bun run build && bun run test && bun run test:e2e",
     "check:no-any": "if rg -n \"as any\\\\b|<any>|:\\\\s*any\\\\b|Runtime<any\\\\s*,\" src tests; then echo \"explicit any found\"; exit 1; fi",
     "verify": "bun run build && bun run check:no-any && bun run test:smoke",
     "db:generate": "drizzle-kit generate"
