@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { HubGit } from "../../src/adapters/hub-git";
+import { createDisposableProbeWorkspace } from "../../src/agents/factory/chat/input";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +54,27 @@ test("hub git canonicalizes local source paths and serializes concurrent remote 
   expect(remoteUrl).toBe(configuredRepoRoot);
 
   await fs.rm(aliasRoot, { force: true });
+});
+
+test("disposable probe workspaces are created as cloned git checkouts", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-probe-source");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# probe workspace test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const { workspacePath, cleanup } = await createDisposableProbeWorkspace(repoRoot, "job-probe");
+  try {
+    await expect(git(workspacePath, ["rev-parse", "--is-inside-work-tree"])).resolves.toBe("true");
+    await expect(fs.access(path.join(workspacePath, ".git"))).resolves.toBeUndefined();
+    await expect(git(workspacePath, ["rev-parse", "HEAD"])).resolves.toMatch(/[0-9a-f]{40}/);
+  } finally {
+    await cleanup();
+  }
 });
 
 test("hub git mirrors source publish remotes into factory worktrees", async () => {
