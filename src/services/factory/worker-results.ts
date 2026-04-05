@@ -5,6 +5,7 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../factory-types";
+import { normalizeStructuredEvidenceRecord } from "./result-contracts";
 
 export type FactoryPublishResult = {
   readonly summary: string;
@@ -112,9 +113,18 @@ export const resolveFactoryTaskWorkerResult = async (
   if (!result) {
     throw new FactoryServiceError(500, "missing structured factory task result from codex");
   }
+  const scriptsRun = Array.isArray(result.scriptsRun) ? result.scriptsRun : [];
+  const structuredEvidence = normalizeStructuredEvidenceRecord(result.structuredEvidence, {
+    logs: [
+      payload.lastMessagePath,
+      payload.resultPath,
+    ].filter((item): item is string => Boolean(item)),
+    artifacts: [],
+    alignmentReason: "Alignment validation was not performed by the worker; the controller recorded a fallback evidence bundle.",
+  });
   return execution.tokensUsed !== undefined
-    ? { ...result, tokensUsed: execution.tokensUsed }
-    : result;
+    ? { ...result, scriptsRun, structuredEvidence, tokensUsed: execution.tokensUsed }
+    : { ...result, scriptsRun, structuredEvidence };
 };
 
 export const resolveFactoryPublishWorkerResult = async (

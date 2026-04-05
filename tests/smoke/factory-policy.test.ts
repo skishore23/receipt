@@ -24,6 +24,7 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../../src/services/factory-service";
+import { resolveFactoryTaskWorkerResult } from "../../src/services/factory/worker-results";
 
 const execFileAsync = promisify(execFile);
 
@@ -368,6 +369,50 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
+});
+
+test("factory policy: failed run resolution always emits scriptsRun and structuredEvidence", async () => {
+  const tempDir = await createTempDir("receipt-factory-failed-run");
+  const lastMessagePath = path.join(tempDir, "last-message.txt");
+  const resultPath = path.join(tempDir, "result.json");
+  await fs.writeFile(resultPath, JSON.stringify({
+    outcome: "blocked",
+    summary: "Validation failed.",
+    handoff: "Investigate the failure.",
+    artifacts: [],
+    scriptsRun: [{ command: "bun run build", summary: "Build failed.", status: "error" }],
+    completion: { changed: [], proof: [], remaining: ["Fix the build failure."] },
+    alignment: {
+      verdict: "uncertain",
+      satisfied: [],
+      missing: ["Validation output"],
+      outOfScope: [],
+      rationale: "Build failed before alignment could be validated.",
+    },
+  }), "utf-8");
+  await fs.writeFile(lastMessagePath, JSON.stringify({
+    outcome: "blocked",
+    summary: "Validation failed.",
+    handoff: "Investigate the failure.",
+    artifacts: [],
+    completion: { changed: [], proof: [], remaining: ["Fix the build failure."] },
+    alignment: {
+      verdict: "uncertain",
+      satisfied: [],
+      missing: ["Validation output"],
+      outOfScope: [],
+      rationale: "Build failed before alignment could be validated.",
+    },
+  }), "utf-8");
+
+  const resolved = await resolveFactoryTaskWorkerResult(
+    { lastMessagePath, resultPath },
+    { tokensUsed: 12 },
+  );
+
+  expect(Array.isArray(resolved.scriptsRun)).toBe(true);
+  expect(Array.isArray(resolved.structuredEvidence?.proofBundle?.logs)).toBe(true);
+  expect(resolved.structuredEvidence?.alignment?.status).toBe("not_performed");
 });
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
