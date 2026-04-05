@@ -277,6 +277,8 @@ export type FactoryCheckResult = {
   readonly stderr: string;
   readonly startedAt: number;
   readonly finishedAt: number;
+  readonly shell?: string;
+  readonly shellDiscoveryAttempted?: ReadonlyArray<string>;
 };
 
 export type FactoryRebracketRecord = {

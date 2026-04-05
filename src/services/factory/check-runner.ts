@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -12,6 +13,13 @@ import { buildFactoryFailureSignature, priorFactoryFailureSignatureMap } from ".
 
 const execFileAsync = promisify(execFile);
 const CHECK_TIMEOUT_MS = 60 * 60 * 1000;
+const SHELL_CANDIDATES = [
+  (process.env.SHELL ?? "").trim(),
+  "/bin/bash",
+  "/usr/bin/bash",
+  "/bin/sh",
+  "/usr/bin/sh",
+].filter((value): value is string => value.length > 0);
 
 const safeWorkspacePart = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
@@ -26,6 +34,29 @@ const prependPaths = (entries: ReadonlyArray<string | undefined>, currentPath: s
     .map((entry) => entry?.trim())
     .filter((entry): entry is string => Boolean(entry))
     .reduceRight<string>((acc, entry) => prependPath(entry, acc), currentPath ?? "");
+
+export const formatShellDiscoveryFailure = (attempted: ReadonlyArray<string>): string =>
+  `no executable shell found for factory checks; attempted ${attempted.join(", ")}. Switch to argv mode when possible.`;
+
+export const discoverShell = async (input?: {
+  readonly candidates?: ReadonlyArray<string>;
+  readonly access?: (candidate: string) => Promise<void>;
+}): Promise<{
+  readonly shell?: string;
+  readonly attempted: ReadonlyArray<string>;
+}> => {
+  const attempted = [...new Set(input?.candidates ?? SHELL_CANDIDATES)];
+  const access = input?.access ?? ((candidate: string) => fs.access(candidate, fsConstants.X_OK));
+  for (const candidate of attempted) {
+    try {
+      await access(candidate);
+      return { shell: candidate, attempted };
+    } catch {
+      // try next candidate
+    }
+  }
+  return { attempted };
+};
 
 const runtimeBunPathEntries = (): ReadonlyArray<string> => {
   const candidates = [
@@ -170,13 +201,18 @@ export const runFactoryChecks = async (input: {
   readonly worktreesDir: string;
 }): Promise<ReadonlyArray<FactoryCheckResult>> => {
   const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv(input);
+  const shell = await discoverShell();
+  console.info(JSON.stringify({ event: "factory.check.shell.discovery", shell: shell.shell ?? null, attempted: shell.attempted }));
+  if (!shell.shell) {
+    throw new Error(formatShellDiscoveryFailure(shell.attempted));
+  }
   const results: FactoryCheckResult[] = [];
   for (const command of input.commands) {
     const startedAt = Date.now();
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(new Error("check command timed out after 60 minutes")), CHECK_TIMEOUT_MS);
     try {
-      const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
+      const { stdout, stderr } = await execFileAsync(shell.shell, ["-lc", command], {
         cwd: input.workspacePath,
         encoding: "utf-8",
         env: {
@@ -196,6 +232,8 @@ export const runFactoryChecks = async (input: {
         stderr,
         startedAt,
         finishedAt: Date.now(),
+        shell: shell.shell,
+        shellDiscoveryAttempted: shell.attempted,
       });
     } catch (err) {
       const failure = err as Error & { stdout?: string; stderr?: string; code?: number };
@@ -207,6 +245,8 @@ export const runFactoryChecks = async (input: {
         stderr: failure.stderr ?? failure.message,
         startedAt,
         finishedAt: Date.now(),
+        shell: shell.shell,
+        shellDiscoveryAttempted: shell.attempted,
       });
       break;
     } finally {
