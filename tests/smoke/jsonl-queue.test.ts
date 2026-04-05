@@ -9,6 +9,7 @@ import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue } from "../../src/adapters/jsonl-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../../src/engine/runtime/job-worker";
+import { type AlignmentReportPayload } from "../../src/agent/reporting/alignment";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 
 const mkTmp = async (label: string): Promise<string> =>
@@ -289,6 +290,46 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
     expect(steered.id).toBe(steerTarget.id);
     const commands = await queue.consumeCommands(steerTarget.id, ["steer"]);
     expect(commands.length).toBe(1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("job worker emits at least one alignment event per executed job", async () => {
+  const dir = await mkTmp("receipt-queue-alignment");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const alignmentEvents: AlignmentReportPayload[] = [];
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker-alignment",
+      alignmentReporter: {
+        record: async (_kind, payload) => {
+          alignmentEvents.push(payload);
+        },
+      },
+      handlers: {
+        writer: async () => ({ ok: true, result: { done: true } }),
+      },
+    });
+
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_alignment", objectiveId: "objective_123", taskId: "task_123" },
+      maxAttempts: 1,
+    });
+
+    await (worker as unknown as { readonly runLeased: (job: typeof job) => Promise<void> }).runLeased(job);
+
+    expect(alignmentEvents.length).toBeGreaterThan(0);
+    expect(alignmentEvents[0]?.job_id).toBe(job.id);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
