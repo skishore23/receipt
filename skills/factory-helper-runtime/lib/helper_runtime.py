@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,66 @@ def ensure_output_dir(output_dir: str | None) -> Path | None:
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def _safe_env_summary() -> dict[str, str | bool]:
+    return {
+        "awsProfile": bool(os.environ.get("AWS_PROFILE")),
+        "awsRegion": bool(os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")),
+        "awsPagerDisabled": os.environ.get("AWS_PAGER", "") == "",
+    }
+
+
+def _aws_calls_artifact_path(output_dir: str | None) -> Path | None:
+    target_dir = ensure_output_dir(output_dir)
+    if target_dir is None:
+        return None
+    return target_dir / "aws_calls.json"
+
+
+def _record_aws_call(
+    *,
+    output_dir: str | None,
+    service: str | None,
+    operation: str | None,
+    region: str | None,
+    success: bool,
+    exit_code: int,
+) -> None:
+    target_path = _aws_calls_artifact_path(output_dir)
+    if target_path is None:
+        return
+    payload = {
+        "updatedAt": utc_now(),
+        "env": _safe_env_summary(),
+        "calls": [],
+        "counts": {},
+    }
+    if target_path.exists():
+        try:
+            payload = json.loads(target_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    calls = payload.get("calls")
+    if not isinstance(calls, list):
+        calls = []
+    calls.append({
+        "service": service,
+        "operation": operation,
+        "region": region,
+        "success": success,
+        "exitCode": exit_code,
+        "capturedAt": utc_now(),
+    })
+    counter = Counter(
+        f"{item.get('service', 'unknown')}:{item.get('operation', 'unknown')}:{item.get('region', 'unknown')}"
+        for item in calls
+        if isinstance(item, dict)
+    )
+    payload["calls"] = calls
+    payload["counts"] = dict(counter)
+    payload["updatedAt"] = utc_now()
+    target_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def build_result(
@@ -102,6 +163,16 @@ def _aws_command(
         text=True,
         env=_aws_env(),
         check=False,
+    )
+    service = aws_args[0] if aws_args else None
+    operation = aws_args[1] if len(aws_args) > 1 else None
+    _record_aws_call(
+        output_dir=os.environ.get("RECEIPT_AWS_CALLS_OUTPUT_DIR"),
+        service=service,
+        operation=operation,
+        region=region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+        success=completed.returncode == 0,
+        exit_code=completed.returncode,
     )
     if completed.returncode != 0:
         raise AwsCliError(

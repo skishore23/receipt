@@ -319,7 +319,46 @@ test("local codex executor completes once a task result file exists and output g
   expect(result.signal).toBeNull();
   await expect(fs.readFile(resultPath, "utf-8")).resolves.toContain("\"outcome\":\"approved\"");
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("result written");
+  await expect(fs.readFile(path.join(artifactDir, "steps", "codex-run.json"), "utf-8")).resolves.toContain("\"exitCode\":0");
+  await expect(fs.readFile(path.join(artifactDir, "steps", "codex-run.log"), "utf-8")).resolves.toContain("result written");
 }, 15_000);
+
+test("local codex executor writes proof artifacts when execution signals are captured", async () => {
+  const root = await mkTmp("receipt-codex-executor-proof-workspace");
+  const stub = await createStructuredLastMessageStreamingCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+
+  const result = await executor.run({
+    prompt: "# Task\nWrite JSON output.",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    stepLogPath: path.join(artifactDir, "steps", "codex-run.log"),
+    stepRecordPath: path.join(artifactDir, "steps", "codex-run.json"),
+    jsonOutput: true,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+
+  expect(result.exitCode).toBe(0);
+  const [stepLog, stepRecord] = await Promise.all([
+    fs.readFile(path.join(artifactDir, "steps", "codex-run.log"), "utf-8"),
+    fs.readFile(path.join(artifactDir, "steps", "codex-run.json"), "utf-8"),
+  ]);
+  expect(stepLog).toContain("structured last message written");
+  expect(stepRecord).toContain("\"stdoutSha256\"");
+  expect(stepRecord).toContain("\"stderrSha256\"");
+});
 
 test("local codex executor extracts tokens used from stdout", async () => {
   const root = await mkTmp("receipt-codex-executor-tokens-workspace");
