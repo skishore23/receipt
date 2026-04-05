@@ -87,6 +87,7 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  buildEvidenceBundle,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
@@ -3697,6 +3698,18 @@ export class FactoryServiceBase {
       : undefined;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
     const completedAt = Date.now();
+    const stdoutTail = await this.readTextTail(optionalTrimmedString(payload.stdoutPath), 900) ?? "";
+    const stderrTail = await this.readTextTail(optionalTrimmedString(payload.stderrPath), 600) ?? "";
+    const evidenceBundle = buildEvidenceBundle({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      startedAt: completedAt,
+      finishedAt: completedAt,
+      scriptsRun,
+      stdout: stdoutTail,
+      stderr: stderrTail,
+    });
     const isInvestigation = state.objectiveMode === "investigation";
     const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
     let outcome: FactoryTaskResultOutcome;
@@ -3763,6 +3776,7 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          evidenceBundle,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -3825,6 +3839,7 @@ export class FactoryServiceBase {
           summary: effectiveSummary,
           handoff,
           scriptsRun,
+          evidenceBundle,
           completion: initialCompletion,
           alignment: initialAlignment,
         }),
@@ -4146,13 +4161,14 @@ export class FactoryServiceBase {
       state,
       task,
       payload.candidateId,
-      renderDeliveryResultText({
-        summary: reviewSummary,
-        handoff: reviewHandoff,
-        scriptsRun,
-        completion: effectiveDeliveryCompletion,
-        alignment: deliveryAlignment,
-      }),
+        renderDeliveryResultText({
+          summary: reviewSummary,
+          handoff: reviewHandoff,
+          scriptsRun,
+          evidenceBundle,
+          completion: effectiveDeliveryCompletion,
+          alignment: deliveryAlignment,
+        }),
       reviewStatus,
     );
   }
