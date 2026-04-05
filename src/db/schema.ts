@@ -64,6 +64,7 @@ export const jobProjection = sqliteTable("job_projection", {
   agentId: text("agent_id").notNull(),
   lane: text("lane").notNull(),
   sessionKey: text("session_key"),
+  idempotencyKey: text("idempotency_key"),
   singletonMode: text("singleton_mode"),
   payloadJson: text("payload_json").notNull(),
   status: text("status").notNull(),
@@ -80,6 +81,7 @@ export const jobProjection = sqliteTable("job_projection", {
   commandsJson: text("commands_json").notNull(),
 }, (table) => [
   uniqueIndex("job_projection_stream_uq").on(table.stream),
+  uniqueIndex("job_projection_idempotency_key_uq").on(table.idempotencyKey),
   index("job_projection_status_idx").on(table.status, table.updatedAt),
   index("job_projection_session_key_idx").on(table.sessionKey),
   index("job_projection_agent_lane_idx").on(table.agentId, table.lane, table.status),

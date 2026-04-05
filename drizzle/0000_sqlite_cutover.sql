@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS job_projection (
   agent_id TEXT NOT NULL,
   lane TEXT NOT NULL,
   session_key TEXT,
+  idempotency_key TEXT,
   singleton_mode TEXT,
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS job_projection (
   commands_json TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS job_projection_stream_uq ON job_projection(stream);
+CREATE UNIQUE INDEX IF NOT EXISTS job_projection_idempotency_key_uq ON job_projection(idempotency_key);
 CREATE INDEX IF NOT EXISTS job_projection_status_idx ON job_projection(status, updated_at);
 CREATE INDEX IF NOT EXISTS job_projection_session_key_idx ON job_projection(session_key);
 CREATE INDEX IF NOT EXISTS job_projection_agent_lane_idx ON job_projection(agent_id, lane, status);

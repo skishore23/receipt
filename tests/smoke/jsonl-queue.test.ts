@@ -294,6 +294,38 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
   }
 });
 
+test("jsonl queue: idempotency key reuses the active job record", async () => {
+  const dir = await mkTmp("receipt-queue-idempotency");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+
+    const first = await queue.enqueue({
+      agentId: "writer",
+      sessionKey: "objective:1",
+      idempotencyKey: "objective:1:control:reconcile",
+      payload: { msg: "first" },
+    });
+    const second = await queue.enqueue({
+      agentId: "writer",
+      sessionKey: "objective:1",
+      idempotencyKey: "objective:1:control:reconcile",
+      payload: { msg: "second" },
+    });
+
+    expect(second.id).toBe(first.id);
+    expect((await queue.listJobs({ limit: 10 }))).toHaveLength(1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => {
   const dir = await mkTmp("receipt-queue-authoritative");
   try {

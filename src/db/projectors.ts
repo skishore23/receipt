@@ -38,6 +38,7 @@ export type StoredJobProjection = {
   readonly agentId: string;
   readonly lane: JobRecord["lane"];
   readonly sessionKey?: string;
+  readonly idempotencyKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: Readonly<Record<string, unknown>>;
   readonly status: JobRecord["status"];
@@ -59,6 +60,7 @@ const toStoredJob = (record: JobRecord): StoredJobProjection => ({
   agentId: record.agentId,
   lane: record.lane,
   sessionKey: record.sessionKey,
+  idempotencyKey: record.idempotencyKey,
   singletonMode: record.singletonMode,
   payload: { ...record.payload },
   status: record.status,
@@ -99,6 +101,7 @@ export const syncJobProjectionStream = async (
         agent_id,
         lane,
         session_key,
+        idempotency_key,
         singleton_mode,
         payload_json,
         status,
@@ -119,6 +122,7 @@ export const syncJobProjectionStream = async (
         agent_id = excluded.agent_id,
         lane = excluded.lane,
         session_key = excluded.session_key,
+        idempotency_key = excluded.idempotency_key,
         singleton_mode = excluded.singleton_mode,
         payload_json = excluded.payload_json,
         status = excluded.status,
@@ -139,6 +143,7 @@ export const syncJobProjectionStream = async (
       stored.agentId,
       stored.lane,
       stored.sessionKey ?? null,
+      stored.idempotencyKey ?? null,
       stored.singletonMode ?? null,
       jsonStringify(stored.payload),
       stored.status,
@@ -264,6 +269,7 @@ export const readJobProjection = (dataDir: string, jobId: string): StoredJobProj
     agentId: row.agent_id,
     lane: row.lane,
     sessionKey: row.session_key ?? undefined,
+    idempotencyKey: row.idempotency_key ?? undefined,
     singletonMode: row.singleton_mode ?? undefined,
     payload: jsonParse<Readonly<Record<string, unknown>>>(row.payload_json, {}),
     status: row.status,
