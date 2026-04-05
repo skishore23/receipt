@@ -21,6 +21,7 @@ export type JobExecutionResult = {
   readonly ok: boolean;
   readonly result?: Record<string, unknown>;
   readonly error?: string;
+  readonly errorCode?: string;
   readonly noRetry?: boolean;
 };
 
@@ -44,6 +45,10 @@ type ActiveLeaseState = {
   readonly jobId: string;
   readonly startedAt: number;
   nextHeartbeatAt: number;
+  renewAttempts: number;
+  renewFailures: number;
+  renewTimer?: ReturnType<typeof setTimeout>;
+  leaseLost?: boolean;
   process?: JobLeaseProcessRegistration;
 };
 
@@ -57,6 +62,7 @@ export class JobWorker {
   private readonly leaseMs: number;
   private readonly leaseHeartbeatMs: number;
   private readonly leasePollMs: number;
+  private readonly leaseMaxRenewFailures = 3;
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onError?: (error: Error) => void;
@@ -135,22 +141,82 @@ export class JobWorker {
       jobId,
       startedAt: Date.now(),
       nextHeartbeatAt: 0,
+      renewAttempts: 0,
+      renewFailures: 0,
     };
     this.activeLeases.set(jobId, state);
     return state;
   }
 
   private clearActiveLease(jobId: string): void {
+    const state = this.activeLeases.get(jobId);
+    if (state?.renewTimer) clearTimeout(state.renewTimer);
     this.activeLeases.delete(jobId);
   }
 
+  private leaseMetrics(state: ActiveLeaseState, latencyMs?: number, reason?: string): Record<string, unknown> {
+    return {
+      lease_ttl_ms: this.leaseMs,
+      renew_interval_ms: this.leaseHeartbeatMs,
+      renew_attempt: state.renewAttempts,
+      ...(latencyMs != null ? { renew_latency_ms: latencyMs } : {}),
+      ...(reason ? { renew_fail_reason: reason } : {}),
+    };
+  }
+
+  private scheduleHeartbeat(state: ActiveLeaseState): void {
+    if (state.leaseLost || !this.running || !this.activeLeases.has(state.jobId)) return;
+    const jitter = Math.max(0, Math.floor(this.leaseHeartbeatMs * 0.15 * Math.random()));
+    const delay = Math.max(100, this.leaseHeartbeatMs + jitter - Math.floor(jitter / 2));
+    state.nextHeartbeatAt = Date.now() + delay;
+    if (state.renewTimer) clearTimeout(state.renewTimer);
+    state.renewTimer = setTimeout(() => {
+      void this.heartbeatLease(state).catch((err) => {
+        this.reportError(err);
+      });
+    }, delay);
+  }
+
+  private async failLeaseLost(state: ActiveLeaseState, reason: string): Promise<void> {
+    if (state.leaseLost) return;
+    state.leaseLost = true;
+    this.clearActiveLease(state.jobId);
+    await this.queue.fail(state.jobId, this.workerId, `ERR_LEASE_LOST: ${reason}`, true, {
+      status: "failed",
+      message: reason,
+      errorCode: "ERR_LEASE_LOST",
+      ...this.leaseMetrics(state, undefined, reason),
+    });
+  }
+
   private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
-    const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
-    if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
-      this.clearActiveLease(state.jobId);
-      return;
+    if (state.leaseLost || !this.activeLeases.has(state.jobId)) return;
+    state.renewAttempts += 1;
+    const started = Date.now();
+    try {
+      const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
+      const latencyMs = Date.now() - started;
+      if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
+        await this.failLeaseLost(state, "lease was no longer active during renewal");
+        return;
+      }
+      state.renewFailures = 0;
+      state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+      void this.leaseMetrics(state, latencyMs);
+      this.scheduleHeartbeat(state);
+    } catch (err) {
+      state.renewFailures += 1;
+      const latencyMs = Date.now() - started;
+      const reason = err instanceof Error ? err.message : String(err);
+      if (state.renewFailures >= this.leaseMaxRenewFailures) {
+        await this.failLeaseLost(state, reason);
+        return;
+      }
+      this.reportError(new Error(`Failed to heartbeat job ${state.jobId} (${state.renewFailures}/${this.leaseMaxRenewFailures}): ${reason}`));
+      state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+      void this.leaseMetrics(state, latencyMs, reason);
+      this.scheduleHeartbeat(state);
     }
-    state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
   }
 
   private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
@@ -172,12 +238,7 @@ export class JobWorker {
         continue;
       }
       if (now < state.nextHeartbeatAt) continue;
-      try {
-        await this.heartbeatLease(state);
-      } catch (err) {
-        this.reportError(new Error(`Failed to heartbeat job ${state.jobId}: ${err}`));
-        state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
-      }
+      await this.heartbeatLease(state);
     }
   }
 
@@ -268,6 +329,7 @@ export class JobWorker {
     }
 
     const activeLease = this.registerActiveLease(job.id);
+    this.scheduleHeartbeat(activeLease);
     await this.heartbeatLease(activeLease);
     if (!this.activeLeases.has(job.id)) return;
 
@@ -307,7 +369,9 @@ export class JobWorker {
     } catch (err) {
       this.clearActiveLease(job.id);
       const message = err instanceof Error ? err.message : String(err);
-      await this.queue.fail(job.id, this.workerId, message);
+      await this.queue.fail(job.id, this.workerId, message, false, {
+        errorCode: "ERR_JOB_HANDLER",
+      });
     }
   }
 }

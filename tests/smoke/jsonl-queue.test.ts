@@ -15,13 +15,13 @@ const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 
 const waitFor = async (
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 1_000,
   pollMs = 20,
 ): Promise<void> => {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 };
@@ -1033,6 +1033,61 @@ test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat
     expect(workerErrors).toContain("simulated heartbeat failure");
     expect(handled).toContain(second.id);
     expect(secondSettled?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("job worker: retries renewal failures up to the lease-loss threshold", async () => {
+  const dir = await mkTmp("receipt-queue-worker-lease-loss");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const baseQueue = jsonlQueue({ runtime, stream: "jobs" });
+    let renewFailures = 0;
+    const queue: typeof baseQueue = {
+      ...baseQueue,
+      heartbeat: async (jobId, workerId, leaseMs) => {
+        renewFailures += 1;
+        throw new Error(`simulated renewal failure ${renewFailures}`);
+      },
+    };
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_lease_loss",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async () => ({
+          ok: true,
+          result: { done: true },
+        }),
+      },
+    });
+
+    const job = await baseQueue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_worker_lease_loss" },
+      maxAttempts: 1,
+    });
+
+    worker.start();
+    await waitFor(async () => {
+      const settled = await baseQueue.getJob(job.id);
+      return settled?.status === "failed" && settled.lastError?.startsWith("ERR_LEASE_LOST");
+    }, 5_000);
+    worker.stop();
+
+    const settled = await baseQueue.getJob(job.id);
+    expect(settled?.status).toBe("failed");
+    expect(settled?.lastError).toContain("ERR_LEASE_LOST");
+    expect(renewFailures).toBeGreaterThanOrEqual(3);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
