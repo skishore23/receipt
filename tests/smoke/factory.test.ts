@@ -781,6 +781,42 @@ test("factory service: duplicate objective control enqueues steer onto the exist
   });
 });
 
+test("factory service: concurrent objective control requests collapse to one job id", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-idempotent");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Concurrent control idempotency",
+    prompt: "Ensure repeated control dispatches reuse the same job.",
+    checks: ["git status --short"],
+  });
+
+  const internals = service as unknown as {
+    enqueueObjectiveControl(objectiveId: string, reason: "startup" | "admitted" | "reconcile"): Promise<void>;
+  };
+
+  await Promise.all([
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+    internals.enqueueObjectiveControl(created.objectiveId, "reconcile"),
+  ]);
+
+  const controlJobs = (await queue.listJobs({ limit: 10 }))
+    .filter((job) => job.agentId === "factory-control");
+  expect(controlJobs).toHaveLength(1);
+  expect(controlJobs[0]?.sessionKey).toBe(`factory:objective:${created.objectiveId}`);
+  expect(controlJobs[0]?.id).toBe(`factory:objective:${created.objectiveId}:control`);
+});
+
 test("factory service: steered objective control jobs are redriven when the queued job already exists", async () => {
   const dataDir = await createTempDir("receipt-factory-control-redrive");
   const repoRoot = await createSourceRepo();

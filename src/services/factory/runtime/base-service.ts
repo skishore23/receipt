@@ -2750,7 +2750,9 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const jobId = `factory:objective:${objectiveId}:control`;
     const created = await this.queue.enqueue({
+      jobId,
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:objective:${objectiveId}`,
