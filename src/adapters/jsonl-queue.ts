@@ -41,6 +41,7 @@ export type QueueJob = {
   readonly agentId: string;
   readonly lane: JobLane;
   readonly sessionKey?: string;
+  readonly idempotencyKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: JobPayload;
   readonly status: JobStatus;
@@ -62,6 +63,7 @@ export type EnqueueJobInput = {
   readonly agentId: string;
   readonly lane?: JobLane;
   readonly sessionKey?: string;
+  readonly idempotencyKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: JobPayload;
   readonly maxAttempts?: number;
@@ -170,6 +172,7 @@ const projectedToQueueJob = (job: StoredJobProjection): QueueJob => ({
   agentId: job.agentId,
   lane: job.lane,
   sessionKey: job.sessionKey,
+  idempotencyKey: job.idempotencyKey,
   singletonMode: job.singletonMode,
   payload: { ...job.payload },
   status: job.status,
@@ -534,6 +537,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     agentId: record.agentId,
     lane: record.lane,
     sessionKey: record.sessionKey,
+    idempotencyKey: record.idempotencyKey,
     singletonMode: record.singletonMode,
     payload: { ...record.payload },
     status: record.status,
@@ -794,6 +798,9 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         const sessionKey = typeof input.sessionKey === "string" && input.sessionKey.trim()
           ? input.sessionKey.trim()
           : undefined;
+        const idempotencyKey = typeof input.idempotencyKey === "string" && input.idempotencyKey.trim()
+          ? input.idempotencyKey.trim()
+          : undefined;
         if (sessionKey && requiresSessionScan) {
           const active = sortedByRecent(activeBySession(sessionKey, jobId));
           if (singletonMode === "cancel" && active.length > 0) {
@@ -812,11 +819,22 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
             }
           }
         }
+        if (idempotencyKey) {
+          const active = sortedByRecent(
+            [...index.jobsById.values()].filter((job) =>
+              job.idempotencyKey === idempotencyKey
+              && job.agentId === input.agentId
+              && (job.status === "queued" || job.status === "leased" || job.status === "running"),
+            ),
+          );
+          if (active.length > 0) return cloneJob(active[0]!);
+        }
         const job: QueueJob = {
           id: jobId,
           agentId: input.agentId,
           lane: input.lane ?? "collect",
           sessionKey,
+          idempotencyKey,
           singletonMode,
           payload: input.payload,
           status: "queued",
@@ -834,6 +852,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
           payload: job.payload,
           maxAttempts: job.maxAttempts,
           sessionKey: job.sessionKey,
+          idempotencyKey: job.idempotencyKey,
           singletonMode: job.singletonMode,
           createdAt: job.createdAt,
         }, changed);
