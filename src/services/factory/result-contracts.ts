@@ -313,6 +313,84 @@ export const buildDefaultTaskCompletion = (input: {
   };
 };
 
+export const repairTaskResultSections = (input: {
+  readonly outcome: string;
+  readonly summary: string;
+  readonly handoff: string;
+  readonly artifacts: ReadonlyArray<{
+    readonly label: string;
+    readonly path: string | null;
+    readonly summary: string | null;
+  }>;
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly completion: FactoryTaskCompletionRecord;
+  readonly alignment?: FactoryTaskAlignmentRecord;
+  readonly signals?: ReadonlyArray<string>;
+}): {
+  readonly artifacts: ReadonlyArray<{
+    readonly label: string;
+    readonly path: string | null;
+    readonly summary: string | null;
+  }>;
+  readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly completion: FactoryTaskCompletionRecord;
+  readonly alignment: FactoryTaskAlignmentRecord;
+  readonly repaired: boolean;
+} => {
+  const summary = clipText(input.summary, 400) ?? input.summary;
+  const repairedArtifacts = input.artifacts.length > 0
+    ? input.artifacts
+    : [{
+        label: "Captured signals",
+        path: null,
+        summary: `${input.outcome} run did not attach any artifact links; captured evidence is limited to the final handoff and runtime signals.`,
+      }];
+  const repairedScriptsRun = input.scriptsRun.length > 0
+    ? input.scriptsRun
+    : [{
+        command: "(none executed)",
+        summary: `${input.outcome} run did not record any executed commands.`,
+        status: "warning" as const,
+      }];
+  const capturedSignals = [...new Set([
+    ...(input.signals ?? []),
+    repairedScriptsRun.map((item) => item.summary ?? item.command).join("; "),
+    repairedArtifacts.map((item) => item.summary ?? item.path ?? item.label).join("; "),
+    input.handoff,
+  ].map((item) => clipText(item, 280)).filter((item): item is string => Boolean(item)))];
+  const repairedCompletion: FactoryTaskCompletionRecord = {
+    changed: input.completion.changed.length > 0
+      ? input.completion.changed
+      : [`No changed files were recorded for this ${input.outcome} run.`],
+    proof: input.completion.proof.length > 0
+      ? input.completion.proof
+      : [
+          `${input.outcome} run did not produce explicit proof; captured signals: ${capturedSignals.join(" | ") || summary}.`,
+        ],
+    remaining: input.completion.remaining,
+  };
+  const repairedAlignment: FactoryTaskAlignmentRecord = input.alignment ?? {
+    verdict: input.outcome === "blocked" ? "uncertain" : "aligned",
+    satisfied: input.outcome === "blocked" ? [] : ["The candidate reported a completed handoff."],
+    missing: input.outcome === "blocked" ? ["Explicit alignment statement was not recorded."] : [],
+    outOfScope: [],
+    rationale: input.outcome === "blocked"
+      ? `${input.outcome} run did not emit an explicit alignment review, so the finalizer synthesized a stub from the available signals.`
+      : "Alignment was not explicitly reported, so the finalizer synthesized a stub from the available signals.",
+  };
+  return {
+    artifacts: repairedArtifacts,
+    scriptsRun: repairedScriptsRun,
+    completion: repairedCompletion,
+    alignment: repairedAlignment,
+    repaired:
+      repairedArtifacts !== input.artifacts
+      || repairedScriptsRun !== input.scriptsRun
+      || repairedCompletion !== input.completion
+      || input.alignment == null,
+  };
+};
+
 export const renderDeliveryResultText = (input: {
   readonly summary: string;
   readonly handoff: string;
