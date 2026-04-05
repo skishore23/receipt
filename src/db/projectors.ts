@@ -37,6 +37,7 @@ export type StoredJobProjection = {
   readonly id: string;
   readonly agentId: string;
   readonly lane: JobRecord["lane"];
+  readonly idempotencyKey?: string;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: Readonly<Record<string, unknown>>;
@@ -58,6 +59,7 @@ const toStoredJob = (record: JobRecord): StoredJobProjection => ({
   id: record.id,
   agentId: record.agentId,
   lane: record.lane,
+  idempotencyKey: record.idempotencyKey,
   sessionKey: record.sessionKey,
   singletonMode: record.singletonMode,
   payload: { ...record.payload },
@@ -98,6 +100,7 @@ export const syncJobProjectionStream = async (
         stream,
         agent_id,
         lane,
+        idempotency_key,
         session_key,
         singleton_mode,
         payload_json,
@@ -113,11 +116,12 @@ export const syncJobProjectionStream = async (
         canceled_reason,
         abort_requested,
         commands_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(job_id) DO UPDATE SET
         stream = excluded.stream,
         agent_id = excluded.agent_id,
         lane = excluded.lane,
+        idempotency_key = excluded.idempotency_key,
         session_key = excluded.session_key,
         singleton_mode = excluded.singleton_mode,
         payload_json = excluded.payload_json,
@@ -138,6 +142,7 @@ export const syncJobProjectionStream = async (
       stream,
       stored.agentId,
       stored.lane,
+      stored.idempotencyKey ?? null,
       stored.sessionKey ?? null,
       stored.singletonMode ?? null,
       jsonStringify(stored.payload),
@@ -222,6 +227,7 @@ export const readJobProjection = (dataDir: string, jobId: string): StoredJobProj
       job_id,
       agent_id,
       lane,
+      idempotency_key,
       session_key,
       singleton_mode,
       payload_json,
@@ -243,6 +249,7 @@ export const readJobProjection = (dataDir: string, jobId: string): StoredJobProj
     readonly job_id: string;
     readonly agent_id: string;
     readonly lane: JobRecord["lane"];
+    readonly idempotency_key: string | null;
     readonly session_key: string | null;
     readonly singleton_mode: "allow" | "cancel" | "steer" | null;
     readonly payload_json: string;
@@ -263,6 +270,7 @@ export const readJobProjection = (dataDir: string, jobId: string): StoredJobProj
     id: row.job_id,
     agentId: row.agent_id,
     lane: row.lane,
+    idempotencyKey: row.idempotency_key ?? undefined,
     sessionKey: row.session_key ?? undefined,
     singletonMode: row.singleton_mode ?? undefined,
     payload: jsonParse<Readonly<Record<string, unknown>>>(row.payload_json, {}),

@@ -40,6 +40,7 @@ export type QueueJob = {
   readonly id: string;
   readonly agentId: string;
   readonly lane: JobLane;
+  readonly idempotencyKey?: string;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: JobPayload;
@@ -61,6 +62,7 @@ export type EnqueueJobInput = {
   readonly jobId?: string;
   readonly agentId: string;
   readonly lane?: JobLane;
+  readonly idempotencyKey?: string;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly payload: JobPayload;
@@ -169,6 +171,7 @@ const projectedToQueueJob = (job: StoredJobProjection): QueueJob => ({
   id: job.id,
   agentId: job.agentId,
   lane: job.lane,
+  idempotencyKey: job.idempotencyKey,
   sessionKey: job.sessionKey,
   singletonMode: job.singletonMode,
   payload: { ...job.payload },
@@ -212,6 +215,19 @@ const compareQueuedJobs = (left: QueueJob, right: QueueJob): number =>
 
 const CROSS_PROCESS_POLL_MS = 250;
 const CROSS_PROCESS_FULL_REFRESH_MS = 30_000;
+const IDEMPOTENCY_DEBOUNCE_MS = 5_000;
+const activeIdempotencyJobs = new Map<string, { readonly jobId: string; readonly expiresAt: number }>();
+
+const normalizeKey = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+const idempotencyWindowKey = (input: EnqueueJobInput): string | undefined => {
+  const key = normalizeKey(input.idempotencyKey);
+  return key;
+};
+
 const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boolean => {
   if (left === right) return true;
   if (!left || !right) return false;
@@ -219,6 +235,7 @@ const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boole
   if (left.status !== right.status) return false;
   if (left.attempt !== right.attempt) return false;
   if (left.leaseUntil !== right.leaseUntil) return false;
+  if (left.idempotencyKey !== right.idempotencyKey) return false;
   if (left.commands.length !== right.commands.length) return false;
   if (left.abortRequested !== right.abortRequested) return false;
   return JSON.stringify(left) === JSON.stringify(right);
@@ -781,6 +798,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
     enqueue: async (input) => {
       const singletonMode = input.singletonMode ?? "allow";
       const requiresSessionScan = singletonMode === "cancel" || singletonMode === "steer";
+      const idempotencyKey = idempotencyWindowKey(input);
       if (requiresSessionScan) {
         await ensureIndexLoaded();
         await syncDiscoveredJobs(true);
@@ -788,6 +806,14 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
       const changed = new Map<string, QueueJob>();
       const created = await withWriteLock(async () => {
         const ts = nowTs();
+        if (idempotencyKey) {
+          const cached = activeIdempotencyJobs.get(idempotencyKey);
+          if (cached && cached.expiresAt > ts) {
+            const existing = await loadAuthoritativeJob(cached.jobId, changed);
+            if (existing && !TERMINAL.has(existing.status)) return cloneJob(existing);
+            activeIdempotencyJobs.delete(idempotencyKey);
+          }
+        }
         const jobId = input.jobId ?? `job_${ts.toString(36)}_${randomUUID().slice(0, 6)}`;
         const existing = await loadAuthoritativeJob(jobId, changed);
         if (existing) return cloneJob(existing);
@@ -816,6 +842,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
           id: jobId,
           agentId: input.agentId,
           lane: input.lane ?? "collect",
+          idempotencyKey: input.idempotencyKey,
           sessionKey,
           singletonMode,
           payload: input.payload,
@@ -833,12 +860,16 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
           lane: job.lane,
           payload: job.payload,
           maxAttempts: job.maxAttempts,
+          idempotencyKey: job.idempotencyKey,
           sessionKey: job.sessionKey,
           singletonMode: job.singletonMode,
           createdAt: job.createdAt,
         }, changed);
         const next = index.jobsById.get(job.id);
         if (!next) throw new Error(`Invariant: missing job ${job.id} after enqueue`);
+        if (input.idempotencyKey) {
+          activeIdempotencyJobs.set(input.idempotencyKey, { jobId: job.id, expiresAt: ts + IDEMPOTENCY_DEBOUNCE_MS });
+        }
         return cloneJob(next);
       });
       notifyWaiters();

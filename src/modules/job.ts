@@ -17,6 +17,7 @@ export type JobEvent =
       readonly lane: JobLane;
       readonly payload: Readonly<Record<string, unknown>>;
       readonly maxAttempts: number;
+      readonly idempotencyKey?: string;
       readonly sessionKey?: string;
       readonly singletonMode?: "allow" | "cancel" | "steer";
       readonly createdAt?: number;
@@ -105,6 +106,7 @@ export type JobRecord = {
   readonly id: string;
   readonly agentId: string;
   readonly lane: JobLane;
+  readonly idempotencyKey?: string;
   readonly sessionKey?: string;
   readonly singletonMode?: "allow" | "cancel" | "steer";
   readonly createdAt: number;
@@ -151,6 +153,7 @@ export const reduce: Reducer<JobState, JobEvent> = (state, event, ts) => {
         id: event.jobId,
         agentId: event.agentId,
         lane: event.lane,
+        idempotencyKey: event.idempotencyKey,
         sessionKey: event.sessionKey,
         singletonMode: event.singletonMode,
         createdAt: event.createdAt ?? ts,

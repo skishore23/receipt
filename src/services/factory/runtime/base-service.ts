@@ -2750,9 +2750,11 @@ export class FactoryServiceBase {
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
+    const idempotencyKey = `factory:objective-control:${objectiveId}:${reason}:1`;
     const created = await this.queue.enqueue({
       agentId: FACTORY_CONTROL_AGENT_ID,
       lane: "collect",
+      idempotencyKey,
       sessionKey: `factory:objective:${objectiveId}`,
       singletonMode: reason === "admitted" ? "cancel" : "steer",
       maxAttempts: 2,
