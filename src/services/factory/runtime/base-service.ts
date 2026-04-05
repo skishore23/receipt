@@ -86,6 +86,10 @@ import {
   factoryTaskCompletionForTask,
 } from "../promotion-gate";
 import {
+  buildFactoryAlignmentReport,
+  writeFactoryAlignmentReport,
+} from "../alignment-reporter";
+import {
   buildDefaultTaskCompletion,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
@@ -3381,125 +3385,158 @@ export class FactoryServiceBase {
         status: "blocked",
       };
     }
+    const alignmentReportPath = path.join(path.dirname(parsed.resultPath), "alignment.json");
     let rebuiltPacket = false;
-    if (parsed.executionMode === "worktree") {
-      const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
-      if (!workspaceStatus.exists) {
-        await this.git.restoreWorkspace({
-          workspaceId: parsed.workspaceId,
-          branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
-          workspacePath: parsed.workspacePath,
-          baseHash: parsed.baseCommit,
-        });
-        rebuiltPacket = true;
+    let taskResult: Record<string, unknown> | undefined;
+    let execution: { readonly lastMessage?: string; readonly tokensUsed?: number } | undefined;
+    try {
+      if (parsed.executionMode === "worktree") {
+        const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
+        if (!workspaceStatus.exists) {
+          await this.git.restoreWorkspace({
+            workspaceId: parsed.workspaceId,
+            branchName: `hub/${parsed.workerType}/${parsed.workspaceId}`,
+            workspacePath: parsed.workspacePath,
+            baseHash: parsed.baseCommit,
+          });
+          rebuiltPacket = true;
+        }
+      } else {
+        const exists = await pathExists(parsed.workspacePath);
+        if (!exists) {
+          await fs.mkdir(parsed.workspacePath, { recursive: true });
+          rebuiltPacket = true;
+        }
+        await materializeFactoryIsolatedTaskSupportFiles(
+          parsed.workspacePath,
+          this.profileRoot,
+          this.workerTaskProfile(parsed.profile),
+        );
       }
-    } else {
-      const exists = await pathExists(parsed.workspacePath);
-      if (!exists) {
-        await fs.mkdir(parsed.workspacePath, { recursive: true });
-        rebuiltPacket = true;
+      const packetPresent = await this.taskPacketPresent(parsed);
+      if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
+        await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
       }
-      await materializeFactoryIsolatedTaskSupportFiles(
-        parsed.workspacePath,
-        this.profileRoot,
-        this.workerTaskProfile(parsed.profile),
+      const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
+        workspacePath: parsed.workspacePath,
+        dataDir: this.dataDir,
+        repoRoot: this.git.repoRoot,
+        worktreesDir: this.git.worktreesDir,
+      });
+      const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
+      await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
+      await fs.writeFile(
+        resultSchemaPath,
+        JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
+        "utf-8",
       );
-    }
-    const packetPresent = await this.taskPacketPresent(parsed);
-    if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
-      await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
-    }
-    const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
-      workspacePath: parsed.workspacePath,
-      dataDir: this.dataDir,
-      repoRoot: this.git.repoRoot,
-      worktreesDir: this.git.worktreesDir,
-    });
-    const resultSchemaPath = this.taskResultSchemaPath(parsed.resultPath);
-    await fs.mkdir(path.dirname(resultSchemaPath), { recursive: true });
-    await fs.writeFile(
-      resultSchemaPath,
-      JSON.stringify(parsed.objectiveMode === "investigation" ? FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA : FACTORY_TASK_RESULT_SCHEMA, null, 2),
-      "utf-8",
-    );
-    const guidanceHistory: FactoryLiveGuidance[] = [];
-    let restartCount = 0;
-    let execution;
-    while (true) {
-      try {
-        execution = await this.codexExecutor.run({
-          prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
-          workspacePath: parsed.workspacePath,
-          promptPath: parsed.promptPath,
-          lastMessagePath: parsed.lastMessagePath,
-          stdoutPath: parsed.stdoutPath,
-          stderrPath: parsed.stderrPath,
-          model: FACTORY_TASK_CODEX_MODEL,
-          jsonOutput: true,
-          outputSchemaPath: resultSchemaPath,
-          completionSignalPath: parsed.lastMessagePath,
-          completionQuietMs: 1_500,
-          reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
-          sandboxMode: sandboxModeForTask(),
-          isolateCodexHome: true,
+      const guidanceHistory: FactoryLiveGuidance[] = [];
+      let restartCount = 0;
+      while (true) {
+        try {
+          execution = await this.codexExecutor.run({
+            prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
+            workspacePath: parsed.workspacePath,
+            promptPath: parsed.promptPath,
+            lastMessagePath: parsed.lastMessagePath,
+            stdoutPath: parsed.stdoutPath,
+            stderrPath: parsed.stderrPath,
+            model: FACTORY_TASK_CODEX_MODEL,
+            jsonOutput: true,
+            outputSchemaPath: resultSchemaPath,
+            completionSignalPath: parsed.lastMessagePath,
+            completionQuietMs: 1_500,
+            reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
+            sandboxMode: sandboxModeForTask(),
+            isolateCodexHome: true,
+            objectiveId: parsed.objectiveId,
+            taskId: parsed.taskId,
+            candidateId: parsed.candidateId,
+            integrationRef: parsed.integrationRef,
+            contextRefs: parsed.contextRefs,
+            skillBundlePaths: parsed.skillBundlePaths,
+            repoSkillPaths: parsed.repoSkillPaths,
+            env: {
+              DATA_DIR: this.dataDir,
+              RECEIPT_DATA_DIR: this.dataDir,
+              PATH: workspaceCommandEnv.path,
+            },
+          }, control);
+          break;
+        } catch (error) {
+          if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+          const guidance = parseFactoryLiveGuidance(error.signal);
+          if (!guidance) throw error;
+          guidanceHistory.push(guidance);
+          restartCount += 1;
+          const restartedAt = Date.now();
+          await this.emitObjectiveBatch(parsed.objectiveId, [
+            {
+              type: "task.intervention.applied",
+              objectiveId: parsed.objectiveId,
+              taskId: parsed.taskId,
+              candidateId: parsed.candidateId,
+              jobId: guidance.jobId ?? parsed.workspaceId,
+              guidance: guidance.guidance,
+              guidanceKind: guidance.guidanceKind,
+              sourceCommandIds: guidance.sourceCommandIds,
+              appliedAt: guidance.appliedAt,
+            },
+            {
+              type: "task.intervention.restarted",
+              objectiveId: parsed.objectiveId,
+              taskId: parsed.taskId,
+              candidateId: parsed.candidateId,
+              jobId: guidance.jobId ?? parsed.workspaceId,
+              guidance: guidance.guidance,
+              guidanceKind: guidance.guidanceKind,
+              sourceCommandIds: guidance.sourceCommandIds,
+              restartCount,
+              restartedAt,
+            },
+          ]);
+        }
+      }
+      taskResult = await this.resolveTaskWorkerResult(parsed, execution);
+      await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
+      await this.applyTaskWorkerResult(parsed, taskResult);
+      await this.reactObjective(parsed.objectiveId);
+      return {
+        objectiveId: parsed.objectiveId,
+        taskId: parsed.taskId,
+        candidateId: parsed.candidateId,
+        status: "completed",
+      };
+    } finally {
+      await writeFactoryAlignmentReport({
+        reportPath: alignmentReportPath,
+        report: buildFactoryAlignmentReport({
           objectiveId: parsed.objectiveId,
           taskId: parsed.taskId,
-          candidateId: parsed.candidateId,
-          integrationRef: parsed.integrationRef,
-          contextRefs: parsed.contextRefs,
-          skillBundlePaths: parsed.skillBundlePaths,
-          repoSkillPaths: parsed.repoSkillPaths,
-          env: {
-            DATA_DIR: this.dataDir,
-            RECEIPT_DATA_DIR: this.dataDir,
-            PATH: workspaceCommandEnv.path,
-          },
-        }, control);
-        break;
-      } catch (error) {
-        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
-        const guidance = parseFactoryLiveGuidance(error.signal);
-        if (!guidance) throw error;
-        guidanceHistory.push(guidance);
-        restartCount += 1;
-        const restartedAt = Date.now();
-        await this.emitObjectiveBatch(parsed.objectiveId, [
-          {
-            type: "task.intervention.applied",
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            appliedAt: guidance.appliedAt,
-          },
-          {
-            type: "task.intervention.restarted",
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            restartCount,
-            restartedAt,
-          },
-        ]);
-      }
+          plannedSteps: [
+            `render task prompt for ${parsed.taskId}`,
+            `run codex worker for ${parsed.taskId}`,
+            `resolve structured worker result for ${parsed.taskId}`,
+          ],
+          actualSteps: taskResult
+            ? [
+                `wrote task result to ${parsed.resultPath}`,
+                `applied task result for ${parsed.taskId}`,
+                ...(execution?.tokensUsed !== undefined ? [`tokens_used=${execution.tokensUsed}`] : []),
+              ]
+            : [
+                "task exited before structured result resolution",
+              ],
+          evidenceRefs: [
+            parsed.resultPath,
+            parsed.stdoutPath,
+            parsed.stderrPath,
+          ],
+          completion: taskResult ? normalizeTaskCompletionRecord((taskResult as Record<string, unknown>).completion) : undefined,
+          alignment: taskResult ? normalizeTaskAlignmentRecord((taskResult as Record<string, unknown>).alignment) : undefined,
+        }),
+      });
     }
-    const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
-    await fs.writeFile(parsed.resultPath, JSON.stringify(taskResult, null, 2), "utf-8");
-    await this.applyTaskWorkerResult(parsed, taskResult);
-    await this.reactObjective(parsed.objectiveId);
-    return {
-      objectiveId: parsed.objectiveId,
-      taskId: parsed.taskId,
-      candidateId: parsed.candidateId,
-      status: "completed",
-    };
   }
 
   private async detectArtifactIssues(
@@ -4030,10 +4067,11 @@ export class FactoryServiceBase {
       ? `${handoff}\n\nController verification reran the configured checks successfully and resolved the remaining validation/cleanup notes.`
       : handoff;
 
-    const resultRefs = {
-      ...baseResultRefs,
-      ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
-    } satisfies Readonly<Record<string, GraphRef>>;
+      const resultRefs = {
+        ...baseResultRefs,
+        ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
+        alignment: fileRef(alignmentReportPath, "task alignment report"),
+      } satisfies Readonly<Record<string, GraphRef>>;
 
     let reviewStatus: Extract<FactoryCandidateStatus, "approved" | "changes_requested" | "rejected"> =
       outcome === "changes_requested" || outcome === "partial" ? "changes_requested" : "approved";
