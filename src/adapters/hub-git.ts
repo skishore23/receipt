@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -87,6 +88,7 @@ export type HubMirrorStatus = {
 type HubGitOptions = {
   readonly dataDir: string;
   readonly repoRoot: string;
+  readonly worktreesRoot?: string;
 };
 
 const HASH_RE = /^[0-9a-f]{4,64}$/i;
@@ -102,6 +104,45 @@ const pathExists = async (value: string): Promise<boolean> => {
     return true;
   } catch {
     return false;
+  }
+};
+
+const getCurrentUserLabel = (): string => process.env.USER || process.env.LOGNAME || `uid:${typeof process.getuid === "function" ? process.getuid() : "unknown"}`;
+
+const isWritableDirectory = async (dir: string): Promise<boolean> => {
+  try {
+    const stat = await fs.promises.stat(dir);
+    if (!stat.isDirectory()) return false;
+    if (typeof process.getuid === "function" && typeof stat.uid === "number" && stat.uid !== process.getuid()) {
+      return false;
+    }
+    await fs.promises.access(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const resolveWorktreesRoot = async (dataDir: string, worktreesRoot?: string): Promise<string> => {
+  const defaultRoot = worktreesRoot || process.env.RECEIPT_WORKTREE_ROOT || path.join(dataDir, "hub", "worktrees");
+  const root = path.resolve(defaultRoot);
+  const parent = path.dirname(root);
+  await fs.promises.mkdir(parent, { recursive: true });
+  if (await isWritableDirectory(parent)) return root;
+  const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "receipt-worktrees-"));
+  await fs.promises.mkdir(tempRoot, { recursive: true });
+  return tempRoot;
+};
+
+const prepareWorktreeParent = async (workspacePath: string): Promise<void> => {
+  const parent = path.dirname(workspacePath);
+  await fs.promises.mkdir(parent, { recursive: true });
+  if (!await isWritableDirectory(parent)) {
+    const user = getCurrentUserLabel();
+    throw new HubGitError(
+      403,
+      `worktree parent is not writable: ${parent} (user: ${user}). Set RECEIPT_WORKTREE_ROOT or --worktrees-root to a writable directory.`,
+    );
   }
 };
 
@@ -156,7 +197,7 @@ const isOperationalPath = (file: string): boolean => {
 export class HubGit {
   readonly repoRoot: string;
   readonly bareDir: string;
-  readonly worktreesDir: string;
+  worktreesDir: string;
 
   private readonly remoteName = "source";
   private readyPromise: Promise<void> | undefined;
@@ -168,7 +209,7 @@ export class HubGit {
   constructor(opts: HubGitOptions) {
     this.repoRoot = path.resolve(opts.repoRoot);
     this.bareDir = path.join(opts.dataDir, "hub", "repo.git");
-    this.worktreesDir = path.join(opts.dataDir, "hub", "worktrees");
+    this.worktreesDir = path.resolve(opts.worktreesRoot || process.env.RECEIPT_WORKTREE_ROOT || path.join(opts.dataDir, "hub", "worktrees"));
   }
 
   invalidateGraph(): void {
@@ -370,6 +411,7 @@ export class HubGit {
   async createWorkspace(spec: HubGitWorkspaceSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
     const workspacePath = path.join(this.worktreesDir, spec.workspaceId);
+    await prepareWorktreeParent(workspacePath);
     if (fs.existsSync(workspacePath)) {
       throw new HubGitError(409, "workspace path already exists");
     }
@@ -398,6 +440,7 @@ export class HubGit {
 
   async restoreWorkspace(spec: HubGitWorkspaceRestoreSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
+    await prepareWorktreeParent(spec.workspacePath);
     await fs.promises.mkdir(this.worktreesDir, { recursive: true });
     const workspaceExists = fs.existsSync(spec.workspacePath);
     const hasWorktreeMetadata = workspaceExists ? await this.hasLiveWorktreeMetadata(spec.workspacePath) : false;
@@ -501,6 +544,7 @@ export class HubGit {
     await this.syncFromSource();
     const workspaceId = `factory_integration_${safeBranchPart(objectiveId)}`;
     const workspacePath = path.join(this.worktreesDir, workspaceId);
+    await prepareWorktreeParent(workspacePath);
     const branchName = `hub/integration/${workspaceId}`;
     if (fs.existsSync(workspacePath) && await this.hasLiveWorktreeMetadata(workspacePath)) {
       if (opts?.resetToBase) {
@@ -672,6 +716,7 @@ export class HubGit {
     }
 
     await fs.promises.mkdir(path.dirname(this.bareDir), { recursive: true });
+    this.worktreesDir = await resolveWorktreesRoot(path.dirname(path.dirname(this.bareDir)), this.worktreesDir);
     await fs.promises.mkdir(this.worktreesDir, { recursive: true });
 
     const headFile = path.join(this.bareDir, "HEAD");
