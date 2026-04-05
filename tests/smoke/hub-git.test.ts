@@ -286,6 +286,34 @@ test("hub git repairs orphaned worktree directories whose admin metadata was pru
   });
 });
 
+test("hub git auto-creates missing worktree parents before checkout", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-create-parent-source");
+  const dataDir = await mkTmp("receipt-hub-git-create-parent-data");
+  const worktreesDir = path.join(dataDir, "hub", "worktrees");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git create parent test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  await fs.rm(path.join(dataDir, "hub"), { recursive: true, force: true });
+  const hub = new HubGit({ dataDir, repoRoot });
+  await hub.ensureReady();
+
+  const workspace = await hub.createWorkspace({
+    workspaceId: "missing-parent",
+    agentId: "codex",
+  });
+
+  expect(workspace.path).toBe(path.join(worktreesDir, "missing-parent"));
+  const stat = await fs.stat(path.dirname(workspace.path));
+  expect(stat.isDirectory()).toBe(true);
+  await expect(git(workspace.path, ["rev-parse", "--abbrev-ref", "HEAD"])).resolves.toBe(workspace.branchName);
+});
+
 test("hub git still blocks promotion when dirty source changes overlap promoted files", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-overlap-source");
   const dataDir = await mkTmp("receipt-hub-git-overlap-data");
