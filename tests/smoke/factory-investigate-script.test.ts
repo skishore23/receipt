@@ -247,6 +247,15 @@ test("factory investigate script resolves task ids and prints summary, context, 
   expect(payload.summary.whatHappened.length).toBeGreaterThan(0);
   expect(payload.assessment.verdict).toBeTruthy();
   expect(payload.assessment.easyRouteRisk).toBeTruthy();
+  expect(payload.artifacts.length).toBeGreaterThan(0);
+  const evidenceArtifact = payload.artifacts.find((item) => item.kind === "evidence");
+  expect(evidenceArtifact?.path).toContain("artifacts/evidence/stale_mirror_recovery_check.json");
+  expect(evidenceArtifact?.path && (await fs.stat(evidenceArtifact.path))).toBeTruthy();
+  const evidenceText = await fs.readFile(evidenceArtifact!.path, "utf-8");
+  expect(evidenceText.length).toBeGreaterThan(0);
+  const evidenceJson = JSON.parse(evidenceText) as { readonly inputs?: { readonly objectivePrompt?: string }; readonly validationResults?: { readonly scriptsRun?: ReadonlyArray<unknown> } };
+  expect(evidenceJson.inputs?.objectivePrompt).toContain("stale-mirror recovery check");
+  expect(evidenceJson.validationResults?.scriptsRun).toBeTruthy();
 }, 120_000);
 
 test("factory CLI investigate exposes the same investigation flow for repair/debug work", async () => {
