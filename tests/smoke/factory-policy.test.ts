@@ -24,6 +24,7 @@ import {
   type FactoryIntegrationPublishJobPayload,
   type FactoryTaskJobPayload,
 } from "../../src/services/factory-service";
+import { EvidenceMissingError, validateRunArtifacts } from "../../src/services/factory/result-contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -368,6 +369,40 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
+});
+
+test("factory policy: delivery candidate run must emit scriptsRun, proof, and alignment evidence", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Evidence-bearing delivery run",
+    prompt: "Make a trivial tracked change and report the evidence.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const candidate = detail.candidates["task_01_candidate_01"];
+  expect(candidate).toBeTruthy();
+  expect(candidate?.scriptsRun?.length ?? 0).toBeGreaterThan(0);
+  expect(candidate?.completion.proof.length ?? 0).toBeGreaterThan(0);
+  expect(candidate?.alignment?.verdict).toBe("aligned");
+});
+
+test("factory policy: missing run artifacts reports the absent fields and how to fix them", () => {
+  expect(() => validateRunArtifacts({ scriptsRun: [], proof: [], alignment: undefined })).toThrow(EvidenceMissingError);
+  try {
+    validateRunArtifacts({ scriptsRun: [], proof: [], alignment: undefined });
+  } catch (error) {
+    expect(error).toBeInstanceOf(EvidenceMissingError);
+    expect((error as EvidenceMissingError).missing).toEqual(["scriptsRun", "proof", "alignment"]);
+    expect((error as Error).message).toContain("Capture scriptsRun with each command and exit code");
+    expect((error as Error).message).toContain("include proof links/files in completion.proof");
+    expect((error as Error).message).toContain("report alignment before returning the task result");
+  }
 });
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
