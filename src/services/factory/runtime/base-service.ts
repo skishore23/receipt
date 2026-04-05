@@ -3765,6 +3765,7 @@ export class FactoryServiceBase {
           scriptsRun,
           completion: initialCompletion,
           alignment: initialAlignment,
+          contract: deliveryContract,
         }),
         outcome,
       );
@@ -3827,6 +3828,7 @@ export class FactoryServiceBase {
           scriptsRun,
           completion: initialCompletion,
           alignment: initialAlignment,
+          contract: deliveryContract,
         }),
         "blocked_isolated_runtime",
       );
@@ -4152,6 +4154,7 @@ export class FactoryServiceBase {
         scriptsRun,
         completion: effectiveDeliveryCompletion,
         alignment: deliveryAlignment,
+        contract: deliveryContract,
       }),
       reviewStatus,
     );
