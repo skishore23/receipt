@@ -286,6 +286,83 @@ test("hub git repairs orphaned worktree directories whose admin metadata was pru
   });
 });
 
+test("hub git falls back to a writable worktree root when the default root is not writable", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-fallback-source");
+  const homeRoot = await mkTmp("receipt-hub-git-fallback-home");
+  const dataDir = path.join(homeRoot, ".receipt", "data");
+  const fallbackRoot = await mkTmp("receipt-hub-git-fallback-worktrees");
+  const previousFallback = process.env.RECEIPT_WORKTREE_ROOT;
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git fallback test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.chmod(homeRoot, 0o555);
+  process.env.RECEIPT_WORKTREE_ROOT = fallbackRoot;
+
+  try {
+    const hub = new HubGit({ dataDir, repoRoot });
+    await hub.ensureReady();
+
+    const workspace = await hub.createWorkspace({
+      workspaceId: "fallback-worktree",
+      agentId: "codex",
+    });
+
+    expect(workspace.path.startsWith(fallbackRoot)).toBe(true);
+    await expect(fs.access(workspace.path)).resolves.toBeUndefined();
+    const status = await hub.worktreeStatus(workspace.path);
+    expect(status.exists).toBe(true);
+  } finally {
+    process.env.RECEIPT_WORKTREE_ROOT = previousFallback;
+    await fs.chmod(homeRoot, 0o755).catch(() => undefined);
+  }
+});
+
+test("hub git surfaces structured writability errors after fallback retry fails", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-writability-source");
+  const homeRoot = await mkTmp("receipt-hub-git-writability-home");
+  const dataDir = path.join(homeRoot, ".receipt", "data");
+  const fallbackRoot = path.join(homeRoot, "fallback");
+  const previousFallback = process.env.RECEIPT_WORKTREE_ROOT;
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git writability test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.chmod(homeRoot, 0o555);
+  process.env.RECEIPT_WORKTREE_ROOT = fallbackRoot;
+
+  try {
+    const hub = new HubGit({ dataDir, repoRoot });
+    await hub.ensureReady();
+
+    await expect(hub.createWorkspace({
+      workspaceId: "writability-failure",
+      agentId: "codex",
+    })).rejects.toMatchObject({
+      status: 423,
+      details: expect.objectContaining({
+        defaultRoot: expect.any(String),
+        fallbackRoot: expect.any(String),
+      }),
+    });
+  } finally {
+    process.env.RECEIPT_WORKTREE_ROOT = previousFallback;
+    await fs.chmod(homeRoot, 0o755).catch(() => undefined);
+  }
+});
+
 test("hub git still blocks promotion when dirty source changes overlap promoted files", async () => {
   const repoRoot = await mkTmp("receipt-hub-git-overlap-source");
   const dataDir = await mkTmp("receipt-hub-git-overlap-data");

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -7,10 +8,12 @@ const execFileAsync = promisify(execFile);
 
 export class HubGitError extends Error {
   readonly status: number;
+  readonly details?: Record<string, unknown>;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, details?: Record<string, unknown>) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -110,6 +113,22 @@ const delay = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+const createTempFile = async (root: string): Promise<void> => {
+  const unique = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const tempPath = path.join(root, `.receipt-writability-${process.pid}-${unique}`);
+  await fs.promises.writeFile(tempPath, "");
+  await fs.promises.unlink(tempPath);
+};
+
+const asErrnoException = (error: unknown): NodeJS.ErrnoException | undefined =>
+  error && typeof error === "object" && "code" in error ? error as NodeJS.ErrnoException : undefined;
+
+const isUnderHomePath = (value: string): boolean => {
+  const home = os.homedir();
+  const normalizedValue = path.resolve(value);
+  return normalizedValue === home || normalizedValue.startsWith(`${home}${path.sep}`);
+};
+
 const looksLikeRemoteUrl = (value: string): boolean =>
   /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
   || /^[^/\\]+@[^:]+:/.test(value);
@@ -169,6 +188,70 @@ export class HubGit {
     this.repoRoot = path.resolve(opts.repoRoot);
     this.bareDir = path.join(opts.dataDir, "hub", "repo.git");
     this.worktreesDir = path.join(opts.dataDir, "hub", "worktrees");
+  }
+
+  private worktreesRootCandidates(): ReadonlyArray<string> {
+    const configured = process.env.RECEIPT_WORKTREE_ROOT?.trim();
+    const candidates = [this.worktreesDir];
+    if (configured) candidates.push(path.resolve(configured));
+    return candidates;
+  }
+
+  private async ensureWritableDirectory(root: string): Promise<void> {
+    await fs.promises.mkdir(root, { recursive: true });
+    try {
+      await createTempFile(root);
+    } catch (error) {
+      const errnoError = asErrnoException(error);
+      throw new HubGitError(423, `worktree root is not writable: ${root}`, {
+        path: root,
+        errno: errnoError?.errno,
+        code: errnoError?.code,
+      });
+    }
+  }
+
+  private fallbackWorktreesRoot(): string {
+    const configured = process.env.RECEIPT_WORKTREE_ROOT?.trim();
+    if (configured) return path.resolve(configured);
+    return path.join(os.tmpdir(), "receipt-worktrees");
+  }
+
+  private async resolveWritableWorktreesRoot(): Promise<string> {
+    let firstError: HubGitError | undefined;
+    for (const candidate of this.worktreesRootCandidates()) {
+      try {
+        await this.ensureWritableDirectory(candidate);
+        return candidate;
+      } catch (error) {
+        if (error instanceof HubGitError) {
+          firstError = error;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const defaultRoot = this.worktreesDir;
+    const fallbackRoot = this.fallbackWorktreesRoot();
+    if (fallbackRoot !== defaultRoot && isUnderHomePath(defaultRoot)) {
+      try {
+        await this.ensureWritableDirectory(fallbackRoot);
+        return fallbackRoot;
+      } catch (error) {
+        if (error instanceof HubGitError) {
+          throw new HubGitError(423, "worktree checkout failed after fallback root retry", {
+            defaultRoot,
+            fallbackRoot,
+            defaultError: firstError?.details,
+            fallbackError: error.details,
+          });
+        }
+        throw error;
+      }
+    }
+
+    throw firstError ?? new HubGitError(423, "worktree root is not writable", { path: defaultRoot });
   }
 
   invalidateGraph(): void {
@@ -369,7 +452,8 @@ export class HubGit {
 
   async createWorkspace(spec: HubGitWorkspaceSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
-    const workspacePath = path.join(this.worktreesDir, spec.workspaceId);
+    const worktreesRoot = await this.resolveWritableWorktreesRoot();
+    const workspacePath = path.join(worktreesRoot, spec.workspaceId);
     if (fs.existsSync(workspacePath)) {
       throw new HubGitError(409, "workspace path already exists");
     }
@@ -384,7 +468,7 @@ export class HubGit {
     }
 
     const baseHash = spec.baseHash ? await this.resolveCommit(spec.baseHash) : await this.requiredSourceHead();
-    await fs.promises.mkdir(this.worktreesDir, { recursive: true });
+    await fs.promises.mkdir(worktreesRoot, { recursive: true });
     await this.execGit(["worktree", "add", "-b", branchName, workspacePath, baseHash], { gitDir: this.bareDir });
     await this.configureWorktreeIdentity(workspacePath);
     this.invalidateGraph();
@@ -398,7 +482,7 @@ export class HubGit {
 
   async restoreWorkspace(spec: HubGitWorkspaceRestoreSpec): Promise<HubGitWorkspace> {
     await this.syncFromSource();
-    await fs.promises.mkdir(this.worktreesDir, { recursive: true });
+    await fs.promises.mkdir(path.dirname(spec.workspacePath), { recursive: true });
     const workspaceExists = fs.existsSync(spec.workspacePath);
     const hasWorktreeMetadata = workspaceExists ? await this.hasLiveWorktreeMetadata(spec.workspacePath) : false;
     if (workspaceExists && !hasWorktreeMetadata) {
@@ -500,7 +584,7 @@ export class HubGit {
   ): Promise<HubGitWorkspace> {
     await this.syncFromSource();
     const workspaceId = `factory_integration_${safeBranchPart(objectiveId)}`;
-    const workspacePath = path.join(this.worktreesDir, workspaceId);
+    const workspacePath = path.join(await this.resolveWritableWorktreesRoot(), workspaceId);
     const branchName = `hub/integration/${workspaceId}`;
     if (fs.existsSync(workspacePath) && await this.hasLiveWorktreeMetadata(workspacePath)) {
       if (opts?.resetToBase) {
