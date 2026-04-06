@@ -18,7 +18,6 @@ import type { JobCmd, JobCommandRecord, JobEvent, JobRecord, JobState } from "..
 import { buildFactoryProjection } from "../modules/factory/selectors";
 import type { FactoryCmd, FactoryEvent } from "../modules/factory/events";
 import type { FactoryProjection, FactoryState } from "../modules/factory/types";
-import type { QueueCommandType } from "../modules/job";
 import { decideMemory, initialMemoryState, reduceMemory } from "../adapters/memory-tools";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 

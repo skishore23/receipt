@@ -27,7 +27,6 @@ import type {
 } from "../../../views/factory-models";
 import type { QueueJob } from "../../../adapters/jsonl-queue";
 import { renderObjectiveHandoffMessage } from "../chat-items";
-import { latestObjectiveIdFromJobs } from "../links";
 import {
   buildActiveCodexCard,
   buildLiveChildCards,
@@ -41,7 +40,6 @@ import {
   asString,
   compareJobsByRecency,
   isRelevantShellJob,
-  jobObjectiveId,
   type AgentRunChain,
 } from "../shared";
 

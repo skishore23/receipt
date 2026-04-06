@@ -25,8 +25,7 @@ import { createDelegationTools } from "../adapters/delegation";
 import { createHeartbeat, parseHeartbeatSpecsFromEnv } from "../adapters/heartbeat";
 import { resonateJobBackend } from "../adapters/resonate-job-backend";
 import { createResonateDriverStarter, createResonateRoleRuntime } from "../adapters/resonate-runtime";
-import type { JobCmd, JobEvent, JobState } from "../modules/job";
-import type { AgentCmd, AgentEvent } from "../modules/agent";
+import type { AgentEvent } from "../modules/agent";
 import { llmStructured, llmText, embed } from "../adapters/openai";
 import { loadAgentPrompts, hashAgentPrompts } from "../prompts/agent";
 import { normalizeAgentConfig } from "../agents/agent";
@@ -87,12 +86,8 @@ const {
 // ============================================================================
 
 const {
-  branchStore,
-  agentStore,
   agentRuntime,
-  jobStore,
   jobRuntime,
-  memoryStore,
   memoryRuntime,
 } = createServerComposition(DATA_DIR);
 

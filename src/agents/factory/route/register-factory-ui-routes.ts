@@ -70,7 +70,7 @@ const routeContextForChat = (
   model: FactoryWorkbenchPageModel["chat"],
 ) => ({
   profileId: model.activeProfileId,
-  chatId: model.chatId,
+  chatId: model.chatId ?? request.chatId,
   objectiveId: model.objectiveId,
   inspectorTab: normalizedWorkbenchInspectorTab(request.inspectorTab),
   detailTab: normalizedWorkbenchDetailTab(request.detailTab, Boolean(model.objectiveId)),

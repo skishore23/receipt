@@ -1,11 +1,11 @@
 import {
   factoryReadyTasks,
   type FactoryBudgetState,
-  type FactoryObjectiveCard,
   type FactoryObjectivePhase,
   type FactoryObjectiveStatus,
   type FactoryState,
 } from "../../../modules/factory";
+import type { FactoryObjectiveCard } from "../../factory-types";
 
 export const objectiveElapsedMinutes = (state: FactoryState, now = Date.now()): number => {
   if (!state.createdAt) return 0;

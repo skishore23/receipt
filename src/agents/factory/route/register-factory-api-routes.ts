@@ -48,11 +48,6 @@ type RouteWrap = <T>(
   render: (value: T) => Response,
 ) => Promise<Response>;
 
-type WorkbenchRequestModel = {
-  readonly request: FactoryWorkbenchRequestState;
-  readonly model: FactoryWorkbenchPageModel;
-};
-
 type WorkbenchRequestWorkspaceModel = {
   readonly request: FactoryWorkbenchRequestState;
   readonly model: FactoryWorkbenchPageModel["workspace"];
@@ -67,7 +62,6 @@ export const registerFactoryApiRoutes = (input: {
   readonly service: FactoryService;
   readonly profileRoot: string;
   readonly loadFactoryProfiles: () => Promise<ReadonlyArray<FactoryChatProfile>>;
-  readonly loadWorkbenchRequestModel: (req: Request) => Promise<WorkbenchRequestModel>;
   readonly loadWorkbenchRequestWorkspaceModel: (req: Request) => Promise<WorkbenchRequestWorkspaceModel>;
   readonly resolveWatchedObjectiveId: (value: string | undefined) => Promise<string | undefined>;
   readonly resolveComposerJob: (objectiveId: string | undefined, preferredJobId: string | undefined) => Promise<QueueJob>;
@@ -110,7 +104,6 @@ export const registerFactoryApiRoutes = (input: {
     service,
     profileRoot,
     loadFactoryProfiles,
-    loadWorkbenchRequestModel,
     loadWorkbenchRequestWorkspaceModel,
     resolveWatchedObjectiveId,
     resolveComposerJob,

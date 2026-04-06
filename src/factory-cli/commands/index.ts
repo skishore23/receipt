@@ -901,6 +901,7 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       repoRoot: runtimeConfig.repoRoot,
       dataDir: runtimeConfig.dataDir,
       codexBin: runtimeConfig.codexBin,
+      repoSlotConcurrency: runtimeConfig.repoSlotConcurrency,
       defaultChecks: [],
       defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
       schedules: [],

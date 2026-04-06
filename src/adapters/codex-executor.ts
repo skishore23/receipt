@@ -2,7 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { buildTelemetryEvidenceRecord, writeTelemetryEvidenceRecord } from "../telemetry/artifacts";
 
 export type CodexRunInput = {
@@ -231,23 +231,6 @@ const prepareIsolatedCodexHome = async (
   return isolatedHome;
 };
 
-type BubblewrapCapabilities = {
-  readonly argv0Supported: boolean;
-};
-
-const bubblewrapCapabilityCache = new Map<string, BubblewrapCapabilities>();
-
-const probeBubblewrapCapabilities = (env: NodeJS.ProcessEnv): BubblewrapCapabilities => {
-  const binary = env.RECEIPT_BWRAP_BIN?.trim() || env.BWRAP_BIN?.trim() || "bwrap";
-  const cached = bubblewrapCapabilityCache.get(binary);
-  if (cached) return cached;
-  const help = spawnSync(binary, ["--help"], { encoding: "utf-8" });
-  const helpOutput = `${help.stdout ?? ""}\n${help.stderr ?? ""}`;
-  const capabilities = { argv0Supported: /\b--argv0\b/.test(helpOutput) };
-  bubblewrapCapabilityCache.set(binary, capabilities);
-  return capabilities;
-};
-
 const emitSandboxRetryEvent = async (
   control: CodexRunControl | undefined,
   stderrPath: string,
@@ -445,7 +428,6 @@ export class LocalCodexExecutor implements CodexExecutor {
     const mutationPolicy = input.mutationPolicy ?? (initialSandboxMode === "read-only" ? "read_only_probe" : "workspace_edit");
     let isolatedCodexHome: string | undefined;
     const mergedEnv = { ...this.env, ...input.env };
-    const bwrapCapabilities = probeBubblewrapCapabilities(mergedEnv);
     const childEnv: NodeJS.ProcessEnv = {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),

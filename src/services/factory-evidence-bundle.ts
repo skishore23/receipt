@@ -107,7 +107,7 @@ export const buildEvidenceBundle = async (input: {
   const artifacts = await Promise.all((input.artifactPaths ?? []).map(async (artifact) => ({
     label: artifact.label,
     path: artifact.path,
-    summary: tail(await readTextIfPresent(artifact.path)),
+    summary: tail(await readTextIfPresent(artifact.path)) ?? null,
   })));
   return {
     objective_id: input.objectiveId,

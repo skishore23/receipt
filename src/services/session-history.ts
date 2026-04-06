@@ -87,7 +87,8 @@ const resolveSessionStream = async (dataDir: string, input: {
     await syncChatContextProjectionStream(dataDir, input.sessionStream.trim());
     return input.sessionStream.trim();
   }
-  if (!input.chatId?.trim()) return undefined;
+  const chatId = input.chatId?.trim();
+  if (!chatId) return undefined;
   await syncChangedChatContextProjections(dataDir);
   const db = getReceiptDb(dataDir);
   const row = db.read(() => db.sqlite.query(`
@@ -96,7 +97,7 @@ const resolveSessionStream = async (dataDir: string, input: {
     WHERE chat_id = ?
     ORDER BY updated_at DESC
     LIMIT 1
-  `).get(input.chatId.trim()) as { readonly stream?: string } | null);
+  `).get(chatId) as { readonly stream?: string } | null);
   return row?.stream?.trim() || undefined;
 };
 
@@ -145,7 +146,7 @@ export const searchSessionHistory = async (input: SessionSearchInput): Promise<R
   const limit = Math.max(1, Math.min(input.limit ?? 10, 100));
   const db = getReceiptDb(input.dataDir);
   const where = ["session_messages_fts MATCH ?"];
-  const params: unknown[] = [ftsQuery];
+  const params: Array<string | number> = [ftsQuery];
   if (input.repoKey?.trim()) {
     where.push("sm.repo_key = ?");
     params.push(input.repoKey.trim());

@@ -2,13 +2,11 @@ import {
   badgeToneClass,
   displayLabel,
   esc,
-  iconChat,
   iconCodex,
   iconProject,
   iconQueue,
   iconRun,
   iconTokens,
-  sectionLabelClass,
   toneForValue,
 } from "../../ui";
 import { COMPOSER_COMMANDS } from "../../../factory-cli/composer";

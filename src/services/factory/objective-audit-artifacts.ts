@@ -114,5 +114,4 @@ export const readPersistedObjectiveAuditMetadata = async (
   } catch {
     return undefined;
   }
-  return undefined;
 };

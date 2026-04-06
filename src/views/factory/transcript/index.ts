@@ -11,7 +11,6 @@ import {
   sectionLabelClass,
   toneForValue,
 } from "../../ui";
-import { renderFactoryRunSteps } from "../../factory-live-steps";
 import type {
   FactoryChatItem,
   FactoryChatIslandModel,
@@ -377,21 +376,6 @@ const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArra
     meta: displayLabel(thread.status) || thread.status,
   }];
 };
-
-const renderTranscriptEmptyState = (model: FactoryChatIslandModel): string =>
-  renderEmptyState({
-    icon: iconChat("h-6 w-6"),
-    tone: "info",
-    eyebrow: "Ready",
-    title: model.objectiveId ? "This thread is quiet." : "Start a new chat",
-    message: model.objectiveId
-      ? "No transcript items have landed yet. Ask for status, react to a task, or wait for the next supervisor update."
-      : `Describe what ${model.activeProfileLabel} should investigate, fix, or review.`,
-    detail: model.objectiveId
-      ? "Use /react, /cleanup, /promote, or /abort-job from the composer below."
-      : "Slash commands still work here when you want a direct Factory action instead of a new prompt.",
-    minHeightClass: "min-h-[320px]",
-  });
 
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";

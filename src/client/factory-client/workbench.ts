@@ -826,7 +826,7 @@ export const initFactoryWorkbenchBrowser = () => {
     if (historyUrl) setHistory(historyUrl, historyMode);
   };
 
-  const handleWorkbenchChatSwap = (target: HTMLElement) => {
+  const handleWorkbenchChatSwap = (_target: HTMLElement) => {
     const scrollState = captureChatScrollState();
     if (pendingOverlayHtml) {
       pendingOverlayHtml = "";

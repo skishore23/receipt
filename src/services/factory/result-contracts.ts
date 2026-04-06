@@ -24,11 +24,6 @@ const asReadonlyStringArray = (value: unknown): ReadonlyArray<string> =>
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
     : [];
 
-const isEvidencePrimitive = (
-  value: unknown,
-): value is string | number | boolean | null =>
-  value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
-
 const normalizeEvidencePrimitive = (
   value: unknown,
 ): string | number | boolean | null | undefined => {

@@ -4,7 +4,7 @@ import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-model
 import { displayLabel } from "../../views/ui";
 import type { FactoryChatContextMessage, FactoryChatContextRun } from "./chat-context";
 
-import { buildDetail, compactJsonValue, jsonRecordToMarkdown, truncateInline, tryParseJson } from "./formatters";
+import { buildDetail, compactJsonValue, jsonRecordToMarkdown, tryParseJson } from "./formatters";
 import {
   asObject,
   asString,

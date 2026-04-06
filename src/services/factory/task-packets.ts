@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type {
-  FactoryCandidateRecord,
   FactoryCandidateStatus,
   FactoryExecutionScriptRun,
   FactoryInvestigationSynthesisRecord,

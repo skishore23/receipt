@@ -107,9 +107,6 @@ export type FactoryHelperResult = {
   readonly errors: ReadonlyArray<string>;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
-
 const isMissingPathError = (err: unknown): boolean => {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   return code === "ENOENT" || code === "ENOTDIR";

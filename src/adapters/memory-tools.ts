@@ -10,7 +10,7 @@ import type { Decide, Reducer } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
 import { desc, eq } from "drizzle-orm";
 import { getReceiptDb } from "../db/client";
-import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
+import { jsonParseOptional, jsonStringifyOptional } from "../db/json";
 import * as schema from "../db/schema";
 
 export type MemoryEntry = {

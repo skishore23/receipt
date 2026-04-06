@@ -56,7 +56,7 @@ export const requestedInspectorTab = (req: Request): FactoryInspectorTab | undef
   return isInspectorTab(inspectorTab) ? inspectorTab : undefined;
 };
 
-export const normalizedDefaultInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>
+export const normalizedDefaultInspectorTab = (_value?: FactoryInspectorTab): FactoryInspectorTab =>
   "overview";
 
 export const normalizedWorkbenchInspectorTab = (value?: FactoryInspectorTab): FactoryInspectorTab =>

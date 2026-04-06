@@ -359,18 +359,6 @@ const fileExists = async (filePath: string | undefined): Promise<boolean> => {
   }
 };
 
-const readJsonIfExists = async (filePath: string | undefined): Promise<unknown | undefined> => {
-  if (!filePath || !await fileExists(filePath)) return undefined;
-  const raw = await fs.readFile(filePath, "utf-8");
-  return JSON.parse(raw) as unknown;
-};
-
-const readTextIfExists = async (filePath: string | undefined): Promise<string | undefined> => {
-  if (!filePath || !await fileExists(filePath)) return undefined;
-  const raw = await fs.readFile(filePath, "utf-8");
-  return raw;
-};
-
 const normalizePosix = (value: string): string =>
   value.replace(/\\/g, "/").replace(/\/+$/u, "");
 
@@ -741,10 +729,6 @@ const runEventSummary = (event: AgentEvent): string => {
     default:
       return event.type;
   }
-};
-
-const incrementMetric = (counts: Map<string, number>, key: string, delta = 1): void => {
-  counts.set(key, (counts.get(key) ?? 0) + delta);
 };
 
 const readAgentRun = async (

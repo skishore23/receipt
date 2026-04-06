@@ -13,7 +13,6 @@ import {
 } from "./normalization";
 import type {
   FactoryCandidateRecord,
-  FactoryCandidateStatus,
   FactoryState,
   FactoryTaskRecord,
   FactoryTaskStatus,

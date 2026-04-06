@@ -274,12 +274,6 @@ export const buildFactoryChatContextImports = async (input: {
   return baseImports;
 };
 
-const tail = (value: string | undefined, max = 400): string | undefined => {
-  const text = value?.trim();
-  if (!text) return undefined;
-  return text.length <= max ? text : `…${text.slice(text.length - max)}`;
-};
-
 type GitChangedFileEntry = {
   readonly path: string;
   readonly status: string;

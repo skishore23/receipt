@@ -2,8 +2,6 @@
 // Receipt-native Queue Adapter - derives queue state from job receipts
 // ============================================================================
 
-import fs from "node:fs";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Runtime } from "@receipt/core/runtime";

@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -14,7 +13,6 @@ import {
   DEFAULT_FACTORY_OBJECTIVE_PROFILE,
   buildFactoryProjection,
   decideFactory,
-  factoryActivatableTasks,
   factoryReadyTasks,
   initialFactoryState,
   normalizeFactoryState,
@@ -45,7 +43,6 @@ import {
   type FactoryTaskExecutionMode,
   type FactoryTaskResultOutcome,
   type FactoryTaskRecord,
-  type FactoryTaskStatus,
   type FactoryWorkerHandoffOutcome,
   type FactoryWorkerHandoffScope,
   type FactoryWorkerType,
@@ -69,11 +66,9 @@ import {
 import {
   scanFactoryCloudExecutionContext,
   type FactoryCloudExecutionContext,
-  type FactoryCloudProvider,
 } from "../../factory-cloud-context";
 import { resolveFactoryCloudExecutionContext } from "../../factory-cloud-targeting";
 import {
-  cloudProviderDefaultsToAws,
   renderInfrastructureTaskExecutionGuidance,
   taskNeedsCloudExecutionContext,
 } from "../../factory-infrastructure-guidance";
@@ -91,7 +86,6 @@ import {
 import {
   buildObjectiveSelfImprovement as buildObjectiveControlSelfImprovement,
   controlJobCancelReason as deriveControlJobCancelReason,
-  isAuditEligibleObjectiveStatus as isEligibleObjectiveAuditStatus,
   objectiveConsumesRepoSlot as consumesObjectiveRepoSlot,
   releasesObjectiveProjectionSlot as releasesProjectedObjectiveSlot,
   releasesObjectiveSlot as releasesLiveObjectiveSlot,
@@ -101,7 +95,6 @@ import {
   buildObjectiveHandoffEvent as buildTaskRunnerObjectiveHandoffEvent,
   buildWorkerHandoffEvent as buildTaskRunnerWorkerHandoffEvent,
   canAutonomouslyResolveDeliveryPartial as canTaskRunnerAutonomouslyResolveDeliveryPartial,
-  defaultObjectiveHandoffNextAction as defaultTaskRunnerObjectiveHandoffNextAction,
   isRetryablePublishFailureMessage as isTaskRunnerRetryablePublishFailureMessage,
   taskResultSchemaPath as buildTaskRunnerResultSchemaPath,
   validateTaskEvidence,
@@ -280,8 +273,6 @@ const clipText = (value: string | undefined, max = 280): string | undefined => {
   if (!trimmed) return undefined;
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 };
-const safeWorkspacePart = (value: string): string =>
-  value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 const tailText = (value: string, maxChars: number): string =>
   value.length <= maxChars ? value.trimEnd() : `…${value.slice(value.length - maxChars).trimEnd()}`;
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -309,10 +300,6 @@ const dedupeGraphRefs = (refs: ReadonlyArray<GraphRef>): ReadonlyArray<GraphRef>
     return true;
   });
 };
-const formatContractLines = (
-  title: string,
-  items: ReadonlyArray<string>,
-): ReadonlyArray<string> => items.length > 0 ? [title, ...items.map((item) => `- ${item}`), ""] : [];
 const renderAlignmentCorrectionNote = (input: {
   readonly taskId: string;
   readonly alignment: FactoryTaskAlignmentRecord;
@@ -464,95 +451,6 @@ const liveExecutionSnapshotForJobs = (
   }
   return { stalledObjectiveIds, nextStatusChangeAt };
 };
-const INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "count",
-  "current",
-  "describe",
-  "engineer",
-  "for",
-  "from",
-  "have",
-  "how",
-  "infra",
-  "infrastructure",
-  "inventory",
-  "investigate",
-  "list",
-  "me",
-  "my",
-  "of",
-  "show",
-  "the",
-  "what",
-  "which",
-  "without",
-  "you",
-]);
-const INFRASTRUCTURE_KNOWLEDGE_MAX_SELECTIONS = 3;
-const INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY = 3;
-const INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY = 3;
-const INFRASTRUCTURE_KNOWLEDGE_MAX_STORED_FILE_BYTES = 1024 * 1024;
-const INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE = /\.(?:sh|bash|py|js|mjs|cjs|ts)$/i;
-const INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE = /\.(?:sh|bash|py|js|mjs|cjs|ts|json|md|txt|csv|ya?ml)$/i;
-
-const normalizeInfrastructureKnowledgeText = (value: string): string =>
-  value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-
-const infrastructureKnowledgeKeywords = (
-  value: string,
-  ignoredTokens: ReadonlyArray<string> = [],
-): ReadonlyArray<string> => {
-  const ignored = new Set(
-    ignoredTokens
-      .flatMap((token) => normalizeInfrastructureKnowledgeText(token).split(/\s+/))
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 3),
-  );
-  return [...new Set(
-    normalizeInfrastructureKnowledgeText(value)
-      .split(/\s+/)
-      .map((token) => token.trim())
-      .filter((token) =>
-        token.length >= 3
-        && !INFRASTRUCTURE_KNOWLEDGE_GENERIC_STOP_WORDS.has(token)
-        && !ignored.has(token)
-      ),
-  )];
-};
-
-const infrastructureKnowledgeFingerprint = (value: string): string =>
-  createHash("sha1").update(normalizeInfrastructureKnowledgeText(value)).digest("hex").slice(0, 16);
-
-const unquoteShellToken = (token: string): string =>
-  token.replace(/^['"]|['"]$/g, "").trim();
-
-const commandPathCandidates = (command: string): ReadonlyArray<string> =>
-  [...new Set(
-    (command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [])
-      .map((token) => unquoteShellToken(token))
-      .filter((token) => {
-        if (!token) return false;
-        const lower = token.toLowerCase();
-        if (["aws", "bash", "bun", "env", "jq", "node", "python", "python3", "sh"].includes(lower)) return false;
-        if (token.includes("=") && !token.includes("/") && !token.startsWith(".")) return false;
-        return token.startsWith("/")
-          || token.startsWith("./")
-          || token.startsWith("../")
-          || token.startsWith(".receipt/")
-          || INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE.test(token);
-      }),
-  )];
-
-const preferredInfrastructureKnowledgePath = (value: { readonly storedPath?: string; readonly originalPath?: string }): string | undefined =>
-  value.storedPath ?? value.originalPath;
-
 const boardSectionForObjective = (
   objective: Pick<FactoryObjectiveCard, "displayState">,
 ): FactoryBoardSection => {
@@ -571,29 +469,6 @@ const objectiveJobCacheKey = (jobs: ReadonlyArray<QueueJob>): string =>
     .slice(0, 10)
     .map((job) => `${job.id}:${job.status}:${job.updatedAt}:${job.lastError ?? ""}`)
     .join("|");
-
-const objectiveTaskStatusPriority = (status: FactoryTaskStatus): number => {
-  switch (status) {
-    case "running":
-      return 0;
-    case "reviewing":
-      return 1;
-    case "ready":
-      return 2;
-    case "blocked":
-      return 3;
-    case "pending":
-      return 4;
-    case "approved":
-      return 5;
-    case "integrated":
-      return 6;
-    case "superseded":
-      return 7;
-    default:
-      return 8;
-  }
-};
 
 const normalizeObjectiveModeInput = (
   value: unknown,
@@ -715,81 +590,6 @@ class FactoryStaleObjectiveError extends Error {
     this.expectedPrev = expectedPrev;
   }
 }
-
-type FactoryInfrastructureKnowledgeScript = {
-  readonly command: string;
-  readonly summary?: string;
-  readonly status?: FactoryInvestigationReport["scriptsRun"][number]["status"];
-  readonly originalPath?: string;
-  readonly storedPath?: string;
-};
-
-type FactoryInfrastructureKnowledgeArtifact = {
-  readonly label: string;
-  readonly summary?: string;
-  readonly originalPath?: string;
-  readonly storedPath?: string;
-};
-
-type FactoryInfrastructureKnowledgeEntry = {
-  readonly entryId: string;
-  readonly repoKey: string;
-  readonly profileId: string;
-  readonly provider: FactoryCloudProvider;
-  readonly accountId?: string;
-  readonly promptFingerprint: string;
-  readonly keywords: ReadonlyArray<string>;
-  readonly objectiveId: string;
-  readonly objectiveTitle: string;
-  readonly objectivePrompt: string;
-  readonly objectiveMode: FactoryObjectiveMode;
-  readonly taskId: string;
-  readonly taskTitle: string;
-  readonly taskPrompt: string;
-  readonly candidateId: string;
-  readonly summary: string;
-  readonly conclusion?: string;
-  readonly scripts: ReadonlyArray<FactoryInfrastructureKnowledgeScript>;
-  readonly artifacts: ReadonlyArray<FactoryInfrastructureKnowledgeArtifact>;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-};
-
-type FactoryInfrastructureKnowledgeIndexEntry = {
-  readonly entryId: string;
-  readonly knowledgePath: string;
-  readonly provider: FactoryCloudProvider;
-  readonly profileId: string;
-  readonly accountId?: string;
-  readonly promptFingerprint: string;
-  readonly keywords: ReadonlyArray<string>;
-  readonly objectiveId: string;
-  readonly taskId: string;
-  readonly summary: string;
-  readonly updatedAt: number;
-  readonly scriptPaths: ReadonlyArray<string>;
-  readonly artifactPaths: ReadonlyArray<string>;
-};
-
-type FactoryInfrastructureKnowledgeSelection = {
-  readonly entryId: string;
-  readonly knowledgePath: string;
-  readonly provider: FactoryCloudProvider;
-  readonly accountId?: string;
-  readonly objectiveId: string;
-  readonly taskId: string;
-  readonly summary: string;
-  readonly updatedAt: number;
-  readonly score: number;
-  readonly scriptPaths: ReadonlyArray<string>;
-  readonly artifactPaths: ReadonlyArray<string>;
-};
-
-type FactoryInfrastructureKnowledgeContext = {
-  readonly roleLabel: string;
-  readonly guidance: ReadonlyArray<string>;
-  readonly selectedEntries: ReadonlyArray<FactoryInfrastructureKnowledgeSelection>;
-};
 
 const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
   const normalized = (value ?? "codex").trim().toLowerCase() || "codex";
@@ -1153,389 +953,6 @@ export class FactoryService {
       artifactRef(profilePath, "objective profile snapshot"),
       artifactRef(skillsPath, "objective profile skills"),
     ];
-  }
-
-  private repoInfrastructureKnowledgeRoot(): string {
-    return path.join(this.dataDir, "factory", "knowledge", repoKeyForRoot(this.git.repoRoot), "infrastructure");
-  }
-
-  private repoInfrastructureKnowledgeEntriesDir(): string {
-    return path.join(this.repoInfrastructureKnowledgeRoot(), "entries");
-  }
-
-  private repoInfrastructureKnowledgeIndexPath(): string {
-    return path.join(this.repoInfrastructureKnowledgeRoot(), "index.json");
-  }
-
-  private repoInfrastructureKnowledgeEntryDir(entryId: string): string {
-    return path.join(this.repoInfrastructureKnowledgeEntriesDir(), entryId);
-  }
-
-  private repoInfrastructureKnowledgeEntryPath(entryId: string): string {
-    return path.join(this.repoInfrastructureKnowledgeEntryDir(entryId), "entry.json");
-  }
-
-  private buildInfrastructureKnowledgeQueryText(input: {
-    readonly objectiveTitle?: string;
-    readonly objectivePrompt: string;
-    readonly taskTitle?: string;
-    readonly taskPrompt?: string;
-  }): string {
-    return [
-      input.objectiveTitle,
-      input.objectivePrompt,
-      input.taskTitle,
-      input.taskPrompt,
-    ].filter(Boolean).join("\n");
-  }
-
-  private resolveInfrastructureKnowledgePath(candidatePath: string | undefined, workspacePath: string): string | undefined {
-    const trimmed = optionalTrimmedString(candidatePath);
-    if (!trimmed) return undefined;
-    return path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(workspacePath, trimmed);
-  }
-
-  private async copyInfrastructureKnowledgeFile(
-    sourcePath: string | undefined,
-    targetDir: string,
-    targetName: string,
-  ): Promise<string | undefined> {
-    const resolved = optionalTrimmedString(sourcePath);
-    if (!resolved) return undefined;
-    try {
-      const stat = await fs.stat(resolved);
-      if (!stat.isFile() || stat.size > INFRASTRUCTURE_KNOWLEDGE_MAX_STORED_FILE_BYTES) return undefined;
-      await fs.mkdir(targetDir, { recursive: true });
-      const targetPath = path.join(targetDir, targetName);
-      await fs.copyFile(resolved, targetPath);
-      return targetPath;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async materializeInfrastructureKnowledgeScripts(input: {
-    readonly report: FactoryInvestigationReport;
-    readonly workspacePath: string;
-    readonly entryDir: string;
-  }): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeScript>> {
-    const scriptsDir = path.join(input.entryDir, "scripts");
-    const materialized: FactoryInfrastructureKnowledgeScript[] = [];
-    for (const [index, item] of input.report.scriptsRun.entries()) {
-      if (materialized.length >= INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY) break;
-      const originalPath = commandPathCandidates(item.command)
-        .map((candidate) => this.resolveInfrastructureKnowledgePath(candidate, input.workspacePath))
-        .find((candidate): candidate is string => typeof candidate === "string" && INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(candidate));
-      const baseName = safeWorkspacePart(path.basename(originalPath ?? `script_${index + 1}.sh`));
-      const storedPath = originalPath
-        ? await this.copyInfrastructureKnowledgeFile(originalPath, scriptsDir, `${String(index + 1).padStart(2, "0")}_${baseName}`)
-        : undefined;
-      materialized.push({
-        command: item.command,
-        summary: item.summary ?? undefined,
-        status: item.status ?? undefined,
-        originalPath,
-        storedPath,
-      });
-    }
-    return materialized;
-  }
-
-  private async materializeInfrastructureKnowledgeArtifacts(input: {
-    readonly artifacts: ReadonlyArray<{
-      readonly label: string;
-      readonly path?: string;
-      readonly summary?: string;
-    }>;
-    readonly workspacePath: string;
-    readonly entryDir: string;
-  }): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeArtifact>> {
-    const artifactsDir = path.join(input.entryDir, "artifacts");
-    const materialized: FactoryInfrastructureKnowledgeArtifact[] = [];
-    for (const [index, item] of input.artifacts.entries()) {
-      if (materialized.length >= INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY) break;
-      const originalPath = this.resolveInfrastructureKnowledgePath(item.path, input.workspacePath);
-      const baseName = safeWorkspacePart(path.basename(originalPath ?? item.label ?? `artifact_${index + 1}`));
-      const storedPath = originalPath && INFRASTRUCTURE_KNOWLEDGE_COPYABLE_RE.test(originalPath)
-        ? await this.copyInfrastructureKnowledgeFile(originalPath, artifactsDir, `${String(index + 1).padStart(2, "0")}_${baseName}`)
-        : undefined;
-      materialized.push({
-        label: item.label,
-        summary: item.summary,
-        originalPath,
-        storedPath,
-      });
-    }
-    return materialized;
-  }
-
-  private async readInfrastructureKnowledgeIndex(): Promise<ReadonlyArray<FactoryInfrastructureKnowledgeIndexEntry>> {
-    try {
-      const raw = await fs.readFile(this.repoInfrastructureKnowledgeIndexPath(), "utf-8");
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed
-        .filter((item): item is Record<string, unknown> => isRecord(item))
-        .map((item) => ({
-          entryId: requireNonEmpty(item.entryId, "entryId required"),
-          knowledgePath: requireNonEmpty(item.knowledgePath, "knowledgePath required"),
-          provider: requireNonEmpty(item.provider, "provider required") as FactoryCloudProvider,
-          profileId: requireNonEmpty(item.profileId, "profileId required"),
-          accountId: optionalTrimmedString(item.accountId),
-          promptFingerprint: requireNonEmpty(item.promptFingerprint, "promptFingerprint required"),
-          keywords: Array.isArray(item.keywords) ? item.keywords.filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim().length > 0) : [],
-          objectiveId: requireNonEmpty(item.objectiveId, "objectiveId required"),
-          taskId: requireNonEmpty(item.taskId, "taskId required"),
-          summary: requireNonEmpty(item.summary, "summary required"),
-          updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
-          scriptPaths: Array.isArray(item.scriptPaths) ? item.scriptPaths.filter((target): target is string => typeof target === "string" && target.trim().length > 0) : [],
-          artifactPaths: Array.isArray(item.artifactPaths) ? item.artifactPaths.filter((target): target is string => typeof target === "string" && target.trim().length > 0) : [],
-        }));
-    } catch {
-      return [];
-    }
-  }
-
-  private scoreInfrastructureKnowledgeMatch(
-    entry: FactoryInfrastructureKnowledgeIndexEntry,
-    query: {
-      readonly provider: FactoryCloudProvider;
-      readonly profileId: string;
-      readonly accountId?: string;
-      readonly promptFingerprint: string;
-      readonly keywords: ReadonlyArray<string>;
-    },
-  ): number {
-    if (entry.provider !== query.provider) return 0;
-    if (entry.profileId !== query.profileId) return 0;
-    if (query.accountId && entry.accountId && entry.accountId !== query.accountId) return 0;
-    const keywordOverlap = query.keywords.filter((keyword) => entry.keywords.includes(keyword)).length;
-    const exactPromptMatch = entry.promptFingerprint === query.promptFingerprint;
-    if (!exactPromptMatch && keywordOverlap === 0) return 0;
-    return (exactPromptMatch ? 100 : 0)
-      + (query.accountId && entry.accountId === query.accountId ? 20 : 0)
-      + keywordOverlap * 10;
-  }
-
-  private async loadInfrastructureKnowledgeContext(input: {
-    readonly profileId: string | undefined;
-    readonly profileCloudProvider?: FactoryCloudProvider;
-    readonly objectiveTitle?: string;
-    readonly objectivePrompt: string;
-    readonly taskTitle?: string;
-    readonly taskPrompt?: string;
-    readonly cloudExecutionContext: FactoryCloudExecutionContext;
-  }): Promise<FactoryInfrastructureKnowledgeContext | undefined> {
-    if (!cloudProviderDefaultsToAws(input.profileCloudProvider)) return undefined;
-    const provider = input.profileCloudProvider ?? input.cloudExecutionContext.preferredProvider ?? "aws";
-    const queryText = this.buildInfrastructureKnowledgeQueryText(input);
-    const query = {
-      provider,
-      profileId: input.profileId ?? "infrastructure",
-      accountId: provider === "aws" ? input.cloudExecutionContext.aws?.callerIdentity?.accountId : undefined,
-      promptFingerprint: infrastructureKnowledgeFingerprint(queryText),
-      keywords: infrastructureKnowledgeKeywords(queryText, [provider]),
-    };
-    const index = await this.readInfrastructureKnowledgeIndex();
-    const ranked = (await Promise.all(index.map(async (entry): Promise<FactoryInfrastructureKnowledgeSelection | undefined> => {
-      const score = this.scoreInfrastructureKnowledgeMatch(entry, query);
-      if (score <= 0) return undefined;
-      if (!(await pathExists(entry.knowledgePath))) return undefined;
-      const scriptPaths = (await Promise.all(entry.scriptPaths.map(async (target) => (await pathExists(target)) ? target : undefined)))
-        .filter((target): target is string => typeof target === "string")
-        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY);
-      const artifactPaths = (await Promise.all(entry.artifactPaths.map(async (target) => (await pathExists(target)) ? target : undefined)))
-        .filter((target): target is string => typeof target === "string")
-        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY);
-      return {
-        entryId: entry.entryId,
-        knowledgePath: entry.knowledgePath,
-        provider: entry.provider,
-        ...(entry.accountId ? { accountId: entry.accountId } : {}),
-        objectiveId: entry.objectiveId,
-        taskId: entry.taskId,
-        summary: entry.summary,
-        updatedAt: entry.updatedAt,
-        score,
-        scriptPaths,
-        artifactPaths,
-      } satisfies FactoryInfrastructureKnowledgeSelection;
-    }))).filter((entry): entry is FactoryInfrastructureKnowledgeSelection => Boolean(entry));
-    return {
-      roleLabel: "Infrastructure engineer",
-      guidance: [
-        "These files are curated repo-scoped infrastructure memory, not the full receipt history.",
-        "Stored scripts are durable and reusable, but for live cloud/account/runtime questions rerun the best matching script before you finalize.",
-      ],
-      selectedEntries: ranked
-        .sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt || a.entryId.localeCompare(b.entryId))
-        .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SELECTIONS),
-    };
-  }
-
-  private infrastructureKnowledgeSharedArtifactRefs(
-    context: FactoryInfrastructureKnowledgeContext | undefined,
-  ): ReadonlyArray<GraphRef> {
-    if (!context?.selectedEntries.length) return [];
-    const seen = new Set<string>();
-    const refs: GraphRef[] = [];
-    const pushRef = (ref: string, label: string): void => {
-      if (!ref || seen.has(ref)) return;
-      seen.add(ref);
-      refs.push(artifactRef(ref, label));
-    };
-    for (const entry of context.selectedEntries) {
-      pushRef(entry.knowledgePath, "reusable infrastructure knowledge");
-      for (const scriptPath of entry.scriptPaths) pushRef(scriptPath, "reusable infrastructure script");
-      for (const artifactPath of entry.artifactPaths) pushRef(artifactPath, "reusable infrastructure evidence");
-    }
-    return refs;
-  }
-
-  private renderInfrastructureKnowledgePromptSection(
-    context: FactoryInfrastructureKnowledgeContext | undefined,
-  ): ReadonlyArray<string> {
-    if (!context) return [];
-    const lines = [
-      `## Infrastructure Role`,
-      `Act as the ${context.roleLabel.toLowerCase()} for this task.`,
-      `Reuse the mounted infrastructure knowledge and stored scripts before inventing a new workflow.`,
-      ...context.guidance.map((item) => `- ${item}`),
-      `Selected reusable knowledge for this scope:`,
-    ];
-    if (context.selectedEntries.length === 0) {
-      lines.push(`- none yet. If this run produces a useful script or structured output, return it in artifacts so Factory can promote it into reusable infrastructure knowledge.`);
-    } else {
-      for (const entry of context.selectedEntries) {
-        lines.push(
-          `- knowledge: ${entry.knowledgePath} | ${entry.summary}${entry.accountId ? ` | account ${entry.accountId}` : ""} | recorded ${new Date(entry.updatedAt).toISOString()}`,
-        );
-        for (const scriptPath of entry.scriptPaths) lines.push(`- reusable script: ${scriptPath}`);
-        for (const artifactPath of entry.artifactPaths) lines.push(`- reusable evidence: ${artifactPath}`);
-      }
-      lines.push(`For live cloud/account/runtime questions, rerun or adapt the best matching stored script before finalizing. Use cached output as a hint, not as the answer.`);
-    }
-    lines.push(``);
-    return lines;
-  }
-
-  private async promoteInfrastructureKnowledge(input: {
-    readonly state: FactoryState;
-    readonly task: FactoryTaskRecord;
-    readonly payload: FactoryTaskJobPayload;
-    readonly outcome: string;
-    readonly summary: string;
-    readonly report: FactoryInvestigationReport;
-    readonly workerArtifacts: ReadonlyArray<{
-      readonly label: string;
-      readonly path?: string;
-      readonly summary?: string;
-    }>;
-  }): Promise<Readonly<Record<string, GraphRef>>> {
-    const profile = this.objectiveProfileForState(input.state);
-    const profileId = profile.rootProfileId;
-    if (!cloudProviderDefaultsToAws(profile.cloudProvider) || input.state.objectiveMode !== "investigation") return {};
-    if (input.outcome === "blocked" && input.report.evidence.length === 0 && input.workerArtifacts.length === 0) return {};
-    const cloudExecutionContext = await this.loadObjectiveCloudExecutionContext(profile);
-    const provider = profile.cloudProvider ?? cloudExecutionContext.preferredProvider ?? "aws";
-    const accountId = provider === "aws" ? cloudExecutionContext.aws?.callerIdentity?.accountId : undefined;
-    const queryText = this.buildInfrastructureKnowledgeQueryText({
-      objectiveTitle: input.state.title,
-      objectivePrompt: input.state.prompt,
-      taskTitle: input.task.title,
-      taskPrompt: effectiveFactoryTaskPrompt({
-        profileCloudProvider: this.objectiveProfileForState(input.state).cloudProvider,
-        objectiveMode: input.state.objectiveMode,
-        taskPrompt: input.task.prompt,
-      }),
-    });
-    const createdAt = Date.now();
-    const entryId = createHash("sha1")
-      .update([input.payload.objectiveId, input.payload.taskId, input.payload.candidateId, provider, accountId ?? "", String(createdAt)].join(":"))
-      .digest("hex")
-      .slice(0, 16);
-    const entryDir = this.repoInfrastructureKnowledgeEntryDir(entryId);
-    await fs.mkdir(entryDir, { recursive: true });
-    const scripts = await this.materializeInfrastructureKnowledgeScripts({
-      report: input.report,
-      workspacePath: input.payload.workspacePath,
-      entryDir,
-    });
-    const artifacts = await this.materializeInfrastructureKnowledgeArtifacts({
-      artifacts: input.workerArtifacts,
-      workspacePath: input.payload.workspacePath,
-      entryDir,
-    });
-    const entry: FactoryInfrastructureKnowledgeEntry = {
-      entryId,
-      repoKey: repoKeyForRoot(this.git.repoRoot),
-      profileId,
-      provider,
-      accountId,
-      promptFingerprint: infrastructureKnowledgeFingerprint(queryText),
-      keywords: infrastructureKnowledgeKeywords(queryText, [provider]),
-      objectiveId: input.payload.objectiveId,
-      objectiveTitle: input.state.title,
-      objectivePrompt: input.state.prompt,
-      objectiveMode: input.state.objectiveMode,
-      taskId: input.payload.taskId,
-      taskTitle: input.task.title,
-      taskPrompt: effectiveFactoryTaskPrompt({
-        profileCloudProvider: this.objectiveProfileForState(input.state).cloudProvider,
-        objectiveMode: input.state.objectiveMode,
-        taskPrompt: input.task.prompt,
-      }),
-      candidateId: input.payload.candidateId,
-      summary: input.summary,
-      conclusion: clipText(input.report.conclusion, 600),
-      scripts,
-      artifacts,
-      createdAt,
-      updatedAt: createdAt,
-    };
-    const entryPath = this.repoInfrastructureKnowledgeEntryPath(entryId);
-    await fs.writeFile(entryPath, JSON.stringify(entry, null, 2), "utf-8");
-
-    const indexPath = this.repoInfrastructureKnowledgeIndexPath();
-    await fs.mkdir(path.dirname(indexPath), { recursive: true });
-    const scriptPaths = [
-      ...scripts.map((item) => preferredInfrastructureKnowledgePath(item)).filter((target): target is string => typeof target === "string"),
-      ...artifacts
-        .filter((item) => {
-          const target = preferredInfrastructureKnowledgePath(item);
-          return typeof target === "string" && INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(target);
-        })
-        .map((item) => preferredInfrastructureKnowledgePath(item))
-        .filter((target): target is string => typeof target === "string"),
-    ].slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_SCRIPTS_PER_ENTRY);
-    const artifactPaths = artifacts
-      .map((item) => preferredInfrastructureKnowledgePath(item))
-      .filter((target): target is string => typeof target === "string" && !INFRASTRUCTURE_KNOWLEDGE_SCRIPT_RE.test(target))
-      .slice(0, INFRASTRUCTURE_KNOWLEDGE_MAX_ARTIFACTS_PER_ENTRY);
-    const indexEntry: FactoryInfrastructureKnowledgeIndexEntry = {
-      entryId,
-      knowledgePath: entryPath,
-      provider,
-      profileId,
-      accountId,
-      promptFingerprint: entry.promptFingerprint,
-      keywords: entry.keywords,
-      objectiveId: input.payload.objectiveId,
-      taskId: input.payload.taskId,
-      summary: input.summary,
-      updatedAt: createdAt,
-      scriptPaths,
-      artifactPaths,
-    };
-    const existingIndex = await this.readInfrastructureKnowledgeIndex();
-    const nextIndex = [
-      indexEntry,
-      ...existingIndex.filter((item) => item.entryId !== entryId),
-    ].slice(0, 200);
-    await fs.writeFile(indexPath, JSON.stringify(nextIndex, null, 2), "utf-8");
-    return {
-      infrastructureKnowledge: fileRef(entryPath, "reusable infrastructure knowledge"),
-    };
   }
 
   private async resolveObjectiveProfileSnapshot(profileId?: string): Promise<FactoryObjectiveProfileSnapshot> {
@@ -2507,10 +1924,6 @@ export class FactoryService {
     return right.updatedAt - left.updatedAt
       || right.createdAt - left.createdAt
       || right.id.localeCompare(left.id);
-  }
-
-  private isAuditEligibleObjectiveStatus(status: FactoryObjectiveStatus): boolean {
-    return isEligibleObjectiveAuditStatus(status);
   }
 
   private async latestObjectiveAuditJob(objectiveId: string): Promise<QueueJob | undefined> {
@@ -3828,13 +3241,6 @@ export class FactoryService {
     return buildTaskRunnerWorkerHandoffEvent(input);
   }
 
-  private defaultObjectiveHandoffNextAction(
-    state: FactoryState,
-    status: FactoryObjectiveHandoffStatus,
-  ): string | undefined {
-    return defaultTaskRunnerObjectiveHandoffNextAction(state, status);
-  }
-
   private buildObjectiveHandoffEvent(input: {
     readonly state: FactoryState;
     readonly status: FactoryObjectiveHandoffStatus;
@@ -3845,6 +3251,16 @@ export class FactoryService {
     readonly nextAction?: string;
   }): Extract<FactoryEvent, { readonly type: "objective.handoff" }> {
     return buildTaskRunnerObjectiveHandoffEvent(input);
+  }
+
+  async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
+    return runFactoryChecks({
+      commands,
+      workspacePath,
+      dataDir: this.dataDir,
+      repoRoot: this.git.repoRoot,
+      worktreesDir: this.git.worktreesDir,
+    });
   }
 
   async applyTaskWorkerResult(payload: FactoryTaskJobPayload, rawResult: Record<string, unknown>): Promise<void> {
@@ -5450,17 +4866,6 @@ export class FactoryService {
     return chain[chain.length - 1]?.hash;
   }
 
-  private async discoverObjectiveStreams(): Promise<ReadonlyArray<string>> {
-    const discovered = new Set<string>();
-    const runtimeStreams = await this.runtime.listStreams(`${FACTORY_STREAM_PREFIX}/`);
-    for (const stream of runtimeStreams) {
-      if (stream.startsWith(`${FACTORY_STREAM_PREFIX}/`)) {
-        discovered.add(stream);
-      }
-    }
-    return [...discovered].sort((a, b) => a.localeCompare(b));
-  }
-
   private dependsTransitivelyOn(
     state: FactoryState,
     taskId: string,
@@ -5622,29 +5027,6 @@ export class FactoryService {
       if (!task || task.status !== "approved") return false;
       return true;
     });
-  }
-
-  private async commitInvestigationSynthesisMemory(
-    state: FactoryState,
-    synthesis: FactoryInvestigationSynthesisRecord,
-  ): Promise<void> {
-    if (!this.memoryTools) return;
-    const reports = this.finalInvestigationReports(state).filter((report) => synthesis.taskIds.includes(report.taskId));
-    const text = renderInvestigationReportText(
-      synthesis.summary,
-      synthesis.report,
-      undefined,
-      reports.map((report) => report.artifactRefs),
-    );
-    try {
-      await this.memoryTools.commit({
-        scope: `factory/objectives/${state.objectiveId}`,
-        text,
-        tags: ["factory", "objective", "investigation", "synthesized"],
-      });
-    } catch {
-      // memory is auxiliary
-    }
   }
 
   private buildFinalInvestigationReport(
@@ -6336,16 +5718,6 @@ export class FactoryService {
   private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
     const checkedIn = await this.collectCheckedInRepoSkillPaths();
     return [...new Set(checkedIn)].sort((a, b) => a.localeCompare(b));
-  }
-
-  private async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
-    return runFactoryChecks({
-      commands,
-      workspacePath,
-      dataDir: this.dataDir,
-      repoRoot: this.git.repoRoot,
-      worktreesDir: this.git.worktreesDir,
-    });
   }
 
   private async readTextTail(filePath: string | undefined, maxChars: number): Promise<string | undefined> {

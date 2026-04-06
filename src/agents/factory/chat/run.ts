@@ -11,7 +11,6 @@ import {
   type AgentRunResult,
 } from "../../agent";
 import type { JsonlQueue } from "../../../adapters/jsonl-queue";
-import type { MemoryTools } from "../../../adapters/memory-tools";
 import type { FactoryService } from "../../../services/factory-service";
 import {
   factoryChatStream,

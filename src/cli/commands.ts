@@ -11,7 +11,7 @@ import { runAgentLoop } from "../engine/runtime/agent-loop";
 import { createResonateAgentActionAdapter } from "../engine/runtime/resonate-agent-actions";
 import { handleFactoryCommand } from "../factory-cli/commands";
 import { detectGitRoot } from "../factory-cli/config";
-import type { JobCmd, JobEvent, JobState } from "../modules/job";
+import type { JobState } from "../modules/job";
 import {
   commitUserPreference,
   globalUserPreferenceScope,

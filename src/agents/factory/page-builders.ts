@@ -59,7 +59,7 @@ export const collectTerminalRunIds = (
   runIds: ReadonlyArray<string>,
   runChains: ReadonlyArray<AgentRunChain>,
 ): ReadonlyArray<string> =>
-  runIds.filter((runId, index) => {
+  runIds.filter((_runId, index) => {
     const chain = runChains[index];
     return chain ? projectAgentRun(chain).state.status !== "running" : false;
   });

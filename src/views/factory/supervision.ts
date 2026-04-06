@@ -334,7 +334,7 @@ export const buildEngineerPerspectiveOverview = (input: {
   readonly role?: string;
   readonly status: string;
   readonly load: string;
-  readonly objective?: Pick<FactorySelectedObjectiveCard, "title" | "displayState" | "status" | "bottomLine" | "summary" | "nextAction">;
+  readonly objective?: Pick<FactorySelectedObjectiveCard, "title" | "displayState" | "status" | "bottomLine" | "summary" | "nextAction" | "phaseDetail">;
 }): {
   readonly focus: string;
   readonly need: string;

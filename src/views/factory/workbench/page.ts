@@ -13,7 +13,6 @@ import {
   iconTokens,
   iconWorker,
   liveIslandAttrs,
-  statPill,
   statusDot,
   toneForValue,
   truncate,
@@ -38,7 +37,6 @@ import type {
   FactoryChatProfileNav,
   FactoryChatObjectiveNav,
   FactoryInspectorTab,
-  FactoryLifecycleStepModel,
   FactorySelectedObjectiveCard,
   FactoryWorkbenchActivitySectionModel,
   FactoryWorkbenchBlockModel,
@@ -46,7 +44,6 @@ import type {
   FactoryWorkbenchFilterKey,
   FactoryWorkbenchObjectiveListSectionModel,
   FactoryWorkbenchPageModel,
-  FactoryWorkbenchSectionModel,
   FactoryWorkbenchSummarySectionModel,
   FactoryWorkbenchWorkspaceModel,
 } from "../../factory-models";
@@ -617,133 +614,6 @@ const renderLiveFocusControls = (
   return `<div class="mt-3 flex flex-wrap gap-2">${buttons.join("")}</div>`;
 };
 
-const renderLifecycleStrip = (
-  objective?: FactoryWorkbenchSummarySectionModel["objective"],
-): string => {
-  if (!objective?.lifecycleSteps?.length) return "";
-  const stepTone = (state: FactoryLifecycleStepModel["state"]): string =>
-    state === "done"
-      ? "border-success/20 bg-success/10 text-success"
-      : state === "current"
-        ? "border-info/20 bg-info/10 text-info"
-        : state === "paused"
-          ? "border-warning/20 bg-warning/10 text-warning"
-          : "border-border bg-background text-muted-foreground";
-  const stepPrefix = (state: FactoryLifecycleStepModel["state"]): string =>
-    state === "done" ? "✓"
-      : state === "paused" ? "⏸"
-      : state === "current" ? "●"
-      : "○";
-  return `<section class="border border-border bg-muted/25 px-4 py-3">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Lifecycle Strip</div>
-    <div class="mt-3 flex flex-wrap gap-2">
-      ${objective.lifecycleSteps.map((step) => `<div class="inline-flex items-center gap-2 border px-2.5 py-1.5 text-[11px] font-medium ${stepTone(step.state)}">
-        <span>${stepPrefix(step.state)}</span>
-        <span>${esc(step.label)}</span>
-      </div>`).join("")}
-    </div>
-  </section>`;
-};
-
-const renderObjectiveEvidenceSnapshot = (
-  objective?: FactoryWorkbenchSummarySectionModel["objective"],
-): string => {
-  if (!objective?.evidenceStats?.length) return "";
-  return `<section class="border border-border bg-muted/25 px-4 py-3">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Snapshot</div>
-    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-      ${objective.evidenceStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(stat.label)}</div>
-        <div class="mt-1 text-sm font-semibold text-foreground">${esc(stat.value)}</div>
-      </div>`).join("")}
-    </div>
-  </section>`;
-};
-
-const renderObjectiveContractSnapshot = (
-  objective?: FactoryWorkbenchSummarySectionModel["objective"],
-): string => {
-  if (!objective?.contract && !objective?.alignment) return "";
-  const contract = objective.contract;
-  const alignment = objective.alignment;
-  const alignmentTone = alignment
-    ? alignment.gateStatus === "blocked"
-      ? "danger"
-      : alignment.gateStatus === "correction_requested" || alignment.gateStatus === "not_reported"
-        ? "warning"
-        : alignment.correctedAfterReview
-          ? "info"
-          : "success"
-    : "neutral";
-  return `<section class="border border-border bg-muted/25 px-4 py-3">
-    <div class="flex flex-wrap items-center gap-2">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Contract</div>
-      ${alignment ? badge(
-        alignment.correctedAfterReview
-          ? "Aligned After Correction"
-          : alignment.gateStatus === "blocked"
-            ? "Blocked"
-            : alignment.gateStatus === "correction_requested"
-              ? "Correction Requested"
-              : alignment.gateStatus === "not_reported"
-                ? "Alignment Not Reported"
-                : "Aligned",
-        alignmentTone,
-      ) : ""}
-    </div>
-    ${contract ? `<div class="mt-3 space-y-3">
-      <div>
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Acceptance Criteria</div>
-        <div class="mt-2 space-y-2">
-          ${contract.acceptanceCriteria.map((item) => `<div class="border border-border bg-background px-3 py-2 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
-        </div>
-      </div>
-      ${contract.requiredChecks.length > 0 ? `<div>
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Required Checks</div>
-        <div class="mt-2 flex flex-wrap gap-2">
-          ${contract.requiredChecks.map((item) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] text-foreground">${esc(item)}</span>`).join("")}
-        </div>
-      </div>` : ""}
-      <div class="text-sm leading-6 text-muted-foreground">${esc(contract.proofExpectation)}</div>
-    </div>` : ""}
-    ${alignment ? `<div class="mt-4 grid gap-3 xl:grid-cols-2">
-      <div class="space-y-3">
-        <div class="border border-border bg-background px-3 py-3">
-          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Satisfied</div>
-          <div class="mt-2 space-y-2">
-            ${(alignment.satisfied.length > 0
-              ? alignment.satisfied
-              : ["No explicit satisfied criteria recorded yet."])
-              .map((item) => `<div class="text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
-          </div>
-        </div>
-        <div class="border border-border bg-background px-3 py-3">
-          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Controller View</div>
-          <div class="mt-2 text-sm leading-6 text-foreground">${esc(alignment.rationale)}</div>
-          ${alignment.correctiveAction ? `<div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(alignment.correctiveAction)}</div>` : ""}
-        </div>
-      </div>
-      <div class="space-y-3">
-        <div class="border border-border bg-background px-3 py-3">
-          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Still Missing</div>
-          <div class="mt-2 space-y-2">
-            ${(alignment.missing.length > 0
-              ? alignment.missing
-              : ["Nothing missing in the latest alignment report."])
-              .map((item) => `<div class="text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
-          </div>
-        </div>
-        ${alignment.outOfScope.length > 0 ? `<div class="border border-warning/25 bg-warning/10 px-3 py-3">
-          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Out Of Scope</div>
-          <div class="mt-2 space-y-2">
-            ${alignment.outOfScope.map((item) => `<div class="text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
-          </div>
-        </div>` : ""}
-      </div>
-    </div>` : ""}
-  </section>`;
-};
-
 const recommendationConfidenceTone = (
   confidence: NonNullable<NonNullable<FactorySelectedObjectiveCard["selfImprovement"]>["recommendations"][number]>["confidence"],
 ): "neutral" | "info" | "success" | "warning" => {
@@ -1278,83 +1148,6 @@ const renderInspectorTabLink = (
     : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"}">${esc(label)}</a>`;
 };
 
-const renderProfileListSection = (
-  title: string,
-  items: ReadonlyArray<string>,
-): string => items.length > 0
-  ? `<section class="border border-border bg-card px-4 py-4">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(title)}</div>
-    <div class="mt-3 space-y-2">
-      ${items.map((item) => `<div class="border border-border bg-muted/25 px-3 py-2 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
-    </div>
-  </section>`
-  : "";
-
-const renderEmployeeProfilePanel = (
-  model: FactoryChatIslandModel,
-  options?: {
-    readonly sectionLimit?: number;
-    readonly includeTools?: boolean;
-  },
-): string => {
-  const roles = (model.activeProfileRoles ?? []).slice(0, 6);
-  const responsibilities = engineerResponsibilities(model).slice(0, 6);
-  const profileSections = (model.activeProfileSections ?? [])
-    .filter((section) => {
-      const normalized = section.title.trim().toLowerCase();
-      return normalized !== "roles" && normalized !== "responsibilities" && section.items.length > 0;
-    })
-    .slice(0, options?.sectionLimit ?? 3);
-  const tools = options?.includeTools
-    ? (model.activeProfileTools ?? []).slice(0, 8)
-    : [];
-  const profileIntro = [
-    model.activeProfileProfileSummary
-      ? `<div class="border border-border bg-muted/25 px-3 py-2.5">
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">PROFILE.md</div>
-        <div class="mt-1 text-sm leading-6 text-foreground">${esc(model.activeProfileProfileSummary)}</div>
-      </div>`
-      : "",
-    model.activeProfileSoulSummary
-      ? `<div class="border border-border bg-muted/25 px-3 py-2.5">
-        <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">SOUL.md</div>
-        <div class="mt-1 text-sm leading-6 text-foreground">${esc(model.activeProfileSoulSummary)}</div>
-      </div>`
-      : "",
-  ].filter(Boolean).join("");
-  const toolsMarkup = tools.length > 0
-    ? `<div class="mt-4 flex flex-wrap gap-2">
-      ${tools.map((tool) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">${esc(tool)}</span>`).join("")}
-    </div>`
-    : "";
-  const cards = [
-    `<section class="border border-border bg-card px-4 py-4">
-      <div class="flex items-start gap-3">
-        <span class="flex h-10 w-10 shrink-0 items-center justify-center border border-border bg-background text-primary">
-          ${iconWorker("h-4 w-4")}
-        </span>
-        <div class="min-w-0 flex-1">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Employee Profile</div>
-          <div class="mt-1 text-base font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
-          ${engineerPrimaryRole(model) ? `<div class="mt-1 text-sm text-muted-foreground">${esc(engineerPrimaryRole(model)!)}</div>` : ""}
-        </div>
-      </div>
-      ${roles.length > 0 ? `<div class="mt-4 flex flex-wrap gap-2">
-        ${roles.map((role) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">${esc(role)}</span>`).join("")}
-      </div>` : ""}
-      ${profileIntro ? `<div class="mt-4 space-y-3">${profileIntro}</div>` : ""}
-      ${toolsMarkup}
-    </section>`,
-    renderProfileListSection("Responsibilities", responsibilities),
-    ...profileSections.map((section) => renderProfileListSection(section.title, section.items.slice(0, 6))),
-  ].filter(Boolean);
-  return cards.length > 0
-    ? cards.join("")
-    : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
-      Profile and soul notes will appear here when available.
-    </section>`;
-};
-
 const renderEmployeeOverviewPanel = (
   model: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
@@ -1435,7 +1228,7 @@ export const factoryWorkbenchChatIsland = (
   </div>`;
 };
 
-const isSummaryVisible = (workspace: FactoryWorkbenchWorkspaceModel): boolean =>
+const isSummaryVisible = (_workspace: FactoryWorkbenchWorkspaceModel): boolean =>
   true;
 
 export const factoryWorkbenchBlockIsland = (
@@ -1601,7 +1394,6 @@ export const buildFactoryWorkbenchShellSnapshot = (
 export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string => {
   const shell = buildFactoryWorkbenchShellSnapshot(model);
   const routeContext = shell.route;
-  const pageQuery = buildFactoryWorkbenchSearch(routeContext);
   const islandBindings = workbenchIslandBindings(routeContext);
   const composerActions = renderWorkbenchComposerQuickActions({
     objectiveId: routeContext.objectiveId,

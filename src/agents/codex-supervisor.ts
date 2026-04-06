@@ -75,11 +75,6 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined;
 
-const asStringList = (value: unknown): ReadonlyArray<string> =>
-  Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
-    : [];
-
 const unique = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
   [...new Set(values.filter((value) => value.trim().length > 0))];
 
