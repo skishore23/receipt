@@ -1,0 +1,17 @@
+{
+  "id": "aws_iam_user_inventory",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["iam", "user", "users", "inventory", "count", "list", "identity"],
+  "description": "List IAM users and return the total count for the active AWS account.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile. IAM user listing is account-global and does not require a region.",
+    "Returns the current IAM user count and a compact user list for operator review."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --count-only"
+  ]
+}

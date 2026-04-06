@@ -1,0 +1,1323 @@
+import path from "node:path";
+
+import type { Hono } from "hono";
+
+import { LocalCodexExecutor } from "../../../adapters/codex-executor";
+import type { MemoryTools } from "../../../adapters/memory-tools";
+import type { Runtime } from "@receipt/core/runtime";
+import {
+  text,
+} from "../../../framework/http";
+import type { AgentLoaderContext, AgentRouteModule } from "../../../framework/agent-types";
+import { agentRunStream } from "../../agent.streams";
+import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
+import {
+  factoryChatSessionStream,
+  assertFactoryProfileCreateModeAllowed,
+  assertFactoryProfileDispatchActionAllowed,
+  factoryChatResolvedProfileActionSubject,
+  repoKeyForRoot,
+  type FactoryChatProfileObjectiveMode,
+  resolveFactoryChatProfile,
+} from "../../../services/factory-chat-profiles";
+import {
+  FactoryService,
+  FactoryServiceError,
+} from "../../../services/factory-service";
+import {
+  toFactorySelectedObjectiveCard,
+} from "../../../views/factory/objective-presenters";
+import { buildFactoryWorkbench } from "../../../views/factory-workbench";
+import type { FactoryWorkbenchHeaderIslandModel } from "../../../views/factory/workbench/page";
+import {
+  type FactoryChatIslandModel,
+  type FactoryChatObjectiveNav,
+  type FactoryInspectorTab,
+  type FactoryLiveRunCard,
+  type FactorySelectedObjectiveCard,
+  type FactoryWorkbenchBlockModel,
+  type FactoryWorkbenchDetailTab,
+  type FactoryWorkbenchFilterKey,
+  type FactoryWorkbenchFilterModel,
+  type FactoryWorkbenchPageModel,
+  type FactoryWorkbenchSectionModel,
+  type FactoryWorkbenchStatModel,
+  type FactoryWorkbenchWorkspaceModel,
+} from "../../../views/factory-models";
+import type { QueueJob } from "../../../adapters/jsonl-queue";
+import { buildChatItemsForRun, buildChatItemsFromConversation } from "../chat-items";
+import {
+} from "../chat-context";
+import {
+  buildChatLink,
+  latestObjectiveIdFromJobs,
+  latestObjectiveIdFromRunChains,
+  normalizeKnownObjectiveId,
+} from "../links";
+import {
+  buildActiveCodexCard,
+  buildLiveChildCards,
+  collectRunIds,
+} from "../live-jobs";
+import {
+  buildObjectiveNavCards,
+  collectTerminalRunIds,
+} from "../page-builders";
+import { describeProfileMarkdown } from "../profile-markdown";
+import { projectAgentRun } from "../run-projection";
+import {
+  asString,
+  isActiveJobStatus,
+  jobAnyRunId,
+  jobObjectiveId,
+  jobParentRunId,
+  jobRunId,
+  type AgentRunChain,
+} from "../shared";
+import {
+  buildWorkbenchLink,
+} from "./navigation";
+import { createFactoryRouteCache } from "./cache";
+import { createFactoryRouteEvents } from "./events";
+import { registerFactoryApiRoutes } from "./register-factory-api-routes";
+import { registerFactoryUiRoutes } from "./register-factory-ui-routes";
+import { registerReceiptRoutes } from "./register-receipt-routes";
+import { registerRuntimeRoutes } from "./register-runtime-routes";
+import { createRuntimeDashboardLoader } from "./runtime-dashboard";
+import { createFactoryRouteSessionRuntime } from "./session-runtime";
+import type { FactoryDispatchAction } from "../dispatch";
+import { summarizeUserPreferences } from "../../../services/conversation-memory";
+import {
+  isTerminalObjectiveStatus,
+  normalizedWorkbenchDetailTab,
+  normalizedWorkbenchInspectorTab,
+} from "./params";
+import {
+  readWorkbenchRequest,
+  type FactoryWorkbenchRequestState,
+} from "./workbench-request";
+
+const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
+  const helpers = ctx.helpers ?? {};
+  const memoryTools = helpers.memoryTools as MemoryTools | undefined;
+  const service = (helpers.factoryService as FactoryService | undefined) ?? new FactoryService({
+    dataDir: ctx.dataDir,
+    queue: ctx.queue,
+    jobRuntime: ctx.jobRuntime,
+    sse: ctx.sse,
+    codexExecutor: new LocalCodexExecutor(),
+    memoryTools: helpers.memoryTools as MemoryTools | undefined,
+  });
+  const agentRuntime = ctx.runtimes.agent as Runtime<AgentCmd, AgentEvent, AgentState>;
+  const profileRoot = path.resolve(typeof helpers.profileRoot === "string" ? helpers.profileRoot : process.cwd());
+  const chatProjectionDataDir = typeof (service as { readonly dataDir?: unknown }).dataDir === "string"
+    ? (service as { readonly dataDir: string }).dataDir
+    : undefined;
+  const routeCache = createFactoryRouteCache({
+    ctx,
+    service,
+    profileRoot,
+    agentRuntime,
+    chatProjectionDataDir,
+  });
+  const {
+    loadRecentJobs,
+    loadFactoryProfiles,
+    resolveObjectiveProjectionVersion,
+    resolveSessionStreamVersion,
+    loadChatContextProjectionForSession,
+    withProjectionCache,
+  } = routeCache;
+
+  const wrap = async <T>(
+    fn: () => Promise<T>,
+    render: (value: T) => Response,
+  ): Promise<Response> => {
+    try {
+      return render(await fn());
+    } catch (err) {
+      if (err instanceof FactoryServiceError) return text(err.status, err.message);
+      const message = err instanceof Error ? err.message : "factory server error";
+      console.error(err);
+      return text(500, message);
+    }
+  };
+
+  const assertComposeDispatchActionAllowed = (
+    profile: Awaited<ReturnType<typeof resolveFactoryChatProfile>>,
+    action: FactoryDispatchAction,
+  ): void => {
+    try {
+      assertFactoryProfileDispatchActionAllowed(factoryChatResolvedProfileActionSubject(profile), action);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile action is not allowed");
+    }
+  };
+
+  const assertComposeCreateModeAllowed = (
+    profile: Awaited<ReturnType<typeof resolveFactoryChatProfile>>,
+    objectiveMode: FactoryChatProfileObjectiveMode,
+  ): void => {
+    try {
+      assertFactoryProfileCreateModeAllowed(factoryChatResolvedProfileActionSubject(profile), objectiveMode);
+    } catch (err) {
+      throw new FactoryServiceError(409, err instanceof Error ? err.message : "profile create mode is not allowed");
+    }
+  };
+
+const resolveWatchedObjectiveId = async (value: string | undefined): Promise<string | undefined> => {
+    if (!value) return undefined;
+    const objectives = await service.listObjectives();
+    const exact = objectives.find((objective) => objective.objectiveId === value);
+    if (exact) return exact.objectiveId;
+    const prefix = objectives.find((objective) => objective.objectiveId.startsWith(value));
+    return prefix?.objectiveId;
+  };
+
+  const resolveComposerJob = async (
+    objectiveId: string | undefined,
+    preferredJobId: string | undefined,
+  ): Promise<QueueJob> => {
+    if (preferredJobId) {
+      const preferred = await ctx.queue.getJob(preferredJobId);
+      if (preferred) return preferred;
+    }
+    if (!objectiveId) throw new FactoryServiceError(409, "Select an objective before sending job commands.");
+    const jobs = (await loadRecentJobs(160))
+      .filter((job) => jobObjectiveId(job) === objectiveId)
+      .sort((left, right) => {
+        const leftActive = isActiveJobStatus(left.status) ? 1 : 0;
+        const rightActive = isActiveJobStatus(right.status) ? 1 : 0;
+        return rightActive - leftActive
+          || right.updatedAt - left.updatedAt
+          || right.createdAt - left.createdAt
+          || right.id.localeCompare(left.id);
+      });
+    const active = jobs.find((job) => isActiveJobStatus(job.status));
+    if (active) return active;
+    const detail = await service.getObjective(objectiveId);
+    const taskJobId = detail.tasks.find((task) => isActiveJobStatus(task.jobStatus) && task.jobId)?.jobId;
+    if (taskJobId) {
+      const queued = await ctx.queue.getJob(taskJobId);
+      if (queued) return queued;
+    }
+    throw new FactoryServiceError(409, "Selected objective has no active job to control.");
+  };
+
+  const workbenchSessionRuntimeCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<Awaited<ReturnType<typeof buildWorkbenchSessionRuntime>>>;
+  }>();
+  const workbenchWorkspaceCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryWorkbenchWorkspaceModel>;
+  }>();
+  const workbenchChatCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryChatIslandModel>;
+  }>();
+  const workbenchPageCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryWorkbenchPageModel>;
+  }>();
+
+  const objectiveIdFromRunChain = (chain: AgentRunChain): string | undefined => {
+    const projection = projectAgentRun(chain);
+    return projection.state.thread?.objectiveId
+      ?? asString(projection.state.config?.extra?.objectiveId)
+      ?? latestObjectiveIdFromRunChains([chain]);
+  };
+
+  const scopeRunTimelineToObjective = (input: {
+    readonly objectiveId?: string;
+    readonly runIds: ReadonlyArray<string>;
+    readonly runChains: ReadonlyArray<AgentRunChain>;
+    readonly jobs?: ReadonlyArray<QueueJob>;
+  }): {
+    readonly runIds: ReadonlyArray<string>;
+    readonly runChains: ReadonlyArray<AgentRunChain>;
+  } => {
+    const objectiveId = input.objectiveId?.trim();
+    if (!objectiveId) return {
+        runIds: input.runIds,
+        runChains: input.runChains,
+      };
+    const objectiveRunIds = new Set<string>(
+      (input.jobs ?? [])
+        .flatMap((job) => jobObjectiveId(job) === objectiveId
+          ? [jobRunId(job), jobParentRunId(job), jobAnyRunId(job)]
+          : [])
+        .filter((runId): runId is string => typeof runId === "string" && runId.trim().length > 0),
+    );
+    const scoped = input.runIds.flatMap((runId, index) => {
+      const chain = input.runChains[index];
+      if (!chain) return [];
+      const runObjectiveId = objectiveIdFromRunChain(chain);
+      if (runObjectiveId && runObjectiveId !== objectiveId) return [];
+      if (!runObjectiveId && !objectiveRunIds.has(runId)) return [];
+      return [{ runId, chain }] as const;
+    });
+    return {
+      runIds: scoped.map((entry) => entry.runId),
+      runChains: scoped.map((entry) => entry.chain),
+    };
+  };
+
+  const loadRuntimeDashboard = createRuntimeDashboardLoader({
+    ctx,
+    service,
+    agentRuntime,
+    loadRecentJobs,
+  });
+
+  const resolveSessionObjectiveId = async (input: {
+    readonly repoRoot: string;
+    readonly profileId: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly selectedJob?: QueueJob;
+    readonly jobs: ReadonlyArray<QueueJob>;
+    readonly liveObjectives?: ReadonlyArray<{ readonly objectiveId: string }>;
+  }): Promise<string | undefined> => {
+    const normalizeSessionObjectiveId = (candidate: string | undefined): string | undefined => {
+      const objectiveId = candidate?.trim();
+      if (!objectiveId) return undefined;
+      return input.liveObjectives
+        ? normalizeKnownObjectiveId(objectiveId, input.liveObjectives)
+        : objectiveId;
+    };
+    const requestedObjectiveId = normalizeSessionObjectiveId(input.objectiveId);
+    if (requestedObjectiveId) return requestedObjectiveId;
+    const selectedJobObjectiveId = normalizeSessionObjectiveId(jobObjectiveId(input.selectedJob));
+    if (selectedJobObjectiveId) return selectedJobObjectiveId;
+    if (!input.chatId) return undefined;
+    const stream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
+    const projected = await loadChatContextProjectionForSession({ sessionStream: stream });
+    const projectedObjectiveId = normalizeSessionObjectiveId(projected?.bindings.objectiveId);
+    if (projectedObjectiveId) return projectedObjectiveId;
+    const indexChain = await agentRuntime.chain(stream);
+    const runIds = collectRunIds(indexChain);
+    const runChains = await Promise.all(runIds.map((runId) => agentRuntime.chain(agentRunStream(stream, runId))));
+    const discoveredObjectiveId = latestObjectiveIdFromRunChains(runChains)
+      ?? latestObjectiveIdFromJobs(input.jobs, stream, input.chatId);
+    return normalizeSessionObjectiveId(discoveredObjectiveId);
+  };
+
+  const {
+    ensureObjectiveHandoffInSession,
+    collectExplicitObjectiveJobs,
+    buildWorkbenchSessionRuntime,
+  } = createFactoryRouteSessionRuntime({
+    service,
+    agentRuntime,
+    profileRoot,
+    loadRecentJobs,
+    loadFactoryProfiles,
+    resolveSessionObjectiveId,
+    scopeRunTimelineToObjective,
+    loadChatContextProjectionForSession,
+    getJob: (jobId) => ctx.queue.getJob(jobId),
+  });
+
+  const routeEvents = createFactoryRouteEvents({
+    ctx,
+    service,
+    profileRoot,
+    loadRecentJobs,
+    resolveSessionObjectiveId,
+  });
+  const {
+    resolveChatEventSubscriptions,
+    subscribeChatEventStream,
+  } = routeEvents;
+
+  const dedupeObjectiveCards = (
+    cards: ReadonlyArray<FactoryChatObjectiveNav>,
+  ): ReadonlyArray<FactoryChatObjectiveNav> => {
+    const seen = new Set<string>();
+    return cards.filter((card) => {
+      if (!card.objectiveId || seen.has(card.objectiveId)) return false;
+      seen.add(card.objectiveId);
+      return true;
+    });
+  };
+
+  const selectedObjectiveNavCard = (
+    objective: FactorySelectedObjectiveCard,
+  ): FactoryChatObjectiveNav => ({
+    objectiveId: objective.objectiveId,
+    profileId: objective.profileId,
+    profileLabel: objective.profileLabel,
+    title: objective.title,
+    status: objective.status,
+    phase: objective.phase,
+    displayState: objective.displayState,
+    phaseDetail: objective.phaseDetail,
+    statusAuthority: objective.statusAuthority,
+    hasAuthoritativeLiveJob: objective.hasAuthoritativeLiveJob,
+    blockedReason: objective.blockedReason,
+    blockedExplanation: objective.blockedExplanation,
+    summary: objective.bottomLine ?? objective.summary ?? objective.nextAction,
+    updatedAt: objective.updatedAt,
+    selected: true,
+    slotState: objective.slotState,
+    activeTaskCount: objective.activeTaskCount,
+    readyTaskCount: objective.readyTaskCount,
+    taskCount: objective.taskCount,
+    integrationStatus: objective.integrationStatus,
+    tokensUsed: objective.tokensUsed,
+  });
+
+  const workbenchFilterCount = (
+    board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
+    filter: FactoryWorkbenchFilterKey,
+  ): number => {
+    switch (filter) {
+      case "objective.running":
+        return board.sections.active.length;
+      case "objective.needs_attention":
+        return board.sections.needs_attention.length;
+      case "objective.queued":
+        return board.sections.queued.length;
+      case "objective.completed":
+        return board.sections.completed.length;
+      default:
+        return board.objectives.length;
+    }
+  };
+
+  const workbenchFilterMatchesSection = (
+    filter: FactoryWorkbenchFilterKey,
+    section: "needs_attention" | "active" | "queued" | "completed",
+  ): boolean => {
+    switch (filter) {
+      case "objective.running":
+        return section === "active";
+      case "objective.needs_attention":
+        return section === "needs_attention";
+      case "objective.queued":
+        return section === "queued";
+      case "objective.completed":
+        return section === "completed";
+    }
+  };
+
+  const workbenchFilterModels = (
+    board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
+    selected: FactoryWorkbenchFilterKey,
+  ): ReadonlyArray<FactoryWorkbenchFilterModel> => [
+    { key: "objective.running", label: "In Progress", count: workbenchFilterCount(board, "objective.running"), selected: selected === "objective.running" },
+    { key: "objective.needs_attention", label: "Blocked", count: workbenchFilterCount(board, "objective.needs_attention"), selected: selected === "objective.needs_attention" },
+    { key: "objective.queued", label: "Queued", count: workbenchFilterCount(board, "objective.queued"), selected: selected === "objective.queued" },
+    { key: "objective.completed", label: "Completed", count: workbenchFilterCount(board, "objective.completed"), selected: selected === "objective.completed" },
+  ];
+
+  const preferredWorkbenchSelectedObjectiveId = (
+    board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>,
+    _filter: FactoryWorkbenchFilterKey,
+    preferredId?: string,
+  ): string | undefined => {
+    if (preferredId && board.objectives.some((objective) => objective.objectiveId === preferredId)) return preferredId;
+    return undefined;
+  };
+
+  const buildWorkbenchStats = (input: {
+    readonly board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>;
+    readonly selectedObjective?: FactorySelectedObjectiveCard;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): ReadonlyArray<FactoryWorkbenchStatModel> => {
+    const objective = input.selectedObjective;
+    if (objective) {
+      const activeTaskCount = objective.activeTaskCount ?? 0;
+      const readyTaskCount = objective.readyTaskCount ?? 0;
+      const taskCount = objective.taskCount ?? activeTaskCount + readyTaskCount;
+      const sessions = objective.evidenceStats?.find((stat) => stat.key === "sessions")?.value
+        ?? String(activeTaskCount + readyTaskCount);
+      const tasks = objective.evidenceStats?.find((stat) => stat.key === "tasks")?.value
+        ?? `${activeTaskCount}/${taskCount}`;
+      const evidence = objective.evidenceStats?.find((stat) => stat.key === "evidence")?.value
+        ?? objective.evidenceStats?.find((stat) => stat.key === "artifacts")?.value
+        ?? "0";
+      const blockers = objective.evidenceStats?.find((stat) => stat.key === "blockers")?.value
+        ?? (objective.blockedReason ? "1" : "0");
+      return [
+        {
+          key: "tasks",
+          label: "Tasks",
+          value: tasks,
+        },
+        {
+          key: "sessions",
+          label: "Sessions",
+          value: sessions,
+        },
+        {
+          key: "evidence",
+          label: "Evidence",
+          value: evidence,
+        },
+        {
+          key: "blockers",
+          label: "Blockers",
+          value: blockers,
+        },
+      ];
+    }
+    const filteredCount = workbenchFilterCount(input.board, input.filter);
+    return [
+      {
+        key: "scope",
+        label: "Visible",
+        value: `${filteredCount} objective${filteredCount === 1 ? "" : "s"}`,
+      },
+      {
+        key: "running",
+        label: "In Progress",
+        value: `${input.board.sections.active.length}`,
+      },
+      {
+        key: "attention",
+        label: "Blocked",
+        value: `${input.board.sections.needs_attention.length}`,
+      },
+      {
+        key: "tasks",
+        label: "Selected Tasks",
+        value: "0/0",
+      },
+    ];
+  };
+
+  const buildWorkbenchBlocks = (input: {
+    readonly board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>;
+    readonly selectedObjective?: FactorySelectedObjectiveCard;
+    readonly blockedObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly runningObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly queuedObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly pastObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly activeRun?: FactoryLiveRunCard;
+    readonly workbench?: FactoryChatIslandModel["workbench"];
+    readonly detailTab: FactoryWorkbenchDetailTab;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): ReadonlyArray<FactoryWorkbenchBlockModel> => {
+    const executionEscalationHint = (status?: string): string | undefined => {
+      switch (status) {
+        case "blocked":
+          return "Execution escalated back to Chat. Use /react in the composer to continue this objective, or plain text in Chat to summarize the current evidence.";
+        case "failed":
+          return "Execution failed and escalated back to Chat. Use /react to run the next attempt, or plain text in Chat to review the failure before deciding.";
+        case "stalled":
+          return "Execution looks stalled and has escalated back to Chat. Use /abort-job or /react in the composer, or plain text in Chat to decide the next step.";
+        default:
+          return undefined;
+      }
+    };
+    const focus = input.workbench?.focus;
+    const selectedObjective = input.selectedObjective;
+    const objectiveTerminal = Boolean(selectedObjective && isTerminalObjectiveStatus(selectedObjective.status));
+    const staleFocusSummary = objectiveTerminal || Boolean(selectedObjective?.blockedReason);
+    const objectiveFallbackSummary = selectedObjective?.blockedReason
+      ?? selectedObjective?.blockedExplanation
+      ?? selectedObjective?.summary
+      ?? selectedObjective?.nextAction;
+    const escalationHint = executionEscalationHint(focus?.status);
+    const activityItems = (input.workbench?.activity ?? []).slice(0, 8).map((entry) => ({
+      key: `${entry.kind}:${entry.at}:${entry.title}`,
+      kind: entry.kind,
+      title: entry.title,
+      summary: entry.summary,
+      meta: entry.meta,
+      at: entry.at,
+    }));
+    const summarySection: FactoryWorkbenchSectionModel = {
+      key: "summary",
+      title: "Selected Objective",
+      shape: "summary",
+      empty: !selectedObjective,
+      eyebrow: selectedObjective?.displayState ? `State: ${selectedObjective.displayState}` : undefined,
+      headline: selectedObjective?.title ?? "No objective selected.",
+      message: selectedObjective
+        ? selectedObjective.bottomLine
+          ?? selectedObjective.summary
+          ?? selectedObjective.nextAction
+          ?? "Review the selected objective, its lifecycle, and the latest evidence."
+        : "Use chat to create a new objective or select one from the queue below.",
+      tokenCount: typeof selectedObjective?.tokensUsed === "number"
+        ? selectedObjective.tokensUsed.toLocaleString()
+        : undefined,
+      stats: buildWorkbenchStats({
+        board: input.board,
+        selectedObjective,
+        filter: input.filter,
+      }),
+      objective: selectedObjective,
+      currentRun: input.activeRun,
+      focus: focus
+        ? {
+            title: focus.title,
+            summary: focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
+            status: focus.status,
+            active: focus.active,
+            jobId: focus.jobId,
+            taskId: focus.taskId,
+            candidateId: focus.candidateId,
+            lastMessage: focus.lastMessage,
+            stdoutTail: focus.stdoutTail,
+            stderrTail: focus.stderrTail,
+          }
+        : undefined,
+      latestDecisionSummary: selectedObjective?.latestDecisionSummary,
+      latestDecisionAt: selectedObjective?.latestDecisionAt,
+      activityCount: selectedObjective?.timelineGroups?.reduce((sum, group) => sum + group.items.length, 0) ?? activityItems.length,
+      activityItems,
+    };
+    const showBlocked = input.filter === "objective.needs_attention";
+    const showRunning = input.filter === "objective.running";
+    const showQueued = input.filter === "objective.queued";
+    const showCompleted = input.filter === "objective.completed";
+
+    const objectiveSections: FactoryWorkbenchSectionModel[] = [
+      ...(showBlocked ? [{
+        key: "blocked",
+        title: "Blocked",
+        shape: "objective-list" as const,
+        count: input.blockedObjectives.length,
+        emptyMessage: input.filter === "objective.needs_attention"
+          ? "No blocked objectives match the current filter."
+          : "Blocked objectives will appear here when work needs intervention.",
+        items: input.blockedObjectives,
+      }] : []),
+      ...(showRunning ? [{
+        key: "running",
+        title: "In Progress",
+        shape: "objective-list" as const,
+        count: input.runningObjectives.length,
+        emptyMessage: input.filter === "objective.running"
+          ? "No in-progress objectives match the current filter."
+          : "Objectives with active execution will appear here.",
+        items: input.runningObjectives,
+      }] : []),
+      ...(showQueued ? [{
+        key: "queued",
+        title: "Queued",
+        shape: "objective-list" as const,
+        count: input.queuedObjectives.length,
+        emptyMessage: input.filter === "objective.queued"
+          ? "No queued objectives match the current filter."
+          : "Queued objectives waiting for execution will appear here.",
+        items: input.queuedObjectives,
+      }] : []),
+    ];
+    const selectedObjectiveSection = selectedObjective && ![
+      ...input.blockedObjectives,
+      ...input.runningObjectives,
+      ...input.queuedObjectives,
+      ...input.pastObjectives,
+    ].some((objective) => objective.objectiveId === selectedObjective.objectiveId)
+      ? {
+          key: "selected",
+          title: "Current selection",
+          shape: "objective-list" as const,
+          count: 1,
+          emptyMessage: "The selected objective will stay visible here when the current filter hides it.",
+          items: [selectedObjectiveNavCard(selectedObjective)],
+        }
+      : undefined;
+    const objectiveBlockSections = selectedObjectiveSection
+      ? [selectedObjectiveSection, ...objectiveSections]
+      : objectiveSections;
+    const activitySection: FactoryWorkbenchSectionModel = {
+      key: "activity",
+      title: focus || input.activeRun ? "Execution Log" : "Timeline",
+      shape: "activity-list",
+      count: selectedObjective?.timelineGroups?.reduce((sum, group) => sum + group.items.length, 0) ?? activityItems.length,
+      emptyMessage: "Outcome, work performed, and raw receipts will appear here when the objective records evidence.",
+      items: activityItems,
+      timelineGroups: selectedObjective?.timelineGroups,
+      callout: escalationHint,
+      focus: focus
+        ? {
+            title: focus.title,
+            summary: staleFocusSummary
+              ? objectiveFallbackSummary ?? focus.summary ?? focus.lastMessage ?? "Objective state changed."
+              : focus.summary ?? focus.lastMessage ?? focus.stdoutTail ?? "Waiting for live output.",
+            status: focus.status,
+            active: focus.active,
+            jobId: focus.jobId,
+            taskId: focus.taskId,
+            candidateId: focus.candidateId,
+            lastMessage: focus.lastMessage,
+            stdoutTail: focus.stdoutTail,
+            stderrTail: focus.stderrTail,
+          }
+        : undefined,
+      run: input.activeRun,
+    };
+    const prioritizeActivity = Boolean(
+      input.activeRun
+      || focus?.active
+      || focus?.status === "running"
+      || focus?.status === "queued",
+    );
+
+    const blocks: FactoryWorkbenchBlockModel[] = [];
+
+    const hasActivity = (selectedObjective?.timelineGroups?.length ?? 0) > 0 || focus || input.activeRun || activityItems.length > 0;
+    if (hasActivity && prioritizeActivity) {
+      blocks.push({
+        key: "activity",
+        layout: "full",
+        sections: [activitySection],
+      });
+    }
+
+    blocks.push({
+      key: "summary",
+      layout: "full",
+      sections: [summarySection],
+    });
+
+    if (hasActivity && !prioritizeActivity) {
+      blocks.push({
+        key: "activity",
+        layout: "full",
+        sections: [activitySection],
+      });
+    }
+
+    if (objectiveBlockSections.length > 0) {
+      blocks.push({
+        key: "objectives",
+        layout: "full",
+        sections: objectiveBlockSections,
+      });
+    }
+
+    if (showCompleted) {
+      blocks.push({
+        key: "history",
+        layout: "full",
+        sections: [{
+          key: "completed",
+          title: "Completed",
+          shape: "objective-list",
+          count: input.pastObjectives.length,
+          emptyMessage: input.filter === "objective.completed"
+            ? "No completed objectives match the current filter."
+            : "Completed objectives and recent history will appear here.",
+          items: input.pastObjectives,
+        }],
+      });
+    }
+
+    return blocks;
+  };
+
+  const buildWorkbenchWorkspaceModel = async (input: {
+    readonly profileId?: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): Promise<FactoryWorkbenchWorkspaceModel> => {
+    await service.ensureBootstrap();
+    const repoRoot = service.git.repoRoot;
+    const requestedObjectiveId = input.objectiveId?.trim();
+    const [resolved, profiles, detail] = await Promise.all([
+      resolveFactoryChatProfile({
+        repoRoot,
+        profileRoot,
+        requestedId: input.profileId,
+      }),
+      loadFactoryProfiles(),
+      requestedObjectiveId
+        ? service.getObjective(requestedObjectiveId).catch((err) => {
+            if (err instanceof FactoryServiceError && err.status === 404) return undefined;
+            throw err;
+          })
+        : Promise.resolve(undefined),
+    ]);
+    const effectiveProfileId = detail?.profile.rootProfileId ?? resolved.root.id;
+    const effectiveProfile = profiles.find((profile) => profile.id === effectiveProfileId) ?? resolved.root;
+    const board = await service.buildBoardProjection({
+      selectedObjectiveId: requestedObjectiveId,
+      profileId: effectiveProfileId,
+    });
+    const resolvedObjectiveId = detail?.objectiveId
+      ?? preferredWorkbenchSelectedObjectiveId(board, input.filter, requestedObjectiveId)
+      ?? requestedObjectiveId;
+    const selectedBoardObjective = resolvedObjectiveId
+      ? board.objectives.find((objective) => objective.objectiveId === resolvedObjectiveId)
+      : undefined;
+    const selectedObjective = detail
+      ? toFactorySelectedObjectiveCard(detail)
+      : selectedBoardObjective
+        ? toFactorySelectedObjectiveCard(selectedBoardObjective)
+        : undefined;
+    const { jobs: recentJobs } = detail
+      ? await collectExplicitObjectiveJobs(
+          detail,
+          input.focusKind === "job" ? input.focusId : undefined,
+        )
+      : { jobs: [] as ReadonlyArray<QueueJob> };
+    const initialWorkbench = buildFactoryWorkbench({
+      detail,
+      recentJobs,
+      requestedFocusKind: input.focusKind,
+      requestedFocusId: input.focusId,
+    });
+    const liveOutput = detail && initialWorkbench?.focus
+      ? await service.getObjectiveLiveOutput(
+          detail.objectiveId,
+          initialWorkbench.focus.focusKind,
+          initialWorkbench.focus.focusId,
+        ).catch(() => undefined)
+      : undefined;
+    const workbench = buildFactoryWorkbench({
+      detail,
+      recentJobs,
+      requestedFocusKind: initialWorkbench?.focus?.focusKind ?? input.focusKind,
+      requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
+      liveOutput,
+    });
+    const sessionStream = input.chatId
+      ? factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
+      : undefined;
+    const sessionChatContext = sessionStream
+      ? await loadChatContextProjectionForSession({
+          sessionStream,
+          fallbackChain: chatProjectionDataDir ? undefined : await agentRuntime.chain(sessionStream),
+        })
+      : undefined;
+    const activeRun = (() => {
+      const projectedRuns = resolvedObjectiveId
+        ? (sessionChatContext?.runs ?? []).filter((run) => run.objectiveId === resolvedObjectiveId)
+        : (sessionChatContext?.runs ?? []);
+      const latestRun = projectedRuns.at(-1);
+      if (!latestRun) return undefined;
+      const latestAssistantMessage = [...(sessionChatContext?.conversation ?? [])]
+        .reverse()
+        .find((message) => message.runId === latestRun.runId && message.role === "assistant");
+      const summary = latestAssistantMessage?.text?.trim()
+        || (workbench?.focus?.summary?.trim() || undefined)
+        || `${effectiveProfile.label} is working on the selected objective.`;
+      return {
+        runId: latestRun.runId,
+        profileLabel: effectiveProfile.label,
+        status: latestRun.status ?? (latestRun.terminal ? "completed" : "running"),
+        summary,
+        updatedAt: latestRun.updatedAt,
+        link: buildChatLink({
+          profileId: effectiveProfile.id,
+          chatId: input.chatId,
+          objectiveId: resolvedObjectiveId,
+          runId: latestRun.runId,
+          focusKind: workbench?.focus?.focusKind,
+          focusId: workbench?.focus?.focusId,
+        }),
+      } satisfies FactoryLiveRunCard;
+    })();
+    const activeCodex = recentJobs.length > 0 ? buildActiveCodexCard(recentJobs) : undefined;
+    const liveChildren = sessionStream
+      ? buildLiveChildCards(recentJobs, sessionStream, resolvedObjectiveId)
+      : [];
+    const filters = workbenchFilterModels(board, input.filter);
+    const blockedObjectives = dedupeObjectiveCards(
+      workbenchFilterMatchesSection(input.filter, "needs_attention")
+        ? buildObjectiveNavCards(board.sections.needs_attention, resolvedObjectiveId)
+        : [],
+    ).slice(0, 10);
+    const runningObjectives = dedupeObjectiveCards(
+      workbenchFilterMatchesSection(input.filter, "active")
+        ? buildObjectiveNavCards(board.sections.active, resolvedObjectiveId)
+        : [],
+    ).slice(0, 10);
+    const queuedObjectives = dedupeObjectiveCards(
+      workbenchFilterMatchesSection(input.filter, "queued")
+        ? buildObjectiveNavCards(board.sections.queued, resolvedObjectiveId)
+        : [],
+    ).slice(0, 10);
+    const activeObjectives = dedupeObjectiveCards([
+      ...blockedObjectives,
+      ...runningObjectives,
+      ...queuedObjectives,
+    ]).slice(0, 10);
+    const pastObjectives = dedupeObjectiveCards(
+      workbenchFilterMatchesSection(input.filter, "completed")
+        ? buildObjectiveNavCards(board.sections.completed, resolvedObjectiveId)
+        : [],
+    ).slice(0, 10);
+    const hasActiveExecution = Boolean(
+      activeRun
+      ||
+      workbench?.focus?.active
+      || workbench?.focus?.status === "running"
+      || workbench?.focus?.status === "queued"
+      || activeCodex?.running
+      || liveChildren.some((child) => child.running),
+    );
+    const detailTab = input.detailTab === "review" || input.detailTab === "queue" || input.detailTab === "action"
+      ? input.detailTab
+      : hasActiveExecution
+        ? "review"
+        : normalizedWorkbenchDetailTab(input.detailTab, Boolean(selectedObjective));
+    return {
+      activeProfileId: effectiveProfile.id,
+      activeProfileLabel: effectiveProfile.label,
+      objectiveId: resolvedObjectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      detailTab,
+      focusKind: workbench?.focus?.focusKind,
+      focusId: workbench?.focus?.focusId,
+      filter: input.filter,
+      filters,
+      selectedObjective,
+      activeCodex,
+      liveChildren,
+      activeRun,
+      workbench,
+      board,
+      activeObjectives,
+      pastObjectives,
+      blocks: buildWorkbenchBlocks({
+        board,
+        selectedObjective,
+        blockedObjectives,
+        runningObjectives,
+        queuedObjectives,
+        pastObjectives,
+        activeRun,
+        workbench,
+        detailTab,
+        filter: input.filter,
+      }),
+    };
+  };
+
+  const buildWorkbenchSessionRuntimeCached = async (input: {
+    readonly repoRoot: string;
+    readonly profileId: string;
+    readonly profileLabel: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly seedJobs?: ReadonlyArray<QueueJob>;
+  }): Promise<Awaited<ReturnType<typeof buildWorkbenchSessionRuntime>>> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    return withProjectionCache(
+      workbenchSessionRuntimeCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        sessionVersion,
+      }),
+      () => buildWorkbenchSessionRuntime(input),
+    );
+  };
+
+  const buildWorkbenchWorkspaceModelCached = async (input: {
+    readonly profileId?: string;
+    readonly chatId?: string;
+    readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): Promise<FactoryWorkbenchWorkspaceModel> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    return withProjectionCache(
+      workbenchWorkspaceCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        objectiveVersion,
+        sessionVersion,
+      }),
+      () => buildWorkbenchWorkspaceModel(input),
+    );
+  };
+
+  const buildWorkbenchChatModel = async (input: {
+    readonly profileId: string;
+    readonly chatId: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly selectedObjectiveId?: string;
+  }): Promise<FactoryChatIslandModel> => {
+    await service.ensureBootstrap();
+    const repoRoot = service.git.repoRoot;
+    const resolved = await resolveFactoryChatProfile({
+      repoRoot,
+      profileRoot,
+      requestedId: input.profileId,
+    });
+    const activeProfileOverview = describeProfileMarkdown(resolved.root);
+    const userPreferencesSummary = memoryTools
+      ? await summarizeUserPreferences({
+          memoryTools,
+          repoKey: repoKeyForRoot(repoRoot),
+          runId: "factory_workbench_chat",
+          actor: "factory-ui",
+        })
+      : undefined;
+    const sessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
+    const fallbackSessionChain = chatProjectionDataDir
+      ? undefined
+      : await agentRuntime.chain(sessionStream);
+    const chatContext = await loadChatContextProjectionForSession({
+      sessionStream,
+      fallbackChain: fallbackSessionChain,
+    });
+    const projectedRuns = chatContext?.runs ?? [];
+    const canScopeProjectedConversation = !input.selectedObjectiveId
+      || projectedRuns.some((run) => run.objectiveId === input.selectedObjectiveId);
+    if (!chatContext || !canScopeProjectedConversation) {
+      const runtime = await buildWorkbenchSessionRuntimeCached({
+        repoRoot,
+        profileId: resolved.root.id,
+        profileLabel: resolved.root.label,
+        chatId: input.chatId,
+        objectiveId: input.selectedObjectiveId,
+      });
+      const jobsById = new Map(runtime.scopedJobs.map((job) => [job.id, job] as const));
+      return {
+        activeProfileId: resolved.root.id,
+        activeProfileLabel: resolved.root.label,
+        chatId: input.chatId,
+        objectiveId: input.selectedObjectiveId,
+        runId: runtime.activeRunId,
+        knownRunIds: runtime.runIds,
+        terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
+        inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+        activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+        activeProfileRoles: activeProfileOverview.roles,
+        activeProfileResponsibilities: activeProfileOverview.responsibilities,
+        activeProfileSummary: activeProfileOverview.summary,
+        activeProfileSoulSummary: activeProfileOverview.soulSummary,
+        activeProfileProfileSummary: activeProfileOverview.profileSummary,
+        activeProfileSections: activeProfileOverview.sections,
+        activeProfileTools: resolved.toolAllowlist,
+        activeCodex: runtime.activeCodex,
+        liveChildren: runtime.liveChildren,
+        activeRun: runtime.activeRun,
+        userPreferencesSummary,
+        jobs: [],
+        chatContext,
+        items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
+      };
+    }
+    const scopedRuns = input.selectedObjectiveId
+      ? projectedRuns.filter((run) => run.objectiveId === input.selectedObjectiveId)
+      : projectedRuns;
+    const discoveredObjectiveId = input.selectedObjectiveId
+      ?? chatContext.bindings.objectiveId;
+    return {
+      activeProfileId: resolved.root.id,
+      activeProfileLabel: resolved.root.label,
+      chatId: input.chatId,
+      objectiveId: discoveredObjectiveId,
+      runId: scopedRuns.at(-1)?.runId ?? chatContext.bindings.latestRunId,
+      knownRunIds: scopedRuns.map((run) => run.runId),
+      terminalRunIds: scopedRuns.filter((run) => run.terminal).map((run) => run.runId),
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      activeProfilePrimaryRole: activeProfileOverview.primaryRole,
+      activeProfileRoles: activeProfileOverview.roles,
+      activeProfileResponsibilities: activeProfileOverview.responsibilities,
+      activeProfileSummary: activeProfileOverview.summary,
+      activeProfileSoulSummary: activeProfileOverview.soulSummary,
+      activeProfileProfileSummary: activeProfileOverview.profileSummary,
+      activeProfileSections: activeProfileOverview.sections,
+      activeProfileTools: resolved.toolAllowlist,
+      activeCodex: undefined,
+      liveChildren: [],
+      activeRun: undefined,
+      userPreferencesSummary,
+      jobs: [],
+      chatContext,
+      items: buildChatItemsFromConversation(chatContext.conversation, {
+        runs: projectedRuns,
+        selectedObjectiveId: input.selectedObjectiveId,
+      }),
+    };
+  };
+
+  const buildWorkbenchChatModelCached = async (input: {
+    readonly profileId: string;
+    readonly chatId: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly selectedObjectiveId?: string;
+  }): Promise<FactoryChatIslandModel> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    return withProjectionCache(
+      workbenchChatCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        objectiveVersion,
+        sessionVersion,
+      }),
+      () => buildWorkbenchChatModel(input),
+    );
+  };
+
+  const buildWorkbenchPageModel = async (input: {
+    readonly profileId?: string;
+    readonly chatId: string;
+    readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): Promise<FactoryWorkbenchPageModel> => {
+    const workspace = await buildWorkbenchWorkspaceModelCached({
+      profileId: input.profileId,
+      chatId: input.chatId,
+      objectiveId: input.objectiveId,
+      inspectorTab: input.inspectorTab,
+      detailTab: input.detailTab,
+      focusKind: input.focusKind,
+      focusId: input.focusId,
+      filter: input.filter,
+    });
+    await ensureObjectiveHandoffInSession({
+      profileId: workspace.activeProfileId,
+      chatId: input.chatId,
+      objective: workspace.selectedObjective,
+    });
+    const [baseChat, profiles] = await Promise.all([
+      buildWorkbenchChatModelCached({
+        profileId: workspace.activeProfileId,
+        chatId: input.chatId,
+        inspectorTab: input.inspectorTab,
+        selectedObjectiveId: workspace.objectiveId,
+      }),
+      loadFactoryProfiles(),
+    ]);
+    const chat: FactoryChatIslandModel = {
+      ...baseChat,
+      objectiveId: workspace.objectiveId ?? baseChat.objectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      selectedThread: workspace.selectedObjective ?? baseChat.selectedThread,
+      activeCodex: workspace.activeCodex ?? baseChat.activeCodex,
+      liveChildren: workspace.liveChildren ?? baseChat.liveChildren,
+      activeRun: workspace.activeRun ?? baseChat.activeRun,
+      workbench: workspace.workbench ?? baseChat.workbench,
+    };
+    return {
+      activeProfileId: workspace.activeProfileId,
+      activeProfileLabel: workspace.activeProfileLabel,
+      chatId: input.chatId,
+      objectiveId: workspace.objectiveId,
+      inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
+      detailTab: workspace.detailTab,
+      focusKind: workspace.focusKind,
+      focusId: workspace.focusId,
+      filter: workspace.filter,
+      profiles: profiles.map((profile) => ({
+        id: profile.id,
+        label: profile.label,
+        href: buildWorkbenchLink({
+          profileId: profile.id,
+          chatId: input.chatId,
+          objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
+          inspectorTab: workspace.selectedObjective?.profileId === profile.id
+            ? normalizedWorkbenchInspectorTab(input.inspectorTab)
+            : undefined,
+          detailTab: workspace.detailTab,
+          focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
+          focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
+          filter: workspace.filter,
+        }),
+        summary: describeProfileMarkdown(profile).summary,
+        selected: profile.id === workspace.activeProfileId,
+      })),
+      workspace,
+      chat,
+    };
+  };
+
+  const buildWorkbenchPageModelCached = async (input: {
+    readonly profileId?: string;
+    readonly chatId: string;
+    readonly objectiveId?: string;
+    readonly inspectorTab?: FactoryInspectorTab;
+    readonly detailTab?: FactoryWorkbenchDetailTab;
+    readonly focusKind?: "task" | "job";
+    readonly focusId?: string;
+    readonly filter: FactoryWorkbenchFilterKey;
+  }): Promise<FactoryWorkbenchPageModel> => {
+    const sessionVersion = await resolveSessionStreamVersion({
+      profileId: input.profileId,
+      chatId: input.chatId,
+    });
+    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    return withProjectionCache(
+      workbenchPageCache,
+      JSON.stringify({
+        input,
+        queueVersion: ctx.queue.snapshot?.().version ?? 0,
+        objectiveVersion,
+        sessionVersion,
+      }),
+      () => buildWorkbenchPageModel(input),
+    );
+  };
+
+  const loadWorkbenchRequestModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchPageModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const model = await buildWorkbenchPageModelCached(request);
+    return { request, model };
+  };
+
+  const loadWorkbenchRequestWorkspaceModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchWorkspaceModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const model = await buildWorkbenchWorkspaceModelCached(request);
+    return { request, model };
+  };
+
+  const loadWorkbenchRequestHeaderModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryWorkbenchHeaderIslandModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    const workspace = await buildWorkbenchWorkspaceModelCached(request);
+    const profiles = await loadFactoryProfiles();
+    const activeProfile = profiles.find((profile) => profile.id === workspace.activeProfileId);
+    const activeProfileOverview = !workspace.selectedObjective && activeProfile
+      ? describeProfileMarkdown(activeProfile)
+      : undefined;
+    const currentRole = activeProfileOverview?.primaryRole
+      ?? activeProfileOverview?.roles?.[0]
+      ?? activeProfileOverview?.summary;
+    const currentPresence = (() => {
+      const summary = activeProfileOverview?.summary?.trim();
+      const role = currentRole?.trim();
+      return summary && summary !== role ? summary : undefined;
+    })();
+    return {
+      request,
+      model: {
+        activeProfileId: workspace.activeProfileId,
+        activeProfileLabel: workspace.activeProfileLabel,
+        profiles: profiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          href: buildWorkbenchLink({
+            profileId: profile.id,
+            chatId: request.chatId,
+            objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
+            inspectorTab: workspace.selectedObjective?.profileId === profile.id
+              ? normalizedWorkbenchInspectorTab(request.inspectorTab)
+              : undefined,
+            detailTab: workspace.detailTab,
+            focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
+            focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
+            filter: workspace.filter,
+          }),
+          summary: describeProfileMarkdown(profile).summary,
+          selected: profile.id === workspace.activeProfileId,
+        })),
+        workspace,
+        currentRole,
+        currentPresence,
+      },
+    };
+  };
+
+  const loadWorkbenchRequestChatModel = async (
+    req: Request,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly model: FactoryChatIslandModel;
+  }> => {
+    const request = readWorkbenchRequest(req);
+    if (request.inspectorTab === "chat") {
+      const model = await buildWorkbenchChatModelCached({
+        profileId: request.profileId,
+        chatId: request.chatId,
+        inspectorTab: request.inspectorTab,
+        selectedObjectiveId: request.objectiveId,
+      });
+      return { request, model };
+    }
+    const workspace = await buildWorkbenchWorkspaceModelCached(request);
+    const model = await buildWorkbenchChatModelCached({
+      profileId: workspace.activeProfileId,
+      chatId: request.chatId,
+      inspectorTab: request.inspectorTab,
+      selectedObjectiveId: workspace.objectiveId,
+    });
+    return { request, model };
+  };
+
+  return {
+    id: "factory",
+    kind: "factory",
+    paths: {
+      shell: "/factory",
+      state: "/factory/api/objectives",
+      events: "/factory/events",
+    },
+    register: (app: Hono) => {
+      registerFactoryUiRoutes({
+        app,
+        wrap,
+        loadWorkbenchRequestModel,
+        loadWorkbenchRequestHeaderModel,
+        loadWorkbenchRequestWorkspaceModel,
+        loadWorkbenchRequestChatModel,
+      });
+      registerFactoryApiRoutes({
+        app,
+        wrap,
+        ctx,
+        service,
+        profileRoot,
+        loadFactoryProfiles,
+        loadWorkbenchRequestWorkspaceModel,
+        resolveWatchedObjectiveId,
+        resolveComposerJob,
+        assertComposeDispatchActionAllowed,
+        assertComposeCreateModeAllowed,
+        resolveChatEventSubscriptions,
+        subscribeChatEventStream,
+        memoryTools,
+        dataDir: chatProjectionDataDir,
+      });
+      registerReceiptRoutes({ app, ctx });
+      registerRuntimeRoutes({
+        app,
+        wrap,
+        loadRuntimeDashboard,
+      });
+    },
+  };
+};
+
+export default createFactoryRoute;

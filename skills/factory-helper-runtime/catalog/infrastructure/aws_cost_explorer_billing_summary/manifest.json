@@ -1,0 +1,17 @@
+{
+  "id": "aws_cost_explorer_billing_summary",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["cost", "billing", "cost-explorer", "service", "summary", "investigation"],
+  "description": "Summarize AWS billing costs over the last 30 days, month-to-date, and service-level top spend using Cost Explorer.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile.",
+    "Calculates last 30 days, current month-to-date, and the last completed calendar month from UTC."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --output-dir .receipt/factory/evidence"
+  ]
+}

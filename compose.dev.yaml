@@ -1,0 +1,31 @@
+services:
+  receipt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      RECEIPT_DOCKER_MODE: dev
+      RECEIPT_SERVER_WATCH: "${RECEIPT_SERVER_WATCH:-api}"
+      RECEIPT_CSS_WATCH: "${RECEIPT_CSS_WATCH:-1}"
+      CHAT_WORKER_PROCESSES: "${CHAT_WORKER_PROCESSES:-2}"
+      CONTROL_WORKER_PROCESSES: "${CONTROL_WORKER_PROCESSES:-4}"
+      CODEX_WORKER_PROCESSES: "${CODEX_WORKER_PROCESSES:-2}"
+      RESONATE_QUEUE_REFRESH_MS: "${RESONATE_QUEUE_REFRESH_MS:-1000}"
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    volumes:
+      - .:/workspace/receipt
+      - receipt-node-modules:/workspace/receipt/node_modules
+      - ${RECEIPT_DOCKER_CODEX_AUTH_SOURCE}:/workspace/receipt/.receipt/home/.codex/auth.json
+      - ${RECEIPT_DOCKER_CODEX_CONFIG_SOURCE}:/workspace/receipt/.receipt/home/.codex/config.toml
+      - ${RECEIPT_DOCKER_CODEX_VERSION_SOURCE}:/workspace/receipt/.receipt/home/.codex/version.json
+      - ${RECEIPT_DOCKER_CODEX_STATE_SOURCE}:/workspace/receipt/.receipt/home/.codex/.codex-global-state.json
+      - ${RECEIPT_DOCKER_AWS_SOURCE}:/workspace/receipt/.receipt/home/.aws
+      - ${RECEIPT_DOCKER_GH_SOURCE}:/workspace/receipt/.receipt/home/.config/gh
+      - ${RECEIPT_DOCKER_GITCONFIG_SOURCE}:/workspace/receipt/.receipt/home/.gitconfig
+      - ${RECEIPT_DOCKER_GIT_CREDENTIALS_SOURCE}:/workspace/receipt/.receipt/home/.git-credentials
+      - ${RECEIPT_DOCKER_SSH_SOURCE}:/workspace/receipt/.receipt/home/.ssh
+      - ${RECEIPT_DOCKER_SSH_AUTH_SOURCE}:${RECEIPT_DOCKER_SSH_AUTH_TARGET}
+
+volumes:
+  receipt-node-modules:

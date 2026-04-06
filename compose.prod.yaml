@@ -1,0 +1,31 @@
+services:
+  receipt:
+    image: "${RECEIPT_IMAGE:-receipt:prod}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    environment:
+      RECEIPT_DOCKER_MODE: prod
+      RECEIPT_SERVER_WATCH: "0"
+      RECEIPT_CSS_WATCH: "0"
+    restart: unless-stopped
+    volumes:
+      - receipt-data:/workspace/receipt/.receipt/data
+      - receipt-resonate:/workspace/receipt/.receipt/resonate
+      - receipt-home:/workspace/receipt/.receipt/home
+      - ${RECEIPT_DOCKER_CODEX_AUTH_SOURCE}:/workspace/receipt/.receipt/home/.codex/auth.json:ro
+      - ${RECEIPT_DOCKER_CODEX_CONFIG_SOURCE}:/workspace/receipt/.receipt/home/.codex/config.toml:ro
+      - ${RECEIPT_DOCKER_CODEX_VERSION_SOURCE}:/workspace/receipt/.receipt/home/.codex/version.json:ro
+      - ${RECEIPT_DOCKER_CODEX_STATE_SOURCE}:/workspace/receipt/.receipt/home/.codex/.codex-global-state.json:ro
+      - ${RECEIPT_DOCKER_AWS_SOURCE}:/workspace/receipt/.receipt/home/.aws:ro
+      - ${RECEIPT_DOCKER_GH_SOURCE}:/workspace/receipt/.receipt/home/.config/gh:ro
+      - ${RECEIPT_DOCKER_GITCONFIG_SOURCE}:/workspace/receipt/.receipt/home/.gitconfig:ro
+      - ${RECEIPT_DOCKER_GIT_CREDENTIALS_SOURCE}:/workspace/receipt/.receipt/home/.git-credentials:ro
+      - ${RECEIPT_DOCKER_SSH_SOURCE}:/workspace/receipt/.receipt/home/.ssh:ro
+      - ${RECEIPT_DOCKER_SSH_AUTH_SOURCE}:${RECEIPT_DOCKER_SSH_AUTH_TARGET}
+
+volumes:
+  receipt-data:
+  receipt-resonate:
+  receipt-home:

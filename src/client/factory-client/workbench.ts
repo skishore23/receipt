@@ -1,0 +1,1453 @@
+import {
+  composerFeedback,
+  parseComposeResponse,
+  resolveFactoryUrl,
+  shellPath,
+} from "./compose-navigation";
+import {
+  parseTokenEventPayload,
+  renderStreamingReply,
+} from "./live-updates";
+import {
+  createQueuedRefreshRunner,
+  createReactivePushRouter,
+  readReactiveRefreshPath,
+} from "./reactive";
+import {
+  DEFAULT_COMMANDS,
+  asString,
+  escapeHtml,
+  parseCommands,
+  type FactoryCommand,
+  type FactoryFetchResponse,
+} from "./shared";
+import {
+  classifyWorkbenchRouteChange,
+  createWorkbenchRouteState,
+  createWorkbenchUiState,
+  mergeReplayRoute,
+  parseWorkbenchReplay,
+  replayStorageKey,
+  routeSearch,
+  serializeWorkbenchReplay,
+  workbenchReducer,
+  type FactoryWorkbenchAction,
+  type FactoryWorkbenchRouteState,
+  type FactoryWorkbenchUiState,
+} from "./workbench-state";
+
+type PendingLiveStatus = {
+  readonly statusLabel: "Queued" | "Starting" | "Working";
+  readonly summary: string;
+  readonly runId?: string;
+  readonly jobId?: string;
+};
+
+type WorkbenchFragmentKind =
+  | "header"
+  | "chat-header"
+  | "summary"
+  | "activity"
+  | "objectives"
+  | "history";
+
+type WorkbenchRefreshSource = "chat" | "background";
+type WorkbenchRefreshTargetKey = WorkbenchFragmentKind | "chat" | "workbench";
+
+type WorkbenchRefreshTarget = {
+  readonly key: WorkbenchRefreshTargetKey;
+  readonly source: WorkbenchRefreshSource;
+  readonly element: () => HTMLElement | null;
+  readonly queue: (delayMs: number, routeKeyOverride?: string) => void;
+};
+
+const isAbortError = (error: unknown): boolean =>
+  Boolean(error && typeof error === "object" && "name" in error && (error as { readonly name?: string }).name === "AbortError");
+
+export const initFactoryWorkbenchBrowser = () => {
+  let shouldStickToBottom = true;
+  let isComposing = false;
+  let activeCommandIndex = 0;
+  let defaultSubmitLabel = "Send";
+  let streamingReply: { readonly runId?: string; readonly profileLabel?: string; readonly text: string } | null = null;
+  let pendingOverlayHtml = "";
+  let pendingLiveStatus: PendingLiveStatus | null = null;
+  let overlayRenderQueued = false;
+  const islandRefreshControllers = new Map<"chat" | "workbench", AbortController>();
+  const fragmentRefreshControllers = new Map<WorkbenchFragmentKind, AbortController>();
+  const islandRefreshQueue = createQueuedRefreshRunner<"chat" | "workbench", string>(
+    (kind, routeKeyOverride) => refreshIslandNow(kind, routeKeyOverride ?? currentRouteKey()),
+  );
+  const fragmentRefreshQueue = createQueuedRefreshRunner<WorkbenchFragmentKind, string>(
+    (kind, routeKeyOverride) => refreshWorkbenchFragmentNow(kind, routeKeyOverride ?? currentRouteKey()),
+  );
+
+  const chatInput = () => {
+    const input = document.getElementById("factory-prompt");
+    return input instanceof HTMLTextAreaElement ? input : null;
+  };
+
+  const chatScroll = () => {
+    const scroll = document.getElementById("factory-workbench-chat-scroll");
+    return scroll instanceof HTMLElement ? scroll : null;
+  };
+
+  const composerForm = () => {
+    const form = document.getElementById("factory-composer");
+    return form instanceof HTMLFormElement ? form : null;
+  };
+
+  const composerShell = () => {
+    const node = document.getElementById("factory-workbench-composer-shell");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const composerStatus = () => {
+    const node = document.getElementById("factory-composer-status");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const composerSubmit = () => {
+    const button = document.getElementById("factory-composer-submit");
+    return button instanceof HTMLButtonElement ? button : null;
+  };
+
+  const composerCompletions = () => {
+    const node = document.getElementById("factory-composer-completions");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const optimisticTranscript = () => {
+    const node = document.getElementById("factory-chat-optimistic");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingTranscript = () => {
+    const node = document.getElementById("factory-chat-streaming");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchContainer = () => {
+    const node = document.getElementById("factory-workbench-panel");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const chatContainer = () => {
+    const node = document.getElementById("factory-workbench-chat");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const backgroundRoot = () => {
+    const node = document.getElementById("factory-workbench-background-root");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const chatRoot = () => {
+    const node = document.getElementById("factory-workbench-chat-root");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchHeader = () => {
+    const node = document.getElementById("factory-workbench-header");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchSummaryBlock = () => {
+    const node = document.getElementById("factory-workbench-block-summary");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchObjectivesBlock = () => {
+    const node = document.getElementById("factory-workbench-block-objectives");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchActivityBlock = () => {
+    const node = document.getElementById("factory-workbench-block-activity");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchRailScroll = () => {
+    const node = document.getElementById("factory-workbench-rail-scroll");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchFocusScroll = () => {
+    const node = document.getElementById("factory-workbench-focus-scroll");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+
+  const workbenchHistoryBlock = () => {
+    const node = document.getElementById("factory-workbench-block-history");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const chatHeader = () => {
+    const node = document.getElementById("factory-workbench-chat-header");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingLabel = () => {
+    const node = document.getElementById("factory-chat-streaming-label-text");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const currentChatState = () => {
+    const container = chatContainer();
+    const root = container?.firstElementChild;
+    if (!(root instanceof HTMLElement)) {
+      return {
+        activeProfileLabel: undefined,
+        activeRunId: undefined,
+        knownRunIds: [],
+        terminalRunIds: [],
+      };
+    }
+    const splitDelimited = (value: string | null) =>
+      value
+        ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
+        : [];
+    return {
+      activeProfileLabel: root.getAttribute("data-active-profile-label") || undefined,
+      activeRunId: root.getAttribute("data-active-run-id") || undefined,
+      knownRunIds: splitDelimited(root.getAttribute("data-known-run-ids")),
+      terminalRunIds: splitDelimited(root.getAttribute("data-terminal-run-ids")),
+    };
+  };
+
+  const currentUrl = () =>
+    resolveFactoryUrl(String(window.location && window.location.href ? window.location.href : "/factory"));
+
+  const bodyRouteValue = (name: string): string | undefined => {
+    const value = document.body?.getAttribute(name);
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  };
+
+  const readDocumentRouteState = (url = currentUrl()): FactoryWorkbenchRouteState => createWorkbenchRouteState({
+    profileId: asString(url?.searchParams.get("profile")) ?? bodyRouteValue("data-profile-id") ?? "generalist",
+    chatId: asString(url?.searchParams.get("chat")) ?? bodyRouteValue("data-chat-id") ?? "",
+    objectiveId: asString(url?.searchParams.get("objective")) ?? bodyRouteValue("data-objective-id"),
+    inspectorTab: asString(url?.searchParams.get("inspectorTab")) ?? bodyRouteValue("data-inspector-tab"),
+    detailTab: asString(url?.searchParams.get("detailTab")) ?? bodyRouteValue("data-detail-tab"),
+    filter: asString(url?.searchParams.get("filter")) ?? "objective.running",
+    focusKind: asString(url?.searchParams.get("focusKind")) ?? bodyRouteValue("data-focus-kind"),
+    focusId: asString(url?.searchParams.get("focusId")) ?? bodyRouteValue("data-focus-id"),
+  });
+
+  const sessionStorageApi = (): Storage | null => {
+    try {
+      const storage = window.sessionStorage;
+      return storage && typeof storage.getItem === "function" && typeof storage.setItem === "function"
+        ? storage
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
+  let workbenchState: FactoryWorkbenchUiState = createWorkbenchUiState(readDocumentRouteState());
+
+  const persistWorkbenchReplay = () => {
+    const storage = sessionStorageApi();
+    if (!storage) return;
+    try {
+      storage.setItem(
+        replayStorageKey(workbenchState.appliedRoute),
+        JSON.stringify(serializeWorkbenchReplay(workbenchState)),
+      );
+    } catch {
+      // Ignore storage failures and keep the workbench usable.
+    }
+  };
+
+  const dispatchWorkbenchAction = (action: FactoryWorkbenchAction): FactoryWorkbenchUiState => {
+    workbenchState = workbenchReducer(workbenchState, action);
+    persistWorkbenchReplay();
+    return workbenchState;
+  };
+
+  const currentRouteKey = () => workbenchState.desiredRoute.routeKey;
+
+  const liveShell = () => {
+    const node = document.getElementById("factory-chat-live");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const isInlineWorkbenchLocation = (location: string): boolean => {
+    const url = resolveFactoryUrl(location);
+    if (!url) return false;
+    if (window.location && window.location.origin && url.origin !== window.location.origin) return false;
+    return url.pathname === "/factory" || url.pathname === "/factory/workbench";
+  };
+
+  const workbenchNavigationTarget = (event: Event): {
+    readonly location: string;
+    readonly historyMode: "replace" | "push";
+  } | null => {
+    if (event.defaultPrevented) return null;
+    const pointerEvent = event as Event & {
+      readonly button?: number;
+      readonly metaKey?: boolean;
+      readonly ctrlKey?: boolean;
+      readonly shiftKey?: boolean;
+      readonly altKey?: boolean;
+    };
+    if (
+      pointerEvent.metaKey
+      || pointerEvent.ctrlKey
+      || pointerEvent.shiftKey
+      || pointerEvent.altKey
+      || (typeof pointerEvent.button === "number" && pointerEvent.button !== 0)
+    ) {
+      return null;
+    }
+    const target = event.target instanceof Element ? event.target.closest("[data-factory-href],a[href]") : null;
+    if (!(target instanceof Element)) return null;
+    if (target.getAttribute("download") !== null) return null;
+    const linkTarget = (target.getAttribute("target") || "").toLowerCase();
+    if (linkTarget && linkTarget !== "_self") return null;
+    const href = target.getAttribute("data-factory-href") || target.getAttribute("href");
+    if (!href) return null;
+    const url = resolveFactoryUrl(href);
+    if (!url || !isInlineWorkbenchLocation(url.href)) return null;
+    return {
+      location: url.href,
+      historyMode: target.getAttribute("data-factory-history") === "replace" ? "replace" : "push",
+    };
+  };
+
+  const composerCommands = () => {
+    const form = composerForm();
+    return parseCommands(form) || DEFAULT_COMMANDS;
+  };
+
+  const renderPendingLiveStatus = (status: PendingLiveStatus): string => '<section class=" border border-primary/20 bg-primary/5 px-3 py-2">' +
+    '<div class="flex min-w-0 items-start justify-between gap-2">' +
+      '<div class="min-w-0 flex-1">' +
+        '<div class="flex flex-wrap items-center gap-2">' +
+          '<span class="text-xs font-semibold text-foreground">Background handoff</span>' +
+          '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + escapeHtml(status.statusLabel) + "</span>" +
+        "</div>" +
+        '<div class="mt-1 text-xs leading-5 text-muted-foreground">' + escapeHtml(status.summary) + "</div>" +
+        ((status.jobId || status.runId)
+          ? '<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">' +
+              (status.jobId ? '<span>Job ' + escapeHtml(status.jobId) + "</span>" : "") +
+              (status.runId ? '<span>Run ' + escapeHtml(status.runId) + "</span>" : "") +
+            "</div>"
+          : "") +
+      "</div>" +
+    "</div>" +
+  "</section>";
+
+  const updatePendingLiveStatus = (
+    status: PendingLiveStatus | null,
+    acknowledged?: {
+      readonly runId?: string;
+      readonly jobId?: string;
+      readonly terminal?: boolean;
+    },
+  ) => {
+    pendingLiveStatus = status;
+    if (status) {
+      dispatchWorkbenchAction({
+        type: "composer.queued",
+        liveOverlay: {
+          ...status,
+          savedAt: Date.now(),
+        },
+      });
+      return;
+    }
+    dispatchWorkbenchAction({
+      type: "composer.acknowledged",
+      runId: acknowledged?.runId,
+      jobId: acknowledged?.jobId,
+      terminal: acknowledged?.terminal ?? true,
+    });
+  };
+
+  const scheduleOverlayRender = () => {
+    if (overlayRenderQueued) return;
+    overlayRenderQueued = true;
+    window.requestAnimationFrame(() => {
+      overlayRenderQueued = false;
+      const optimistic = optimisticTranscript();
+      if (!optimistic) return;
+      optimistic.innerHTML = pendingOverlayHtml + (pendingLiveStatus ? renderPendingLiveStatus(pendingLiveStatus) : "");
+      const streaming = streamingTranscript();
+      if (streaming) {
+        streaming.innerHTML = streamingReply ? renderStreamingReply(streamingReply) : "";
+      }
+      if ((pendingOverlayHtml || pendingLiveStatus || streamingReply) && shouldStickToBottom) {
+        window.requestAnimationFrame(() => {
+          const scroll = chatScroll();
+          if (!scroll) return;
+          if (typeof scroll.scrollTo === "function") {
+            scroll.scrollTo({ top: scroll.scrollHeight, behavior: "auto" });
+          } else {
+            scroll.scrollTop = scroll.scrollHeight;
+          }
+        });
+      }
+    });
+  };
+
+  const clearStreamingReply = () => {
+    streamingReply = null;
+    scheduleOverlayRender();
+  };
+
+  const captureChatScrollState = () => {
+    const scroll = chatScroll();
+    if (!scroll) return null;
+    return {
+      top: scroll.scrollTop,
+      height: scroll.scrollHeight,
+      bottomOffset: Math.max(0, scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+    };
+  };
+
+  const restoreChatScrollState = (state: { readonly top: number; readonly height: number; readonly bottomOffset: number }) => {
+    const scroll = chatScroll();
+    if (!scroll) return;
+    const atBottom = state.bottomOffset < 120;
+    const nextTop = atBottom
+      ? scroll.scrollHeight
+      : Math.max(0, scroll.scrollHeight - scroll.clientHeight - state.bottomOffset);
+    if (typeof scroll.scrollTo === "function") {
+      scroll.scrollTo({ top: nextTop, behavior: "auto" });
+    } else {
+      scroll.scrollTop = nextTop;
+    }
+    shouldStickToBottom = atBottom;
+  };
+
+  const captureDocumentScrollState = () => {
+    const scrollingElement = document.scrollingElement;
+    return {
+      top: typeof window.scrollY === "number"
+        ? window.scrollY
+        : (scrollingElement instanceof HTMLElement ? scrollingElement.scrollTop : 0),
+    };
+  };
+
+  const restoreDocumentScrollState = (state: { readonly top: number }) => {
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo({ top: state.top, behavior: "auto" });
+      return;
+    }
+    const scrollingElement = document.scrollingElement;
+    if (scrollingElement instanceof HTMLElement) {
+      scrollingElement.scrollTop = state.top;
+    }
+  };
+
+  const captureWorkbenchPaneScrollState = () => {
+    const panes = [workbenchRailScroll(), workbenchFocusScroll()]
+      .filter((pane): pane is HTMLElement => Boolean(pane))
+      .map((pane) => ({
+        key: pane.getAttribute("data-preserve-scroll-key") || pane.id,
+        top: pane.scrollTop,
+        height: pane.scrollHeight,
+        bottomOffset: Math.max(0, pane.scrollHeight - pane.scrollTop - pane.clientHeight),
+      }));
+    return panes.length > 0 ? panes : null;
+  };
+
+  const restoreWorkbenchPaneScrollState = (
+    state: ReadonlyArray<{
+      readonly key: string;
+      readonly top: number;
+      readonly height: number;
+      readonly bottomOffset: number;
+    }>,
+  ) => {
+    for (const paneState of state) {
+      const selector = `[data-preserve-scroll-key="${paneState.key}"]`;
+      const pane = document.querySelector(selector);
+      if (!(pane instanceof HTMLElement)) continue;
+      const atBottom = paneState.bottomOffset < 120;
+      const nextTop = atBottom
+        ? pane.scrollHeight
+        : Math.max(0, pane.scrollHeight - pane.clientHeight - paneState.bottomOffset);
+      if (typeof pane.scrollTo === "function") {
+        pane.scrollTo({ top: nextTop, behavior: "auto" });
+      } else {
+        pane.scrollTop = nextTop;
+      }
+    }
+  };
+
+  const reconcileLiveTranscript = () => {
+    const state = currentChatState();
+    const pendingRunId = pendingLiveStatus?.runId;
+    if (
+      pendingLiveStatus
+      && (
+        (pendingRunId && (
+          state.activeRunId === pendingRunId
+          || state.knownRunIds.indexOf(pendingRunId) >= 0
+          || state.terminalRunIds.indexOf(pendingRunId) >= 0
+        ))
+        || (!pendingRunId && Boolean(state.activeRunId))
+      )
+    ) {
+      updatePendingLiveStatus(null, {
+        runId: pendingLiveStatus.runId,
+        jobId: pendingLiveStatus.jobId,
+      });
+    }
+    const runId = streamingReply?.runId;
+    if (runId && state.terminalRunIds.indexOf(runId) >= 0) {
+      streamingReply = null;
+    } else if (
+      runId
+      && pendingRunId !== runId
+      && state.activeRunId !== runId
+      && state.knownRunIds.indexOf(runId) < 0
+      && state.terminalRunIds.indexOf(runId) < 0
+    ) {
+      streamingReply = null;
+    }
+    scheduleOverlayRender();
+  };
+
+  const acceptsStreamingRun = (runId: string | undefined): boolean => {
+    if (!workbenchState.appliedRoute.objectiveId) return true;
+    if (!runId) return false;
+    if (pendingLiveStatus?.runId === runId) return true;
+    const state = currentChatState();
+    return state.activeRunId === runId
+      || state.knownRunIds.indexOf(runId) >= 0
+      || state.terminalRunIds.indexOf(runId) >= 0;
+  };
+
+  const setComposerStatus = (message: string) => {
+    const node = composerStatus();
+    if (!node) return;
+    if (!message) {
+      node.textContent = "";
+      node.classList.add("hidden");
+      return;
+    }
+    node.textContent = message;
+    node.classList.remove("hidden");
+  };
+
+  const setComposerBusy = (busy: boolean, label?: string) => {
+    const input = chatInput();
+    const submit = composerSubmit();
+    if (input) input.disabled = busy;
+    if (submit) {
+      if (!submit.disabled && submit.textContent) defaultSubmitLabel = submit.textContent;
+      submit.disabled = busy;
+      submit.textContent = busy ? (label || "Sending...") : defaultSubmitLabel;
+    }
+  };
+
+  const setExpanded = (expanded: boolean) => {
+    const input = chatInput();
+    if (input) input.setAttribute("aria-expanded", expanded ? "true" : "false");
+    const popup = composerCompletions();
+    if (popup) popup.classList.toggle("hidden", !expanded);
+  };
+
+  const getSlashContext = (value: string, caret: number) => {
+    const safeCaret = Math.max(0, Math.min(caret, value.length));
+    const start = value.lastIndexOf("/", safeCaret - 1);
+    if (start < 0) return null;
+    const before = value.slice(0, start);
+    if (before && !/\s$/.test(before)) return null;
+    const tokenEnd = value.indexOf(" ", start + 1);
+    const end = tokenEnd === -1 ? value.length : tokenEnd;
+    if (safeCaret < start + 1 || safeCaret > end) return null;
+    return {
+      before,
+      after: value.slice(end),
+      query: value.slice(start + 1, safeCaret),
+    };
+  };
+
+  const filterCommands = (query: string) => {
+    const normalized = query.trim().toLowerCase();
+    const commands = composerCommands();
+    if (!normalized) return commands;
+    return commands.filter((command) =>
+      [command.name, command.label, command.usage, command.description].concat(command.aliases || []).join(" ").toLowerCase().indexOf(normalized) >= 0
+    );
+  };
+
+  const renderCommands = (query: string, selectedIndex: number) => {
+    const popup = composerCompletions();
+    if (!popup) return [];
+    const matches = filterCommands(query);
+    activeCommandIndex = Math.max(0, Math.min(selectedIndex, Math.max(0, matches.length - 1)));
+    if (!matches.length) {
+      popup.innerHTML = '<div class="px-3 py-2 text-xs text-muted-foreground">No matching commands.</div>';
+      setExpanded(true);
+      return matches;
+    }
+    popup.innerHTML = matches.map((command, index) => {
+      const active = index === activeCommandIndex;
+      return '<button type="button" role="option" aria-selected="' + (active ? "true" : "false") + '" data-command-index="' + index + '" class="flex w-full items-start gap-3 px-3 py-2 text-left transition ' + (active ? "bg-primary/10 text-foreground" : "hover:bg-muted text-foreground") + '">' +
+        '<span class="min-w-0 flex-1">' +
+        '<span class="block text-sm font-medium">' + escapeHtml(command.label) + "</span>" +
+        '<span class="block text-xs text-muted-foreground">' + escapeHtml(command.description) + "</span>" +
+        "</span>" +
+        '<span class="shrink-0 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">' + escapeHtml(command.usage) + "</span>" +
+      "</button>";
+    }).join("");
+    setExpanded(true);
+    return matches;
+  };
+
+  const insertCommand = (command: FactoryCommand) => {
+    const input = chatInput();
+    if (!input) return;
+    const context = getSlashContext(input.value, input.selectionStart || 0);
+    if (!context) return;
+    const replacement = "/" + command.name + " ";
+    input.value = context.before + replacement + context.after;
+    const caret = (context.before + replacement).length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+    setExpanded(false);
+  };
+
+  const autoResizeInput = () => {
+    const input = chatInput();
+    if (!input) return;
+    input.style.height = "0px";
+    input.style.height = Math.min(Math.max(input.scrollHeight, 120), 260) + "px";
+  };
+
+  const prefillComposerCommand = (command: string) => {
+    const input = chatInput();
+    if (!input) return;
+    input.value = command;
+    const caret = command.length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    autoResizeInput();
+    setExpanded(false);
+    setComposerStatus(command.trim() ? `Draft ready: ${command.trim()}` : "");
+    const shell = composerShell();
+    if (shell && typeof shell.scrollIntoView === "function") {
+      shell.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    input.focus();
+  };
+
+  const consumeComposeCommandFromLocation = (location: string) => {
+    const url = resolveFactoryUrl(location);
+    if (!url) return;
+    const command = asString(url.searchParams.get("compose"));
+    if (!command) return;
+    prefillComposerCommand(command);
+    url.searchParams.delete("compose");
+    setHistory(url, "replace");
+  };
+
+  const fetchHtml = (url: string, signal?: AbortSignal) =>
+    window.fetch(url, {
+      method: "GET",
+      headers: { Accept: "text/html" },
+      credentials: "same-origin",
+      signal,
+    }).then((response: FactoryFetchResponse) => {
+      if (!response.ok) throw new Error("Request failed.");
+      return response.text();
+    });
+
+  const startRefreshController = <Key extends string>(
+    controllers: Map<Key, AbortController>,
+    key: Key,
+    options?: {
+      readonly replaceInFlight?: boolean;
+    },
+  ): AbortController | undefined => {
+    if (typeof AbortController !== "function") return undefined;
+    if (options?.replaceInFlight) controllers.get(key)?.abort();
+    const controller = new AbortController();
+    controllers.set(key, controller);
+    return controller;
+  };
+
+  const finishRefreshController = <Key extends string>(
+    controllers: Map<Key, AbortController>,
+    key: Key,
+    controller?: AbortController,
+  ) => {
+    if (!controller) return;
+    if (controllers.get(key) === controller) controllers.delete(key);
+  };
+
+  const abortFragmentRefresh = (kind: WorkbenchFragmentKind) => {
+    fragmentRefreshControllers.get(kind)?.abort();
+  };
+
+  const abortIslandRefresh = (kind: "chat" | "workbench") => {
+    islandRefreshControllers.get(kind)?.abort();
+  };
+
+  const setHistory = (url: URL, historyMode?: "replace" | "push" | "none") => {
+    const nextPath = url.pathname + (url.search || "") + (url.hash || "");
+    if (!window.history) return;
+    if (historyMode === "replace" && typeof window.history.replaceState === "function") {
+      window.history.replaceState({}, "", nextPath);
+    } else if (historyMode !== "none" && typeof window.history.pushState === "function") {
+      window.history.pushState({}, "", nextPath);
+    }
+  };
+
+  const workbenchHeaderPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `/factory/island/workbench/header${routeSearch(route)}`;
+
+  const chatHeaderPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `/factory/island/chat/header${routeSearch(route)}`;
+
+  const workbenchIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `/factory/island/workbench${routeSearch(route)}`;
+
+  const chatIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `/factory/island/chat${routeSearch(route)}`;
+
+  const workbenchBlockPathForRoute = (
+    route: FactoryWorkbenchRouteState,
+    block: WorkbenchFragmentKind,
+  ): string => {
+    const url = resolveFactoryUrl(route.routeKey) ?? new URL(route.routeKey, "http://receipt.local");
+    const params = new URLSearchParams(url.search);
+    params.set("block", block);
+    const query = params.toString();
+    return `/factory/island/workbench/block${query ? `?${query}` : ""}`;
+  };
+
+  const backgroundEventsPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `/factory/background/events${routeSearch(route)}`;
+
+  const chatEventsPathForRoute = (route: FactoryWorkbenchRouteState): string => {
+    const params = new URLSearchParams();
+    params.set("profile", route.profileId);
+    if (route.chatId) params.set("chat", route.chatId);
+    if (route.objectiveId) params.set("objective", route.objectiveId);
+    if (route.focusKind === "job" && route.focusId) params.set("job", route.focusId);
+    return `/factory/chat/events?${params.toString()}`;
+  };
+
+  const syncWorkbenchRouteData = (route: FactoryWorkbenchRouteState) => {
+    if (!document.body) return;
+    document.body.setAttribute("data-route-key", route.routeKey);
+    document.body.setAttribute("data-chat-id", route.chatId ?? "");
+    document.body.setAttribute("data-objective-id", route.objectiveId ?? "");
+    document.body.setAttribute("data-inspector-tab", route.inspectorTab ?? "overview");
+    document.body.setAttribute("data-detail-tab", route.detailTab ?? "action");
+    document.body.setAttribute("data-focus-kind", route.focusKind ?? "");
+    document.body.setAttribute("data-focus-id", route.focusId ?? "");
+  };
+
+  const syncInspectorTabVisibility = (inspectorTab?: string) => {
+    const isChatTab = inspectorTab === "chat";
+    const composer = composerShell();
+    if (composer) composer.classList.toggle("hidden", !isChatTab);
+    const live = liveShell();
+    if (live) live.classList.toggle("hidden", !isChatTab);
+  };
+
+  const syncInspectorTabControls = (inspectorTab?: string) => {
+    const header = chatHeader();
+    const activeTab = inspectorTab ?? "overview";
+    const querySelectorAll = header && "querySelectorAll" in header
+      ? (header.querySelectorAll as ((selector: string) => NodeListOf<Element>) | undefined)
+      : undefined;
+    if (!header || typeof querySelectorAll !== "function") return;
+    for (const link of Array.from(querySelectorAll.call(header, 'a[href*="inspectorTab="], a[href="/factory"], a[href^="/factory?"]'))) {
+      if (!(link instanceof HTMLElement)) continue;
+      const href = link.getAttribute("href") || "";
+      const url = resolveFactoryUrl(href);
+      const linkTab = url
+        ? (asString(url.searchParams.get("inspectorTab")) ?? "overview")
+        : "overview";
+      const isActive = linkTab === activeTab;
+      link.classList.toggle("border-primary/20", isActive);
+      link.classList.toggle("bg-primary/10", isActive);
+      link.classList.toggle("text-primary", isActive);
+      link.classList.toggle("border-border", !isActive);
+      link.classList.toggle("bg-background", !isActive);
+      link.classList.toggle("text-muted-foreground", !isActive);
+      link.classList.toggle("hover:bg-accent", !isActive);
+      link.classList.toggle("hover:text-foreground", !isActive);
+      if (isActive) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+  };
+
+  const syncRouteBindings = (route: FactoryWorkbenchRouteState) => {
+    const setRefreshPath = (element: HTMLElement | null, path: string) => {
+      if (!element) return;
+      element.setAttribute("data-refresh-path", path);
+    };
+    const currentWorkbenchHeader = workbenchHeader();
+    setRefreshPath(currentWorkbenchHeader, workbenchHeaderPathForRoute(route));
+    const currentChatHeader = chatHeader();
+    setRefreshPath(currentChatHeader, chatHeaderPathForRoute(route));
+    const currentWorkbench = workbenchContainer();
+    setRefreshPath(currentWorkbench, workbenchIslandPathForRoute(route));
+    const currentChat = chatContainer();
+    setRefreshPath(currentChat, chatIslandPathForRoute(route));
+    const currentBackgroundRoot = backgroundRoot();
+    if (currentBackgroundRoot) currentBackgroundRoot.setAttribute("data-events-path", backgroundEventsPathForRoute(route));
+    const currentChatRoot = chatRoot();
+    if (currentChatRoot) currentChatRoot.setAttribute("data-events-path", chatEventsPathForRoute(route));
+    const form = composerForm();
+    if (form) form.action = `/factory/compose${routeSearch(route)}`;
+    const summary = workbenchSummaryBlock();
+    setRefreshPath(summary, workbenchBlockPathForRoute(route, "summary"));
+    const activity = workbenchActivityBlock();
+    setRefreshPath(activity, workbenchBlockPathForRoute(route, "activity"));
+    const objectives = workbenchObjectivesBlock();
+    setRefreshPath(objectives, workbenchBlockPathForRoute(route, "objectives"));
+    const history = workbenchHistoryBlock();
+    setRefreshPath(history, workbenchBlockPathForRoute(route, "history"));
+  };
+
+  const applyRouteState = (
+    route: FactoryWorkbenchRouteState,
+    historyMode?: "replace" | "push" | "none",
+  ) => {
+    syncWorkbenchRouteData(route);
+    syncRouteBindings(route);
+    syncInspectorTabVisibility(route.inspectorTab);
+    syncInspectorTabControls(route.inspectorTab);
+    reactiveRefresh.sync();
+    const historyUrl = resolveFactoryUrl(route.routeKey);
+    if (historyUrl) setHistory(historyUrl, historyMode);
+  };
+
+  const handleWorkbenchChatSwap = (_target: HTMLElement) => {
+    const scrollState = captureChatScrollState();
+    if (pendingOverlayHtml) {
+      pendingOverlayHtml = "";
+      scheduleOverlayRender();
+    }
+    reconcileLiveTranscript();
+    if (!scrollState) return;
+    window.requestAnimationFrame(() => {
+      restoreChatScrollState(scrollState);
+    });
+  };
+
+  const islandContainer = (kind: "chat" | "workbench") =>
+    kind === "chat" ? chatContainer() : workbenchContainer();
+
+  const workbenchFragment = (kind: WorkbenchFragmentKind) => {
+    switch (kind) {
+      case "header":
+        return workbenchHeader();
+      case "chat-header":
+        return chatHeader();
+      case "summary":
+        return workbenchSummaryBlock();
+      case "activity":
+        return workbenchActivityBlock();
+      case "objectives":
+        return workbenchObjectivesBlock();
+      case "history":
+        return workbenchHistoryBlock();
+      default:
+        return null;
+    }
+  };
+
+  function refreshWorkbenchFragmentNow(
+    kind: WorkbenchFragmentKind,
+    expectedRouteKey: string,
+    options?: {
+      readonly replaceInFlight?: boolean;
+    },
+  ) {
+    const target = workbenchFragment(kind);
+    const path = readReactiveRefreshPath(target);
+    if (!target || !path) return Promise.resolve();
+    const documentScrollState = captureDocumentScrollState();
+    const controller = startRefreshController(fragmentRefreshControllers, kind, options);
+    return fetchHtml(path, controller?.signal).then((markup) => {
+      if (expectedRouteKey !== currentRouteKey()) return;
+      target.innerHTML = markup;
+      window.requestAnimationFrame(() => {
+        restoreDocumentScrollState(documentScrollState);
+      });
+    }).catch((error: unknown) => {
+      if (isAbortError(error)) return;
+      throw error;
+    }).finally(() => {
+      finishRefreshController(fragmentRefreshControllers, kind, controller);
+    });
+  }
+
+  function refreshIslandNow(
+    kind: "chat" | "workbench",
+    expectedRouteKey: string,
+    options?: {
+      readonly replaceInFlight?: boolean;
+    },
+  ) {
+    const target = islandContainer(kind);
+    const path = readReactiveRefreshPath(target);
+    if (!target || !path) return Promise.resolve();
+    const documentScrollState = captureDocumentScrollState();
+    const paneScrollState = kind === "workbench" ? captureWorkbenchPaneScrollState() : null;
+    if (kind === "workbench" && options?.replaceInFlight) {
+      abortFragmentRefresh("summary");
+      abortFragmentRefresh("activity");
+      abortFragmentRefresh("objectives");
+      abortFragmentRefresh("history");
+    }
+    const controller = startRefreshController(islandRefreshControllers, kind, options);
+    return fetchHtml(path, controller?.signal).then((markup) => {
+      if (expectedRouteKey !== currentRouteKey()) return;
+      target.innerHTML = markup;
+      if (kind === "chat") handleWorkbenchChatSwap(target);
+      if (kind === "workbench" && paneScrollState) {
+        window.requestAnimationFrame(() => {
+          restoreWorkbenchPaneScrollState(paneScrollState);
+          restoreDocumentScrollState(documentScrollState);
+        });
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        restoreDocumentScrollState(documentScrollState);
+      });
+    }).catch((error: unknown) => {
+      if (isAbortError(error)) return;
+      throw error;
+    }).finally(() => {
+      finishRefreshController(islandRefreshControllers, kind, controller);
+    });
+  }
+
+  const queueWorkbenchFragmentRefresh = (
+    kind: WorkbenchFragmentKind,
+    delayMs: number,
+    routeKeyOverride?: string,
+  ) => {
+    fragmentRefreshQueue.queue(kind, delayMs, routeKeyOverride);
+  };
+
+  const queueIslandRefresh = (kind: "chat" | "workbench", delayMs: number, routeKeyOverride?: string) => {
+    islandRefreshQueue.queue(kind, delayMs, routeKeyOverride);
+  };
+
+  const refreshRouteTargetsNow = (
+    targets: ReadonlyArray<WorkbenchRefreshTargetKey>,
+    routeKeyOverride?: string,
+  ) => {
+    const seen = new Set<WorkbenchRefreshTargetKey>();
+    const refreshes: Array<Promise<void>> = [];
+    for (const target of targets) {
+      if (seen.has(target)) continue;
+      seen.add(target);
+      if (target === "chat" || target === "workbench") {
+        abortIslandRefresh(target);
+        refreshes.push(
+          refreshIslandNow(target, routeKeyOverride ?? currentRouteKey(), { replaceInFlight: true }).then(() => undefined),
+        );
+        continue;
+      }
+      abortFragmentRefresh(target);
+      refreshes.push(
+        refreshWorkbenchFragmentNow(target, routeKeyOverride ?? currentRouteKey(), { replaceInFlight: true }).then(() => undefined),
+      );
+    }
+    return Promise.all(refreshes).then(() => undefined);
+  };
+
+  const scopeRefreshTargets = (
+    current: FactoryWorkbenchRouteState,
+    next: FactoryWorkbenchRouteState,
+  ): ReadonlyArray<WorkbenchRefreshTargetKey> => {
+    if (
+      current.profileId !== next.profileId
+      || current.chatId !== next.chatId
+      || current.objectiveId !== next.objectiveId
+    ) {
+      return ["header", "chat-header", "workbench", "chat"];
+    }
+    if (current.detailTab !== next.detailTab) {
+      return ["chat-header", "workbench"];
+    }
+    return ["header", "chat-header", "workbench", "chat"];
+  };
+
+  const workbenchRefreshTargets = (): ReadonlyArray<WorkbenchRefreshTarget> => [
+    {
+      key: "header",
+      source: "background",
+      element: workbenchHeader,
+      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("header", delayMs, routeKeyOverride),
+    },
+    {
+      key: "workbench",
+      source: "background",
+      element: workbenchContainer,
+      queue: (delayMs, routeKeyOverride) => queueIslandRefresh("workbench", delayMs, routeKeyOverride),
+    },
+    {
+      key: "summary",
+      source: "background",
+      element: workbenchSummaryBlock,
+      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("summary", delayMs, routeKeyOverride),
+    },
+    {
+      key: "activity",
+      source: "background",
+      element: workbenchActivityBlock,
+      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("activity", delayMs, routeKeyOverride),
+    },
+    {
+      key: "objectives",
+      source: "background",
+      element: workbenchObjectivesBlock,
+      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("objectives", delayMs, routeKeyOverride),
+    },
+    {
+      key: "history",
+      source: "background",
+      element: workbenchHistoryBlock,
+      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("history", delayMs, routeKeyOverride),
+    },
+    {
+      key: "chat",
+      source: workbenchState.appliedRoute.inspectorTab === "chat" ? "chat" : "background",
+      element: chatContainer,
+      queue: (delayMs, routeKeyOverride) => queueIslandRefresh("chat", delayMs, routeKeyOverride),
+    },
+  ];
+
+  const chatEventsPath = () => {
+    const node = chatRoot();
+    return node?.getAttribute("data-events-path") || null;
+  };
+
+  const backgroundEventsPath = () => {
+    const node = backgroundRoot();
+    return node?.getAttribute("data-events-path") || null;
+  };
+  const reactiveRefresh = createReactivePushRouter<WorkbenchRefreshSource, WorkbenchRefreshTargetKey, string>({
+    sources: ["background", "chat"],
+    targets: workbenchRefreshTargets,
+    eventPath: (source) => source === "chat" ? chatEventsPath() : backgroundEventsPath(),
+    getScopeKey: currentRouteKey,
+    onSseEvent: ({ eventName }) => {
+      if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
+        updatePendingLiveStatus({
+          ...pendingLiveStatus,
+          statusLabel: "Working",
+          summary: "Reply is arriving. Background work, if any, keeps updating separately.",
+        });
+      }
+      if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply && pendingLiveStatus.statusLabel === "Queued") {
+        updatePendingLiveStatus({
+          ...pendingLiveStatus,
+          statusLabel: "Starting",
+          summary: "The chat run is starting.",
+        });
+      }
+    },
+    onEventSourceConnected: ({ sourceKey, eventSource }) => {
+      if (sourceKey !== "chat") return;
+      eventSource.addEventListener("agent-token", (event) => {
+        const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
+        if (!payload) return;
+        const state = currentChatState();
+        const runId = payload.runId || state.activeRunId || streamingReply?.runId;
+        if (!acceptsStreamingRun(runId)) return;
+        updatePendingLiveStatus(null, { runId: payload.runId });
+        const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
+        streamingReply = {
+          runId,
+          profileLabel: state.activeProfileLabel || streamingLabel()?.textContent || "Assistant",
+          text: previous + payload.delta,
+        };
+        scheduleOverlayRender();
+      });
+      eventSource.addEventListener("factory-stream-reset", () => {
+        clearStreamingReply();
+      });
+    },
+  });
+
+  const refreshVisibleWorkbench = () => {
+    reactiveRefresh.sync();
+  };
+
+  const navigateWithFeedback = (location: string) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.location.assign(location);
+      });
+    });
+  };
+
+  const routeStateFromLocation = (url: URL): FactoryWorkbenchRouteState =>
+    createWorkbenchRouteState({
+      profileId: asString(url.searchParams.get("profile")) ?? workbenchState.appliedRoute.profileId,
+      chatId: asString(url.searchParams.get("chat")) ?? workbenchState.appliedRoute.chatId,
+      objectiveId: asString(url.searchParams.get("objective")),
+      inspectorTab: asString(url.searchParams.get("inspectorTab")),
+      detailTab: asString(url.searchParams.get("detailTab")),
+      filter: asString(url.searchParams.get("filter")),
+      focusKind: asString(url.searchParams.get("focusKind")),
+      focusId: asString(url.searchParams.get("focusId")),
+    });
+
+  const applyInlineLocation = (
+    location: string,
+    historyMode?: "replace" | "push" | "none",
+  ) => {
+    if (!isInlineWorkbenchLocation(location)) {
+      navigateWithFeedback(location);
+      return Promise.resolve(false);
+    }
+    const url = resolveFactoryUrl(location);
+    if (!url) {
+      navigateWithFeedback(location);
+      return Promise.resolve(false);
+    }
+    const nextRoute = routeStateFromLocation(url);
+    const currentRoute = workbenchState.desiredRoute;
+    const changeKind = classifyWorkbenchRouteChange(workbenchState.desiredRoute, nextRoute);
+    if (changeKind === "noop") return Promise.resolve(true);
+    if (changeKind === "inspector") {
+      dispatchWorkbenchAction({ type: "inspector.changed", route: nextRoute });
+      applyRouteState(nextRoute, "replace");
+      if (nextRoute.inspectorTab === "chat") {
+        window.requestAnimationFrame(() => {
+          const input = chatInput();
+          if (input) input.focus();
+        });
+      }
+      return refreshRouteTargetsNow(["chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+    }
+    if (changeKind === "focus") {
+      dispatchWorkbenchAction({ type: "focus.changed", route: nextRoute });
+      applyRouteState(nextRoute, "replace");
+      return refreshRouteTargetsNow(["summary", "activity"], nextRoute.routeKey).then(() => true).catch(() => true);
+    }
+    if (changeKind === "filter") {
+      dispatchWorkbenchAction({ type: "filter.changed", route: nextRoute });
+      applyRouteState(nextRoute, "push");
+      return refreshRouteTargetsNow(["header", "chat-header", "workbench"], nextRoute.routeKey).then(() => true).catch(() => true);
+    }
+    dispatchWorkbenchAction({
+      type: "route.applied",
+      route: nextRoute,
+    });
+    applyRouteState(nextRoute, historyMode ?? "push");
+    return refreshRouteTargetsNow(scopeRefreshTargets(currentRoute, nextRoute), nextRoute.routeKey).then(() => {
+      if (shouldStickToBottom) {
+        window.requestAnimationFrame(() => {
+          const scroll = chatScroll();
+          if (!scroll) return;
+          if (typeof scroll.scrollTo === "function") {
+            scroll.scrollTo({ top: scroll.scrollHeight, behavior: "auto" });
+          } else {
+            scroll.scrollTop = scroll.scrollHeight;
+          }
+        });
+      }
+      return true;
+    }).catch(() => true);
+  };
+
+  const resetComposerAfterSuccess = () => {
+    const input = chatInput();
+    if (input) {
+      input.value = "";
+      autoResizeInput();
+      input.focus();
+    }
+    setExpanded(false);
+    setComposerStatus("");
+    setComposerBusy(false);
+  };
+
+  const input = chatInput();
+  if (input) {
+    input.addEventListener("input", autoResizeInput, { passive: true });
+    input.addEventListener("compositionstart", () => { isComposing = true; });
+    input.addEventListener("compositionend", () => { isComposing = false; refreshAutocomplete(); });
+    input.addEventListener("click", () => { refreshAutocomplete(); });
+    input.addEventListener("keyup", () => { refreshAutocomplete(); });
+    input.addEventListener("keydown", (event) => {
+      if (isComposing) return;
+      const popup = composerCompletions();
+      const matches = filterCommands((getSlashContext(input.value, input.selectionStart || 0) || { query: "" }).query);
+      if (popup && !popup.classList.contains("hidden") && matches.length) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          activeCommandIndex = (activeCommandIndex + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length;
+          renderCommands((getSlashContext(input.value, input.selectionStart || 0) || { query: "" }).query, activeCommandIndex);
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          insertCommand(matches[activeCommandIndex] || matches[0]!);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setExpanded(false);
+          return;
+        }
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        const form = composerForm();
+        if (form) form.requestSubmit();
+      }
+    });
+    autoResizeInput();
+
+    const refreshAutocomplete = () => {
+      const context = getSlashContext(input.value, input.selectionStart || 0);
+      if (!context) {
+        setExpanded(false);
+        return;
+      }
+      renderCommands(context.query, 0);
+    };
+
+    input.addEventListener("input", refreshAutocomplete);
+    input.addEventListener("blur", () => {
+      window.setTimeout(() => { setExpanded(false); }, 100);
+    });
+    input.addEventListener("focus", refreshAutocomplete);
+
+    const popup = composerCompletions();
+    if (popup) {
+      popup.addEventListener("mousedown", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-command-index]") : null;
+        if (!button) return;
+        event.preventDefault();
+        const index = Number(button.getAttribute("data-command-index") || "0");
+        const matches = renderCommands((getSlashContext(input.value, input.selectionStart || 0) || { query: "" }).query, index);
+        if (matches[index]) insertCommand(matches[index]!);
+      });
+      popup.addEventListener("mousemove", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-command-index]") : null;
+        if (!button) return;
+        const index = Number(button.getAttribute("data-command-index") || "0");
+        activeCommandIndex = index;
+        renderCommands((getSlashContext(input.value, input.selectionStart || 0) || { query: "" }).query, index);
+      });
+    }
+  }
+
+  const form = composerForm();
+  if (form) {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const activeForm = composerForm();
+      if (!activeForm) return;
+      const activeInput = chatInput();
+      const payload = activeInput && activeInput.value ? activeInput.value.trim() : "";
+      if (!payload) {
+        setComposerStatus("Enter a chat message or slash command.");
+        return;
+      }
+      const formData = new window.FormData(activeForm);
+      const feedback = composerFeedback(payload, activeForm.action);
+      let keepBusyForNavigation = false;
+      setComposerBusy(true, feedback.buttonLabel);
+      setComposerStatus(feedback.status || "");
+      clearStreamingReply();
+      pendingOverlayHtml = "optimisticHtml" in feedback && feedback.optimisticHtml ? feedback.optimisticHtml : "";
+      updatePendingLiveStatus("optimisticHtml" in feedback && feedback.optimisticHtml
+        ? {
+            statusLabel: "Queued",
+            summary: "Chat accepted this turn and is preparing a reply.",
+          }
+        : null);
+      scheduleOverlayRender();
+      window.fetch(activeForm.action, {
+        method: activeForm.method || "POST",
+        body: formData,
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      }).then((response: FactoryFetchResponse) => {
+        const contentType = response.headers.get("content-type") || "";
+        const bodyPromise = contentType.indexOf("application/json") >= 0
+          ? response.json().catch(() => ({}))
+          : response.text().catch(() => "Request failed.").then((text) => ({ error: text }));
+        return bodyPromise.then((payloadBody) => {
+          const body = parseComposeResponse(payloadBody);
+          if (!response.ok) {
+            pendingOverlayHtml = "";
+            updatePendingLiveStatus(null);
+            scheduleOverlayRender();
+            setComposerStatus(body.error || "Request failed.");
+            return;
+          }
+          if (pendingLiveStatus) {
+            updatePendingLiveStatus({
+              ...pendingLiveStatus,
+              runId: body.live?.runId || pendingLiveStatus.runId,
+              jobId: body.live?.jobId || pendingLiveStatus.jobId,
+              summary: body.live?.jobId
+                ? "Chat run queued. Waiting for the reply to start."
+                : pendingLiveStatus.summary,
+            });
+            scheduleOverlayRender();
+          }
+          if (body.selection?.objectiveId && /^\/(?:obj|new)\b/i.test(payload)) {
+            pendingOverlayHtml = `<section class=" border border-primary/30 bg-primary/10 px-3 py-2">
+              <div class="text-xs font-semibold text-primary">Background handoff acknowledged</div>
+              <div class="mt-1 text-xs text-foreground">Objective ${escapeHtml(body.selection.objectiveId)} is now running. You can ask the next question while it updates on the left.</div>
+            </section>`;
+            scheduleOverlayRender();
+          }
+          if (body.location) {
+            keepBusyForNavigation = true;
+            return applyInlineLocation(body.location, "push").then((handledInline) => {
+              if (!handledInline) return;
+              keepBusyForNavigation = false;
+              resetComposerAfterSuccess();
+            });
+          }
+          keepBusyForNavigation = true;
+          if (typeof window.location.reload === "function") {
+            window.location.reload();
+            return;
+          }
+          throw new Error("Request failed.");
+        });
+      }).catch((error: unknown) => {
+        pendingOverlayHtml = "";
+        updatePendingLiveStatus(null);
+        scheduleOverlayRender();
+        setComposerStatus(error instanceof Error ? error.message : "Request failed.");
+      }).finally(() => {
+        if (!keepBusyForNavigation) setComposerBusy(false);
+      });
+    });
+  }
+
+  const scroll = chatScroll();
+  if (scroll) {
+    scroll.addEventListener("scroll", () => {
+      shouldStickToBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
+    }, { passive: true });
+  }
+
+  document.addEventListener("click", (event) => {
+    const commandTarget = event.target instanceof Element ? event.target.closest("[data-factory-command]") : null;
+    if (commandTarget instanceof HTMLElement) {
+      event.preventDefault();
+      const command = commandTarget.getAttribute("data-factory-command") || "";
+      const focusHref = commandTarget.getAttribute("data-factory-focus-href") || "";
+      const applyCommand = () => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            prefillComposerCommand(command);
+          });
+        });
+      };
+      if (focusHref) {
+        applyInlineLocation(focusHref, "push").catch(() => {
+          // Keep the current shell usable even if the tab switch fails.
+        }).finally(() => {
+          applyCommand();
+        });
+        return;
+      }
+      applyCommand();
+      return;
+    }
+    const target = workbenchNavigationTarget(event);
+    if (!target || !isInlineWorkbenchLocation(target.location)) return;
+    event.preventDefault();
+    applyInlineLocation(target.location, target.historyMode).catch(() => {
+      navigateWithFeedback(target.location);
+    });
+  });
+
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.getAttribute("data-factory-profile-select") !== "true") return;
+    const location = typeof (target as HTMLInputElement).value === "string"
+      ? (target as HTMLInputElement).value
+      : "";
+    if (!location) return;
+    applyInlineLocation(location, "push").catch(() => {
+      navigateWithFeedback(location);
+    });
+  });
+
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("popstate", () => {
+      applyInlineLocation(String(window.location && window.location.href ? window.location.href : shellPath()), "replace").catch(() => {
+        // Fall through to browser URL if inline hydration fails.
+      });
+    });
+    window.addEventListener("focus", refreshVisibleWorkbench);
+    window.addEventListener("pageshow", refreshVisibleWorkbench);
+  }
+
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      refreshVisibleWorkbench();
+    });
+  }
+
+  window.requestAnimationFrame(() => {
+    const nextScroll = chatScroll();
+    if (!nextScroll) return;
+    if (typeof nextScroll.scrollTo === "function") {
+      nextScroll.scrollTo({ top: nextScroll.scrollHeight, behavior: "auto" });
+    } else {
+      nextScroll.scrollTop = nextScroll.scrollHeight;
+    }
+  });
+  const bootRoute = readDocumentRouteState();
+  const bootUrl = currentUrl();
+  const replayStorage = sessionStorageApi();
+  const replay = parseWorkbenchReplay(
+    replayStorage?.getItem(replayStorageKey(bootRoute)) ?? null,
+  );
+  dispatchWorkbenchAction({ type: "boot", route: bootRoute });
+  const replayRoute = mergeReplayRoute(workbenchState.appliedRoute, replay, {
+    preserveExplicitInspectorTab: Boolean(bootUrl?.searchParams.has("inspectorTab")),
+    preserveExplicitDetailTab: Boolean(bootUrl?.searchParams.has("detailTab")),
+    preserveExplicitFilter: Boolean(bootUrl?.searchParams.has("filter")),
+    preserveExplicitFocus: Boolean(
+      bootUrl?.searchParams.has("focusKind")
+      || bootUrl?.searchParams.has("focusId"),
+    ),
+  });
+  if (replay && (replayRoute.routeKey !== workbenchState.appliedRoute.routeKey || replay.liveOverlay)) {
+    dispatchWorkbenchAction({
+      type: "session.replayed",
+      route: replayRoute,
+      liveOverlay: replay.liveOverlay,
+    });
+    pendingLiveStatus = replay.liveOverlay
+      ? {
+          statusLabel: replay.liveOverlay.statusLabel,
+          summary: replay.liveOverlay.summary,
+          runId: replay.liveOverlay.runId,
+          jobId: replay.liveOverlay.jobId,
+        }
+      : null;
+    applyRouteState(replayRoute, replayRoute.routeKey === bootRoute.routeKey ? "none" : "replace");
+  } else {
+    applyRouteState(workbenchState.appliedRoute, "none");
+  }
+  scheduleOverlayRender();
+  reactiveRefresh.sync();
+  consumeComposeCommandFromLocation(String(window.location && window.location.href ? window.location.href : shellPath()));
+};

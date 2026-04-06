@@ -1,0 +1,52 @@
+import {
+  buildAwsEc2RegionScopeGuidance,
+  summarizeAwsEc2RegionScope,
+  type FactoryAwsExecutionContext,
+  type FactoryCloudExecutionContext,
+} from "./factory-cloud-context";
+
+const AWS_INFRA_GUIDANCE =
+  "Infrastructure profile is AWS-only for now. Ignore other mounted cloud sessions and fail fast with the exact AWS CLI error if AWS access is unavailable.";
+
+const buildAwsInfraSummary = (aws: FactoryAwsExecutionContext | undefined): string => {
+  if (!aws) {
+    return `${AWS_INFRA_GUIDANCE} No live AWS CLI context was detected from this machine.`;
+  }
+  if (!aws.callerIdentity) {
+    return [
+      AWS_INFRA_GUIDANCE,
+      `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}, but no active caller identity was confirmed.`,
+    ].join(" ");
+  }
+  return [
+    AWS_INFRA_GUIDANCE,
+    `AWS CLI is available${aws.selectedProfile ? ` via profile ${aws.selectedProfile}` : ""}; active identity ${aws.callerIdentity.arn} in account ${aws.callerIdentity.accountId}${aws.defaultRegion ? ` with region ${aws.defaultRegion}` : ""}.`,
+    summarizeAwsEc2RegionScope(aws.ec2RegionScope) ?? "",
+  ].filter(Boolean).join(" ");
+};
+
+const buildAwsInfraGuidance = (aws: FactoryAwsExecutionContext | undefined): ReadonlyArray<string> => {
+  const guidance = [AWS_INFRA_GUIDANCE];
+  if (aws?.callerIdentity) {
+    guidance.push(`AWS bucket listing is global for the active account ${aws.callerIdentity.accountId}; region is secondary unless the objective asks for regional filtering.`);
+  }
+  const ec2ScopeGuidance = buildAwsEc2RegionScopeGuidance(aws?.ec2RegionScope);
+  if (ec2ScopeGuidance) guidance.push(ec2ScopeGuidance);
+  return guidance;
+};
+
+export const resolveFactoryCloudExecutionContext = (
+  profileCloudProvider: string | undefined,
+  context: FactoryCloudExecutionContext,
+): FactoryCloudExecutionContext => {
+  if (profileCloudProvider !== "aws") return context;
+  const aws = context.aws;
+  return {
+    summary: buildAwsInfraSummary(aws),
+    availableProviders: aws ? ["aws"] : [],
+    activeProviders: aws?.callerIdentity ? ["aws"] : [],
+    preferredProvider: "aws",
+    guidance: buildAwsInfraGuidance(aws),
+    aws,
+  };
+};

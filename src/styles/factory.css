@@ -1,0 +1,458 @@
+@import "tailwindcss";
+
+@source "../views/ui.ts";
+@source "../views/factory-live-steps.ts";
+@source "../views/factory/shared/index.ts";
+@source "../views/factory/transcript/index.ts";
+@source "../views/factory/workbench/page.ts";
+@source "../views/receipt.ts";
+@source "../views/runtime/data.ts";
+@source "../views/runtime/render.ts";
+@source "../views/runtime/index.ts";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: hsl(0 0% 94.1176%);
+  --foreground: hsl(0 0% 20%);
+  --card: hsl(0 0% 96.0784%);
+  --card-foreground: hsl(0 0% 20%);
+  --popover: hsl(0 0% 96.0784%);
+  --popover-foreground: hsl(0 0% 20%);
+  --primary: hsl(0 0% 37.6471%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(0 0% 87.8431%);
+  --secondary-foreground: hsl(0 0% 20%);
+  --muted: hsl(0 0% 85.0980%);
+  --muted-foreground: hsl(0 0% 40%);
+  --accent: hsl(0 0% 75.2941%);
+  --accent-foreground: hsl(0 0% 20%);
+  --destructive: hsl(0 60.0000% 50%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --border: hsl(0 0% 81.5686%);
+  --input: hsl(0 0% 87.8431%);
+  --ring: hsl(0 0% 37.6471%);
+  --chart-1: hsl(0 0% 37.6471%);
+  --chart-2: hsl(180 17.9191% 33.9216%);
+  --chart-3: hsl(0 0% 56.4706%);
+  --chart-4: hsl(0 0% 65.8824%);
+  --chart-5: hsl(0 0% 75.2941%);
+  --sidebar: hsl(0 0% 91.7647%);
+  --sidebar-foreground: hsl(0 0% 20%);
+  --sidebar-primary: hsl(0 0% 37.6471%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(0 0% 75.2941%);
+  --sidebar-accent-foreground: hsl(0 0% 20%);
+  --sidebar-border: hsl(0 0% 81.5686%);
+  --sidebar-ring: hsl(0 0% 37.6471%);
+  --success: hsl(142 71% 45%);
+  --success-foreground: hsl(0 0% 100%);
+  --warning: hsl(38 92% 50%);
+  --warning-foreground: hsl(0 0% 100%);
+  --info: hsl(199 89% 48%);
+  --info-foreground: hsl(0 0% 100%);
+  --font-sans: Montserrat, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: Fira Code, monospace;
+  --radius: 0.35rem;
+  --shadow-x: 0px;
+  --shadow-y: 2px;
+  --shadow-blur: 0px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.15;
+  --shadow-color: hsl(0 0% 20% / 0.1);
+  --shadow-2xs: 0px 2px 0px 0px hsl(0 0% 20% / 0.07);
+  --shadow-xs: 0px 2px 0px 0px hsl(0 0% 20% / 0.07);
+  --shadow-sm: 0px 2px 0px 0px hsl(0 0% 20% / 0.15), 0px 1px 2px -1px hsl(0 0% 20% / 0.15);
+  --shadow: 0px 2px 0px 0px hsl(0 0% 20% / 0.15), 0px 1px 2px -1px hsl(0 0% 20% / 0.15);
+  --shadow-md: 0px 2px 0px 0px hsl(0 0% 20% / 0.15), 0px 2px 4px -1px hsl(0 0% 20% / 0.15);
+  --shadow-lg: 0px 2px 0px 0px hsl(0 0% 20% / 0.15), 0px 4px 6px -1px hsl(0 0% 20% / 0.15);
+  --shadow-xl: 0px 2px 0px 0px hsl(0 0% 20% / 0.15), 0px 8px 10px -1px hsl(0 0% 20% / 0.15);
+  --shadow-2xl: 0px 2px 0px 0px hsl(0 0% 20% / 0.38);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+}
+
+.dark {
+  --background: hsl(240 4% 8%);
+  --foreground: hsl(210 17% 91%);
+  --card: hsl(240 4% 10%);
+  --card-foreground: hsl(210 17% 91%);
+  --popover: hsl(240 4% 9%);
+  --popover-foreground: hsl(210 17% 91%);
+  --primary: hsl(214 100% 71%);
+  --primary-foreground: hsl(240 4% 8%);
+  --secondary: hsl(240 3% 13%);
+  --secondary-foreground: hsl(210 17% 91%);
+  --muted: hsl(240 3% 12%);
+  --muted-foreground: hsl(220 8% 60%);
+  --accent: hsl(240 3% 15%);
+  --accent-foreground: hsl(210 17% 91%);
+  --destructive: hsl(0 72% 61%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --border: hsl(240 3% 18%);
+  --input: hsl(240 3% 12%);
+  --ring: hsl(214 100% 71%);
+  --chart-1: hsl(214 100% 71%);
+  --chart-2: hsl(167 81% 43%);
+  --chart-3: hsl(219 9% 63%);
+  --chart-4: hsl(240 4% 20%);
+  --chart-5: hsl(240 3% 14%);
+  --sidebar: hsl(240 4% 9%);
+  --sidebar-foreground: hsl(210 17% 91%);
+  --sidebar-primary: hsl(214 100% 71%);
+  --sidebar-primary-foreground: hsl(240 4% 8%);
+  --sidebar-accent: hsl(240 3% 14%);
+  --sidebar-accent-foreground: hsl(210 17% 91%);
+  --sidebar-border: hsl(240 3% 17%);
+  --sidebar-ring: hsl(214 100% 71%);
+  --success: hsl(142 71% 45%);
+  --success-foreground: hsl(142 71% 90%);
+  --warning: hsl(38 92% 50%);
+  --warning-foreground: hsl(38 92% 90%);
+  --info: hsl(214 100% 71%);
+  --info-foreground: hsl(214 100% 95%);
+  --font-sans: "JetBrains Mono", "Fira Code", monospace;
+  --font-serif: Georgia, serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  --radius: 0.12rem;
+  --shadow-x: 0px;
+  --shadow-y: 0px;
+  --shadow-blur: 0px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0;
+  --shadow-color: transparent;
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+  --shadow-2xl: none;
+  --tracking-normal: 0.01em;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+@layer base {
+  *, *::before, *::after {
+    @apply border-border outline-ring/50;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply font-sans bg-background text-foreground;
+    margin: 0;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button, input, textarea {
+    font: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  textarea {
+    field-sizing: content;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 25%, transparent);
+  }
+
+  [data-factory-stream-shell]:has(#factory-chat-streaming-content:empty) {
+    display: none;
+  }
+}
+
+@layer components {
+  .factory-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+
+  .factory-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .factory-scrollbar::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+    background-color: hsl(var(--muted-foreground) / 0.3);
+  }
+
+  .factory-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .factory-markdown {
+    @apply text-[15px] leading-7 text-foreground font-sans;
+  }
+
+  .factory-markdown > :first-child {
+    @apply mt-0;
+  }
+
+  .factory-markdown > :last-child {
+    @apply mb-0;
+  }
+
+  .factory-markdown h1,
+  .factory-markdown h2,
+  .factory-markdown h3,
+  .factory-markdown h4 {
+    @apply text-foreground tracking-tight;
+  }
+  
+  .factory-markdown h1 {
+    @apply mt-1 mb-4 text-lg font-semibold leading-tight;
+  }
+  
+  .factory-markdown h2 {
+    @apply mt-7 mb-3 text-base font-semibold;
+  }
+
+  .factory-markdown > h2:first-child {
+    @apply mt-0;
+  }
+  
+  .factory-markdown h3 {
+    @apply mt-5 mb-2 text-sm font-semibold;
+  }
+
+  .factory-markdown h4 {
+    @apply mt-4 mb-2 text-sm font-semibold text-muted-foreground;
+  }
+
+  .factory-markdown p {
+    @apply my-3 text-foreground;
+  }
+
+  .factory-markdown > p:first-of-type {
+    @apply text-[15px] leading-7 text-foreground;
+  }
+
+  .factory-markdown ul,
+  .factory-markdown ol {
+    @apply my-4 pl-5 space-y-2;
+  }
+
+  .factory-markdown ul {
+    @apply list-disc marker:text-muted-foreground/70;
+  }
+
+  .factory-markdown ol {
+    @apply list-decimal marker:text-muted-foreground/70;
+  }
+
+  .factory-markdown li {
+    @apply leading-relaxed;
+  }
+
+  .factory-markdown li > p {
+    @apply my-1.5;
+  }
+
+  .factory-markdown table {
+    @apply my-4  border border-border bg-card text-left text-[13px] leading-6 shadow-sm;
+    display: block;
+    width: max-content;
+    min-width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .factory-markdown table thead {
+    @apply bg-muted;
+  }
+
+  .factory-markdown table th {
+    @apply whitespace-nowrap border-b border-border px-3 py-2.5 text-[11px] font-semibold text-muted-foreground;
+  }
+
+  .factory-markdown table td {
+    @apply border-t border-border/70 px-3 py-2.5 align-top text-foreground;
+  }
+
+  .factory-markdown table tbody tr:first-child td {
+    @apply border-t-0;
+  }
+
+  .factory-markdown blockquote {
+    @apply my-4  border border-border bg-muted px-4 py-3 text-[14px] text-muted-foreground;
+  }
+
+  .factory-markdown pre {
+    @apply my-4 overflow-x-auto  border border-border bg-[#151311] p-4 text-[13px] leading-relaxed text-[#ECE7E1] font-mono shadow-sm;
+  }
+
+  .factory-markdown code {
+    @apply  border border-border/60 bg-muted px-[0.34em] py-[0.16em] text-[0.84em] font-mono text-foreground;
+  }
+
+  .factory-markdown pre code {
+    @apply border-0 bg-transparent p-0 text-inherit font-normal text-[13px];
+  }
+
+  .factory-markdown a {
+    @apply text-primary hover:underline font-medium;
+  }
+
+  .factory-markdown strong {
+    @apply font-semibold;
+  }
+
+  .factory-inspector-panel,
+  .factory-job-panel,
+  .factory-job-list,
+  .factory-job-card,
+  .factory-job-card__row,
+  .factory-job-card__body,
+  .factory-job-card__title,
+  .factory-job-card__summary,
+  .factory-job-card__meta {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .factory-inspector-panel,
+  .factory-job-panel,
+  .factory-job-list {
+    overflow-x: hidden;
+  }
+
+  .factory-job-card {
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .factory-job-card__body {
+    flex: 1 1 12rem;
+    overflow: hidden;
+  }
+
+  .factory-job-card__status {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  .factory-job-card__title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .factory-job-card__summary {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .factory-job-card__meta {
+    overflow-wrap: anywhere;
+  }
+
+  .factory-workbench-shell {
+    background: var(--background);
+  }
+
+  .factory-workbench-grid {
+    align-items: stretch;
+    height: 100%;
+  }
+
+  .factory-workbench-chat-shell {
+    background: var(--card);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}

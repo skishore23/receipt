@@ -1,0 +1,17 @@
+{
+  "id": "aws_policy_or_exposure_check",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["policy", "exposure", "public", "security", "permissions", "access", "trust", "bucket", "buckets", "role", "security-group"],
+  "description": "Check a small set of common AWS exposure and policy surfaces.",
+  "entrypoint": "run.py",
+  "requiredArgs": ["--service", "--check", "--resource-id"],
+  "requiredContext": [
+    "Requires a real bucket name, IAM role name, or security group id from the operator request, receipts, or prior helper output.",
+    "Do not invent placeholder identifiers such as __placeholder__."
+  ],
+  "examples": [
+    "--service s3 --check public-access --resource-id my-bucket",
+    "--service iam --check trust-policy --resource-id my-role"
+  ]
+}

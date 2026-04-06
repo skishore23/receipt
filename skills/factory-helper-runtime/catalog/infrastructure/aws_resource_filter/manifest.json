@@ -1,0 +1,17 @@
+{
+  "id": "aws_resource_filter",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["filter", "query", "search", "resource", "select", "find", "match", "instances", "volumes", "buckets", "functions", "databases"],
+  "description": "Run a targeted AWS CLI query against a supported resource inventory target.",
+  "entrypoint": "run.py",
+  "requiredArgs": ["--service", "--resource", "--query"],
+  "requiredContext": [
+    "Requires an explicit service/resource pair and a real AWS CLI --query expression.",
+    "For region-scoped resources, provide --region, --regions, or --all-regions from the mounted scope."
+  ],
+  "examples": [
+    "--service s3 --resource buckets --query 'Buckets[].Name'",
+    "--service ec2 --resource instances --all-regions --query 'Reservations[].Instances[].InstanceId'"
+  ]
+}

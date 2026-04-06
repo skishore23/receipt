@@ -1,0 +1,26 @@
+{
+  "id": "ec2_terminated_instance_audit",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": [
+    "ec2",
+    "instances",
+    "terminated",
+    "terminate",
+    "cloudtrail",
+    "autoscaling",
+    "audit",
+    "deleted"
+  ],
+  "description": "Audit terminated EC2 instances with CloudTrail attribution and EC2 metadata.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile and queryable EC2 region scope when no explicit region scope is provided.",
+    "Collects CloudTrail TerminateInstances events from the last N days and enriches them with EC2 and Auto Scaling metadata."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --days 7 --all-regions"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "aws_alarm_summary",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["alarm", "alarms", "alert", "alerts", "cloudwatch", "metric", "metrics"],
+  "description": "Summarize CloudWatch alarms by region and state.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Needs region scope. Use --region, --regions, or --all-regions with mounted region context.",
+    "Prefer existing packet region scope before widening to --all-regions."
+  ],
+  "examples": [
+    "--region us-west-2 --state-value ALARM",
+    "--all-regions --name-prefix api-"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "aws_cdn_charge_investigation",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["cost", "billing", "cloudfront", "global-accelerator", "cdn", "investigation"],
+  "description": "Investigate recent CDN-related spend changes using Cost Explorer, CloudFront inventory, Global Accelerator inventory, and CloudTrail event history.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Uses the mounted AWS profile.",
+    "Defaults to a 30-day lookback and queries CloudTrail in us-east-1 plus Global Accelerator in us-west-2 unless overridden."
+  ],
+  "examples": [
+    "--profile default",
+    "--profile default --lookback-days 30 --output-dir .receipt/factory"
+  ]
+}

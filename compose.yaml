@@ -1,0 +1,41 @@
+services:
+  receipt:
+    working_dir: /workspace/receipt
+    environment:
+      PORT: "${PORT:-8787}"
+      DATA_DIR: /workspace/receipt/.receipt/data
+      RECEIPT_DATA_DIR: /workspace/receipt/.receipt/data
+      JOB_BACKEND: resonate
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.2}"
+      RECEIPT_WORKDIR: /workspace/receipt
+      HOME: /workspace/receipt/.receipt/home
+      CODEX_HOME: /workspace/receipt/.receipt/home/.codex
+      RECEIPT_ISOLATED_CODEX_HOME_ROOT: /workspace/receipt/.receipt/home/.codex/runtime
+      RECEIPT_CODEX_BIN: codex
+      CHAT_WORKER_PROCESSES: "${CHAT_WORKER_PROCESSES:-10}"
+      CONTROL_WORKER_PROCESSES: "${CONTROL_WORKER_PROCESSES:-4}"
+      CODEX_WORKER_PROCESSES: "${CODEX_WORKER_PROCESSES:-6}"
+      CHAT_JOB_CONCURRENCY: "${CHAT_JOB_CONCURRENCY:-50}"
+      ORCHESTRATION_JOB_CONCURRENCY: "${ORCHESTRATION_JOB_CONCURRENCY:-20}"
+      CODEX_JOB_CONCURRENCY: "${CODEX_JOB_CONCURRENCY:-30}"
+      JOB_CONCURRENCY: "${JOB_CONCURRENCY:-12}"
+      RESONATE_QUEUE_REFRESH_MS: "${RESONATE_QUEUE_REFRESH_MS:-1000}"
+      RESONATE_STARTUP_SETTLE_MS: "${RESONATE_STARTUP_SETTLE_MS:-1000}"
+      RESONATE_URL: http://127.0.0.1:8001
+      RESONATE_GROUP_API: receipt-api
+      RESONATE_GROUP_DRIVER: receipt-driver
+      RESONATE_GROUP_CHAT: receipt-chat
+      RESONATE_GROUP_CONTROL: receipt-control
+      RESONATE_GROUP_CODEX: receipt-codex
+      RESONATE_SQLITE_PATH: /workspace/receipt/.receipt/resonate/resonate.db
+      SSH_AUTH_SOCK: "${RECEIPT_DOCKER_FORWARD_SSH_AUTH_SOCK:-}"
+    ports:
+      - "${PORT:-8787}:8787"
+      - "8001:8001"
+      - "8002:8002"
+      - "50051:50051"
+      - "9090:9090"
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
