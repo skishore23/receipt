@@ -190,6 +190,30 @@ test("factory objective status: reconcile-worthy publish failures without a live
   });
 });
 
+test("factory objective status: canceled monitor recovery does not override an active task run", () => {
+  expect(deriveObjectiveOperationalState({
+    state: makeState({
+      status: "executing",
+    }),
+    taskCount: 1,
+    objectiveJobs: [
+      makeJob("factory.task.run", {
+        status: "running",
+      }),
+      makeJob("factory.task.monitor", {
+        id: "job_factory_task_monitor_recovered",
+        status: "canceled",
+        canceledReason: "stale active objective job reconciled during startup recovery",
+      }),
+    ],
+  })).toEqual({
+    displayState: "Running",
+    phaseDetail: "executing",
+    statusAuthority: "live_execution",
+    hasAuthoritativeLiveJob: true,
+  });
+});
+
 test("factory objective status: terminal objectives with lingering non-audit jobs show cleanup detail", () => {
   expect(deriveObjectiveOperationalState({
     state: makeState({

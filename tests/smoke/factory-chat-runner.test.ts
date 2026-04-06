@@ -2409,8 +2409,9 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
     profileRoot,
   });
 
-  expect(result.status).toBe("failed");
-  expect(result.finalResponse).toContain("Stopped after hitting max iterations.");
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Work is still running in this chat.");
+  expect(result.finalResponse).toContain("Objective demo is active (executing).");
   expect(llmCalls).toEqual(["factory.status", "factory.status"]);
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_live_wait_once"));
@@ -4402,6 +4403,129 @@ test("factory chat runner: canonical completed-objective follow-up fields create
   const latestBound = boundEvents.at(-1);
   expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_followup");
   expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_create");
+});
+
+test("factory chat runner: compatibility aliases and single-string checks no longer burn iterations", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-compat-dispatch");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.status", "factory.dispatch"],
+  });
+
+  let createdInput: Record<string, unknown> | undefined;
+  const factoryService = createFactoryServiceStub({
+    getObjective: async (objectiveId: string) => ({
+      objectiveId,
+      title: "Stale auto-fix objective",
+      status: "active",
+      phase: "integrating",
+      objectiveMode: "delivery",
+      severity: 3,
+      latestSummary: "Working unrelated git ancestry repair.",
+      nextAction: "Keep integrating the auto-fix.",
+      integration: { status: "running", queuedCandidateIds: [] },
+      latestDecision: undefined,
+      blockedExplanation: undefined,
+      evidenceCards: [],
+      tasks: [],
+    }),
+    createObjective: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return {
+        objectiveId: "objective_pagination",
+        title: String(input.title ?? input.prompt ?? "pagination"),
+        status: "queued",
+        phase: "queued",
+        latestSummary: "Created the pagination objective.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+  });
+
+  const actions = [
+    {
+      thought: "inspect the currently bound objective using the legacy alias",
+      action: {
+        type: "tool",
+        name: "factory.objective",
+        input: JSON.stringify({ objectiveId: "objective_stale" }),
+        text: null,
+      },
+    },
+    {
+      thought: "start a fresh objective for the unrelated pagination request",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({
+          action: "create",
+          prompt: "add pagination to In Progress / Blocked / Queued / Completed tabs and fix sorting",
+          checks: "repo_profile",
+          channel: "software",
+        }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Started a fresh pagination objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_factory_compat_dispatch",
+    problem: "add pagination to In Progress / Blocked / Queued / Completed tabs and fix sorting",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: async ({ schema }) => {
+      const next = actions.shift();
+      if (!next) throw new Error("no scripted action left");
+      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+    },
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_stale",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toContain("Started a fresh pagination objective.");
+  expect(createdInput).toMatchObject({
+    prompt: "add pagination to In Progress / Blocked / Queued / Completed tabs and fix sorting",
+    checks: ["repo_profile"],
+    channel: "software",
+    profileId: "generalist",
+    startImmediately: true,
+  });
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_factory_compat_dispatch"));
+  const toolCalls = chain.filter((receipt) => receipt.body.type === "tool.called").map((receipt) => receipt.body);
+  const aliasCall = toolCalls.find((event) => event.tool === "factory.objective");
+  expect(aliasCall && "error" in aliasCall ? aliasCall.error : undefined).toBeUndefined();
+  const dispatchCall = toolCalls.find((event) => event.tool === "factory.dispatch");
+  expect(dispatchCall && "error" in dispatchCall ? dispatchCall.error : undefined).toBeUndefined();
 });
 
 test("factory chat runner: exhausted slices queue an automatic continuation on the same thread with a higher budget", async () => {

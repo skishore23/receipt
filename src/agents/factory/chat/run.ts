@@ -125,6 +125,7 @@ const FACTORY_CHAT_LOOP_TEMPLATE = [
   "- If the answer depends on current cloud/account/runtime state and checked-in helpers are available in the current situation or `factory.status`, rerun the best matching helper first via `codex.run` or `factory.dispatch` instead of finalizing from saved results alone.",
   "- If the answer depends on current cloud/account/runtime state and you only have saved evidence, prefer a fresh probe over presenting old results as current.",
   "- When a thread is already bound to an objective, treat follow-up work as a continuation by default. Use `factory.dispatch` with `{\"action\":\"react\",\"note\":\"...\"}` unless the user explicitly wants a separate objective.",
+  "- If the user's new request is clearly unrelated to the bound objective's title, summary, or next action, do not force a continuation. Use `factory.dispatch` with `{\"action\":\"create\",\"prompt\":\"...\"}` for the new work.",
   "- If the bound objective is blocked, completed, canceled, or failed and the user wants fresh work, still use `action:\"react\"` with a `note` or `prompt`; the runtime will create a follow-up objective and rebind the thread.",
   "- Use `action:\"create\"` only when you intentionally want unrelated or explicitly separate work.",
   "- Before `react`, `promote`, `cancel`, or duplicate dispatch, ground the decision in the current situation, receipts, or live output.",
@@ -282,7 +283,15 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     if (objectiveId) {
       const objective = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
       if (objective && !isTerminalObjectiveStatus(objective.status) && !objective.archivedAt && objective.status !== "blocked") {
-        return undefined;
+        return {
+          finalText: [
+            "Work is still running in this chat.",
+            `${objective.title || objective.objectiveId} is ${objective.status}${objective.phase ? ` (${objective.phase})` : ""}.`,
+            objective.latestSummary ?? objective.nextAction ?? "Keep this chat open for live updates.",
+            "Keep this chat open for live updates.",
+          ].filter(Boolean).join("\n\n"),
+          note: `${objective.objectiveId} still ${objective.status}`,
+        };
       }
     }
     const nextMaxIterations = nextIterationBudget(config.maxIterations);

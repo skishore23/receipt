@@ -4643,6 +4643,96 @@ test("factory workbench route: selected objective stays visible when section cap
   expect(body).toContain("Selected overflow objective");
 });
 
+test("factory workbench route: chat-thread follow-up objectives suppress predecessor duplicates in queue lists", async () => {
+  const blockedObjective = {
+    ...makeStubObjectiveDetail("objective_blocked"),
+    title: "Original blocked objective",
+    status: "blocked",
+    phase: "blocked",
+    scheduler: { slotState: "released" },
+    latestSummary: "Original attempt stalled during startup recovery.",
+    blockedReason: "Original attempt stalled during startup recovery.",
+    nextAction: "Use /react to continue the selected objective.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    taskCount: 1,
+    updatedAt: 10,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const followUpObjective = {
+    ...makeStubObjectiveDetail("objective_followup"),
+    title: "Continued follow-up objective",
+    status: "completed",
+    phase: "completed",
+    scheduler: { slotState: "idle" },
+    latestSummary: "Published the continuation cleanly.",
+    nextAction: "Objective is complete.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+    taskCount: 1,
+    updatedAt: 20,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const blockedCard = { ...blockedObjective, section: "needs_attention" as const };
+  const followUpCard = { ...followUpObjective, section: "completed" as const };
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", "chat_demo");
+  const app = createRouteTestApp({
+    agentEvents: {
+      [sessionStream]: [
+        {
+          type: "problem.set",
+          runId: "run_dispatch_followup",
+          problem: "Continue with the pagination work.",
+          agentId: "orchestrator",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_dispatch_followup",
+          agentId: "orchestrator",
+          objectiveId: "objective_blocked",
+          chatId: "chat_demo",
+          reason: "startup",
+        },
+        {
+          type: "thread.bound",
+          runId: "run_dispatch_followup",
+          agentId: "orchestrator",
+          objectiveId: "objective_followup",
+          chatId: "chat_demo",
+          reason: "dispatch_create",
+          created: true,
+        },
+      ],
+    },
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [followUpCard, blockedCard],
+        sections: {
+          needs_attention: [blockedCard],
+          active: [],
+          queued: [],
+          completed: [followUpCard],
+        },
+        selectedObjectiveId: "objective_followup",
+      }),
+      listObjectives: async () => [
+        followUpObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+        blockedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async (objectiveId: string) => objectiveId === "objective_blocked"
+        ? blockedObjective
+        : followUpObjective,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_followup&detailTab=queue&filter=objective.needs_attention");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("Current selection");
+  expect(body).toContain("Continued follow-up objective");
+  expect(body).toContain("No blocked objectives match the current filter.");
+  expect(body).not.toContain("Original blocked objective");
+});
+
 test("factory workbench shell snapshot: returns a canonical route key for client-side stale-response rejection", async () => {
   const activeObjective = makeRunningWorkbenchObjectiveDetail("objective_live");
   const activeCard = { ...activeObjective, section: "active" as const };

@@ -62,7 +62,7 @@ export const buildFactorySituation = async (input: {
       lines.push(
         isObjectiveContinuationBoundary(detail)
           ? "Continuation rule: this bound objective is terminal or blocked. Historical/meta questions can answer directly, but fresh work should continue the thread by reacting with a note so Factory can create and bind a follow-up objective."
-          : "Continuation rule: this bound objective is still live. Follow-up work should react the current objective in place instead of starting a separate objective.",
+          : "Continuation rule: this bound objective is still live. Follow-up work that is clearly about this objective should react in place; unrelated fresh work should start a new objective instead of being forced into the current one.",
       );
       if (detail.latestDecision?.summary) lines.push(`Latest decision: ${detail.latestDecision.summary}`);
       if (detail.blockedExplanation?.summary) lines.push(`Blocked: ${detail.blockedExplanation.summary}`);

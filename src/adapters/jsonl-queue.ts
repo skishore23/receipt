@@ -549,6 +549,7 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
   });
 
   const refreshAllJobs = async (): Promise<ReadonlyArray<QueueJob>> => {
+    const bootstrap = !index.loaded;
     const changed = await withWriteLock(async () => {
       const ids = await discoverJobIds();
       const jobs: QueueJob[] = [];
@@ -562,8 +563,11 @@ export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
         if (loaded) jobs.push(loaded);
       }
       const changedJobs = new Map<string, QueueJob>();
-      for (const job of resetIndex(jobs)) {
-        changedJobs.set(job.id, cloneJob(job));
+      const reloaded = resetIndex(jobs);
+      if (!bootstrap) {
+        for (const job of reloaded) {
+          changedJobs.set(job.id, cloneJob(job));
+        }
       }
       if (expireLeasesOnRefresh) {
         await handleExpiredLeases(nowTs(), changedJobs);

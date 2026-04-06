@@ -15,6 +15,7 @@ import {
   createBuiltinAgentCapabilities,
   createCapabilitySpec,
   factoryDispatchCapability,
+  factoryStatusCapability,
 } from "../../src/agents/capabilities";
 import { agentRunStream } from "../../src/agents/agent.streams";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent, type AgentState } from "../../src/modules/agent";
@@ -200,4 +201,42 @@ test("session.search and session.read expose projected transcript recall", async
     await fs.rm(dir, { recursive: true, force: true });
     await fs.rm(repoRoot, { recursive: true, force: true });
   }
+});
+
+test("capability registry resolves the factory.objective compatibility alias", async () => {
+  const registry = new AgentCapabilityRegistry({
+    capabilities: [
+      createCapabilitySpec(
+        factoryStatusCapability,
+        async (input) => ({ output: JSON.stringify(input), summary: "status" }),
+      ),
+    ],
+    allowlist: ["factory.status"],
+  });
+
+  const result = await registry.execute("factory.objective", { objectiveId: "objective_demo" });
+
+  expect(result.summary).toBe("status");
+  expect(result.output).toContain('"objectiveId":"objective_demo"');
+});
+
+test("factory.dispatch accepts a single checks string and normalizes it to an array", async () => {
+  const registry = new AgentCapabilityRegistry({
+    capabilities: [
+      createCapabilitySpec(
+        factoryDispatchCapability,
+        async (input) => ({ output: JSON.stringify(input), summary: "dispatch" }),
+      ),
+    ],
+    allowlist: ["factory.dispatch"],
+  });
+
+  const result = await registry.execute("factory.dispatch", {
+    action: "create",
+    prompt: "Add pagination.",
+    checks: "repo_profile",
+  });
+
+  expect(result.summary).toBe("dispatch");
+  expect(result.output).toContain('"checks":["repo_profile"]');
 });

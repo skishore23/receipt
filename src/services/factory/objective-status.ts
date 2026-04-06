@@ -181,6 +181,10 @@ const shouldSurfaceStalled = (
   if (executionStalled) return true;
   if (state.status === "planning" && state.scheduler.slotState === "queued") return false;
   if (state.status === "blocked" || state.archivedAt || TERMINAL_OBJECTIVE_STATUSES.has(state.status)) return false;
+  if (objectiveJobs.some((job) =>
+    activeJobStatus(job.status) && classifyObjectiveLiveJobAuthority(state, job) === "authoritative")) {
+    return false;
+  }
   return objectiveJobs.some((job) => shouldReconcileObjectiveFromJobChange(job))
     && !objectiveJobs.some((job) =>
       activeJobStatus(job.status) && jobKind(job) === "factory.objective.control");

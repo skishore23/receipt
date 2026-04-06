@@ -342,6 +342,37 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     });
   };
 
+  const sessionContinuationPredecessorObjectiveIds = (
+    chain: AgentRunChain,
+    preservedObjectiveId?: string,
+  ): ReadonlySet<string> => {
+    const distinctBindingObjectiveIds: string[] = [];
+    let lastBoundObjectiveId: string | undefined;
+    for (const receipt of chain) {
+      if (receipt.body.type !== "thread.bound") continue;
+      const objectiveId = receipt.body.objectiveId.trim();
+      if (!objectiveId || objectiveId === lastBoundObjectiveId) continue;
+      distinctBindingObjectiveIds.push(objectiveId);
+      lastBoundObjectiveId = objectiveId;
+    }
+    const latestObjectiveId = distinctBindingObjectiveIds.at(-1);
+    if (!latestObjectiveId) return new Set<string>();
+    return new Set(
+      distinctBindingObjectiveIds.filter((objectiveId) =>
+        objectiveId !== latestObjectiveId
+        && objectiveId !== preservedObjectiveId),
+    );
+  };
+
+  const filterSessionContinuationPredecessors = <T extends { readonly objectiveId: string }>(
+    cards: ReadonlyArray<T>,
+    predecessorObjectiveIds: ReadonlySet<string>,
+    preservedObjectiveId?: string,
+  ): ReadonlyArray<T> =>
+    cards.filter((card) =>
+      card.objectiveId === preservedObjectiveId
+      || !predecessorObjectiveIds.has(card.objectiveId));
+
   const selectedObjectiveNavCard = (
     objective: FactorySelectedObjectiveCard,
   ): FactoryChatObjectiveNav => ({
@@ -792,6 +823,44 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           fallbackChain: chatProjectionDataDir ? undefined : await agentRuntime.chain(sessionStream),
         })
       : undefined;
+    const sessionContinuationPredecessors = sessionStream
+      ? sessionContinuationPredecessorObjectiveIds(
+          await agentRuntime.chain(sessionStream),
+          resolvedObjectiveId,
+        )
+      : new Set<string>();
+    const workbenchBoard = sessionContinuationPredecessors.size > 0
+      ? {
+          ...board,
+          objectives: filterSessionContinuationPredecessors(
+            board.objectives,
+            sessionContinuationPredecessors,
+            resolvedObjectiveId,
+          ),
+          sections: {
+            needs_attention: filterSessionContinuationPredecessors(
+              board.sections.needs_attention,
+              sessionContinuationPredecessors,
+              resolvedObjectiveId,
+            ),
+            active: filterSessionContinuationPredecessors(
+              board.sections.active,
+              sessionContinuationPredecessors,
+              resolvedObjectiveId,
+            ),
+            queued: filterSessionContinuationPredecessors(
+              board.sections.queued,
+              sessionContinuationPredecessors,
+              resolvedObjectiveId,
+            ),
+            completed: filterSessionContinuationPredecessors(
+              board.sections.completed,
+              sessionContinuationPredecessors,
+              resolvedObjectiveId,
+            ),
+          },
+        }
+      : board;
     const activeRun = (() => {
       const projectedRuns = resolvedObjectiveId
         ? (sessionChatContext?.runs ?? []).filter((run) => run.objectiveId === resolvedObjectiveId)
@@ -824,20 +893,20 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const liveChildren = sessionStream
       ? buildLiveChildCards(recentJobs, sessionStream, resolvedObjectiveId)
       : [];
-    const filters = workbenchFilterModels(board, input.filter);
+    const filters = workbenchFilterModels(workbenchBoard, input.filter);
     const blockedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "needs_attention")
-        ? buildObjectiveNavCards(board.sections.needs_attention, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.needs_attention, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
     const runningObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "active")
-        ? buildObjectiveNavCards(board.sections.active, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.active, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
     const queuedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "queued")
-        ? buildObjectiveNavCards(board.sections.queued, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.queued, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
     const activeObjectives = dedupeObjectiveCards([
@@ -847,7 +916,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     ]).slice(0, 10);
     const pastObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "completed")
-        ? buildObjectiveNavCards(board.sections.completed, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.completed, resolvedObjectiveId)
         : [],
     ).slice(0, 10);
     const hasActiveExecution = Boolean(
@@ -879,11 +948,11 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       liveChildren,
       activeRun,
       workbench,
-      board,
+      board: workbenchBoard,
       activeObjectives,
       pastObjectives,
       blocks: buildWorkbenchBlocks({
-        board,
+        board: workbenchBoard,
         selectedObjective,
         blockedObjectives,
         runningObjectives,

@@ -39,6 +39,27 @@ export type AgentCapabilitySpec = {
   readonly isAvailable?: () => boolean;
 };
 
+const normalizeOptionalStringListInput = (value: unknown): unknown => {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") {
+    return value
+      .split(/[,\n]/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => typeof item === "string" ? item.trim() : item)
+      .filter((item) => typeof item !== "string" || item.length > 0);
+  }
+  return value;
+};
+
+const optionalStringListInput = z.preprocess(
+  normalizeOptionalStringListInput,
+  z.array(z.string()).optional(),
+);
+
 export const capabilityInput = {
   empty: z.object({}).passthrough(),
   listDir: z.object({
@@ -150,8 +171,8 @@ export const capabilityInput = {
     goal: z.string().optional(),
     currentState: z.string().optional(),
     doneWhen: z.string().optional(),
-    evidence: z.array(z.string()).optional(),
-    blockers: z.array(z.string()).optional(),
+    evidence: optionalStringListInput,
+    blockers: optionalStringListInput,
     objectiveId: z.string().optional(),
     chatId: z.string().optional(),
   }).passthrough(),
@@ -175,7 +196,7 @@ export const capabilityInput = {
       z.literal(4),
       z.literal(5),
     ]).optional(),
-    checks: z.array(z.string()).optional(),
+    checks: optionalStringListInput,
     channel: z.string().optional(),
     reason: z.string().optional(),
   }).passthrough(),
@@ -195,10 +216,17 @@ export const capabilityInput = {
     objectiveId: z.string().optional(),
     taskId: z.string().optional(),
     candidateId: z.string().optional(),
-    types: z.array(z.string()).optional(),
+    types: optionalStringListInput,
     limit: z.number().finite().optional(),
   }).passthrough(),
 } as const;
+
+const capabilityAliases = new Map<string, string>([
+  ["factory.objective", "factory.status"],
+]);
+
+const resolveCapabilityAlias = (id: string): string =>
+  capabilityAliases.get(id) ?? id;
 
 export const capabilityDescriptions = {
   ls: '{"path"?: string} — List directory contents. Defaults to workspace root.',
@@ -278,7 +306,7 @@ export class AgentCapabilityRegistry {
   }
 
   get(id: string): AgentCapabilitySpec | undefined {
-    return this.byId.get(id);
+    return this.byId.get(resolveCapabilityAlias(id));
   }
 
   describe(id: string): string | undefined {
@@ -290,7 +318,8 @@ export class AgentCapabilityRegistry {
   }
 
   async execute(id: string, rawInput: Record<string, unknown>): Promise<AgentToolResult> {
-    const capability = this.get(id);
+    const resolvedId = resolveCapabilityAlias(id);
+    const capability = this.byId.get(resolvedId);
     if (!capability) throw new Error(`unknown tool '${id}'`);
     const parsed = capability.inputSchema.safeParse(rawInput);
     if (!parsed.success) {
