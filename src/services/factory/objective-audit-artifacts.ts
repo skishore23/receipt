@@ -6,6 +6,7 @@ import type { AuditRecommendation } from "../../factory-cli/analyze";
 export type FactoryObjectiveAuditMetadata = {
   readonly generatedAt: number;
   readonly objectiveUpdatedAt?: number;
+  readonly objectiveChannel?: string;
   readonly recommendationStatus: "ready" | "failed";
   readonly recommendationError?: string;
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
@@ -18,14 +19,16 @@ export type FactoryObjectiveAuditMetadata = {
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 
 const asArray = (value: unknown): ReadonlyArray<unknown> =>
   Array.isArray(value) ? value : [];
 
 const asString = (value: unknown): string | undefined =>
-  typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 
 const asStringArray = (value: unknown): ReadonlyArray<string> =>
   asArray(value)
@@ -33,16 +36,16 @@ const asStringArray = (value: unknown): ReadonlyArray<string> =>
     .filter((item): item is string => Boolean(item));
 
 const asConfidence = (value: unknown): AuditRecommendation["confidence"] =>
-  value === "low" || value === "medium" || value === "high"
-    ? value
-    : "medium";
+  value === "low" || value === "medium" || value === "high" ? value : "medium";
 
-const asRecommendationStatus = (value: unknown): FactoryObjectiveAuditMetadata["recommendationStatus"] | undefined =>
-  value === "ready" || value === "failed"
-    ? value
-    : undefined;
+const asRecommendationStatus = (
+  value: unknown,
+): FactoryObjectiveAuditMetadata["recommendationStatus"] | undefined =>
+  value === "ready" || value === "failed" ? value : undefined;
 
-const parseRecommendation = (value: unknown): AuditRecommendation | undefined => {
+const parseRecommendation = (
+  value: unknown,
+): AuditRecommendation | undefined => {
   const record = asRecord(value);
   if (!record) return undefined;
   const summary = asString(record.summary);
@@ -57,7 +60,10 @@ const parseRecommendation = (value: unknown): AuditRecommendation | undefined =>
   };
 };
 
-export const objectiveAuditArtifactPaths = (dataDir: string, objectiveId: string): {
+export const objectiveAuditArtifactPaths = (
+  dataDir: string,
+  objectiveId: string,
+): {
   readonly root: string;
   readonly jsonPath: string;
   readonly textPath: string;
@@ -81,18 +87,24 @@ export const readPersistedObjectiveAuditMetadata = async (
     const audit = asRecord(parsed?.audit);
     if (!audit) return undefined;
     const generatedAt =
-      typeof audit.generatedAt === "number" && Number.isFinite(audit.generatedAt) && audit.generatedAt > 0
+      typeof audit.generatedAt === "number" &&
+      Number.isFinite(audit.generatedAt) &&
+      audit.generatedAt > 0
         ? audit.generatedAt
         : undefined;
-    const recommendationStatus = asRecommendationStatus(audit.recommendationStatus);
+    const recommendationStatus = asRecommendationStatus(
+      audit.recommendationStatus,
+    );
     if (!generatedAt || !recommendationStatus) return undefined;
     const objectiveUpdatedAt =
-      typeof audit.objectiveUpdatedAt === "number" && Number.isFinite(audit.objectiveUpdatedAt)
+      typeof audit.objectiveUpdatedAt === "number" &&
+      Number.isFinite(audit.objectiveUpdatedAt)
         ? audit.objectiveUpdatedAt
         : undefined;
     return {
       generatedAt,
       objectiveUpdatedAt,
+      objectiveChannel: asString(audit.objectiveChannel),
       recommendationStatus,
       recommendationError: asString(audit.recommendationError),
       recommendations: asArray(audit.recommendations)
@@ -107,9 +119,17 @@ export const readPersistedObjectiveAuditMetadata = async (
             typeof record?.count === "number" && Number.isFinite(record.count)
               ? Math.max(0, Math.floor(record.count))
               : undefined;
-          return pattern && count !== undefined ? { pattern, count } : undefined;
+          return pattern && count !== undefined
+            ? { pattern, count }
+            : undefined;
         })
-        .filter((item): item is NonNullable<FactoryObjectiveAuditMetadata["recurringPatterns"][number]> => Boolean(item)),
+        .filter(
+          (
+            item,
+          ): item is NonNullable<
+            FactoryObjectiveAuditMetadata["recurringPatterns"][number]
+          > => Boolean(item),
+        ),
     };
   } catch {
     return undefined;

@@ -1,7 +1,15 @@
 import path from "node:path";
 
 import React from "react";
-import { cancel, confirm, intro, isCancel, outro, spinner, text } from "@clack/prompts";
+import {
+  cancel,
+  confirm,
+  intro,
+  isCancel,
+  outro,
+  spinner,
+  text,
+} from "@clack/prompts";
 import { render } from "ink";
 
 import { fold } from "@receipt/core/chain";
@@ -9,8 +17,17 @@ import { jsonlStore } from "../../adapters/jsonl";
 import type { Flags } from "../../cli.types";
 import { printUsage } from "../../cli/shared";
 import type { AgentEvent } from "../../modules/agent";
-import { initial as initialAgent, reduce as reduceAgent } from "../../modules/agent";
-import type { FactoryObjectiveMode, FactoryObjectivePolicy, FactoryObjectiveSeverity, FactoryTaskRecord, FactoryCandidateRecord } from "../../modules/factory";
+import {
+  initial as initialAgent,
+  reduce as reduceAgent,
+} from "../../modules/agent";
+import type {
+  FactoryObjectiveMode,
+  FactoryObjectivePolicy,
+  FactoryObjectiveSeverity,
+  FactoryTaskRecord,
+  FactoryCandidateRecord,
+} from "../../modules/factory";
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../../modules/factory";
 import { bunWhich, resolveBunRuntime } from "../../lib/runtime-paths";
 import {
@@ -36,9 +53,20 @@ import {
   resolveFactoryRuntimeConfig,
   writeFactoryConfig,
 } from "../config";
-import { renderCodexProbeText, runFactoryCodexProbe, type CodexProbeMode } from "../codex-probe";
-import { renderBoardText, renderObjectiveHeader, renderObjectivePanelText } from "../format";
-import { buildInvestigationReportPanelValue, defaultObjectivePanelForDetail } from "../investigation-report";
+import {
+  renderCodexProbeText,
+  runFactoryCodexProbe,
+  type CodexProbeMode,
+} from "../codex-probe";
+import {
+  renderBoardText,
+  renderObjectiveHeader,
+  renderObjectivePanelText,
+} from "../format";
+import {
+  buildInvestigationReportPanelValue,
+  defaultObjectivePanelForDetail,
+} from "../investigation-report";
 import {
   readFactoryReceiptInvestigation,
   renderFactoryReceiptInvestigationText,
@@ -56,7 +84,10 @@ import { terminalTheme } from "../theme";
 import { truncate, type FactoryObjectivePanel } from "../view-model";
 import { readObjectiveAnalysis, renderObjectiveAnalysisText } from "../analyze";
 import { readFactoryParsedRun, renderFactoryParsedRunText } from "../parse";
-import { loadFactoryHelperCatalog, runFactoryHelper } from "../../services/factory-helper-catalog";
+import {
+  loadFactoryHelperCatalog,
+  runFactoryHelper,
+} from "../../services/factory-helper-catalog";
 import type { FactoryCloudProvider } from "../../services/factory-cloud-context";
 import { readObjectiveReplaySnapshot } from "../../services/factory/objective-replay";
 
@@ -79,7 +110,10 @@ const parseIntegerFlag = (
   return Math.max(input.min, Math.min(Math.floor(parsed), input.max));
 };
 
-const parseOptionalIntegerFlag = (flags: Flags, key: string): number | undefined => {
+const parseOptionalIntegerFlag = (
+  flags: Flags,
+  key: string,
+): number | undefined => {
   const value = asString(flags, key);
   if (!value) return undefined;
   const parsed = Number(value);
@@ -100,10 +134,16 @@ const asStrings = (flags: Flags, key: string): ReadonlyArray<string> => {
   return [];
 };
 
-const mergePolicy = (base: FactoryObjectivePolicy, override: FactoryObjectivePolicy | undefined): FactoryObjectivePolicy => {
+const mergePolicy = (
+  base: FactoryObjectivePolicy,
+  override: FactoryObjectivePolicy | undefined,
+): FactoryObjectivePolicy => {
   if (!override) return base;
   return {
-    concurrency: { ...(base.concurrency ?? {}), ...(override.concurrency ?? {}) },
+    concurrency: {
+      ...(base.concurrency ?? {}),
+      ...(override.concurrency ?? {}),
+    },
     budgets: { ...(base.budgets ?? {}), ...(override.budgets ?? {}) },
     throttles: { ...(base.throttles ?? {}), ...(override.throttles ?? {}) },
     promotion: { ...(base.promotion ?? {}), ...(override.promotion ?? {}) },
@@ -116,14 +156,18 @@ const parseChecksInput = (value: string): string[] =>
     .map((item) => item.trim())
     .filter(Boolean);
 
-const parseObjectiveModeFlag = (flags: Flags): FactoryObjectiveMode | undefined => {
+const parseObjectiveModeFlag = (
+  flags: Flags,
+): FactoryObjectiveMode | undefined => {
   const value = asString(flags, "objective-mode")?.trim().toLowerCase();
   if (!value) return undefined;
   if (value === "delivery" || value === "investigation") return value;
   throw new Error(`--objective-mode must be 'delivery' or 'investigation'`);
 };
 
-const parseSeverityFlag = (flags: Flags): FactoryObjectiveSeverity | undefined => {
+const parseSeverityFlag = (
+  flags: Flags,
+): FactoryObjectiveSeverity | undefined => {
   const value = asString(flags, "severity");
   if (!value) return undefined;
   const parsed = Number(value);
@@ -146,28 +190,48 @@ const normalizeInline = (value: string | undefined): string | undefined =>
 
 const renderObjectiveWaitLine = (opts: {
   readonly objectiveId: string;
-  readonly detail: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]>>;
-  readonly live?: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["buildLiveProjection"]>>;
+  readonly detail: Awaited<
+    ReturnType<
+      ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]
+    >
+  >;
+  readonly live?: Awaited<
+    ReturnType<
+      ReturnType<
+        typeof createFactoryCliRuntime
+      >["service"]["buildLiveProjection"]
+    >
+  >;
   readonly auditStatus: "idle" | "queued" | "running" | "completed" | "failed";
 }): { readonly key: string; readonly line: string } => {
-  const activeTask = opts.live?.activeTasks[0]
-    ?? opts.detail.tasks.find((task) => task.status === "running" || task.status === "reviewing");
-  const nextTask = opts.detail.tasks.find((task) =>
-    task.taskId !== activeTask?.taskId && (task.status === "ready" || task.status === "pending"),
+  const activeTask =
+    opts.live?.activeTasks[0] ??
+    opts.detail.tasks.find(
+      (task) => task.status === "running" || task.status === "reviewing",
+    );
+  const nextTask = opts.detail.tasks.find(
+    (task) =>
+      task.taskId !== activeTask?.taskId &&
+      (task.status === "ready" || task.status === "pending"),
   );
   const signal = normalizeInline(
-    activeTask?.lastMessage
-    ?? activeTask?.stderrTail
-    ?? activeTask?.stdoutTail
-    ?? opts.detail.nextAction
-    ?? opts.detail.latestSummary,
+    activeTask?.lastMessage ??
+      activeTask?.stderrTail ??
+      activeTask?.stdoutTail ??
+      opts.detail.nextAction ??
+      opts.detail.latestSummary,
   );
   const taskLabel = activeTask
     ? `${activeTask.taskId.slice(-2)}(${(activeTask.jobStatus ?? activeTask.status).slice(0, 3)})`
     : opts.detail.tasks.length > 0
-      ? opts.detail.tasks.map((task) => `${task.taskId.slice(-2)}(${task.status.slice(0, 3)})`).join(",")
+      ? opts.detail.tasks
+          .map((task) => `${task.taskId.slice(-2)}(${task.status.slice(0, 3)})`)
+          .join(",")
       : "none";
-  const nextLabel = activeTask && nextTask ? `${nextTask.taskId.slice(-2)}(${nextTask.status.slice(0, 3)})` : undefined;
+  const nextLabel =
+    activeTask && nextTask
+      ? `${nextTask.taskId.slice(-2)}(${nextTask.status.slice(0, 3)})`
+      : undefined;
   const line = [
     `obj=${opts.objectiveId.slice(-6)}`,
     `phase=${opts.detail.phase}`,
@@ -176,7 +240,9 @@ const renderObjectiveWaitLine = (opts: {
     `task=${taskLabel}`,
     nextLabel ? `next=${nextLabel}` : undefined,
     signal ? `live=${truncate(signal, 84)}` : undefined,
-  ].filter(Boolean).join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
   const key = JSON.stringify([
     opts.detail.status,
     opts.detail.phase,
@@ -220,18 +286,36 @@ const printSetupSummary = (opts: {
   console.log(lines.join("\n"));
 };
 
-const readPolicyFile = async (filePath: string | undefined): Promise<FactoryObjectivePolicy | undefined> => {
+const readPolicyFile = async (
+  filePath: string | undefined,
+): Promise<FactoryObjectivePolicy | undefined> => {
   if (!filePath) return undefined;
-  const loaded = await import("node:fs/promises").then((fs) => fs.readFile(path.resolve(filePath), "utf-8"));
+  const loaded = await import("node:fs/promises").then((fs) =>
+    fs.readFile(path.resolve(filePath), "utf-8"),
+  );
   const parsed = JSON.parse(loaded) as FactoryObjectivePolicy;
   return parsed;
 };
 
 const panelValue = (
   panel: FactoryObjectivePanel,
-  detail: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]>>,
-  live: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["buildLiveProjection"]>>,
-  debug: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["getObjectiveDebug"]>>,
+  detail: Awaited<
+    ReturnType<
+      ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]
+    >
+  >,
+  live: Awaited<
+    ReturnType<
+      ReturnType<
+        typeof createFactoryCliRuntime
+      >["service"]["buildLiveProjection"]
+    >
+  >,
+  debug: Awaited<
+    ReturnType<
+      ReturnType<typeof createFactoryCliRuntime>["service"]["getObjectiveDebug"]
+    >
+  >,
 ): unknown => {
   switch (panel) {
     case "overview":
@@ -265,8 +349,21 @@ const panelValue = (
 };
 
 const parsePanel = (value: string | undefined): FactoryObjectivePanel => {
-  const panel = value?.trim().toLowerCase() as FactoryObjectivePanel | undefined;
-  return panel && ["overview", "report", "tasks", "candidates", "evidence", "activity", "live", "debug", "receipts"].includes(panel)
+  const panel = value?.trim().toLowerCase() as
+    | FactoryObjectivePanel
+    | undefined;
+  return panel &&
+    [
+      "overview",
+      "report",
+      "tasks",
+      "candidates",
+      "evidence",
+      "activity",
+      "live",
+      "debug",
+      "receipts",
+    ].includes(panel)
     ? panel
     : "overview";
 };
@@ -276,11 +373,12 @@ const objectiveAuditJobs = async (
   objectiveId: string,
 ) => {
   const jobs = await runtime.queue.listJobs({ limit: 200 });
-  return jobs.filter((job) =>
-    typeof job.payload === "object"
-    && job.payload
-    && job.payload.kind === "factory.objective.audit"
-    && job.payload.objectiveId === objectiveId,
+  return jobs.filter(
+    (job) =>
+      typeof job.payload === "object" &&
+      job.payload &&
+      job.payload.kind === "factory.objective.audit" &&
+      job.payload.objectiveId === objectiveId,
   );
 };
 
@@ -289,16 +387,22 @@ const objectiveAuditStatus = async (
   objectiveId: string,
 ): Promise<"idle" | "queued" | "running" | "completed" | "failed"> => {
   const jobs = await objectiveAuditJobs(runtime, objectiveId);
-  if (jobs.some((job) => job.status === "running" || job.status === "leased")) return "running";
+  if (jobs.some((job) => job.status === "running" || job.status === "leased"))
+    return "running";
   if (jobs.some((job) => job.status === "queued")) return "queued";
-  if (jobs.some((job) => job.status === "failed" || job.status === "canceled")) return "failed";
+  if (jobs.some((job) => job.status === "failed" || job.status === "canceled"))
+    return "failed";
   if (jobs.some((job) => job.status === "completed")) return "completed";
   return "idle";
 };
 
 const ensureObjectiveAuditQueued = async (
   runtime: ReturnType<typeof createFactoryCliRuntime>,
-  detail: Awaited<ReturnType<ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]>>,
+  detail: Awaited<
+    ReturnType<
+      ReturnType<typeof createFactoryCliRuntime>["service"]["getObjective"]
+    >
+  >,
 ): Promise<void> => {
   const auditStatus = await objectiveAuditStatus(runtime, detail.objectiveId);
   if (auditStatus !== "idle") return;
@@ -313,6 +417,7 @@ const ensureObjectiveAuditQueued = async (
       objectiveId: detail.objectiveId,
       objectiveStatus: detail.status,
       objectiveUpdatedAt: detail.updatedAt,
+      objectiveChannel: detail.channel,
     },
   });
 };
@@ -327,16 +432,22 @@ const printJson = async (value: unknown): Promise<void> => {
       if (error) reject(error);
       else resolve();
     };
-    const wrote = process.stdout.write(payload, (error) => finish(error ?? undefined));
+    const wrote = process.stdout.write(payload, (error) =>
+      finish(error ?? undefined),
+    );
     if (!wrote) process.stdout.once("drain", () => finish());
   });
 };
 
-const parseHelperProvider = (value: string | undefined): FactoryCloudProvider => {
+const parseHelperProvider = (
+  value: string | undefined,
+): FactoryCloudProvider => {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "aws") return "aws";
   if (normalized === "gcp" || normalized === "azure") return normalized;
-  throw new Error(`Unsupported helper provider '${value}'. Use aws, gcp, or azure.`);
+  throw new Error(
+    `Unsupported helper provider '${value}'. Use aws, gcp, or azure.`,
+  );
 };
 
 const isHelpToken = (value: string | undefined): boolean =>
@@ -348,28 +459,38 @@ const hasHelpFlag = (flags: Flags): boolean =>
 const printFactoryUsage = (subcommand?: string): void => {
   switch (subcommand) {
     case "investigate":
-      console.log("receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]");
+      console.log(
+        "receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
+      );
       return;
     case "audit":
-      console.log("receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]");
+      console.log(
+        "receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
+      );
       return;
     case "experiment":
-      console.log("receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]");
+      console.log(
+        "receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]",
+      );
       return;
     case "codex-probe":
-      console.log("receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]");
+      console.log(
+        "receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
+      );
       return;
     default:
       printUsage();
-      console.log([
-        "",
-        "Factory commands:",
-        "  receipt factory init [--repo-root <path>]",
-        "  receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
-        "  receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
-        "  receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
-        "  receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]",
-      ].join("\n"));
+      console.log(
+        [
+          "",
+          "Factory commands:",
+          "  receipt factory init [--repo-root <path>]",
+          "  receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
+          "  receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
+          "  receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
+          "  receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]",
+        ].join("\n"),
+      );
   }
 };
 
@@ -392,8 +513,12 @@ const summarizeReplayCandidate = (candidate: FactoryCandidateRecord) => ({
   latestReason: candidate.latestReason,
 });
 
-const readObjectiveReplay = async (dataDir: string, objectiveIdOrStream: string) => {
-  const { objectiveId, stream, chain, projection } = await readObjectiveReplaySnapshot(dataDir, objectiveIdOrStream);
+const readObjectiveReplay = async (
+  dataDir: string,
+  objectiveIdOrStream: string,
+) => {
+  const { objectiveId, stream, chain, projection } =
+    await readObjectiveReplaySnapshot(dataDir, objectiveIdOrStream);
   return {
     objectiveId,
     stream,
@@ -416,7 +541,9 @@ const readObjectiveReplay = async (dataDir: string, objectiveIdOrStream: string)
   };
 };
 
-const renderObjectiveReplayText = (replay: Awaited<ReturnType<typeof readObjectiveReplay>>): string => {
+const renderObjectiveReplayText = (
+  replay: Awaited<ReturnType<typeof readObjectiveReplay>>,
+): string => {
   const lines = [
     `${replay.objectiveId} (${replay.status})`,
     `Receipts: ${replay.receiptCount}`,
@@ -429,8 +556,9 @@ const renderObjectiveReplayText = (replay: Awaited<ReturnType<typeof readObjecti
     `Blocked tasks: ${replay.workflow.blockedTaskIds.join(", ") || "none"}`,
     "",
     "Tasks:",
-    ...replay.tasks.map((task) =>
-      `- ${task.taskId} [${task.status}]${task.dependsOn.length ? ` dependsOn=${task.dependsOn.join(",")}` : ""}${task.blockedReason ? ` blocked=${task.blockedReason}` : ""}`,
+    ...replay.tasks.map(
+      (task) =>
+        `- ${task.taskId} [${task.status}]${task.dependsOn.length ? ` dependsOn=${task.dependsOn.join(",")}` : ""}${task.blockedReason ? ` blocked=${task.blockedReason}` : ""}`,
     ),
   ].filter((line): line is string => Boolean(line));
   return lines.join("\n");
@@ -443,7 +571,8 @@ const readChatReplay = async (dataDir: string, stream: string) => {
   }
   const runChains = new Map<string, Array<(typeof chain)[number]>>();
   for (const receipt of chain) {
-    const runId = typeof receipt.body.runId === "string" ? receipt.body.runId : undefined;
+    const runId =
+      typeof receipt.body.runId === "string" ? receipt.body.runId : undefined;
     if (!runId) continue;
     const existing = runChains.get(runId);
     if (existing) existing.push(receipt);
@@ -452,8 +581,13 @@ const readChatReplay = async (dataDir: string, stream: string) => {
   const runs = [...runChains.entries()].map(([runId, runChain]) => {
     const state = fold(runChain, reduceAgent, initialAgent);
     const bindings = runChain
-      .filter((receipt): receipt is typeof receipt & { readonly body: Extract<AgentEvent, { readonly type: "thread.bound" }> } =>
-        isThreadBoundEvent(receipt.body))
+      .filter(
+        (
+          receipt,
+        ): receipt is typeof receipt & {
+          readonly body: Extract<AgentEvent, { readonly type: "thread.bound" }>;
+        } => isThreadBoundEvent(receipt.body),
+      )
       .map((receipt) => {
         const body = receipt.body;
         return {
@@ -463,7 +597,8 @@ const readChatReplay = async (dataDir: string, stream: string) => {
           created: body.created,
         };
       });
-    const continuationReceipt = [...runChain].reverse()
+    const continuationReceipt = [...runChain]
+      .reverse()
       .map((receipt) => receipt.body)
       .find(isRunContinuedEvent);
     const continuation = continuationReceipt
@@ -479,16 +614,26 @@ const readChatReplay = async (dataDir: string, stream: string) => {
       problem: state.problem,
       status: state.status,
       finalResponse: state.finalResponse,
-      startupObjectiveId: bindings.find((binding) => binding.reason === "startup")?.objectiveId,
+      startupObjectiveId: bindings.find(
+        (binding) => binding.reason === "startup",
+      )?.objectiveId,
       latestBoundObjectiveId: bindings.at(-1)?.objectiveId,
       bindings,
       continuation,
     };
   });
   const threadTimeline = chain
-    .filter((receipt): receipt is typeof receipt & {
-      readonly body: Extract<AgentEvent, { readonly type: "thread.bound" | "run.continued" }>;
-    } => isThreadBoundEvent(receipt.body) || isRunContinuedEvent(receipt.body))
+    .filter(
+      (
+        receipt,
+      ): receipt is typeof receipt & {
+        readonly body: Extract<
+          AgentEvent,
+          { readonly type: "thread.bound" | "run.continued" }
+        >;
+      } =>
+        isThreadBoundEvent(receipt.body) || isRunContinuedEvent(receipt.body),
+    )
     .map((receipt) => {
       const body = receipt.body;
       if (body.type === "thread.bound") {
@@ -513,13 +658,17 @@ const readChatReplay = async (dataDir: string, stream: string) => {
   return {
     stream,
     receiptCount: chain.length,
-    latestObjectiveId: [...threadTimeline].reverse().find((entry) => entry.type === "thread.bound")?.objectiveId,
+    latestObjectiveId: [...threadTimeline]
+      .reverse()
+      .find((entry) => entry.type === "thread.bound")?.objectiveId,
     runs,
     threadTimeline,
   };
 };
 
-const renderChatReplayText = (replay: Awaited<ReturnType<typeof readChatReplay>>): string => {
+const renderChatReplayText = (
+  replay: Awaited<ReturnType<typeof readChatReplay>>,
+): string => {
   const lines = [
     replay.stream,
     `Receipts: ${replay.receiptCount}`,
@@ -542,7 +691,9 @@ const printFactoryInvestigation = async (opts: {
 }): Promise<void> => {
   const repoRootOverride = asString(opts.flags, "repo-root");
   const runtime = await resolveFactoryRuntimeConfig(opts.cwd, repoRootOverride);
-  const dataDir = path.resolve(asString(opts.flags, "data-dir") ?? runtime.dataDir);
+  const dataDir = path.resolve(
+    asString(opts.flags, "data-dir") ?? runtime.dataDir,
+  );
   const repoRoot = path.resolve(repoRootOverride ?? runtime.repoRoot);
   const asOfTs = parseOptionalIntegerFlag(opts.flags, "as-of-ts");
   const report = await readFactoryReceiptInvestigation(
@@ -556,9 +707,25 @@ const printFactoryInvestigation = async (opts: {
     return;
   }
   const compact = parseBooleanFlag(opts.flags, "compact");
-  const timelineLimit = parseIntegerFlag(opts.flags, "timeline-limit", compact ? 12 : 20, { min: 1, max: 1_000 });
-  const contextChars = parseIntegerFlag(opts.flags, "context-chars", compact ? 700 : 1_200, { min: 200, max: 20_000 });
-  console.log(renderFactoryReceiptInvestigationText(report, { timelineLimit, contextChars, compact }));
+  const timelineLimit = parseIntegerFlag(
+    opts.flags,
+    "timeline-limit",
+    compact ? 12 : 20,
+    { min: 1, max: 1_000 },
+  );
+  const contextChars = parseIntegerFlag(
+    opts.flags,
+    "context-chars",
+    compact ? 700 : 1_200,
+    { min: 200, max: 20_000 },
+  );
+  console.log(
+    renderFactoryReceiptInvestigationText(report, {
+      timelineLimit,
+      contextChars,
+      compact,
+    }),
+  );
 };
 
 const printFactoryAudit = async (opts: {
@@ -568,11 +735,18 @@ const printFactoryAudit = async (opts: {
 }): Promise<void> => {
   const repoRootOverride = asString(opts.flags, "repo-root");
   const runtime = await resolveFactoryRuntimeConfig(opts.cwd, repoRootOverride);
-  const dataDir = path.resolve(asString(opts.flags, "data-dir") ?? runtime.dataDir);
+  const dataDir = path.resolve(
+    asString(opts.flags, "data-dir") ?? runtime.dataDir,
+  );
   const repoRoot = path.resolve(repoRootOverride ?? runtime.repoRoot);
   const limit = parseIntegerFlag(opts.flags, "limit", 12, { min: 1, max: 200 });
   const objectiveId = asString(opts.flags, "objective");
-  const report = await readFactoryReceiptAudit(dataDir, repoRoot, limit, objectiveId);
+  const report = await readFactoryReceiptAudit(
+    dataDir,
+    repoRoot,
+    limit,
+    objectiveId,
+  );
   if (opts.asJson) {
     await printJson(report);
     return;
@@ -614,7 +788,8 @@ const printMutationResult = async (
     return;
   }
   if (result.kind === "objective") {
-    const verb = result.action === "compose" && result.note ? "reacted" : result.action;
+    const verb =
+      result.action === "compose" && result.note ? "reacted" : result.action;
     console.log(`${verb} ${result.objectiveId}`);
     return;
   }
@@ -624,8 +799,15 @@ const printMutationResult = async (
 const parseCodexProbeMode = (value: string | undefined): CodexProbeMode => {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return "both";
-  if (normalized === "direct" || normalized === "queue" || normalized === "both") return normalized;
-  throw new Error(`Unsupported codex probe mode '${value}'. Use direct, queue, or both.`);
+  if (
+    normalized === "direct" ||
+    normalized === "queue" ||
+    normalized === "both"
+  )
+    return normalized;
+  throw new Error(
+    `Unsupported codex probe mode '${value}'. Use direct, queue, or both.`,
+  );
 };
 
 const ensurePromptValue = async (opts: {
@@ -637,7 +819,8 @@ const ensurePromptValue = async (opts: {
     message: opts.message,
     initialValue: opts.initialValue,
     placeholder: opts.placeholder,
-    validate: (input) => (input ?? "").trim().length > 0 ? undefined : "Value is required",
+    validate: (input) =>
+      (input ?? "").trim().length > 0 ? undefined : "Value is required",
   });
   if (isCancel(value)) {
     cancel("Factory setup canceled.");
@@ -646,19 +829,30 @@ const ensurePromptValue = async (opts: {
   return String(value).trim();
 };
 
-const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliConfig> => {
-  const repoRoot = path.resolve(asString(flags, "repo-root") ?? await detectGitRoot(cwd) ?? cwd);
+const initFactoryConfig = async (
+  cwd: string,
+  flags: Flags,
+): Promise<FactoryCliConfig> => {
+  const repoRoot = path.resolve(
+    asString(flags, "repo-root") ?? (await detectGitRoot(cwd)) ?? cwd,
+  );
   const gitRoot = await detectGitRoot(repoRoot);
   if (!gitRoot) {
-    throw new Error(`Factory init requires a git repository. No repo found from ${repoRoot}`);
+    throw new Error(
+      `Factory init requires a git repository. No repo found from ${repoRoot}`,
+    );
   }
 
   const yes = parseBooleanFlag(flags, "yes");
   const force = parseBooleanFlag(flags, "force");
   const json = parseBooleanFlag(flags, "json");
-  const defaultDataDir = path.resolve(repoRoot, asString(flags, "data-dir") ?? path.join(".receipt", "data"));
+  const defaultDataDir = path.resolve(
+    repoRoot,
+    asString(flags, "data-dir") ?? path.join(".receipt", "data"),
+  );
   const detectedCodexPath = bunWhich("codex");
-  const explicitCodexBin = asString(flags, "codex-bin") ?? process.env.RECEIPT_CODEX_BIN;
+  const explicitCodexBin =
+    asString(flags, "codex-bin") ?? process.env.RECEIPT_CODEX_BIN;
   const defaultCodexBin = explicitCodexBin ?? "codex";
 
   let dataDir = defaultDataDir;
@@ -666,11 +860,15 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
 
   if (isInteractiveTerminal() && !yes) {
     intro("Receipt Factory setup");
-    dataDir = path.resolve(repoRoot, await ensurePromptValue({
-      message: "Data directory",
-      initialValue: path.relative(repoRoot, defaultDataDir) || ".receipt/data",
-      placeholder: ".receipt/data",
-    }));
+    dataDir = path.resolve(
+      repoRoot,
+      await ensurePromptValue({
+        message: "Data directory",
+        initialValue:
+          path.relative(repoRoot, defaultDataDir) || ".receipt/data",
+        placeholder: ".receipt/data",
+      }),
+    );
     codexBin = await ensurePromptValue({
       message: "Codex executable",
       initialValue: defaultCodexBin,
@@ -700,7 +898,9 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
   try {
     const compose = await runtime.service.buildComposeModel();
     updateProgress("collecting repo status and existing objectives");
-    progress?.stop(`Repository profile collected in ${formatDurationMs(Date.now() - profileStartedAt)}`);
+    progress?.stop(
+      `Repository profile collected in ${formatDurationMs(Date.now() - profileStartedAt)}`,
+    );
     if (isInteractiveTerminal() && !json) {
       printSetupSummary({
         repoRoot,
@@ -725,11 +925,13 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
         throw new Error("Factory setup canceled");
       }
       if (!useDetected) {
-        defaultChecks = parseChecksInput(await ensurePromptValue({
-          message: "Validation commands (comma or newline separated)",
-          initialValue: defaultChecks.join("\n"),
-          placeholder: "bun run build",
-        }));
+        defaultChecks = parseChecksInput(
+          await ensurePromptValue({
+            message: "Validation commands (comma or newline separated)",
+            initialValue: defaultChecks.join("\n"),
+            placeholder: "bun run build",
+          }),
+        );
       }
     }
 
@@ -766,11 +968,13 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
         },
       });
     } else if (isInteractiveTerminal() && !yes) {
-      outro([
-        `Factory config written to ${configPath}`,
-        `Next: bun run factory`,
-        `Create objective: bun run factory run --title "Mission" --prompt "Describe the change"`,
-      ].join("\n"));
+      outro(
+        [
+          `Factory config written to ${configPath}`,
+          `Next: bun run factory`,
+          `Create objective: bun run factory run --title "Mission" --prompt "Describe the change"`,
+        ].join("\n"),
+      );
     } else {
       console.log(`factory config written: ${configPath}`);
     }
@@ -780,13 +984,18 @@ const initFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliC
   }
 };
 
-const ensureFactoryConfig = async (cwd: string, flags: Flags): Promise<FactoryCliConfig> => {
+const ensureFactoryConfig = async (
+  cwd: string,
+  flags: Flags,
+): Promise<FactoryCliConfig> => {
   const loaded = await loadFactoryConfig(cwd, asString(flags, "repo-root"));
   if (loaded) return loaded;
   if (isInteractiveTerminal()) {
     return initFactoryConfig(cwd, flags);
   }
-  throw new Error("Factory is not initialized in this repo. Run `receipt factory init` first.");
+  throw new Error(
+    "Factory is not initialized in this repo. Run `receipt factory init` first.",
+  );
 };
 
 const runInteractiveFactoryApp = async (opts: {
@@ -795,16 +1004,22 @@ const runInteractiveFactoryApp = async (opts: {
   readonly initialPanel?: FactoryObjectivePanel;
   readonly exitOnTerminal?: boolean;
 }): Promise<FactoryAppExit> => {
-  let result: FactoryAppExit = { code: 0, reason: "quit", objectiveId: opts.initialObjectiveId };
-  const instance = render(React.createElement(FactoryTerminalApp, {
-    runtime: opts.runtime,
-    initialObjectiveId: opts.initialObjectiveId,
-    initialPanel: opts.initialPanel,
-    exitOnTerminal: opts.exitOnTerminal,
-    onExit: (next: FactoryAppExit) => {
-      result = next;
-    },
-  }));
+  let result: FactoryAppExit = {
+    code: 0,
+    reason: "quit",
+    objectiveId: opts.initialObjectiveId,
+  };
+  const instance = render(
+    React.createElement(FactoryTerminalApp, {
+      runtime: opts.runtime,
+      initialObjectiveId: opts.initialObjectiveId,
+      initialPanel: opts.initialPanel,
+      exitOnTerminal: opts.exitOnTerminal,
+      onExit: (next: FactoryAppExit) => {
+        result = next;
+      },
+    }),
+  );
   await instance.waitUntilExit();
   return result;
 };
@@ -827,28 +1042,52 @@ const waitForObjectiveTerminal = async (
       runtime.service.buildLiveProjection(objectiveId).catch(() => undefined),
     ]);
     let auditStatus = await objectiveAuditStatus(runtime, objectiveId);
-    const progress = renderObjectiveWaitLine({ objectiveId, detail, live, auditStatus });
+    const progress = renderObjectiveWaitLine({
+      objectiveId,
+      detail,
+      live,
+      auditStatus,
+    });
     if (!quiet) {
       if (process.stdout.isTTY) {
         ttyWidth = Math.max(ttyWidth, progress.line.length);
         process.stdout.write(`\r${progress.line.padEnd(ttyWidth, " ")}`);
-      } else if (progress.key !== lastPrintedKey || Date.now() - lastPrintedAt >= 10_000) {
+      } else if (
+        progress.key !== lastPrintedKey ||
+        Date.now() - lastPrintedAt >= 10_000
+      ) {
         console.log(progress.line);
         lastPrintedKey = progress.key;
         lastPrintedAt = Date.now();
       }
     }
     const terminal =
-      detail.status === "completed" ? { code: 0, reason: "completed" as const, objectiveId } :
-      detail.status === "failed" ? { code: 1, reason: "failed" as const, objectiveId } :
-      detail.status === "canceled" ? { code: 1, reason: "canceled" as const, objectiveId } :
-      detail.status === "blocked" ? { code: 2, reason: "blocked" as const, objectiveId } :
-      detail.integration.status === "conflicted" ? { code: 1, reason: "integration_conflicted" as const, objectiveId } :
-      (!detail.policy.promotion.autoPromote && detail.integration.status === "ready_to_promote")
-        ? { code: 2, reason: "manual" as const, objectiveId }
-        : undefined;
+      detail.status === "completed"
+        ? { code: 0, reason: "completed" as const, objectiveId }
+        : detail.status === "failed"
+          ? { code: 1, reason: "failed" as const, objectiveId }
+          : detail.status === "canceled"
+            ? { code: 1, reason: "canceled" as const, objectiveId }
+            : detail.status === "blocked"
+              ? { code: 2, reason: "blocked" as const, objectiveId }
+              : detail.integration.status === "conflicted"
+                ? {
+                    code: 1,
+                    reason: "integration_conflicted" as const,
+                    objectiveId,
+                  }
+                : !detail.policy.promotion.autoPromote &&
+                    detail.integration.status === "ready_to_promote"
+                  ? { code: 2, reason: "manual" as const, objectiveId }
+                  : undefined;
     if (terminal) {
-      if (auditStatus === "idle" && (detail.status === "completed" || detail.status === "failed" || detail.status === "canceled" || detail.status === "blocked")) {
+      if (
+        auditStatus === "idle" &&
+        (detail.status === "completed" ||
+          detail.status === "failed" ||
+          detail.status === "canceled" ||
+          detail.status === "blocked")
+      ) {
         await ensureObjectiveAuditQueued(runtime, detail);
         auditStatus = await objectiveAuditStatus(runtime, objectiveId);
       }
@@ -871,12 +1110,23 @@ const waitForObjectiveTerminal = async (
   }
 };
 
-const printBoardSnapshot = async (runtime: ReturnType<typeof createFactoryCliRuntime>, asJson: boolean): Promise<void> => {
+const printBoardSnapshot = async (
+  runtime: ReturnType<typeof createFactoryCliRuntime>,
+  asJson: boolean,
+): Promise<void> => {
   const compose = await runtime.service.buildComposeModel();
   const board = await runtime.service.buildBoardProjection();
   const selectedObjectiveId = board.selectedObjectiveId;
-  const selected = selectedObjectiveId ? await runtime.service.getObjective(selectedObjectiveId).catch(() => undefined) : undefined;
-  const live = selectedObjectiveId ? await runtime.service.buildLiveProjection(selectedObjectiveId).catch(() => undefined) : undefined;
+  const selected = selectedObjectiveId
+    ? await runtime.service
+        .getObjective(selectedObjectiveId)
+        .catch(() => undefined)
+    : undefined;
+  const live = selectedObjectiveId
+    ? await runtime.service
+        .buildLiveProjection(selectedObjectiveId)
+        .catch(() => undefined)
+    : undefined;
   if (asJson) {
     await printJson({ compose, board, selected, live });
     return;
@@ -904,10 +1154,12 @@ const printObjectiveSnapshot = async (
     });
     return;
   }
-  console.log([
-    renderObjectiveHeader(detail).join("\n"),
-    renderObjectivePanelText(detail, live, debug, resolvedPanel),
-  ].join("\n\n"));
+  console.log(
+    [
+      renderObjectiveHeader(detail).join("\n"),
+      renderObjectivePanelText(detail, live, debug, resolvedPanel),
+    ].join("\n\n"),
+  );
 };
 
 const resolveObjectivePanel = async (
@@ -920,7 +1172,11 @@ const resolveObjectivePanel = async (
   return defaultObjectivePanelForDetail(detail);
 };
 
-export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
+export const handleFactoryCommand = async (
+  cwd: string,
+  args: ReadonlyArray<string>,
+  flags: Flags,
+): Promise<void> => {
   const subcommand = args[0];
   if (hasHelpFlag(flags)) {
     printFactoryUsage(isHelpToken(subcommand) ? undefined : subcommand);
@@ -944,35 +1200,50 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
   }
 
   if (subcommand === "codex-probe") {
-    const runtimeConfig = await resolveFactoryRuntimeConfig(cwd, asString(flags, "repo-root"));
+    const runtimeConfig = await resolveFactoryRuntimeConfig(
+      cwd,
+      asString(flags, "repo-root"),
+    );
     const mode = parseCodexProbeMode(asString(flags, "mode"));
-    const timeoutMs = parseIntegerFlag(flags, "timeout-ms", 120_000, { min: 30_000, max: 900_000 });
-    const pollMs = parseIntegerFlag(flags, "poll-ms", 250, { min: 50, max: 10_000 });
-    const reply = asString(flags, "reply") ?? `receipt-probe-${Date.now().toString(36)}`;
-    const prompt = asString(flags, "prompt") ?? [
-      `Reply with exactly: ${reply}`,
-      "Do not modify any files.",
-    ].join("\n");
+    const timeoutMs = parseIntegerFlag(flags, "timeout-ms", 120_000, {
+      min: 30_000,
+      max: 900_000,
+    });
+    const pollMs = parseIntegerFlag(flags, "poll-ms", 250, {
+      min: 50,
+      max: 10_000,
+    });
+    const reply =
+      asString(flags, "reply") ?? `receipt-probe-${Date.now().toString(36)}`;
+    const prompt =
+      asString(flags, "prompt") ??
+      [`Reply with exactly: ${reply}`, "Do not modify any files."].join("\n");
     const probeId = `codex-probe-${Date.now().toString(36)}`;
     const probeDataDir = path.resolve(
-      asString(flags, "probe-dir") ?? path.join(runtimeConfig.dataDir, "probes", probeId),
+      asString(flags, "probe-dir") ??
+        path.join(runtimeConfig.dataDir, "probes", probeId),
     );
-    const report = await runFactoryCodexProbe({
-      configPath: runtimeConfig.configPath ?? path.join(runtimeConfig.repoRoot, ".receipt", "config.json"),
-      repoRoot: runtimeConfig.repoRoot,
-      dataDir: runtimeConfig.dataDir,
-      codexBin: runtimeConfig.codexBin,
-      repoSlotConcurrency: runtimeConfig.repoSlotConcurrency,
-      defaultChecks: [],
-      defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
-      schedules: [],
-    }, {
-      mode,
-      prompt,
-      dataDir: probeDataDir,
-      pollMs,
-      timeoutMs,
-    });
+    const report = await runFactoryCodexProbe(
+      {
+        configPath:
+          runtimeConfig.configPath ??
+          path.join(runtimeConfig.repoRoot, ".receipt", "config.json"),
+        repoRoot: runtimeConfig.repoRoot,
+        dataDir: runtimeConfig.dataDir,
+        codexBin: runtimeConfig.codexBin,
+        repoSlotConcurrency: runtimeConfig.repoSlotConcurrency,
+        defaultChecks: [],
+        defaultPolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+        schedules: [],
+      },
+      {
+        mode,
+        prompt,
+        dataDir: probeDataDir,
+        pollMs,
+        timeoutMs,
+      },
+    );
     if (json) await printJson(report);
     else console.log(renderCodexProbeText(report));
     if (!report.ok) process.exitCode = 1;
@@ -1002,9 +1273,13 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
   if (subcommand === "experiment") {
     const scenario = args[1] ?? "long-run";
     if (scenario !== "long-run") {
-      throw new Error(`Unsupported factory experiment scenario '${scenario}'. Use 'long-run'.`);
+      throw new Error(
+        `Unsupported factory experiment scenario '${scenario}'. Use 'long-run'.`,
+      );
     }
-    const sourceRepoRoot = path.resolve(asString(flags, "repo-root") ?? await detectGitRoot(cwd) ?? cwd);
+    const sourceRepoRoot = path.resolve(
+      asString(flags, "repo-root") ?? (await detectGitRoot(cwd)) ?? cwd,
+    );
     const report = await runFactoryLongRunExperiment({
       sourceRepoRoot,
       outputDir: asString(flags, "output-dir"),
@@ -1021,13 +1296,17 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
 
   if (subcommand === "helper") {
     const helperCommand = args[1] ?? "list";
-    const repoRoot = path.resolve(asString(flags, "repo-root") ?? await detectGitRoot(cwd) ?? cwd);
+    const repoRoot = path.resolve(
+      asString(flags, "repo-root") ?? (await detectGitRoot(cwd)) ?? cwd,
+    );
     const domain = asString(flags, "domain") ?? "infrastructure";
     if (helperCommand === "list") {
       const provider = asString(flags, "provider");
       const helpers = await loadFactoryHelperCatalog(repoRoot, domain);
       const filtered = provider
-        ? helpers.filter((helper) => helper.provider === parseHelperProvider(provider))
+        ? helpers.filter(
+            (helper) => helper.provider === parseHelperProvider(provider),
+          )
         : helpers;
       if (json) {
         await printJson(filtered);
@@ -1045,10 +1324,7 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       const helperId = args[2] ?? asString(flags, "id");
       if (!helperId) throw new Error("factory helper run requires a helper id");
       const provider = parseHelperProvider(asString(flags, "provider"));
-      const helperArgs = [
-        ...args.slice(3),
-        ...asStrings(flags, "helper-arg"),
-      ];
+      const helperArgs = [...args.slice(3), ...asStrings(flags, "helper-arg")];
       const result = await runFactoryHelper({
         profileRoot: repoRoot,
         helperId,
@@ -1064,7 +1340,9 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       if (result.status === "error") process.exitCode = 1;
       return;
     }
-    throw new Error(`Unsupported factory helper command '${helperCommand}'. Use 'list' or 'run'.`);
+    throw new Error(
+      `Unsupported factory helper command '${helperCommand}'. Use 'list' or 'run'.`,
+    );
   }
 
   const config = await ensureFactoryConfig(cwd, flags);
@@ -1090,9 +1368,17 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         return;
       }
       case "run": {
-        const prompt = asString(flags, "prompt") ?? asString(flags, "problem") ?? args.slice(1).join(" ").trim();
-        if (!prompt) throw new Error("factory run requires --prompt or trailing prompt text");
-        const explicitChecks = asStrings(flags, "check").flatMap(parseChecksInput);
+        const prompt =
+          asString(flags, "prompt") ??
+          asString(flags, "problem") ??
+          args.slice(1).join(" ").trim();
+        if (!prompt)
+          throw new Error(
+            "factory run requires --prompt or trailing prompt text",
+          );
+        const explicitChecks = asStrings(flags, "check").flatMap(
+          parseChecksInput,
+        );
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
@@ -1110,8 +1396,17 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           profileId: asString(flags, "profile"),
         });
         if (json || !isInteractiveTerminal()) {
-          const result = await waitForObjectiveTerminal(runtime, created.objectiveId, { quiet: json });
-          await printObjectiveSnapshot(runtime, created.objectiveId, undefined, json);
+          const result = await waitForObjectiveTerminal(
+            runtime,
+            created.objectiveId,
+            { quiet: json },
+          );
+          await printObjectiveSnapshot(
+            runtime,
+            created.objectiveId,
+            undefined,
+            json,
+          );
           process.exitCode = result.code;
           return;
         }
@@ -1120,14 +1415,27 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
           initialObjectiveId: created.objectiveId,
           exitOnTerminal: true,
         });
-        await printObjectiveSnapshot(runtime, created.objectiveId, undefined, false);
+        await printObjectiveSnapshot(
+          runtime,
+          created.objectiveId,
+          undefined,
+          false,
+        );
         process.exitCode = result.code;
         return;
       }
       case "create": {
-        const prompt = asString(flags, "prompt") ?? asString(flags, "problem") ?? args.slice(1).join(" ").trim();
-        if (!prompt) throw new Error("factory create requires --prompt or trailing prompt text");
-        const explicitChecks = asStrings(flags, "check").flatMap(parseChecksInput);
+        const prompt =
+          asString(flags, "prompt") ??
+          asString(flags, "problem") ??
+          args.slice(1).join(" ").trim();
+        if (!prompt)
+          throw new Error(
+            "factory create requires --prompt or trailing prompt text",
+          );
+        const explicitChecks = asStrings(flags, "check").flatMap(
+          parseChecksInput,
+        );
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
@@ -1147,9 +1455,17 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         return;
       }
       case "compose": {
-        const prompt = asString(flags, "prompt") ?? asString(flags, "problem") ?? args.slice(1).join(" ").trim();
-        if (!prompt) throw new Error("factory compose requires --prompt or trailing prompt text");
-        const explicitChecks = asStrings(flags, "check").flatMap(parseChecksInput);
+        const prompt =
+          asString(flags, "prompt") ??
+          asString(flags, "problem") ??
+          args.slice(1).join(" ").trim();
+        if (!prompt)
+          throw new Error(
+            "factory compose requires --prompt or trailing prompt text",
+          );
+        const explicitChecks = asStrings(flags, "check").flatMap(
+          parseChecksInput,
+        );
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
@@ -1171,14 +1487,24 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "watch": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory watch requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory watch requires <objective-id>");
         const panelFlag = asString(flags, "panel");
         await runtime.start();
         if (json || !isInteractiveTerminal()) {
-          await printObjectiveSnapshot(runtime, objectiveId, panelFlag ? parsePanel(panelFlag) : undefined, json);
+          await printObjectiveSnapshot(
+            runtime,
+            objectiveId,
+            panelFlag ? parsePanel(panelFlag) : undefined,
+            json,
+          );
           return;
         }
-        const initialPanel = await resolveObjectivePanel(runtime, objectiveId, panelFlag ? parsePanel(panelFlag) : undefined);
+        const initialPanel = await resolveObjectivePanel(
+          runtime,
+          objectiveId,
+          panelFlag ? parsePanel(panelFlag) : undefined,
+        );
         await runInteractiveFactoryApp({
           runtime,
           initialObjectiveId: objectiveId,
@@ -1188,15 +1514,22 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "inspect": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory inspect requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory inspect requires <objective-id>");
         const panelFlag = asString(flags, "panel");
         await runtime.service.ensureBootstrap();
-        await printObjectiveSnapshot(runtime, objectiveId, panelFlag ? parsePanel(panelFlag) : undefined, json);
+        await printObjectiveSnapshot(
+          runtime,
+          objectiveId,
+          panelFlag ? parsePanel(panelFlag) : undefined,
+          json,
+        );
         return;
       }
       case "replay": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory replay requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory replay requires <objective-id>");
         const replay = await readObjectiveReplay(config.dataDir, objectiveId);
         if (json || !isInteractiveTerminal()) {
           await printJson(replay);
@@ -1207,7 +1540,8 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "replay-chat": {
         const stream = args[1];
-        if (!stream) throw new Error("factory replay-chat requires <chat-or-run-stream>");
+        if (!stream)
+          throw new Error("factory replay-chat requires <chat-or-run-stream>");
         const replay = await readChatReplay(config.dataDir, stream);
         if (json || !isInteractiveTerminal()) {
           await printJson(replay);
@@ -1218,8 +1552,12 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "analyze": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory analyze requires <objective-id>");
-        const analysis = await readObjectiveAnalysis(config.dataDir, objectiveId);
+        if (!objectiveId)
+          throw new Error("factory analyze requires <objective-id>");
+        const analysis = await readObjectiveAnalysis(
+          config.dataDir,
+          objectiveId,
+        );
         if (json || !isInteractiveTerminal()) {
           await printJson(analysis);
           return;
@@ -1229,7 +1567,11 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "parse": {
         const targetId = args[1];
-        const parsed = await readFactoryParsedRun(config.dataDir, config.repoRoot, targetId);
+        const parsed = await readFactoryParsedRun(
+          config.dataDir,
+          config.repoRoot,
+          targetId,
+        );
         if (json || !isInteractiveTerminal()) {
           await printJson(parsed);
           return;
@@ -1239,7 +1581,8 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "resume": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory resume requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory resume requires <objective-id>");
         await runtime.start();
         await reactObjectiveMutation(runtime, { objectiveId });
         if (json || !isInteractiveTerminal()) {
@@ -1259,23 +1602,30 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "react": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory react requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory react requires <objective-id>");
         const trailingMessage = args.slice(2).join(" ").trim();
-        const message = asString(flags, "message") ?? (trailingMessage || undefined);
-        const result = await reactObjectiveMutation(runtime, { objectiveId, message });
+        const message =
+          asString(flags, "message") ?? (trailingMessage || undefined);
+        const result = await reactObjectiveMutation(runtime, {
+          objectiveId,
+          message,
+        });
         await printMutationResult(result, json);
         return;
       }
       case "promote": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory promote requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory promote requires <objective-id>");
         const result = await promoteObjectiveMutation(runtime, objectiveId);
         await printMutationResult(result, json);
         return;
       }
       case "cancel": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory cancel requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory cancel requires <objective-id>");
         const result = await cancelObjectiveMutation(runtime, {
           objectiveId,
           reason: asString(flags, "reason") ?? "canceled from CLI",
@@ -1285,14 +1635,16 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
       }
       case "cleanup": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory cleanup requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory cleanup requires <objective-id>");
         const result = await cleanupObjectiveMutation(runtime, objectiveId);
         await printMutationResult(result, json);
         return;
       }
       case "archive": {
         const objectiveId = args[1];
-        if (!objectiveId) throw new Error("factory archive requires <objective-id>");
+        if (!objectiveId)
+          throw new Error("factory archive requires <objective-id>");
         const result = await archiveObjectiveMutation(runtime, objectiveId);
         await printMutationResult(result, json);
         return;
@@ -1312,8 +1664,12 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const jobId = args[1];
         if (!jobId) throw new Error("factory steer requires <job-id>");
         const trailingMessage = args.slice(2).join(" ").trim();
-        const message = asString(flags, "message") ?? (trailingMessage || undefined);
-        if (!message) throw new Error("factory steer requires --message or trailing message text");
+        const message =
+          asString(flags, "message") ?? (trailingMessage || undefined);
+        if (!message)
+          throw new Error(
+            "factory steer requires --message or trailing message text",
+          );
         const result = await steerJobMutation(runtime, {
           jobId,
           message,
@@ -1325,8 +1681,12 @@ export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<stri
         const jobId = args[1];
         if (!jobId) throw new Error("factory follow-up requires <job-id>");
         const trailingMessage = args.slice(2).join(" ").trim();
-        const message = asString(flags, "message") ?? (trailingMessage || undefined);
-        if (!message) throw new Error("factory follow-up requires --message or trailing message text");
+        const message =
+          asString(flags, "message") ?? (trailingMessage || undefined);
+        if (!message)
+          throw new Error(
+            "factory follow-up requires --message or trailing message text",
+          );
         const result = await followUpJobMutation(runtime, {
           jobId,
           message,

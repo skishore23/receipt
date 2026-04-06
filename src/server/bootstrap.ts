@@ -8,7 +8,10 @@ import path from "node:path";
 import { Hono } from "hono";
 import { createServerComposition } from "./composition";
 import { resolveServerConfig } from "./config";
-import { summarizeLocalRuntimeHealth, type LocalRuntimeWorkerRole } from "./local-runtime-health";
+import {
+  summarizeLocalRuntimeHealth,
+  type LocalRuntimeWorkerRole,
+} from "./local-runtime-health";
 import { resolveAssetDir } from "./assets";
 import {
   agentStreamForJob,
@@ -18,23 +21,47 @@ import {
 } from "./job-metadata";
 
 import type { JobBackend } from "../adapters/job-backend";
-import { jsonlQueue, type EnqueueJobInput, type QueueJob } from "../adapters/jsonl-queue";
 import {
-  createMemoryTools,
-} from "../adapters/memory-tools";
+  jsonlQueue,
+  type EnqueueJobInput,
+  type QueueJob,
+} from "../adapters/jsonl-queue";
+import { createMemoryTools } from "../adapters/memory-tools";
 import { createDelegationTools } from "../adapters/delegation";
-import { createHeartbeat, parseHeartbeatSpecsFromEnv } from "../adapters/heartbeat";
+import {
+  createHeartbeat,
+  parseHeartbeatSpecsFromEnv,
+} from "../adapters/heartbeat";
 import { resonateJobBackend } from "../adapters/resonate-job-backend";
-import { createResonateDriverStarter, createResonateRoleRuntime } from "../adapters/resonate-runtime";
+import {
+  createResonateDriverStarter,
+  createResonateRoleRuntime,
+} from "../adapters/resonate-runtime";
 import type { AgentEvent } from "../modules/agent";
 import { llmStructured, llmText, embed } from "../adapters/openai";
 import { loadAgentPrompts, hashAgentPrompts } from "../prompts/agent";
 import { normalizeAgentConfig } from "../agents/agent";
-import { createQueuedBudgetContinuation, parseContinuationDepth } from "../agents/agent-continuation";
-import { runOrchestrator, normalizeFactoryChatConfig, runFactoryCodexJob } from "../agents/orchestrator";
-import { emitToContinuedRun, resolveContinuedRunTarget } from "../agents/run-target";
-import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../services/factory-runtime";
-import { FACTORY_CONTROL_AGENT_ID, type FactoryService } from "../services/factory-service";
+import {
+  createQueuedBudgetContinuation,
+  parseContinuationDepth,
+} from "../agents/agent-continuation";
+import {
+  runOrchestrator,
+  normalizeFactoryChatConfig,
+  runFactoryCodexJob,
+} from "../agents/orchestrator";
+import {
+  emitToContinuedRun,
+  resolveContinuedRunTarget,
+} from "../agents/run-target";
+import {
+  createFactoryServiceRuntime,
+  createFactoryWorkerHandlers,
+} from "../services/factory-runtime";
+import {
+  FACTORY_CONTROL_AGENT_ID,
+  type FactoryService,
+} from "../services/factory-service";
 import {
   shouldQueueObjectiveAudit,
   shouldQueueObjectiveControlReconcile,
@@ -50,7 +77,11 @@ import {
   renderFactoryStreamingResetFragment,
   renderFactoryStreamingTokenFragment,
 } from "../views/factory/transcript";
-import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "../db/client";
+import {
+  getReceiptDb,
+  listChangesAfter,
+  pollLatestChangeSeq,
+} from "../db/client";
 
 // ============================================================================
 // Config
@@ -81,6 +112,7 @@ const {
   subJobPollMs,
   subJobJoinWaitMs,
   factoryAutoFixEnabled: FACTORY_AUTO_FIX_ENABLED,
+  factoryAutoFixSourceChannels: FACTORY_AUTO_FIX_SOURCE_CHANNELS,
   localRuntimeStaleJobMs: LOCAL_RUNTIME_STALE_JOB_MS,
   localRuntimeWorkerStaleMs: LOCAL_RUNTIME_WORKER_STALE_MS,
   localRuntimeWatchdogMs: LOCAL_RUNTIME_WATCHDOG_MS,
@@ -90,11 +122,8 @@ const {
 // Composition: Store -> Runtime
 // ============================================================================
 
-const {
-  agentRuntime,
-  jobRuntime,
-  memoryRuntime,
-} = createServerComposition(DATA_DIR);
+const { agentRuntime, jobRuntime, memoryRuntime } =
+  createServerComposition(DATA_DIR);
 
 // ============================================================================
 // Prompts + Models
@@ -113,26 +142,37 @@ const memoryTools = createMemoryTools({
 let queueImpl: JobBackend | undefined;
 let factoryServiceRef: FactoryService | undefined;
 
-const shouldQueueFactoryObjectiveReconcile = async (objectiveId: string, sourceUpdatedAt: number): Promise<boolean> => {
+const shouldQueueFactoryObjectiveReconcile = async (
+  objectiveId: string,
+  sourceUpdatedAt: number,
+): Promise<boolean> => {
   const queue = queueImpl;
   const factoryService = factoryServiceRef;
   const [recentJobs, detail] = await Promise.all([
     queue?.listJobs({ limit: 200 }) ?? Promise.resolve([]),
-    factoryService?.getObjective(objectiveId).catch(() => undefined) ?? Promise.resolve(undefined),
+    factoryService?.getObjective(objectiveId).catch(() => undefined) ??
+      Promise.resolve(undefined),
   ]);
   return shouldQueueObjectiveControlReconcile({
     controlAgentId: FACTORY_CONTROL_AGENT_ID,
     objectiveId,
     recentJobs,
     sourceUpdatedAt,
-    objectiveInactive: detail != null && isTerminalObjectiveStatus(detail.status),
+    objectiveInactive:
+      detail != null && isTerminalObjectiveStatus(detail.status),
   });
 };
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
-  status === "completed" || status === "blocked" || status === "canceled" || status === "failed";
+  status === "completed" ||
+  status === "blocked" ||
+  status === "canceled" ||
+  status === "failed";
 
-const shouldQueueFactoryObjectiveAudit = async (objectiveId: string, objectiveUpdatedAt: number): Promise<boolean> => {
+const shouldQueueFactoryObjectiveAudit = async (
+  objectiveId: string,
+  objectiveUpdatedAt: number,
+): Promise<boolean> => {
   const queue = queueImpl;
   return shouldQueueObjectiveAudit({
     controlAgentId: FACTORY_CONTROL_AGENT_ID,
@@ -147,11 +187,16 @@ const baseQueue = jsonlQueue({
   stream: JOB_STREAM,
   watchDir: DATA_DIR,
   expireLeasesOnRefresh: JOB_BACKEND === "local",
-  fullRefreshWindowMs: Number(process.env.RESONATE_QUEUE_FULL_REFRESH_MS ?? (JOB_BACKEND === "resonate" ? 300_000 : 30_000)),
+  fullRefreshWindowMs: Number(
+    process.env.RESONATE_QUEUE_FULL_REFRESH_MS ??
+      (JOB_BACKEND === "resonate" ? 300_000 : 30_000),
+  ),
   onJobChange: async (jobs) => {
     for (const job of jobs) {
       sse.publish("jobs", job.id);
-      const agentStream = agentStreamForJob(job ? { payload: job.payload as Record<string, unknown> } : undefined);
+      const agentStream = agentStreamForJob(
+        job ? { payload: job.payload as Record<string, unknown> } : undefined,
+      );
       if (agentStream) sse.publish("agent", agentStream);
       const jobMetadata = job
         ? {
@@ -173,46 +218,64 @@ const baseQueue = jsonlQueue({
       // We enqueue a control job to reconcile the objective so the orchestrator
       // naturally picks it up, avoiding mutable global state or direct side-effects.
       if (objectiveId && shouldReconcileObjectiveFromJobChange(job)) {
-        if (await shouldQueueFactoryObjectiveReconcile(objectiveId, job.updatedAt)) {
-          queue.enqueue({
-            agentId: "factory-control",
-            lane: "collect",
-            sessionKey: `factory:objective:${objectiveId}`,
-            singletonMode: "steer",
-            maxAttempts: 1,
-            payload: {
-              kind: "factory.objective.control",
-              objectiveId,
-              reason: "reconcile",
-            },
-          }).catch(console.error);
+        if (
+          await shouldQueueFactoryObjectiveReconcile(objectiveId, job.updatedAt)
+        ) {
+          queue
+            .enqueue({
+              agentId: "factory-control",
+              lane: "collect",
+              sessionKey: `factory:objective:${objectiveId}`,
+              singletonMode: "steer",
+              maxAttempts: 1,
+              payload: {
+                kind: "factory.objective.control",
+                objectiveId,
+                reason: "reconcile",
+              },
+            })
+            .catch(console.error);
         }
       }
 
       if (
-        objectiveId
-        && (job.status === "completed" || job.status === "failed" || job.status === "canceled")
-        && typeof job.payload === "object"
-        && job.payload
-        && job.payload.kind !== "factory.objective.audit"
+        objectiveId &&
+        (job.status === "completed" ||
+          job.status === "failed" ||
+          job.status === "canceled") &&
+        typeof job.payload === "object" &&
+        job.payload &&
+        job.payload.kind !== "factory.objective.audit"
       ) {
         const factoryService = factoryServiceRef;
         if (factoryService) {
-          const detail = await factoryService.getObjective(objectiveId).catch(() => undefined);
-          if (detail && isTerminalObjectiveStatus(detail.status) && await shouldQueueFactoryObjectiveAudit(objectiveId, detail.updatedAt)) {
-            queue.enqueue({
-              agentId: FACTORY_CONTROL_AGENT_ID,
-              lane: "collect",
-              sessionKey: `factory:audit:${objectiveId}`,
-              singletonMode: "steer",
-              maxAttempts: 3,
-              payload: {
-                kind: "factory.objective.audit",
-                objectiveId,
-                objectiveStatus: detail.status,
-                objectiveUpdatedAt: detail.updatedAt,
-              },
-            }).catch(console.error);
+          const detail = await factoryService
+            .getObjective(objectiveId)
+            .catch(() => undefined);
+          if (
+            detail &&
+            isTerminalObjectiveStatus(detail.status) &&
+            (await shouldQueueFactoryObjectiveAudit(
+              objectiveId,
+              detail.updatedAt,
+            ))
+          ) {
+            queue
+              .enqueue({
+                agentId: FACTORY_CONTROL_AGENT_ID,
+                lane: "collect",
+                sessionKey: `factory:audit:${objectiveId}`,
+                singletonMode: "steer",
+                maxAttempts: 3,
+                payload: {
+                  kind: "factory.objective.audit",
+                  objectiveId,
+                  objectiveStatus: detail.status,
+                  objectiveUpdatedAt: detail.updatedAt,
+                  objectiveChannel: detail.channel,
+                },
+              })
+              .catch(console.error);
           }
         }
       }
@@ -224,17 +287,23 @@ queueImpl = baseQueue;
 const queue: JobBackend = {
   enqueue: (input) => queueImpl!.enqueue(input),
   leaseNext: (opts) => queueImpl!.leaseNext(opts),
-  leaseJob: (jobId, workerId, leaseMs) => queueImpl!.leaseJob(jobId, workerId, leaseMs),
-  heartbeat: (jobId, workerId, leaseMs) => queueImpl!.heartbeat(jobId, workerId, leaseMs),
-  progress: (jobId, workerId, result) => queueImpl!.progress(jobId, workerId, result),
-  complete: (jobId, workerId, result) => queueImpl!.complete(jobId, workerId, result),
-  fail: (jobId, workerId, error, noRetry, result) => queueImpl!.fail(jobId, workerId, error, noRetry, result),
+  leaseJob: (jobId, workerId, leaseMs) =>
+    queueImpl!.leaseJob(jobId, workerId, leaseMs),
+  heartbeat: (jobId, workerId, leaseMs) =>
+    queueImpl!.heartbeat(jobId, workerId, leaseMs),
+  progress: (jobId, workerId, result) =>
+    queueImpl!.progress(jobId, workerId, result),
+  complete: (jobId, workerId, result) =>
+    queueImpl!.complete(jobId, workerId, result),
+  fail: (jobId, workerId, error, noRetry, result) =>
+    queueImpl!.fail(jobId, workerId, error, noRetry, result),
   cancel: (jobId, reason, by) => queueImpl!.cancel(jobId, reason, by),
   queueCommand: (input) => queueImpl!.queueCommand(input),
   consumeCommands: (jobId, filter) => queueImpl!.consumeCommands(jobId, filter),
   getJob: (jobId) => queueImpl!.getJob(jobId),
   listJobs: (opts) => queueImpl!.listJobs(opts),
-  waitForJob: (jobId, timeoutMs, pollMs) => queueImpl!.waitForJob(jobId, timeoutMs, pollMs),
+  waitForJob: (jobId, timeoutMs, pollMs) =>
+    queueImpl!.waitForJob(jobId, timeoutMs, pollMs),
   waitForWork: (opts) => queueImpl!.waitForWork(opts),
   notifyWorkAvailable: () => queueImpl!.notifyWorkAvailable(),
   snapshot: () => queueImpl!.snapshot(),
@@ -256,11 +325,17 @@ const createRunControl = (jobId: string) => ({
     const abortCommands = await queue.consumeCommands(jobId, ["abort"]);
     return abortCommands.length > 0;
   },
-  pullCommands: async (): Promise<ReadonlyArray<{ command: "steer" | "follow_up"; payload?: Record<string, unknown> }>> => {
+  pullCommands: async (): Promise<
+    ReadonlyArray<{
+      command: "steer" | "follow_up";
+      payload?: Record<string, unknown>;
+    }>
+  > => {
     const commands = await queue.consumeCommands(jobId, ["steer", "follow_up"]);
     return commands
-      .filter((cmd): cmd is typeof cmd & { command: "steer" | "follow_up" } =>
-        cmd.command === "steer" || cmd.command === "follow_up"
+      .filter(
+        (cmd): cmd is typeof cmd & { command: "steer" | "follow_up" } =>
+          cmd.command === "steer" || cmd.command === "follow_up",
       )
       .map((cmd) => ({ command: cmd.command, payload: cmd.payload }));
   },
@@ -273,28 +348,44 @@ const createRunControl = (jobId: string) => ({
 type AgentRunControl = {
   readonly jobId?: string;
   readonly checkAbort?: () => Promise<boolean>;
-  readonly pullCommands?: () => Promise<ReadonlyArray<{ command: "steer" | "follow_up"; payload?: Record<string, unknown> }>>;
+  readonly pullCommands?: () => Promise<
+    ReadonlyArray<{
+      command: "steer" | "follow_up";
+      payload?: Record<string, unknown>;
+    }>
+  >;
 };
 
 type AgentRunner = (
   payload: Record<string, unknown>,
-  control?: AgentRunControl
+  control?: AgentRunControl,
 ) => Promise<Record<string, unknown> | void>;
 
-const extractRunPayload = (payload: Record<string, unknown>, defaultStream: string) => ({
-  stream: typeof payload.stream === "string" && payload.stream.trim() ? payload.stream : defaultStream,
-  runId: typeof payload.runId === "string" && payload.runId.trim()
-    ? payload.runId
-    : `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-  runStream: typeof payload.runStream === "string" && payload.runStream.trim().length > 0
-    ? payload.runStream
-    : undefined,
+const extractRunPayload = (
+  payload: Record<string, unknown>,
+  defaultStream: string,
+) => ({
+  stream:
+    typeof payload.stream === "string" && payload.stream.trim()
+      ? payload.stream
+      : defaultStream,
+  runId:
+    typeof payload.runId === "string" && payload.runId.trim()
+      ? payload.runId
+      : `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+  runStream:
+    typeof payload.runStream === "string" && payload.runStream.trim().length > 0
+      ? payload.runStream
+      : undefined,
   problem: typeof payload.problem === "string" ? payload.problem : "",
 });
 
 const apiStatus = () => {
   const apiReady = Boolean(process.env.OPENAI_API_KEY);
-  return { apiReady, apiNote: apiReady ? undefined : "OPENAI_API_KEY not set" } as const;
+  return {
+    apiReady,
+    apiNote: apiReady ? undefined : "OPENAI_API_KEY not set",
+  } as const;
 };
 
 type AgentRunnerSpec = {
@@ -311,19 +402,29 @@ type AgentRunnerSpec = {
   readonly model: string;
   readonly promptHash: string;
   readonly promptPath: string;
-  readonly runFn: (input: Record<string, unknown>) => Promise<Record<string, unknown> | void>;
+  readonly runFn: (
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown> | void>;
   readonly extras?: Record<string, unknown>;
   readonly autoContinueOnBudget?: boolean;
 };
 
-const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
+const createAgentRunner =
+  (spec: AgentRunnerSpec): AgentRunner =>
   async (payload, control) => {
-    const { stream, runId, runStream, problem } = extractRunPayload(payload, spec.defaultStream);
-    const supervisorSessionId = typeof payload.supervisorSessionId === "string" && payload.supervisorSessionId.trim().length > 0
-      ? payload.supervisorSessionId.trim()
-      : runId;
-    const configInput = typeof payload.config === "object" && payload.config
-      ? payload.config as Record<string, unknown> : {};
+    const { stream, runId, runStream, problem } = extractRunPayload(
+      payload,
+      spec.defaultStream,
+    );
+    const supervisorSessionId =
+      typeof payload.supervisorSessionId === "string" &&
+      payload.supervisorSessionId.trim().length > 0
+        ? payload.supervisorSessionId.trim()
+        : runId;
+    const configInput =
+      typeof payload.config === "object" && payload.config
+        ? (payload.config as Record<string, unknown>)
+        : {};
     const config = spec.normalizeConfig(configInput);
     const { apiReady, apiNote } = apiStatus();
     const payloadWithSession = {
@@ -332,43 +433,66 @@ const createAgentRunner = (spec: AgentRunnerSpec): AgentRunner =>
     };
     const publishStreamingReset = () => {
       if (!spec.sseResetEvent) return;
-      sse.publishData(spec.sseTopic, stream, spec.sseResetEvent, renderFactoryStreamingResetFragment());
+      sse.publishData(
+        spec.sseTopic,
+        stream,
+        spec.sseResetEvent,
+        renderFactoryStreamingResetFragment(),
+      );
     };
     const onIterationBudgetExhausted = spec.autoContinueOnBudget
       ? createQueuedBudgetContinuation({
-        queue,
-        agentId: spec.defaultAgentId,
-        jobKind: spec.jobKind,
-        stream,
-        payload: payloadWithSession,
-        continuationDepth: parseContinuationDepth(payload.continuationDepth),
-      })
+          queue,
+          agentId: spec.defaultAgentId,
+          jobKind: spec.jobKind,
+          stream,
+          payload: payloadWithSession,
+          continuationDepth: parseContinuationDepth(payload.continuationDepth),
+        })
       : undefined;
     publishStreamingReset();
     try {
       const runnerResult = await spec.runFn({
         ...payloadWithSession,
-        stream, runId, runStream, problem, config,
-        runtime: spec.runtime, prompts: spec.prompts,
-        llmText: (opts: Record<string, unknown>) => llmText({
-          ...(opts as { system?: string; user: string }),
-          onDelta: async (delta) => {
-            if (!delta) return;
-            sse.publishData(spec.sseTopic, stream, spec.sseTokenEvent, JSON.stringify({ runId, delta }));
-            if (spec.sseHtmlTokenEvent) {
+        stream,
+        runId,
+        runStream,
+        problem,
+        config,
+        runtime: spec.runtime,
+        prompts: spec.prompts,
+        llmText: (opts: Record<string, unknown>) =>
+          llmText({
+            ...(opts as { system?: string; user: string }),
+            onDelta: async (delta) => {
+              if (!delta) return;
               sse.publishData(
                 spec.sseTopic,
                 stream,
-                spec.sseHtmlTokenEvent,
-                renderFactoryStreamingTokenFragment({ runId, delta }),
+                spec.sseTokenEvent,
+                JSON.stringify({ runId, delta }),
               );
-            }
-          },
-        }),
-        model: spec.model, promptHash: spec.promptHash, promptPath: spec.promptPath,
-        apiReady, apiNote, control,
+              if (spec.sseHtmlTokenEvent) {
+                sse.publishData(
+                  spec.sseTopic,
+                  stream,
+                  spec.sseHtmlTokenEvent,
+                  renderFactoryStreamingTokenFragment({ runId, delta }),
+                );
+              }
+            },
+          }),
+        model: spec.model,
+        promptHash: spec.promptHash,
+        promptPath: spec.promptPath,
+        apiReady,
+        apiNote,
+        control,
         onIterationBudgetExhausted,
-        broadcast: () => { sse.publish(spec.sseTopic, stream); sse.publish("receipt"); },
+        broadcast: () => {
+          sse.publish(spec.sseTopic, stream);
+          sse.publish("receipt");
+        },
         ...(spec.extras ?? {}),
       });
       return {
@@ -396,22 +520,33 @@ const delegationTools = createDelegationTools({
   waitForJob: async (jobId, timeoutMs) => {
     const job = await queue.waitForJob(jobId, timeoutMs, subJobPollMs);
     if (!job) throw new Error(`job ${jobId} not found`);
-    return { id: job.id, status: job.status, result: job.result, lastError: job.lastError };
+    return {
+      id: job.id,
+      status: job.status,
+      result: job.result,
+      lastError: job.lastError,
+    };
   },
   getJob: async (jobId) => {
     const job = await queue.getJob(jobId);
     if (!job) throw new Error(`job ${jobId} not found`);
-    return { id: job.id, status: job.status, result: job.result, lastError: job.lastError };
+    return {
+      id: job.id,
+      status: job.status,
+      result: job.result,
+      lastError: job.lastError,
+    };
   },
   dataDir: DATA_DIR,
 });
 
-const redriveQueuedJobRef = JOB_BACKEND === "resonate"
-  ? {
-      current: undefined as (((job: QueueJob) => Promise<void>) | undefined),
-      lastAttemptAt: new Map<string, number>(),
-    }
-  : undefined;
+const redriveQueuedJobRef =
+  JOB_BACKEND === "resonate"
+    ? {
+        current: undefined as ((job: QueueJob) => Promise<void>) | undefined,
+        lastAttemptAt: new Map<string, number>(),
+      }
+    : undefined;
 
 const { service: factoryService } = createFactoryServiceRuntime({
   dataDir: DATA_DIR,
@@ -431,6 +566,7 @@ const { service: factoryService } = createFactoryServiceRuntime({
 factoryServiceRef = factoryService;
 const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService, {
   auditAutoFixEnabled: FACTORY_AUTO_FIX_ENABLED,
+  auditAutoFixSourceChannels: FACTORY_AUTO_FIX_SOURCE_CHANNELS,
 });
 type MutableLocalWorkerState = {
   role: LocalRuntimeWorkerRole;
@@ -441,12 +577,40 @@ type MutableLocalWorkerState = {
   lastErrorAt?: number;
   lastError?: string;
 };
-const localWorkerStates = new Map<LocalRuntimeWorkerRole, MutableLocalWorkerState>([
-  ["chat", { role: "chat", workerId: `${jobWorkerId}:chat`, concurrency: chatJobConcurrency }],
-  ["orchestration", { role: "orchestration", workerId: `${jobWorkerId}:orchestration`, concurrency: orchestrationJobConcurrency }],
-  ["codex", { role: "codex", workerId: `${jobWorkerId}:codex`, concurrency: codexJobConcurrency }],
+const localWorkerStates = new Map<
+  LocalRuntimeWorkerRole,
+  MutableLocalWorkerState
+>([
+  [
+    "chat",
+    {
+      role: "chat",
+      workerId: `${jobWorkerId}:chat`,
+      concurrency: chatJobConcurrency,
+    },
+  ],
+  [
+    "orchestration",
+    {
+      role: "orchestration",
+      workerId: `${jobWorkerId}:orchestration`,
+      concurrency: orchestrationJobConcurrency,
+    },
+  ],
+  [
+    "codex",
+    {
+      role: "codex",
+      workerId: `${jobWorkerId}:codex`,
+      concurrency: codexJobConcurrency,
+    },
+  ],
 ]);
-const localWorkerOrder: ReadonlyArray<LocalRuntimeWorkerRole> = ["chat", "orchestration", "codex"];
+const localWorkerOrder: ReadonlyArray<LocalRuntimeWorkerRole> = [
+  "chat",
+  "orchestration",
+  "codex",
+];
 const runtimeHealthState = {
   lastResumeAt: undefined as number | undefined,
   lastResumeError: undefined as string | undefined,
@@ -465,7 +629,10 @@ const markLocalWorkerTick = (role: LocalRuntimeWorkerRole): void => {
   if (!state.startedAt) state.startedAt = Date.now();
   state.lastTickAt = Date.now();
 };
-const markLocalWorkerError = (role: LocalRuntimeWorkerRole, error: Error): void => {
+const markLocalWorkerError = (
+  role: LocalRuntimeWorkerRole,
+  error: Error,
+): void => {
   const state = localWorkerStates.get(role);
   if (!state) return;
   state.lastErrorAt = Date.now();
@@ -488,33 +655,60 @@ const evaluateLocalRuntimeWatchdog = async (): Promise<void> => {
   if (!health) return;
   runtimeHealthState.lastWatchdogAt = health.watchdog.evaluatedAt;
   const warningSignature = health.watchdog.warnings.join("\n");
-  if (warningSignature && warningSignature !== runtimeHealthState.lastWatchdogWarningSignature) {
-    console.warn(`[local runtime watchdog] ${health.watchdog.warnings.join(" | ")}`);
+  if (
+    warningSignature &&
+    warningSignature !== runtimeHealthState.lastWatchdogWarningSignature
+  ) {
+    console.warn(
+      `[local runtime watchdog] ${health.watchdog.warnings.join(" | ")}`,
+    );
   }
   runtimeHealthState.lastWatchdogWarningSignature = warningSignature;
 };
 const agentRunner = createAgentRunner({
   defaultAgentId: "agent",
-  defaultStream: "agents/agent", sseTopic: "agent", sseTokenEvent: "agent-token",
+  defaultStream: "agents/agent",
+  sseTopic: "agent",
+  sseTokenEvent: "agent-token",
   jobKind: "agent.run",
-  normalizeConfig: normalizeAgentConfig, runtime: agentRuntime,
-  prompts: AGENT_PROMPTS, model: AGENT_MODEL,
-  promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
-  runFn: runOrchestrator as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  normalizeConfig: normalizeAgentConfig,
+  runtime: agentRuntime,
+  prompts: AGENT_PROMPTS,
+  model: AGENT_MODEL,
+  promptHash: AGENT_PROMPTS_HASH,
+  promptPath: AGENT_PROMPTS_PATH,
+  runFn: runOrchestrator as unknown as (
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>,
   autoContinueOnBudget: true,
-  extras: { memoryTools, delegationTools, workspaceRoot: WORKSPACE_ROOT, llmStructured, queue, dataDir: DATA_DIR, factoryService },
+  extras: {
+    memoryTools,
+    delegationTools,
+    workspaceRoot: WORKSPACE_ROOT,
+    llmStructured,
+    queue,
+    dataDir: DATA_DIR,
+    factoryService,
+  },
 });
 
 const factoryRunner = createAgentRunner({
   defaultAgentId: "factory",
-  defaultStream: "agents/factory", sseTopic: "agent", sseTokenEvent: "agent-token",
+  defaultStream: "agents/factory",
+  sseTopic: "agent",
+  sseTokenEvent: "agent-token",
   sseHtmlTokenEvent: "factory-stream-token",
   sseResetEvent: "factory-stream-reset",
   jobKind: "factory.run",
-  normalizeConfig: normalizeFactoryChatConfig, runtime: agentRuntime,
-  prompts: AGENT_PROMPTS, model: FACTORY_CHAT_MODEL,
-  promptHash: AGENT_PROMPTS_HASH, promptPath: AGENT_PROMPTS_PATH,
-  runFn: runOrchestrator as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  normalizeConfig: normalizeFactoryChatConfig,
+  runtime: agentRuntime,
+  prompts: AGENT_PROMPTS,
+  model: FACTORY_CHAT_MODEL,
+  promptHash: AGENT_PROMPTS_HASH,
+  promptPath: AGENT_PROMPTS_PATH,
+  runFn: runOrchestrator as unknown as (
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>,
   extras: {
     memoryTools,
     delegationTools,
@@ -528,15 +722,19 @@ const factoryRunner = createAgentRunner({
   },
 });
 
-
-const parseDelegateTask = (payload: Record<string, unknown> | undefined): { task: string; agentId?: string } | undefined => {
+const parseDelegateTask = (
+  payload: Record<string, unknown> | undefined,
+): { task: string; agentId?: string } | undefined => {
   if (!payload || typeof payload !== "object") return undefined;
   const candidate = payload.delegate_task;
   if (!candidate || typeof candidate !== "object") return undefined;
   const rec = candidate as Record<string, unknown>;
   const task = typeof rec.task === "string" ? rec.task.trim() : "";
   if (!task) return undefined;
-  const agentId = typeof rec.agentId === "string" && rec.agentId.trim().length > 0 ? rec.agentId.trim() : undefined;
+  const agentId =
+    typeof rec.agentId === "string" && rec.agentId.trim().length > 0
+      ? rec.agentId.trim()
+      : undefined;
   return { task, agentId };
 };
 
@@ -572,12 +770,27 @@ const emitMergedSummary = async (opts: {
   sse.publish("receipt");
 };
 
-const summarizeSubJob = async (jobId: string, timeoutMs = subJobWaitMs): Promise<SubJobSummary> => {
+const summarizeSubJob = async (
+  jobId: string,
+  timeoutMs = subJobWaitMs,
+): Promise<SubJobSummary> => {
   const done = await queue.waitForJob(jobId, timeoutMs, subJobPollMs);
-  if (!done) return { summary: `sub-agent status: missing (${jobId})`, done: true };
-  if (done.status === "completed") return { summary: JSON.stringify(done.result ?? { status: done.status }), done: true };
-  if (done.status === "queued" || done.status === "leased" || done.status === "running") {
-    return { summary: `sub-agent status: pending (${done.status}; job ${jobId})`, done: false };
+  if (!done)
+    return { summary: `sub-agent status: missing (${jobId})`, done: true };
+  if (done.status === "completed")
+    return {
+      summary: JSON.stringify(done.result ?? { status: done.status }),
+      done: true,
+    };
+  if (
+    done.status === "queued" ||
+    done.status === "leased" ||
+    done.status === "running"
+  ) {
+    return {
+      summary: `sub-agent status: pending (${done.status}; job ${jobId})`,
+      done: false,
+    };
   }
   return { summary: `sub-agent status: ${done.status}`, done: true };
 };
@@ -602,15 +815,28 @@ const scheduleSubJobJoin = (opts: {
       baseStream: opts.parentStream,
       parentRunId: opts.parentRunId,
     });
-    const candidateJobIds = [...new Set([target.jobId, opts.parentJobId].filter((value): value is string => Boolean(value)))];
+    const candidateJobIds = [
+      ...new Set(
+        [target.jobId, opts.parentJobId].filter((value): value is string =>
+          Boolean(value),
+        ),
+      ),
+    ];
     for (const jobId of candidateJobIds) {
       const parent = await queue.getJob(jobId);
       if (!parent) continue;
-      if (parent.status !== "queued" && parent.status !== "leased" && parent.status !== "running") continue;
+      if (
+        parent.status !== "queued" &&
+        parent.status !== "leased" &&
+        parent.status !== "running"
+      )
+        continue;
       await queue.queueCommand({
         jobId,
         command: "follow_up",
-        payload: { note: `Sub-agent summary (${opts.subRunId}):\n${settled.summary}` },
+        payload: {
+          note: `Sub-agent summary (${opts.subRunId}):\n${settled.summary}`,
+        },
         by: "subagent-join",
       });
       sse.publish("jobs", jobId);
@@ -637,13 +863,20 @@ type WorkerHandlerSpec = {
 
 const mergeCommands = (
   merged: Record<string, unknown>,
-  commands: ReadonlyArray<{ command: string; payload?: Record<string, unknown> }>,
+  commands: ReadonlyArray<{
+    command: string;
+    payload?: Record<string, unknown>;
+  }>,
 ) => {
   for (const cmd of commands) {
     if (cmd.command === "steer" && cmd.payload) {
-      if (typeof cmd.payload.problem === "string") merged.problem = cmd.payload.problem;
+      if (typeof cmd.payload.problem === "string")
+        merged.problem = cmd.payload.problem;
       if (typeof cmd.payload.config === "object" && cmd.payload.config) {
-        merged.config = { ...(merged.config as Record<string, unknown> | undefined), ...(cmd.payload.config as Record<string, unknown>) };
+        merged.config = {
+          ...(merged.config as Record<string, unknown> | undefined),
+          ...(cmd.payload.config as Record<string, unknown>),
+        };
       }
     }
     if (cmd.command === "follow_up" && typeof cmd.payload?.note === "string") {
@@ -657,12 +890,17 @@ const handleDelegates = async (
   spec: WorkerHandlerSpec,
   job: { readonly id: string; readonly payload: Record<string, unknown> },
   merged: Record<string, unknown>,
-  commands: ReadonlyArray<{ command: string; payload?: Record<string, unknown> }>,
+  commands: ReadonlyArray<{
+    command: string;
+    payload?: Record<string, unknown>;
+  }>,
 ) => {
   if (Boolean(merged.isSubAgent)) return;
   for (const cmd of commands) {
     if (cmd.command !== "follow_up") continue;
-    const delegate = parseDelegateTask(cmd.payload as Record<string, unknown> | undefined);
+    const delegate = parseDelegateTask(
+      cmd.payload as Record<string, unknown> | undefined,
+    );
     if (!delegate) continue;
 
     const parentStream = String(merged.stream);
@@ -678,7 +916,8 @@ const handleDelegates = async (
       maxAttempts: 1,
       payload: {
         kind: spec.kind,
-        stream: subStream, runId: subRunId,
+        stream: subStream,
+        runId: subRunId,
         problem: delegate.task,
         config: spec.defaultSubConfig,
         isSubAgent: true,
@@ -687,11 +926,15 @@ const handleDelegates = async (
 
     const summaryNow = await summarizeSubJob(subJob.id);
     const base = typeof merged.problem === "string" ? merged.problem : "";
-    merged.problem = `${base}\n\nSub-agent summary (${subRunId}):\n${summaryNow.summary}`.trim();
+    merged.problem =
+      `${base}\n\nSub-agent summary (${subRunId}):\n${summaryNow.summary}`.trim();
 
     const mergedEvent = {
-      type: "subagent.merged", agentId: "orchestrator",
-      subJobId: subJob.id, subRunId, task: delegate.task,
+      type: "subagent.merged",
+      agentId: "orchestrator",
+      subJobId: subJob.id,
+      subRunId,
+      task: delegate.task,
       ...(spec.mergeEventExtras ?? {}),
     } as const;
 
@@ -701,7 +944,8 @@ const handleDelegates = async (
         baseStream: parentStream,
         parentRunId,
         eventIdForStream: makeEventId,
-        eventForRun: (runId) => ({ ...mergedEvent, runId, summary } satisfies AgentEvent),
+        eventForRun: (runId) =>
+          ({ ...mergedEvent, runId, summary }) satisfies AgentEvent,
       });
     };
 
@@ -721,11 +965,13 @@ const handleDelegates = async (
   }
 };
 
-const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
+const createWorkerHandler =
+  (spec: WorkerHandlerSpec): JobHandler =>
   async (job, ctx) => {
     const commands = await ctx.pullCommands(["steer", "follow_up"]);
     const merged = { ...job.payload } as Record<string, unknown>;
-    if (typeof merged.stream !== "string" || !merged.stream.trim()) merged.stream = spec.defaultStream;
+    if (typeof merged.stream !== "string" || !merged.stream.trim())
+      merged.stream = spec.defaultStream;
     if (typeof merged.runId !== "string" || !merged.runId.trim()) {
       merged.runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     }
@@ -740,11 +986,15 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
     if (normalizedResult.status === "failed") {
       const decision = deriveJobFailureDecision(normalizedResult);
       if (job.payload.kind === "factory.task.run" && decision.noRetry) {
-        await factoryService.applyTaskWorkerResult(job.payload as never, {
-          summary: `Codex job failed: ${decision.error}`,
-          outcome: "blocked",
-        }).catch(() => undefined);
-        await factoryService.reactObjective(String(job.payload.objectiveId ?? "")).catch(() => undefined);
+        await factoryService
+          .applyTaskWorkerResult(job.payload as never, {
+            summary: `Codex job failed: ${decision.error}`,
+            outcome: "blocked",
+          })
+          .catch(() => undefined);
+        await factoryService
+          .reactObjective(String(job.payload.objectiveId ?? ""))
+          .catch(() => undefined);
       }
       return {
         ok: false,
@@ -758,19 +1008,30 @@ const createWorkerHandler = (spec: WorkerHandlerSpec): JobHandler =>
 
 const jobHandlers = {
   agent: createWorkerHandler({
-    defaultStream: "agents/agent", defaultAgentId: "agent", kind: "agent.run",
-    defaultSubConfig: { maxIterations: 3, maxToolOutputChars: 2500, memoryScope: "agent", workspace: "." },
-    runtime: agentRuntime, runner: agentRunner,
+    defaultStream: "agents/agent",
+    defaultAgentId: "agent",
+    kind: "agent.run",
+    defaultSubConfig: {
+      maxIterations: 3,
+      maxToolOutputChars: 2500,
+      memoryScope: "agent",
+      workspace: ".",
+    },
+    runtime: agentRuntime,
+    runner: agentRunner,
   }),
   factory: createWorkerHandler({
-    defaultStream: "agents/factory", defaultAgentId: "factory", kind: "factory.run",
+    defaultStream: "agents/factory",
+    defaultAgentId: "factory",
+    kind: "factory.run",
     defaultSubConfig: {
       maxIterations: 8,
       maxToolOutputChars: 6000,
       memoryScope: "repos/factory/profiles/generalist",
       workspace: ".",
     },
-    runtime: agentRuntime, runner: factoryRunner,
+    runtime: agentRuntime,
+    runner: factoryRunner,
   }),
   ...factoryWorkerHandlers,
   codex: async (job, ctx) => {
@@ -779,7 +1040,8 @@ const jobHandlers = {
     }
     await ctx.pullCommands(["steer", "follow_up"]);
     const payload = job.payload as Record<string, unknown>;
-    const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+    const prompt =
+      typeof payload.prompt === "string" ? payload.prompt.trim() : "";
     if (!prompt) {
       return {
         ok: false,
@@ -788,20 +1050,29 @@ const jobHandlers = {
         result: { status: "failed", summary: "factory codex prompt required" },
       };
     }
-    const timeoutMs = typeof payload.timeoutMs === "number" && Number.isFinite(payload.timeoutMs)
-      ? Math.max(30_000, Math.min(Math.floor(payload.timeoutMs), 900_000))
-      : 180_000;
+    const timeoutMs =
+      typeof payload.timeoutMs === "number" &&
+      Number.isFinite(payload.timeoutMs)
+        ? Math.max(30_000, Math.min(Math.floor(payload.timeoutMs), 900_000))
+        : 180_000;
     const isTerminalJobStatus = (status: unknown): boolean =>
       status === "completed" || status === "failed" || status === "canceled";
     const shouldAbort = async (): Promise<boolean> => {
       const latest = await queue.getJob(job.id);
-      return latest?.abortRequested === true || isTerminalJobStatus(latest?.status);
+      return (
+        latest?.abortRequested === true || isTerminalJobStatus(latest?.status)
+      );
     };
-    const parentRunId = typeof payload.parentRunId === "string" ? payload.parentRunId.trim() : "";
-    const parentStream = typeof payload.parentStream === "string" ? payload.parentStream.trim() : "";
-    const task = typeof payload.task === "string" && payload.task.trim()
-      ? payload.task.trim()
-      : prompt;
+    const parentRunId =
+      typeof payload.parentRunId === "string" ? payload.parentRunId.trim() : "";
+    const parentStream =
+      typeof payload.parentStream === "string"
+        ? payload.parentStream.trim()
+        : "";
+    const task =
+      typeof payload.task === "string" && payload.task.trim()
+        ? payload.task.trim()
+        : prompt;
     let lastMergedSummary = "";
     const emitCodexMerged = async (summary: string): Promise<void> => {
       const next = summary.trim();
@@ -817,33 +1088,41 @@ const jobHandlers = {
       });
     };
     try {
-      const result = await runFactoryCodexJob({
-        dataDir: DATA_DIR,
-        repoRoot: factoryService.git.repoRoot,
-        jobId: job.id,
-        prompt,
-        timeoutMs,
-        executor: factoryService.codexExecutor,
-        factoryService,
-        payload,
-        onProgress: async (update) => {
-          await queue.progress(job.id, ctx.workerId, update);
-          const summary = typeof update.summary === "string" ? update.summary : "";
-          await emitCodexMerged(summary);
+      const result = await runFactoryCodexJob(
+        {
+          dataDir: DATA_DIR,
+          repoRoot: factoryService.git.repoRoot,
+          jobId: job.id,
+          prompt,
+          timeoutMs,
+          executor: factoryService.codexExecutor,
+          factoryService,
+          payload,
+          onProgress: async (update) => {
+            await queue.progress(job.id, ctx.workerId, update);
+            const summary =
+              typeof update.summary === "string" ? update.summary : "";
+            await emitCodexMerged(summary);
+          },
         },
-      }, {
-        shouldAbort,
-        onChildSpawn: async (update) => {
-          ctx.registerLeaseProcess({
-            pid: update.pid,
-            label: "codex child",
-          });
+        {
+          shouldAbort,
+          onChildSpawn: async (update) => {
+            ctx.registerLeaseProcess({
+              pid: update.pid,
+              label: "codex child",
+            });
+          },
+          onChildExit: async () => {
+            ctx.clearLeaseProcess();
+          },
         },
-        onChildExit: async () => {
-          ctx.clearLeaseProcess();
-        },
-      });
-      await emitCodexMerged(typeof result.summary === "string" ? result.summary : "Codex completed.");
+      );
+      await emitCodexMerged(
+        typeof result.summary === "string"
+          ? result.summary
+          : "Codex completed.",
+      );
       return { ok: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -913,18 +1192,20 @@ const workers = [
     },
   }),
 ];
-const resonateRoleRuntime = JOB_BACKEND === "resonate"
-  ? createResonateRoleRuntime(PROCESS_ROLE, {
-      queue,
-      handlers: jobHandlers,
-      onError: (error) => {
-        console.error(`[resonate ${PROCESS_ROLE}]`, error);
-      },
-    })
-  : undefined;
-const startResonateDriver = JOB_BACKEND === "resonate"
-  ? createResonateDriverStarter(resonateRoleRuntime!.client)
-  : undefined;
+const resonateRoleRuntime =
+  JOB_BACKEND === "resonate"
+    ? createResonateRoleRuntime(PROCESS_ROLE, {
+        queue,
+        handlers: jobHandlers,
+        onError: (error) => {
+          console.error(`[resonate ${PROCESS_ROLE}]`, error);
+        },
+      })
+    : undefined;
+const startResonateDriver =
+  JOB_BACKEND === "resonate"
+    ? createResonateDriverStarter(resonateRoleRuntime!.client)
+    : undefined;
 if (redriveQueuedJobRef && PROCESS_ROLE === "api") {
   redriveQueuedJobRef.current = async (job) => {
     const now = Date.now();
@@ -972,7 +1253,8 @@ const scheduleObjectiveResume = (): void => {
       runtimeHealthState.lastResumeErrorAt = undefined;
       await evaluateLocalRuntimeWatchdog();
     } catch (err) {
-      runtimeHealthState.lastResumeError = err instanceof Error ? err.message : String(err);
+      runtimeHealthState.lastResumeError =
+        err instanceof Error ? err.message : String(err);
       runtimeHealthState.lastResumeErrorAt = Date.now();
       console.error("[factory resume]", err);
     }
@@ -1018,7 +1300,7 @@ const heartbeats = heartbeatSpecs.map((spec) =>
       sse.publish("jobs", created.id);
       return { id: created.id };
     },
-  })
+  }),
 );
 
 const app = new Hono();
@@ -1072,14 +1354,18 @@ const jsonResponse = (status: number, body: unknown): Response =>
   });
 
 class BadJsonError extends Error {
-  constructor(msg: string) { super(msg); }
+  constructor(msg: string) {
+    super(msg);
+  }
 }
 
 const readJsonBody = async (req: Request): Promise<Record<string, unknown>> => {
   const rawText = await req.text();
   if (!rawText.trim()) return {};
   let parsed: unknown;
-  try { parsed = JSON.parse(rawText); } catch {
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
     throw new BadJsonError("Malformed JSON body");
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -1091,27 +1377,42 @@ const readJsonBody = async (req: Request): Promise<Record<string, unknown>> => {
 app.post("/agents/:id/jobs", async (c) => {
   const agentId = c.req.param("id");
   const body = await readJsonBody(c.req.raw);
-  const payload = (typeof body.payload === "object" && body.payload)
-    ? body.payload as Record<string, unknown>
-    : body;
-  const lane = body.lane === "chat" || body.lane === "steer" || body.lane === "follow_up" || body.lane === "collect"
-    ? body.lane
-    : "collect";
+  const payload =
+    typeof body.payload === "object" && body.payload
+      ? (body.payload as Record<string, unknown>)
+      : body;
+  const lane =
+    body.lane === "chat" ||
+    body.lane === "steer" ||
+    body.lane === "follow_up" ||
+    body.lane === "collect"
+      ? body.lane
+      : "collect";
   const jobId = typeof body.jobId === "string" ? body.jobId : undefined;
-  const maxAttempts = typeof body.maxAttempts === "number" && Number.isFinite(body.maxAttempts)
-    ? Math.max(1, Math.min(Math.floor(body.maxAttempts), 8))
-    : 2;
-  const singleton = (typeof body.singleton === "object" && body.singleton)
-    ? body.singleton as Record<string, unknown>
-    : undefined;
-  const sessionKey = typeof body.sessionKey === "string"
-    ? body.sessionKey
-    : (typeof singleton?.key === "string" ? singleton.key : undefined);
-  const singletonMode = body.singletonMode === "allow" || body.singletonMode === "cancel" || body.singletonMode === "steer"
-    ? body.singletonMode
-    : (singleton?.mode === "allow" || singleton?.mode === "cancel" || singleton?.mode === "steer"
-      ? singleton.mode
-      : "allow");
+  const maxAttempts =
+    typeof body.maxAttempts === "number" && Number.isFinite(body.maxAttempts)
+      ? Math.max(1, Math.min(Math.floor(body.maxAttempts), 8))
+      : 2;
+  const singleton =
+    typeof body.singleton === "object" && body.singleton
+      ? (body.singleton as Record<string, unknown>)
+      : undefined;
+  const sessionKey =
+    typeof body.sessionKey === "string"
+      ? body.sessionKey
+      : typeof singleton?.key === "string"
+        ? singleton.key
+        : undefined;
+  const singletonMode =
+    body.singletonMode === "allow" ||
+    body.singletonMode === "cancel" ||
+    body.singletonMode === "steer"
+      ? body.singletonMode
+      : singleton?.mode === "allow" ||
+          singleton?.mode === "cancel" ||
+          singleton?.mode === "steer"
+        ? singleton.mode
+        : "allow";
 
   const job = await queue.enqueue({
     jobId,
@@ -1152,9 +1453,10 @@ app.get("/healthz", async () => {
 app.post("/jobs/:id/steer", async (c) => {
   const jobId = c.req.param("id");
   const body = await readJsonBody(c.req.raw);
-  const payload = (typeof body.payload === "object" && body.payload)
-    ? body.payload as Record<string, unknown>
-    : body;
+  const payload =
+    typeof body.payload === "object" && body.payload
+      ? (body.payload as Record<string, unknown>)
+      : body;
   const queued = await queue.queueCommand({
     jobId,
     command: "steer",
@@ -1169,9 +1471,10 @@ app.post("/jobs/:id/steer", async (c) => {
 app.post("/jobs/:id/follow-up", async (c) => {
   const jobId = c.req.param("id");
   const body = await readJsonBody(c.req.raw);
-  const payload = (typeof body.payload === "object" && body.payload)
-    ? body.payload as Record<string, unknown>
-    : body;
+  const payload =
+    typeof body.payload === "object" && body.payload
+      ? (body.payload as Record<string, unknown>)
+      : body;
   const queued = await queue.queueCommand({
     jobId,
     command: "follow_up",
@@ -1186,7 +1489,8 @@ app.post("/jobs/:id/follow-up", async (c) => {
 app.post("/jobs/:id/abort", async (c) => {
   const jobId = c.req.param("id");
   const body = await readJsonBody(c.req.raw);
-  const reason = typeof body.reason === "string" ? body.reason : "abort requested";
+  const reason =
+    typeof body.reason === "string" ? body.reason : "abort requested";
   const queued = await queue.queueCommand({
     jobId,
     command: "abort",
@@ -1206,26 +1510,33 @@ app.get("/jobs/:id", async (c) => {
 
 app.get("/jobs/:id/wait", async (c) => {
   const timeoutMsRaw = Number(c.req.query("timeoutMs") ?? 15_000);
-  const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(0, Math.min(timeoutMsRaw, 120_000)) : 15_000;
+  const timeoutMs = Number.isFinite(timeoutMsRaw)
+    ? Math.max(0, Math.min(timeoutMsRaw, 120_000))
+    : 15_000;
   const job = await queue.waitForJob(c.req.param("id"), timeoutMs, 200);
   if (!job) return text(404, "job not found");
   return jsonResponse(200, job);
 });
 
-app.get("/jobs/:id/events", async (c) => sse.subscribe("jobs", c.req.param("id"), c.req.raw.signal));
+app.get("/jobs/:id/events", async (c) =>
+  sse.subscribe("jobs", c.req.param("id"), c.req.raw.signal),
+);
 
 app.get("/jobs", async (c) => {
   const status = c.req.query("status");
-  const parsed = status === "queued"
-    || status === "leased"
-    || status === "running"
-    || status === "completed"
-    || status === "failed"
-    || status === "canceled"
-    ? status
-    : undefined;
+  const parsed =
+    status === "queued" ||
+    status === "leased" ||
+    status === "running" ||
+    status === "completed" ||
+    status === "failed" ||
+    status === "canceled"
+      ? status
+      : undefined;
   const limitRaw = Number(c.req.query("limit") ?? 50);
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 50;
+  const limit = Number.isFinite(limitRaw)
+    ? Math.max(1, Math.min(limitRaw, 500))
+    : 50;
   const jobs = await queue.listJobs({ status: parsed, limit });
   return jsonResponse(200, { jobs });
 });
@@ -1261,7 +1572,8 @@ app.post("/memory/:scope/summarize", async (c) => {
   const body = await readJsonBody(c.req.raw);
   const query = typeof body.query === "string" ? body.query : undefined;
   const limit = typeof body.limit === "number" ? body.limit : undefined;
-  const maxChars = typeof body.maxChars === "number" ? body.maxChars : undefined;
+  const maxChars =
+    typeof body.maxChars === "number" ? body.maxChars : undefined;
   const result = await memoryTools.summarize({
     scope,
     query,
@@ -1284,7 +1596,10 @@ app.post("/memory/:scope/commit", async (c) => {
     scope,
     text: textValue,
     tags,
-    meta: typeof body.meta === "object" && body.meta ? body.meta as Record<string, unknown> : undefined,
+    meta:
+      typeof body.meta === "object" && body.meta
+        ? (body.meta as Record<string, unknown>)
+        : undefined,
   });
   sse.publish("receipt");
   return jsonResponse(201, { entry });
@@ -1316,7 +1631,8 @@ const MIME_TYPES: Record<string, string> = {
 
 app.get("/assets/:file", async (c) => {
   const fileName = c.req.param("file");
-  if (fileName.includes("..") || fileName.includes("/")) return text(400, "invalid asset path");
+  if (fileName.includes("..") || fileName.includes("/"))
+    return text(400, "invalid asset path");
   const filePath = path.join(ASSET_DIR, fileName);
   try {
     const body = fs.readFileSync(filePath);
@@ -1325,7 +1641,8 @@ app.get("/assets/:file", async (c) => {
     return new Response(body, {
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": ext === ".css" || ext === ".js" ? "no-cache" : "public, max-age=3600",
+        "Cache-Control":
+          ext === ".css" || ext === ".js" ? "no-cache" : "public, max-age=3600",
       },
     });
   } catch {
@@ -1349,9 +1666,12 @@ const scheduleUiWarmup = (): void => {
       console.error("[factory ui warmup]", err);
     }
   };
-  const timer = setTimeout(() => {
-    void runWarmup();
-  }, Math.max(50, Math.min(STARTUP_SETTLE_MS || 250, 500)));
+  const timer = setTimeout(
+    () => {
+      void runWarmup();
+    },
+    Math.max(50, Math.min(STARTUP_SETTLE_MS || 250, 500)),
+  );
   timer.unref();
 };
 
@@ -1367,7 +1687,12 @@ if (shouldRunHeartbeats) {
 }
 
 let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "api" && Number.isFinite(queueRefreshMs) && queueRefreshMs > 0) {
+if (
+  JOB_BACKEND === "resonate" &&
+  PROCESS_ROLE === "api" &&
+  Number.isFinite(queueRefreshMs) &&
+  queueRefreshMs > 0
+) {
   let refreshInFlight = false;
   const refreshIntervalMs = Math.max(1_000, Math.floor(queueRefreshMs));
   const scheduleNextQueueRefresh = (): void => {
@@ -1391,9 +1716,16 @@ if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "api" && Number.isFinite(queu
   scheduleNextQueueRefresh();
 }
 let localRuntimeWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
-if (JOB_BACKEND === "local" && Number.isFinite(LOCAL_RUNTIME_WATCHDOG_MS) && LOCAL_RUNTIME_WATCHDOG_MS > 0) {
+if (
+  JOB_BACKEND === "local" &&
+  Number.isFinite(LOCAL_RUNTIME_WATCHDOG_MS) &&
+  LOCAL_RUNTIME_WATCHDOG_MS > 0
+) {
   let watchdogInFlight = false;
-  const watchdogIntervalMs = Math.max(1_000, Math.floor(LOCAL_RUNTIME_WATCHDOG_MS));
+  const watchdogIntervalMs = Math.max(
+    1_000,
+    Math.floor(LOCAL_RUNTIME_WATCHDOG_MS),
+  );
   const scheduleNextLocalRuntimeWatchdog = (): void => {
     localRuntimeWatchdogTimer = setTimeout(async () => {
       if (watchdogInFlight) {
@@ -1432,7 +1764,8 @@ if (shouldServeHttp) {
         }
         if (change.stream.startsWith("factory/objectives/")) {
           const objectiveId = change.stream.slice("factory/objectives/".length);
-          if (objectiveId && !objectiveId.includes("/")) sse.publish("factory", objectiveId);
+          if (objectiveId && !objectiveId.includes("/"))
+            sse.publish("factory", objectiveId);
         }
       }
     } catch (err) {
@@ -1448,21 +1781,31 @@ const serverOptions: Bun.Serve.Options<undefined> = {
   port: PORT,
   idleTimeout: SERVER_IDLE_TIMEOUT_SECONDS,
 };
-const serveWithOptions = Bun.serve as (options: Bun.Serve.Options<undefined>) => Bun.Server<undefined>;
+const serveWithOptions = Bun.serve as (
+  options: Bun.Serve.Options<undefined>,
+) => Bun.Server<undefined>;
 
-const httpServer = shouldServeHttp ? serveWithOptions(serverOptions) : undefined;
+const httpServer = shouldServeHttp
+  ? serveWithOptions(serverOptions)
+  : undefined;
 if (httpServer) {
   console.log(`Receipt server listening on http://localhost:${PORT}`);
 } else {
-  console.log(`Receipt ${PROCESS_ROLE} runtime connected to ${process.env.RESONATE_URL ?? "http://127.0.0.1:8001"}`);
+  console.log(
+    `Receipt ${PROCESS_ROLE} runtime connected to ${process.env.RESONATE_URL ?? "http://127.0.0.1:8001"}`,
+  );
 }
 
 scheduleObjectiveResume();
 scheduleUiWarmup();
 
 console.log(`Receipt runtime root: ${WORKSPACE_ROOT}`);
-console.log(`Receipt data dir: ${DATA_DIR}${FACTORY_RUNTIME.configPath ? ` (from ${FACTORY_RUNTIME.configPath})` : ""}`);
-console.log(`Receipt backend: ${JOB_BACKEND}${JOB_BACKEND === "resonate" ? ` (${PROCESS_ROLE})` : ""}`);
+console.log(
+  `Receipt data dir: ${DATA_DIR}${FACTORY_RUNTIME.configPath ? ` (from ${FACTORY_RUNTIME.configPath})` : ""}`,
+);
+console.log(
+  `Receipt backend: ${JOB_BACKEND}${JOB_BACKEND === "resonate" ? ` (${PROCESS_ROLE})` : ""}`,
+);
 
 let shuttingDown = false;
 const shutdown = (signal: string): void => {

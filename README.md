@@ -181,6 +181,8 @@ bun src/cli.ts memory read factory/objectives/<objective-id> --limit 5
 bun src/cli.ts memory search factory/repo/shared --query "integration failure"
 ```
 
+Memory internals and behavior are documented in `docs/memory.md`.
+
 The live guidance commands target a Factory-visible job directly:
 
 - `receipt factory steer <job-id> --message "<updated direction>"` retargets the active run when the operator needs to correct the plan.

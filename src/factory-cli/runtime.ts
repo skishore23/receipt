@@ -6,16 +6,33 @@ import { jsonlQueue } from "../adapters/jsonl-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../engine/runtime/job-worker";
 import { SseHub } from "../framework/sse-hub";
-import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job";
+import {
+  decide as decideJob,
+  initial as initialJob,
+  reduce as reduceJob,
+  type JobCmd,
+  type JobEvent,
+  type JobState,
+} from "../modules/job";
 import {
   shouldQueueObjectiveControlReconcile,
   shouldReconcileObjectiveFromJobChange,
 } from "../services/factory-job-gates";
-import { createFactoryServiceRuntime, createFactoryWorkerHandlers } from "../services/factory-runtime";
+import {
+  createFactoryServiceRuntime,
+  createFactoryWorkerHandlers,
+} from "../services/factory-runtime";
 import { FACTORY_CONTROL_AGENT_ID } from "../services/factory-service";
-import type { FactoryService, FactoryTaskView } from "../services/factory-service";
+import type {
+  FactoryService,
+  FactoryTaskView,
+} from "../services/factory-service";
 import type { FactoryCliConfig } from "./config";
-import { getReceiptDb, listChangesAfter, pollLatestChangeSeq } from "../db/client";
+import {
+  getReceiptDb,
+  listChangesAfter,
+  pollLatestChangeSeq,
+} from "../db/client";
 
 export type FactoryCliRuntime = {
   readonly config: FactoryCliConfig;
@@ -24,35 +41,38 @@ export type FactoryCliRuntime = {
   readonly worker: JobWorker;
   readonly subscribe: (listener: FactoryCliRuntimeListener) => () => void;
   readonly focusObjective: (objectiveId?: string) => Promise<void>;
-  readonly trackTaskLogs: (objectiveId: string | undefined, tasks: ReadonlyArray<FactoryTaskView>) => void;
+  readonly trackTaskLogs: (
+    objectiveId: string | undefined,
+    tasks: ReadonlyArray<FactoryTaskView>,
+  ) => void;
   readonly start: () => Promise<void>;
   readonly stop: () => void;
 };
 
 export type FactoryCliRuntimeEvent =
   | {
-    readonly type: "queue_changed";
-    readonly jobIds: ReadonlyArray<string>;
-    readonly at: number;
-  }
+      readonly type: "queue_changed";
+      readonly jobIds: ReadonlyArray<string>;
+      readonly at: number;
+    }
   | {
-    readonly type: "objective_changed";
-    readonly objectiveId: string;
-    readonly at: number;
-  }
+      readonly type: "objective_changed";
+      readonly objectiveId: string;
+      readonly at: number;
+    }
   | {
-    readonly type: "log_updated";
-    readonly objectiveId: string;
-    readonly taskId?: string;
-    readonly stream: "stdout" | "stderr" | "last_message";
-    readonly filePath: string;
-    readonly at: number;
-  }
+      readonly type: "log_updated";
+      readonly objectiveId: string;
+      readonly taskId?: string;
+      readonly stream: "stdout" | "stderr" | "last_message";
+      readonly filePath: string;
+      readonly at: number;
+    }
   | {
-    readonly type: "worker_error";
-    readonly error: Error;
-    readonly at: number;
-  };
+      readonly type: "worker_error";
+      readonly error: Error;
+      readonly at: number;
+    };
 
 export type FactoryCliRuntimeListener = (event: FactoryCliRuntimeEvent) => void;
 
@@ -60,12 +80,26 @@ type FactoryCliRuntimeOptions = {
   readonly onWorkerError?: (error: Error) => void;
 };
 
-const parseBooleanEnv = (value: string | undefined, fallback: boolean): boolean => {
+const parseBooleanEnv = (
+  value: string | undefined,
+  fallback: boolean,
+): boolean => {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return fallback;
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
+};
+
+const parseListEnv = (
+  value: string | undefined,
+  fallback: ReadonlyArray<string>,
+): ReadonlyArray<string> => {
+  const normalized = value?.trim();
+  const values = (normalized ? normalized.split(",") : [...fallback])
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return [...new Set(values)];
 };
 
 export const createFactoryCliRuntime = (
@@ -92,7 +126,11 @@ export const createFactoryCliRuntime = (
     watcher.close();
     watchers.delete(key);
   };
-  const watchPath = (key: string, filePath: string, onChange: () => void): void => {
+  const watchPath = (
+    key: string,
+    filePath: string,
+    onChange: () => void,
+  ): void => {
     const dir = path.dirname(filePath);
     const base = path.basename(filePath);
     closeWatcher(key);
@@ -126,34 +164,44 @@ export const createFactoryCliRuntime = (
       });
 
       for (const job of jobs) {
-        const objectiveId = typeof job.payload.objectiveId === "string" && job.payload.objectiveId.trim().length > 0
-          ? job.payload.objectiveId.trim()
-          : undefined;
-        if (!objectiveId || !shouldReconcileObjectiveFromJobChange(job)) continue;
+        const objectiveId =
+          typeof job.payload.objectiveId === "string" &&
+          job.payload.objectiveId.trim().length > 0
+            ? job.payload.objectiveId.trim()
+            : undefined;
+        if (!objectiveId || !shouldReconcileObjectiveFromJobChange(job))
+          continue;
         const [recentJobs, detail] = await Promise.all([
           queue.listJobs({ limit: 200 }),
-          serviceRef?.getObjective(objectiveId).catch(() => undefined) ?? Promise.resolve(undefined),
+          serviceRef?.getObjective(objectiveId).catch(() => undefined) ??
+            Promise.resolve(undefined),
         ]);
         const shouldQueue = shouldQueueObjectiveControlReconcile({
           controlAgentId: FACTORY_CONTROL_AGENT_ID,
           objectiveId,
           recentJobs,
           sourceUpdatedAt: job.updatedAt,
-          objectiveInactive: detail != null && ["blocked", "canceled", "completed", "failed"].includes(detail.status),
+          objectiveInactive:
+            detail != null &&
+            ["blocked", "canceled", "completed", "failed"].includes(
+              detail.status,
+            ),
         });
         if (!shouldQueue) continue;
-        queue.enqueue({
-          agentId: FACTORY_CONTROL_AGENT_ID,
-          lane: "collect",
-          sessionKey: `factory:objective:${objectiveId}`,
-          singletonMode: "steer",
-          maxAttempts: 1,
-          payload: {
-            kind: "factory.objective.control",
-            objectiveId,
-            reason: "reconcile",
-          },
-        }).catch(() => undefined);
+        queue
+          .enqueue({
+            agentId: FACTORY_CONTROL_AGENT_ID,
+            lane: "collect",
+            sessionKey: `factory:objective:${objectiveId}`,
+            singletonMode: "steer",
+            maxAttempts: 1,
+            payload: {
+              kind: "factory.objective.control",
+              objectiveId,
+              reason: "reconcile",
+            },
+          })
+          .catch(() => undefined);
       }
     },
   });
@@ -169,12 +217,24 @@ export const createFactoryCliRuntime = (
   serviceRef = service;
 
   const handlers = createFactoryWorkerHandlers(service, {
-    auditAutoFixEnabled: parseBooleanEnv(process.env.RECEIPT_FACTORY_AUTO_FIX_ENABLED, false),
+    auditAutoFixEnabled: parseBooleanEnv(
+      process.env.RECEIPT_FACTORY_AUTO_FIX_ENABLED,
+      true,
+    ),
+    auditAutoFixSourceChannels: parseListEnv(
+      process.env.RECEIPT_FACTORY_AUTO_FIX_SOURCE_CHANNELS,
+      ["trial"],
+    ),
   });
   const worker = new JobWorker({
     queue,
     workerId: process.env.JOB_WORKER_ID ?? `factory_cli_${process.pid}`,
-    idleResyncMs: Math.max(1_000, Number(process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000)),
+    idleResyncMs: Math.max(
+      1_000,
+      Number(
+        process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000,
+      ),
+    ),
     leaseMs: Math.max(5_000, Number(process.env.JOB_LEASE_MS ?? 30_000)),
     concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 12)),
     leaseAgentIds: Object.keys(handlers),
@@ -193,16 +253,20 @@ export const createFactoryCliRuntime = (
     closeWatcher(objectiveWatchKey);
     focusedObjectiveId = objectiveId;
   };
-  const trackTaskLogs = (objectiveId: string | undefined, tasks: ReadonlyArray<FactoryTaskView>): void => {
+  const trackTaskLogs = (
+    objectiveId: string | undefined,
+    tasks: ReadonlyArray<FactoryTaskView>,
+  ): void => {
     for (const key of [...watchers.keys()]) {
       if (key.startsWith("log:")) closeWatcher(key);
     }
     if (!objectiveId) return;
-    const activeTasks = tasks.filter((task) =>
-      task.status === "running"
-      || task.status === "reviewing"
-      || task.jobStatus === "running"
-      || task.jobStatus === "leased",
+    const activeTasks = tasks.filter(
+      (task) =>
+        task.status === "running" ||
+        task.status === "reviewing" ||
+        task.jobStatus === "running" ||
+        task.jobStatus === "leased",
     );
     for (const task of activeTasks) {
       const streams = [

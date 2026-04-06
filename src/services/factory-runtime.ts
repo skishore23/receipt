@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 
-import { CodexControlSignalError, LocalCodexExecutor } from "../adapters/codex-executor";
+import {
+  CodexControlSignalError,
+  LocalCodexExecutor,
+} from "../adapters/codex-executor";
 import type { JobBackend } from "../adapters/job-backend";
 import {
   createMemoryTools,
@@ -37,7 +40,9 @@ import {
 import { isSqliteLockError } from "../db/client";
 
 export type FactoryQueue = JobBackend;
-export type FactoryJobRuntime = ReturnType<typeof createRuntime<JobCmd, JobEvent, JobState>>;
+export type FactoryJobRuntime = ReturnType<
+  typeof createRuntime<JobCmd, JobEvent, JobState>
+>;
 
 type FactoryServiceRuntimeOptions = {
   readonly dataDir: string;
@@ -88,17 +93,28 @@ type LiveGuidanceCommand = {
   readonly payload?: Record<string, unknown>;
 };
 
-const guidanceMessageFromCommand = (command: LiveGuidanceCommand): string | undefined => {
+const guidanceMessageFromCommand = (
+  command: LiveGuidanceCommand,
+): string | undefined => {
   const payload = command.payload;
   if (!payload || typeof payload !== "object") return undefined;
-  const direct = typeof payload.message === "string" && payload.message.trim().length > 0
-    ? payload.message.trim()
-    : undefined;
+  const direct =
+    typeof payload.message === "string" && payload.message.trim().length > 0
+      ? payload.message.trim()
+      : undefined;
   if (direct) return direct;
-  if (command.command === "steer" && typeof payload.problem === "string" && payload.problem.trim().length > 0) {
+  if (
+    command.command === "steer" &&
+    typeof payload.problem === "string" &&
+    payload.problem.trim().length > 0
+  ) {
     return payload.problem.trim();
   }
-  if (command.command === "follow_up" && typeof payload.note === "string" && payload.note.trim().length > 0) {
+  if (
+    command.command === "follow_up" &&
+    typeof payload.note === "string" &&
+    payload.note.trim().length > 0
+  ) {
     return payload.note.trim();
   }
   return undefined;
@@ -107,21 +123,32 @@ const guidanceMessageFromCommand = (command: LiveGuidanceCommand): string | unde
 const coalesceLiveGuidanceSignal = (
   jobId: string,
   commands: ReadonlyArray<LiveGuidanceCommand>,
-): {
-  readonly kind: "restart";
-  readonly note: string;
-  readonly meta: Record<string, unknown>;
-} | undefined => {
-  const liveCommands = commands.filter((command) => command.command === "steer" || command.command === "follow_up");
+):
+  | {
+      readonly kind: "restart";
+      readonly note: string;
+      readonly meta: Record<string, unknown>;
+    }
+  | undefined => {
+  const liveCommands = commands.filter(
+    (command) => command.command === "steer" || command.command === "follow_up",
+  );
   if (liveCommands.length === 0) return undefined;
-  const messages = [...new Set(liveCommands.map((command) => guidanceMessageFromCommand(command)).filter((item): item is string => Boolean(item)))];
+  const messages = [
+    ...new Set(
+      liveCommands
+        .map((command) => guidanceMessageFromCommand(command))
+        .filter((item): item is string => Boolean(item)),
+    ),
+  ];
   if (messages.length === 0) return undefined;
-  const guidanceKind: LiveGuidanceKind =
-    liveCommands.every((command) => command.command === "steer")
-      ? "steer"
-      : liveCommands.every((command) => command.command === "follow_up")
-        ? "follow_up"
-        : "mixed";
+  const guidanceKind: LiveGuidanceKind = liveCommands.every(
+    (command) => command.command === "steer",
+  )
+    ? "steer"
+    : liveCommands.every((command) => command.command === "follow_up")
+      ? "follow_up"
+      : "mixed";
   const note = messages.join("\n\n");
   return {
     kind: "restart",
@@ -136,7 +163,10 @@ const coalesceLiveGuidanceSignal = (
   };
 };
 
-const appendLiveOperatorGuidance = (prompt: string, guidanceBlocks: ReadonlyArray<string>): string => {
+const appendLiveOperatorGuidance = (
+  prompt: string,
+  guidanceBlocks: ReadonlyArray<string>,
+): string => {
   const normalizedPrompt = prompt.trimEnd();
   if (guidanceBlocks.length === 0) return normalizedPrompt;
   const section = [
@@ -148,7 +178,9 @@ const appendLiveOperatorGuidance = (prompt: string, guidanceBlocks: ReadonlyArra
 
 const AUTOFIX_PATTERN_THRESHOLD = 5;
 const RECENT_AUDIT_PATTERN_WINDOW = 20;
-const USAGE_LIMIT_ANOMALY_RE = /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
+const DEFAULT_AUTO_FIX_SOURCE_CHANNELS = ["trial"] as const;
+const USAGE_LIMIT_ANOMALY_RE =
+  /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
 
 const normalizeAuditPattern = (value: string): string => {
   const normalized = value
@@ -161,29 +193,56 @@ const normalizeAuditPattern = (value: string): string => {
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 
 const asArray = (value: unknown): ReadonlyArray<unknown> =>
   Array.isArray(value) ? value : [];
 
 const asString = (value: unknown): string | undefined =>
-  typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+
+const normalizeAuditChannel = (
+  value: string | undefined,
+): string | undefined => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized ? normalized : undefined;
+};
+
+const normalizeAuditChannelList = (
+  values: ReadonlyArray<string | undefined>,
+): ReadonlyArray<string> => [
+  ...new Set(
+    values
+      .map((value) => normalizeAuditChannel(value))
+      .filter((value): value is string => Boolean(value)),
+  ),
+];
 
 const categorizeAuditSummary = (summary: string): string | undefined => {
   const normalized = summary.toLowerCase();
   if (USAGE_LIMIT_ANOMALY_RE.test(summary)) return "quota_rate_limit";
   if (normalized.includes("lease expired")) return "lease_expired";
   if (isSqliteLockError(summary)) return "database_locked";
-  if (normalized.includes("iteration budget exhausted")) return "iteration_budget_exhausted";
-  if (/workspace (branch|path) already exists/i.test(summary)) return "workspace_collision";
-  if (/human input|operator|clarification|approval|permission denied|access denied|unauthorized|forbidden/i.test(summary)) {
+  if (normalized.includes("iteration budget exhausted"))
+    return "iteration_budget_exhausted";
+  if (/workspace (branch|path) already exists/i.test(summary))
+    return "workspace_collision";
+  if (
+    /human input|operator|clarification|approval|permission denied|access denied|unauthorized|forbidden/i.test(
+      summary,
+    )
+  ) {
     return "human_input_or_permission_gate";
   }
   return undefined;
 };
 
-const deriveRecommendationPatternsFromReport = (report: FactoryReceiptInvestigation): ReadonlyArray<string> => {
+const deriveRecommendationPatternsFromReport = (
+  report: FactoryReceiptInvestigation,
+): ReadonlyArray<string> => {
   const patterns = new Set<string>();
   for (const anomaly of report.anomalies) {
     if (anomaly.kind) patterns.add(normalizeAuditPattern(anomaly.kind));
@@ -192,23 +251,32 @@ const deriveRecommendationPatternsFromReport = (report: FactoryReceiptInvestigat
   }
   for (const note of report.assessment.notes) {
     const normalized = note.toLowerCase();
-    if (normalized.includes("without structured evidence entries")) patterns.add("missing_structured_evidence");
-    if (normalized.includes("scriptsrun") || normalized.includes("captured command logs")) patterns.add("missing_scripts_run");
+    if (normalized.includes("without structured evidence entries"))
+      patterns.add("missing_structured_evidence");
+    if (
+      normalized.includes("scriptsrun") ||
+      normalized.includes("captured command logs")
+    )
+      patterns.add("missing_scripts_run");
     if (normalized.includes("proof items")) patterns.add("missing_proof");
-    if (normalized.includes("alignment report")) patterns.add("alignment_not_reported");
+    if (normalized.includes("alignment report"))
+      patterns.add("alignment_not_reported");
   }
-  if (report.assessment.alignmentVerdict === "not_reported") patterns.add("alignment_not_reported");
+  if (report.assessment.alignmentVerdict === "not_reported")
+    patterns.add("alignment_not_reported");
   return [...patterns];
 };
 
 const AuditRecommendationSchema = z.object({
-  recommendations: z.array(z.object({
-    summary: z.string(),
-    anomalyPatterns: z.array(z.string()),
-    scope: z.string(),
-    confidence: z.enum(["low", "medium", "high"]),
-    suggestedFix: z.string(),
-  })),
+  recommendations: z.array(
+    z.object({
+      summary: z.string(),
+      anomalyPatterns: z.array(z.string()),
+      scope: z.string(),
+      confidence: z.enum(["low", "medium", "high"]),
+      suggestedFix: z.string(),
+    }),
+  ),
 });
 
 type AuditRecommendationRun = {
@@ -219,13 +287,26 @@ type AuditRecommendationRun = {
 
 const AUTO_FIX_KEY_PREFIX = "factory_auto_fix_key:";
 
-const autoFixRecommendationKey = (recommendation: AuditRecommendation): string =>
+const autoFixRecommendationKey = (
+  recommendation: AuditRecommendation,
+): string =>
   createHash("sha1")
-    .update(JSON.stringify({
-      summary: recommendation.summary.trim().toLowerCase().replace(/\s+/g, " "),
-      scope: recommendation.scope.trim().toLowerCase().replace(/\s+/g, " "),
-      anomalyPatterns: [...new Set(recommendation.anomalyPatterns.map(normalizeAuditPattern).filter(Boolean))].sort(),
-    }))
+    .update(
+      JSON.stringify({
+        summary: recommendation.summary
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, " "),
+        scope: recommendation.scope.trim().toLowerCase().replace(/\s+/g, " "),
+        anomalyPatterns: [
+          ...new Set(
+            recommendation.anomalyPatterns
+              .map(normalizeAuditPattern)
+              .filter(Boolean),
+          ),
+        ].sort(),
+      }),
+    )
     .digest("hex")
     .slice(0, 16);
 
@@ -240,11 +321,20 @@ const findExistingAutoFixObjective = async (
   recommendation: AuditRecommendation,
 ): Promise<string | undefined> => {
   const key = autoFixRecommendationKey(recommendation);
-  const activeObjectives = (await factoryService.listObjectives())
-    .filter((objective) => isOpenObjectiveStatus(objective.status));
+  const activeObjectives = (await factoryService.listObjectives()).filter(
+    (objective) => isOpenObjectiveStatus(objective.status),
+  );
   for (const objective of activeObjectives) {
-    const state = await factoryService.getObjectiveState(objective.objectiveId).catch(() => undefined);
-    if (!state || state.archivedAt || state.channel !== "auto-fix" || !isOpenObjectiveStatus(state.status)) continue;
+    const state = await factoryService
+      .getObjectiveState(objective.objectiveId)
+      .catch(() => undefined);
+    if (
+      !state ||
+      state.archivedAt ||
+      state.channel !== "auto-fix" ||
+      !isOpenObjectiveStatus(state.status)
+    )
+      continue;
     if (state.prompt.includes(autoFixPromptMarker(key))) {
       return state.objectiveId;
     }
@@ -263,7 +353,11 @@ const runAuditRecommendationGenerator = async (
   patternCounts: ReadonlyMap<string, number>,
 ): Promise<AuditRecommendationRun> => {
   try {
-    const recommendations = await recommendationGenerator(report, recentAuditEntries, patternCounts);
+    const recommendations = await recommendationGenerator(
+      report,
+      recentAuditEntries,
+      patternCounts,
+    );
     return {
       recommendations,
       status: "ready",
@@ -284,7 +378,9 @@ const generateAuditRecommendations = async (
   patternCounts: ReadonlyMap<string, number>,
 ): Promise<ReadonlyArray<AuditRecommendation>> => {
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY not set for audit recommendation generation");
+    throw new Error(
+      "OPENAI_API_KEY not set for audit recommendation generation",
+    );
   }
   const anomalySummary = report.anomalies
     .slice(0, 20)
@@ -304,7 +400,9 @@ const generateAuditRecommendations = async (
   const whatHappened = report.summary.whatHappened?.join("\n") ?? "";
   const currentPatterns = deriveRecommendationPatternsFromReport(report);
   const recurringPatterns = [...patternCounts.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .sort(
+      (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
+    )
     .slice(0, 12)
     .map(([pattern, count]) => `- ${pattern}: ${count}`)
     .join("\n");
@@ -334,7 +432,9 @@ const generateAuditRecommendations = async (
       anomalySummary || "none",
       "",
       "## Current Objective Patterns",
-      currentPatterns.length > 0 ? currentPatterns.map((pattern) => `- ${pattern}`).join("\n") : "none",
+      currentPatterns.length > 0
+        ? currentPatterns.map((pattern) => `- ${pattern}`).join("\n")
+        : "none",
       "",
       "## Recent Recurring Patterns",
       recurringPatterns || "none",
@@ -347,7 +447,9 @@ const generateAuditRecommendations = async (
   });
   return result.parsed.recommendations.map((recommendation) => ({
     ...recommendation,
-    anomalyPatterns: recommendation.anomalyPatterns.map(normalizeAuditPattern).filter(Boolean),
+    anomalyPatterns: recommendation.anomalyPatterns
+      .map(normalizeAuditPattern)
+      .filter(Boolean),
     scope: recommendation.scope.trim() || "unknown",
   }));
 };
@@ -361,17 +463,31 @@ const readPersistedAuditPatterns = async (
   dataDir: string,
   objectiveId: string,
 ): Promise<ReadonlyArray<string>> => {
-  const metadata = await readPersistedObjectiveAuditMetadata(dataDir, objectiveId);
+  const metadata = await readPersistedObjectiveAuditMetadata(
+    dataDir,
+    objectiveId,
+  );
   if (metadata?.recommendations.length) {
-    return [...new Set(metadata.recommendations.flatMap((recommendation) =>
-      recommendation.anomalyPatterns.map(normalizeAuditPattern)).filter(Boolean))];
+    return [
+      ...new Set(
+        metadata.recommendations
+          .flatMap((recommendation) =>
+            recommendation.anomalyPatterns.map(normalizeAuditPattern),
+          )
+          .filter(Boolean),
+      ),
+    ];
   }
   try {
     const artifact = objectiveAuditArtifactPaths(dataDir, objectiveId);
-    const raw = JSON.parse(await fs.readFile(artifact.jsonPath, "utf-8")) as Record<string, unknown>;
+    const raw = JSON.parse(
+      await fs.readFile(artifact.jsonPath, "utf-8"),
+    ) as Record<string, unknown>;
     const anomalies = asArray(raw.anomalies);
     const assessment = asRecord(raw.assessment);
-    const notes = asArray(assessment?.notes).map((note) => asString(note)).filter((note): note is string => Boolean(note));
+    const notes = asArray(assessment?.notes)
+      .map((note) => asString(note))
+      .filter((note): note is string => Boolean(note));
     const patterns = new Set<string>();
     for (const entry of anomalies) {
       const anomaly = asRecord(entry);
@@ -385,17 +501,56 @@ const readPersistedAuditPatterns = async (
     }
     for (const note of notes) {
       const normalized = note.toLowerCase();
-      if (normalized.includes("without structured evidence entries")) patterns.add("missing_structured_evidence");
-      if (normalized.includes("scriptsrun") || normalized.includes("captured command logs")) patterns.add("missing_scripts_run");
+      if (normalized.includes("without structured evidence entries"))
+        patterns.add("missing_structured_evidence");
+      if (
+        normalized.includes("scriptsrun") ||
+        normalized.includes("captured command logs")
+      )
+        patterns.add("missing_scripts_run");
       if (normalized.includes("proof items")) patterns.add("missing_proof");
-      if (normalized.includes("alignment report")) patterns.add("alignment_not_reported");
+      if (normalized.includes("alignment report"))
+        patterns.add("alignment_not_reported");
     }
     const alignmentVerdict = asString(assessment?.alignmentVerdict);
-    if (alignmentVerdict === "not_reported") patterns.add("alignment_not_reported");
+    if (alignmentVerdict === "not_reported")
+      patterns.add("alignment_not_reported");
     return [...patterns];
   } catch {
     return [];
   }
+};
+
+const readPersistedAuditChannel = async (
+  dataDir: string,
+  objectiveId: string,
+): Promise<string | undefined> => {
+  const metadata = await readPersistedObjectiveAuditMetadata(
+    dataDir,
+    objectiveId,
+  );
+  return normalizeAuditChannel(metadata?.objectiveChannel);
+};
+
+const filterRecentAuditEntriesBySourceChannel = async (
+  dataDir: string,
+  recentAuditEntries: ReadonlyArray<{ readonly text: string }>,
+  allowedChannels: ReadonlySet<string>,
+): Promise<ReadonlyArray<{ readonly text: string }>> => {
+  if (allowedChannels.size === 0) return [];
+  const filtered: Array<{ readonly text: string }> = [];
+  const channelCache = new Map<string, string | undefined>();
+  for (const entry of recentAuditEntries) {
+    const objectiveId = objectiveIdFromAuditEntry(entry.text);
+    if (!objectiveId) continue;
+    let channel = channelCache.get(objectiveId);
+    if (channel === undefined && !channelCache.has(objectiveId)) {
+      channel = await readPersistedAuditChannel(dataDir, objectiveId);
+      channelCache.set(objectiveId, channel);
+    }
+    if (channel && allowedChannels.has(channel)) filtered.push(entry);
+  }
+  return filtered;
 };
 
 const clusterRecentAuditPatterns = async (
@@ -409,7 +564,9 @@ const clusterRecentAuditPatterns = async (
     if (!objectiveId || seenObjectiveIds.has(objectiveId)) continue;
     seenObjectiveIds.add(objectiveId);
     const patterns = await readPersistedAuditPatterns(dataDir, objectiveId);
-    for (const pattern of new Set(patterns.map(normalizeAuditPattern).filter(Boolean))) {
+    for (const pattern of new Set(
+      patterns.map(normalizeAuditPattern).filter(Boolean),
+    )) {
       counts.set(pattern, (counts.get(pattern) ?? 0) + 1);
     }
   }
@@ -425,20 +582,28 @@ const selectAutoFixRecommendation = (
       recommendation,
       recurringPatterns: recommendation.anomalyPatterns
         .map(normalizeAuditPattern)
-        .filter((pattern) => (patternCounts.get(pattern) ?? 0) >= AUTOFIX_PATTERN_THRESHOLD),
+        .filter(
+          (pattern) =>
+            (patternCounts.get(pattern) ?? 0) >= AUTOFIX_PATTERN_THRESHOLD,
+        ),
       maxCount: Math.max(
         0,
-        ...recommendation.anomalyPatterns.map((pattern) => patternCounts.get(normalizeAuditPattern(pattern)) ?? 0),
+        ...recommendation.anomalyPatterns.map(
+          (pattern) => patternCounts.get(normalizeAuditPattern(pattern)) ?? 0,
+        ),
       ),
     }))
-    .filter((entry) =>
-      entry.recommendation.confidence === "high"
-      && entry.recurringPatterns.length > 0)
-    .sort((left, right) =>
-      right.maxCount - left.maxCount
-      || right.recurringPatterns.length - left.recurringPatterns.length
-      || left.recommendation.summary.localeCompare(right.recommendation.summary))[0]
-    ?.recommendation;
+    .filter(
+      (entry) =>
+        entry.recommendation.confidence === "high" &&
+        entry.recurringPatterns.length > 0,
+    )
+    .sort(
+      (left, right) =>
+        right.maxCount - left.maxCount ||
+        right.recurringPatterns.length - left.recurringPatterns.length ||
+        left.recommendation.summary.localeCompare(right.recommendation.summary),
+    )[0]?.recommendation;
 
 const renderObjectiveAuditText = (input: {
   readonly report: FactoryReceiptInvestigation;
@@ -447,7 +612,10 @@ const renderObjectiveAuditText = (input: {
   readonly recommendationError?: string;
   readonly autoFixObjectiveId?: string;
 }): string => {
-  const base = renderFactoryReceiptInvestigationText(input.report, { timelineLimit: 20, contextChars: 1_600 });
+  const base = renderFactoryReceiptInvestigationText(input.report, {
+    timelineLimit: 20,
+    contextChars: 1_600,
+  });
   const section = [
     "",
     "## Audit Recommendations",
@@ -455,8 +623,10 @@ const renderObjectiveAuditText = (input: {
       ? [`- generation failed: ${input.recommendationError ?? "unknown error"}`]
       : []),
     ...(input.recommendations.length > 0
-      ? input.recommendations.map((recommendation) =>
-          `- [${recommendation.confidence}] ${recommendation.summary} · scope=${recommendation.scope}${recommendation.anomalyPatterns.length > 0 ? ` · patterns=${recommendation.anomalyPatterns.join(",")}` : ""}`)
+      ? input.recommendations.map(
+          (recommendation) =>
+            `- [${recommendation.confidence}] ${recommendation.summary} · scope=${recommendation.scope}${recommendation.anomalyPatterns.length > 0 ? ` · patterns=${recommendation.anomalyPatterns.join(",")}` : ""}`,
+        )
       : ["- none"]),
     ...(input.autoFixObjectiveId
       ? [
@@ -469,22 +639,33 @@ const renderObjectiveAuditText = (input: {
   return `${base}\n${section.join("\n")}\n`;
 };
 
-const parseObjectiveAuditPayload = (payload: Record<string, unknown>): FactoryObjectiveAuditJobPayload => {
+const parseObjectiveAuditPayload = (
+  payload: Record<string, unknown>,
+): FactoryObjectiveAuditJobPayload => {
   if (payload.kind !== "factory.objective.audit") {
     throw new Error("invalid factory objective audit payload");
   }
-  const objectiveId = typeof payload.objectiveId === "string" ? payload.objectiveId.trim() : "";
-  if (!objectiveId) throw new Error("factory objective audit payload missing objectiveId");
-  const objectiveStatus = typeof payload.objectiveStatus === "string" ? payload.objectiveStatus.trim() : "";
-  if (!objectiveStatus) throw new Error("factory objective audit payload missing objectiveStatus");
-  const objectiveUpdatedAt = typeof payload.objectiveUpdatedAt === "number" && Number.isFinite(payload.objectiveUpdatedAt)
-    ? payload.objectiveUpdatedAt
-    : Date.now();
+  const objectiveId =
+    typeof payload.objectiveId === "string" ? payload.objectiveId.trim() : "";
+  if (!objectiveId)
+    throw new Error("factory objective audit payload missing objectiveId");
+  const objectiveStatus =
+    typeof payload.objectiveStatus === "string"
+      ? payload.objectiveStatus.trim()
+      : "";
+  if (!objectiveStatus)
+    throw new Error("factory objective audit payload missing objectiveStatus");
+  const objectiveUpdatedAt =
+    typeof payload.objectiveUpdatedAt === "number" &&
+    Number.isFinite(payload.objectiveUpdatedAt)
+      ? payload.objectiveUpdatedAt
+      : Date.now();
   return {
     kind: "factory.objective.audit",
     objectiveId,
     objectiveStatus,
     objectiveUpdatedAt,
+    objectiveChannel: asString(payload.objectiveChannel),
   };
 };
 
@@ -514,18 +695,26 @@ const renderObjectiveAuditMemoryText = (input: {
     `- Control churn: ${input.controlChurn}`,
     "",
     "Notes",
-    ...(input.notes.length > 0 ? input.notes.map((item) => `- ${item}`) : ["- none"]),
+    ...(input.notes.length > 0
+      ? input.notes.map((item) => `- ${item}`)
+      : ["- none"]),
     "",
     "Recommendations",
     ...(input.recommendationStatus === "failed"
       ? [`- generation_failed: ${input.recommendationError ?? "unknown error"}`]
       : []),
     ...(input.recommendations.length > 0
-      ? input.recommendations.map((r) =>
-          `- [${r.confidence}] scope=${r.scope}${r.anomalyPatterns.length > 0 ? ` patterns=${r.anomalyPatterns.join(",")}` : ""} ${r.summary}`)
+      ? input.recommendations.map(
+          (r) =>
+            `- [${r.confidence}] scope=${r.scope}${r.anomalyPatterns.length > 0 ? ` patterns=${r.anomalyPatterns.join(",")}` : ""} ${r.summary}`,
+        )
       : ["- none"]),
     ...(input.autoFixObjectiveId
-      ? ["", "Auto-fix", `- Objective: ${input.autoFixObjectiveId} (delivery, severity 1)`]
+      ? [
+          "",
+          "Auto-fix",
+          `- Objective: ${input.autoFixObjectiveId} (delivery, severity 1)`,
+        ]
       : []),
     "",
     "Artifacts",
@@ -550,11 +739,14 @@ const createDefaultMemoryTools = (dataDir: string): MemoryTools => {
   });
 };
 
-export const createFactoryServiceRuntime = (opts: FactoryServiceRuntimeOptions): {
+export const createFactoryServiceRuntime = (
+  opts: FactoryServiceRuntimeOptions,
+): {
   readonly service: FactoryService;
   readonly memoryTools: MemoryTools;
 } => {
-  const memoryTools = opts.memoryTools ?? createDefaultMemoryTools(opts.dataDir);
+  const memoryTools =
+    opts.memoryTools ?? createDefaultMemoryTools(opts.dataDir);
 
   const service = new FactoryService({
     dataDir: opts.dataDir,
@@ -581,6 +773,7 @@ export const runFactoryObjectiveAudit = async (input: {
   readonly payload: Record<string, unknown>;
   readonly factoryService?: FactoryService;
   readonly autoFixEnabled?: boolean;
+  readonly autoFixSourceChannels?: ReadonlyArray<string>;
   readonly recommendationGenerator?: (
     report: FactoryReceiptInvestigation,
     recentAuditEntries: ReadonlyArray<{ readonly text: string }>,
@@ -594,20 +787,55 @@ export const runFactoryObjectiveAudit = async (input: {
       input.repoRoot,
       parsed.objectiveId,
       { asOfTs: parsed.objectiveUpdatedAt },
-    )
+    ),
   );
-  const artifacts = objectiveAuditArtifactPaths(input.dataDir, parsed.objectiveId);
+  const artifacts = objectiveAuditArtifactPaths(
+    input.dataDir,
+    parsed.objectiveId,
+  );
   await fs.mkdir(artifacts.root, { recursive: true });
+  const allowedAutoFixChannels = new Set(
+    normalizeAuditChannelList(
+      input.autoFixSourceChannels ?? DEFAULT_AUTO_FIX_SOURCE_CHANNELS,
+    ),
+  );
+  const objectiveState = input.factoryService
+    ? await input.factoryService
+        .getObjectiveState(parsed.objectiveId)
+        .catch(() => undefined)
+    : undefined;
+  const objectiveChannel =
+    normalizeAuditChannel(parsed.objectiveChannel) ??
+    normalizeAuditChannel(objectiveState?.channel);
+  const autoFixSourceEligible = Boolean(
+    objectiveChannel &&
+    allowedAutoFixChannels.size > 0 &&
+    allowedAutoFixChannels.has(objectiveChannel),
+  );
 
   // Read recent audit entries for cross-run patterns
-  const recentAuditEntries = await input.memoryTools.read({
-    scope: "factory/audits/repo",
-    limit: RECENT_AUDIT_PATTERN_WINDOW,
-  }).catch(() => []);
-  const patternCounts = await clusterRecentAuditPatterns(input.dataDir, recentAuditEntries);
+  const repoAuditEntries = await input.memoryTools
+    .read({
+      scope: "factory/audits/repo",
+      limit: RECENT_AUDIT_PATTERN_WINDOW,
+    })
+    .catch(() => []);
+  const recentAuditEntries =
+    allowedAutoFixChannels.size > 0
+      ? await filterRecentAuditEntriesBySourceChannel(
+          input.dataDir,
+          repoAuditEntries,
+          allowedAutoFixChannels,
+        )
+      : [];
+  const patternCounts = await clusterRecentAuditPatterns(
+    input.dataDir,
+    recentAuditEntries,
+  );
 
   // Generate LLM recommendations
-  const recommendationGenerator = input.recommendationGenerator ?? generateAuditRecommendations;
+  const recommendationGenerator =
+    input.recommendationGenerator ?? generateAuditRecommendations;
   const recommendationRun = await runAuditRecommendationGenerator(
     recommendationGenerator,
     report,
@@ -618,11 +846,21 @@ export const runFactoryObjectiveAudit = async (input: {
 
   // Auto-fix: create a delivery objective when a high-confidence recommendation matches recurring patterns.
   let autoFixObjectiveId: string | undefined;
-  if (input.factoryService && input.autoFixEnabled !== false) {
-    const autoFixRec = selectAutoFixRecommendation(recommendations, patternCounts);
+  if (
+    input.factoryService &&
+    input.autoFixEnabled !== false &&
+    autoFixSourceEligible
+  ) {
+    const autoFixRec = selectAutoFixRecommendation(
+      recommendations,
+      patternCounts,
+    );
     if (autoFixRec) {
       try {
-        const existingObjectiveId = await findExistingAutoFixObjective(input.factoryService, autoFixRec);
+        const existingObjectiveId = await findExistingAutoFixObjective(
+          input.factoryService,
+          autoFixRec,
+        );
         if (existingObjectiveId) {
           autoFixObjectiveId = existingObjectiveId;
         } else {
@@ -639,8 +877,10 @@ export const runFactoryObjectiveAudit = async (input: {
               autoFixRec.scope,
               "",
               `## Recurring Patterns (${autoFixRec.anomalyPatterns.join(", ")})`,
-              ...autoFixRec.anomalyPatterns.map((pattern) =>
-                `- ${normalizeAuditPattern(pattern)}: ${patternCounts.get(normalizeAuditPattern(pattern)) ?? 0} occurrence(s)`),
+              ...autoFixRec.anomalyPatterns.map(
+                (pattern) =>
+                  `- ${normalizeAuditPattern(pattern)}: ${patternCounts.get(normalizeAuditPattern(pattern)) ?? 0} occurrence(s)`,
+              ),
               "",
               "## Audit Deduplication",
               autoFixPromptMarker(autoFixKey),
@@ -665,17 +905,25 @@ export const runFactoryObjectiveAudit = async (input: {
     audit: {
       generatedAt: Date.now(),
       objectiveUpdatedAt: parsed.objectiveUpdatedAt,
+      objectiveChannel,
       recommendationStatus: recommendationRun.status,
       recommendationError: recommendationRun.error,
       recommendations,
       autoFixObjectiveId,
       recurringPatterns: [...patternCounts.entries()]
-        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+        .sort(
+          (left, right) =>
+            right[1] - left[1] || left[0].localeCompare(right[0]),
+        )
         .slice(0, 20)
         .map(([pattern, count]) => ({ pattern, count })),
     },
   };
-  await fs.writeFile(artifacts.jsonPath, JSON.stringify(persistedReport, null, 2), "utf-8");
+  await fs.writeFile(
+    artifacts.jsonPath,
+    JSON.stringify(persistedReport, null, 2),
+    "utf-8",
+  );
   await fs.writeFile(
     artifacts.textPath,
     renderObjectiveAuditText({
@@ -697,12 +945,17 @@ export const runFactoryObjectiveAudit = async (input: {
     controlChurn: report.assessment.controlChurn,
     notes: [
       ...report.assessment.notes.slice(0, 6),
+      `objective_channel=${objectiveChannel ?? "unknown"}`,
+      `auto_fix_source_channels=${allowedAutoFixChannels.size > 0 ? [...allowedAutoFixChannels].join(",") : "none"}`,
+      `auto_fix_source_eligible=${autoFixSourceEligible ? "yes" : "no"}`,
       `alignment=${report.assessment.alignmentVerdict}`,
       `recommendation_generation=${recommendationRun.status}`,
       report.assessment.correctiveSteerIssued
         ? `corrective_steer=issued aligned_after_correction=${report.assessment.alignedAfterCorrection ? "yes" : "no"}`
         : "corrective_steer=none",
-      ...(recommendationRun.error ? [`recommendation_error=${recommendationRun.error}`] : []),
+      ...(recommendationRun.error
+        ? [`recommendation_error=${recommendationRun.error}`]
+        : []),
     ],
     recommendations: recommendations.slice(0, 6),
     recommendationStatus: recommendationRun.status,
@@ -714,15 +967,28 @@ export const runFactoryObjectiveAudit = async (input: {
   await withObjectiveAuditRetry(async () => {
     await Promise.all([
       input.memoryTools.commit({
-      scope: `factory/audits/objectives/${parsed.objectiveId}`,
-      text: memoryText,
-      tags: ["factory", "audit", parsed.objectiveStatus, report.assessment.verdict],
-    }),
+        scope: `factory/audits/objectives/${parsed.objectiveId}`,
+        text: memoryText,
+        tags: [
+          "factory",
+          "audit",
+          parsed.objectiveStatus,
+          report.assessment.verdict,
+          ...(objectiveChannel ? [`channel:${objectiveChannel}`] : []),
+        ],
+      }),
       input.memoryTools.commit({
-      scope: "factory/audits/repo",
-      text: `[${parsed.objectiveId}] ${memoryText}`,
-      tags: ["factory", "audit", "repo", parsed.objectiveStatus, report.assessment.verdict],
-    }),
+        scope: "factory/audits/repo",
+        text: `[${parsed.objectiveId}] ${memoryText}`,
+        tags: [
+          "factory",
+          "audit",
+          "repo",
+          parsed.objectiveStatus,
+          report.assessment.verdict,
+          ...(objectiveChannel ? [`channel:${objectiveChannel}`] : []),
+        ],
+      }),
     ]);
   });
 
@@ -750,22 +1016,33 @@ export const createFactoryWorkerHandlers = (
   service: FactoryService,
   opts: {
     readonly auditAutoFixEnabled?: boolean;
+    readonly auditAutoFixSourceChannels?: ReadonlyArray<string>;
   } = {},
 ): Record<typeof FACTORY_CONTROL_AGENT_ID | "codex", JobHandler> => ({
   [FACTORY_CONTROL_AGENT_ID]: async (job, ctx) => {
     await ctx.pullCommands(["abort", "steer"]);
     try {
       const auditMemoryTools = service.memoryTools;
-      const result = job.payload.kind === "factory.objective.audit"
-        ? await runFactoryObjectiveAudit({
-            dataDir: service.dataDir,
-            repoRoot: service.git.repoRoot,
-            memoryTools: auditMemoryTools ?? (() => { throw new Error("factory objective audit requires memory tools"); })(),
-            payload: job.payload as Record<string, unknown>,
-            factoryService: service,
-            autoFixEnabled: opts.auditAutoFixEnabled,
-          })
-        : await service.runObjectiveControl(job.payload as Record<string, unknown>);
+      const result =
+        job.payload.kind === "factory.objective.audit"
+          ? await runFactoryObjectiveAudit({
+              dataDir: service.dataDir,
+              repoRoot: service.git.repoRoot,
+              memoryTools:
+                auditMemoryTools ??
+                (() => {
+                  throw new Error(
+                    "factory objective audit requires memory tools",
+                  );
+                })(),
+              payload: job.payload as Record<string, unknown>,
+              factoryService: service,
+              autoFixEnabled: opts.auditAutoFixEnabled,
+              autoFixSourceChannels: opts.auditAutoFixSourceChannels,
+            })
+          : await service.runObjectiveControl(
+              job.payload as Record<string, unknown>,
+            );
       return { ok: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -773,7 +1050,9 @@ export const createFactoryWorkerHandlers = (
         ok: false,
         error: message,
         result: {
-          ...(typeof job.payload.objectiveId === "string" ? { objectiveId: job.payload.objectiveId } : {}),
+          ...(typeof job.payload.objectiveId === "string"
+            ? { objectiveId: job.payload.objectiveId }
+            : {}),
           status: "failed",
           message,
         },
@@ -789,132 +1068,66 @@ export const createFactoryWorkerHandlers = (
           {
             shouldAbort: async () => {
               const latest = await service.queue.getJob(job.id);
-              return latest?.abortRequested === true || isTerminalJobStatus(latest?.status);
+              return (
+                latest?.abortRequested === true ||
+                isTerminalJobStatus(latest?.status)
+              );
             },
           },
         );
         return { ok: true, result };
       }
 
-      const result = job.payload.kind === "factory.task.run"
-        ? await service.runTask(job.payload, {
-          shouldAbort: async () => {
-            const latest = await service.queue.getJob(job.id);
-            return latest?.abortRequested === true
-              || isTerminalJobStatus(latest?.status);
-          },
-          pollSignal: async () => {
-            const commands = await ctx.pullCommands(["abort", "steer", "follow_up"]);
-            if (commands.some((command) => command.command === "abort")) return { kind: "abort" as const };
-            const restart = coalesceLiveGuidanceSignal(
-              job.id,
-              commands
-                .filter((command): command is typeof command & { readonly command: "steer" | "follow_up" } =>
-                  command.command === "steer" || command.command === "follow_up")
-                .map((command) => ({
-                  id: command.id,
-                  command: command.command,
-                  payload: command.payload,
-                })),
-            );
-            if (restart) return restart;
-            const latest = await service.queue.getJob(job.id);
-            if (latest?.abortRequested === true || isTerminalJobStatus(latest?.status)) return { kind: "abort" };
-            return undefined;
-          },
-          onProgress: async (update) => {
-            await service.queue.progress(job.id, ctx.workerId, {
-              worker: "codex",
-              ...update,
-            });
-          },
-          onChildSpawn: async (update) => {
-            ctx.registerLeaseProcess({
-              pid: update.pid,
-              label: "codex child",
-            });
-          },
-          onChildExit: async () => {
-            ctx.clearLeaseProcess();
-          },
-        })
-        : job.payload.kind === "factory.codex.run" || job.payload.kind === "codex.run"
-          ? await (async () => {
-            const payload = job.payload as Record<string, unknown>;
-            const basePrompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-            if (!basePrompt) {
-              throw new Error(job.payload.kind === "factory.codex.run" ? "factory codex prompt required" : "codex prompt required");
-            }
-            const timeoutMs = typeof payload.timeoutMs === "number" && Number.isFinite(payload.timeoutMs)
-              ? Math.max(30_000, Math.min(Math.floor(payload.timeoutMs), 900_000))
-              : 180_000;
-            const guidanceHistory: string[] = [];
-            while (true) {
-              try {
-                return await runFactoryCodexJob({
-                  dataDir: service.dataDir,
-                  repoRoot: service.git.repoRoot,
-                  jobId: job.id,
-                  prompt: appendLiveOperatorGuidance(basePrompt, guidanceHistory),
-                  timeoutMs,
-                  executor: service.codexExecutor,
-                  factoryService: service,
-                  payload,
-                  onProgress: async (update) => {
-                    await service.queue.progress(job.id, ctx.workerId, update);
-                  },
-                }, {
-                  shouldAbort: async () => {
-                    const latest = await service.queue.getJob(job.id);
-                    return latest?.abortRequested === true || isTerminalJobStatus(latest?.status);
-                  },
-                  pollSignal: async () => {
-                    const commands = await ctx.pullCommands(["abort", "steer", "follow_up"]);
-                    if (commands.some((command) => command.command === "abort")) return { kind: "abort" as const };
-                    const restart = coalesceLiveGuidanceSignal(
-                      job.id,
-                      commands
-                        .filter((command): command is typeof command & { readonly command: "steer" | "follow_up" } =>
-                          command.command === "steer" || command.command === "follow_up")
-                        .map((command) => ({
-                          id: command.id,
-                          command: command.command,
-                          payload: command.payload,
-                        })),
-                    );
-                    if (restart) return restart;
-                    const latest = await service.queue.getJob(job.id);
-                    if (latest?.abortRequested === true || isTerminalJobStatus(latest?.status)) return { kind: "abort" };
-                    return undefined;
-                  },
-                  onChildSpawn: async (update) => {
-                    ctx.registerLeaseProcess({
-                      pid: update.pid,
-                      label: "codex child",
-                    });
-                  },
-                  onChildExit: async () => {
-                    ctx.clearLeaseProcess();
-                  },
-                });
-              } catch (error) {
-                if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
-                const guidance = typeof error.signal.note === "string" ? error.signal.note.trim() : "";
-                if (guidance) guidanceHistory.push(guidance);
-                continue;
-              }
-            }
-          })()
-        : job.payload.kind === "factory.integration.validate"
-          ? await service.runIntegrationValidation(job.payload)
-        : job.payload.kind === "factory.integration.publish"
-          ? await service.runIntegrationPublish(job.payload, {
+      const result =
+        job.payload.kind === "factory.task.run"
+          ? await service.runTask(job.payload, {
               shouldAbort: async () => {
-                const aborts = await ctx.pullCommands(["abort"]);
                 const latest = await service.queue.getJob(job.id);
-                return aborts.length > 0
-                  || job.abortRequested === true
-                  || isTerminalJobStatus(latest?.status);
+                return (
+                  latest?.abortRequested === true ||
+                  isTerminalJobStatus(latest?.status)
+                );
+              },
+              pollSignal: async () => {
+                const commands = await ctx.pullCommands([
+                  "abort",
+                  "steer",
+                  "follow_up",
+                ]);
+                if (commands.some((command) => command.command === "abort"))
+                  return { kind: "abort" as const };
+                const restart = coalesceLiveGuidanceSignal(
+                  job.id,
+                  commands
+                    .filter(
+                      (
+                        command,
+                      ): command is typeof command & {
+                        readonly command: "steer" | "follow_up";
+                      } =>
+                        command.command === "steer" ||
+                        command.command === "follow_up",
+                    )
+                    .map((command) => ({
+                      id: command.id,
+                      command: command.command,
+                      payload: command.payload,
+                    })),
+                );
+                if (restart) return restart;
+                const latest = await service.queue.getJob(job.id);
+                if (
+                  latest?.abortRequested === true ||
+                  isTerminalJobStatus(latest?.status)
+                )
+                  return { kind: "abort" };
+                return undefined;
+              },
+              onProgress: async (update) => {
+                await service.queue.progress(job.id, ctx.workerId, {
+                  worker: "codex",
+                  ...update,
+                });
               },
               onChildSpawn: async (update) => {
                 ctx.registerLeaseProcess({
@@ -926,9 +1139,154 @@ export const createFactoryWorkerHandlers = (
                 ctx.clearLeaseProcess();
               },
             })
-          : (() => {
-            throw new Error(`unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`);
-          })();
+          : job.payload.kind === "factory.codex.run" ||
+              job.payload.kind === "codex.run"
+            ? await (async () => {
+                const payload = job.payload as Record<string, unknown>;
+                const basePrompt =
+                  typeof payload.prompt === "string"
+                    ? payload.prompt.trim()
+                    : "";
+                if (!basePrompt) {
+                  throw new Error(
+                    job.payload.kind === "factory.codex.run"
+                      ? "factory codex prompt required"
+                      : "codex prompt required",
+                  );
+                }
+                const timeoutMs =
+                  typeof payload.timeoutMs === "number" &&
+                  Number.isFinite(payload.timeoutMs)
+                    ? Math.max(
+                        30_000,
+                        Math.min(Math.floor(payload.timeoutMs), 900_000),
+                      )
+                    : 180_000;
+                const guidanceHistory: string[] = [];
+                while (true) {
+                  try {
+                    return await runFactoryCodexJob(
+                      {
+                        dataDir: service.dataDir,
+                        repoRoot: service.git.repoRoot,
+                        jobId: job.id,
+                        prompt: appendLiveOperatorGuidance(
+                          basePrompt,
+                          guidanceHistory,
+                        ),
+                        timeoutMs,
+                        executor: service.codexExecutor,
+                        factoryService: service,
+                        payload,
+                        onProgress: async (update) => {
+                          await service.queue.progress(
+                            job.id,
+                            ctx.workerId,
+                            update,
+                          );
+                        },
+                      },
+                      {
+                        shouldAbort: async () => {
+                          const latest = await service.queue.getJob(job.id);
+                          return (
+                            latest?.abortRequested === true ||
+                            isTerminalJobStatus(latest?.status)
+                          );
+                        },
+                        pollSignal: async () => {
+                          const commands = await ctx.pullCommands([
+                            "abort",
+                            "steer",
+                            "follow_up",
+                          ]);
+                          if (
+                            commands.some(
+                              (command) => command.command === "abort",
+                            )
+                          )
+                            return { kind: "abort" as const };
+                          const restart = coalesceLiveGuidanceSignal(
+                            job.id,
+                            commands
+                              .filter(
+                                (
+                                  command,
+                                ): command is typeof command & {
+                                  readonly command: "steer" | "follow_up";
+                                } =>
+                                  command.command === "steer" ||
+                                  command.command === "follow_up",
+                              )
+                              .map((command) => ({
+                                id: command.id,
+                                command: command.command,
+                                payload: command.payload,
+                              })),
+                          );
+                          if (restart) return restart;
+                          const latest = await service.queue.getJob(job.id);
+                          if (
+                            latest?.abortRequested === true ||
+                            isTerminalJobStatus(latest?.status)
+                          )
+                            return { kind: "abort" };
+                          return undefined;
+                        },
+                        onChildSpawn: async (update) => {
+                          ctx.registerLeaseProcess({
+                            pid: update.pid,
+                            label: "codex child",
+                          });
+                        },
+                        onChildExit: async () => {
+                          ctx.clearLeaseProcess();
+                        },
+                      },
+                    );
+                  } catch (error) {
+                    if (
+                      !(error instanceof CodexControlSignalError) ||
+                      error.signal.kind !== "restart"
+                    )
+                      throw error;
+                    const guidance =
+                      typeof error.signal.note === "string"
+                        ? error.signal.note.trim()
+                        : "";
+                    if (guidance) guidanceHistory.push(guidance);
+                    continue;
+                  }
+                }
+              })()
+            : job.payload.kind === "factory.integration.validate"
+              ? await service.runIntegrationValidation(job.payload)
+              : job.payload.kind === "factory.integration.publish"
+                ? await service.runIntegrationPublish(job.payload, {
+                    shouldAbort: async () => {
+                      const aborts = await ctx.pullCommands(["abort"]);
+                      const latest = await service.queue.getJob(job.id);
+                      return (
+                        aborts.length > 0 ||
+                        job.abortRequested === true ||
+                        isTerminalJobStatus(latest?.status)
+                      );
+                    },
+                    onChildSpawn: async (update) => {
+                      ctx.registerLeaseProcess({
+                        pid: update.pid,
+                        label: "codex child",
+                      });
+                    },
+                    onChildExit: async () => {
+                      ctx.clearLeaseProcess();
+                    },
+                  })
+                : (() => {
+                    throw new Error(
+                      `unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`,
+                    );
+                  })();
       return { ok: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -936,7 +1294,9 @@ export const createFactoryWorkerHandlers = (
         ok: false,
         error: message,
         result: {
-          ...(typeof job.payload.objectiveId === "string" ? { objectiveId: job.payload.objectiveId } : {}),
+          ...(typeof job.payload.objectiveId === "string"
+            ? { objectiveId: job.payload.objectiveId }
+            : {}),
           status: "failed",
           message,
         },

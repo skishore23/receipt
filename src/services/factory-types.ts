@@ -28,7 +28,8 @@ import type {
 import type { JobRecord, JobStatus } from "../modules/job";
 import type { FactoryCloudExecutionContext } from "./factory-cloud-context";
 
-export const FACTORY_PROFILE_SUMMARY = "Using checked-in Factory profiles and skills only.";
+export const FACTORY_PROFILE_SUMMARY =
+  "Using checked-in Factory profiles and skills only.";
 
 export class FactoryServiceError extends Error {
   readonly status: number;
@@ -132,7 +133,11 @@ export type FactoryArtifactActivity = {
 };
 
 export type FactoryObjectiveAlignmentSummary = FactoryTaskAlignmentRecord & {
-  readonly gateStatus: "passed" | "correction_requested" | "blocked" | "not_reported";
+  readonly gateStatus:
+    | "passed"
+    | "correction_requested"
+    | "blocked"
+    | "not_reported";
   readonly correctiveAction?: string;
   readonly correctionAttempted: boolean;
   readonly correctedAfterReview: boolean;
@@ -313,8 +318,17 @@ export type FactoryBoardSection =
   | "completed";
 
 export type FactoryBoardProjection = {
-  readonly objectives: ReadonlyArray<FactoryObjectiveCard & { readonly section: FactoryBoardSection }>;
-  readonly sections: Readonly<Record<FactoryBoardSection, ReadonlyArray<FactoryObjectiveCard & { readonly section: FactoryBoardSection }>>>;
+  readonly objectives: ReadonlyArray<
+    FactoryObjectiveCard & { readonly section: FactoryBoardSection }
+  >;
+  readonly sections: Readonly<
+    Record<
+      FactoryBoardSection,
+      ReadonlyArray<
+        FactoryObjectiveCard & { readonly section: FactoryBoardSection }
+      >
+    >
+  >;
   readonly selectedObjectiveId?: string;
 };
 
@@ -477,6 +491,7 @@ export type FactoryObjectiveAuditJobPayload = {
   readonly objectiveId: string;
   readonly objectiveStatus: string;
   readonly objectiveUpdatedAt: number;
+  readonly objectiveChannel?: string;
 };
 
 export type FactoryObjectiveReceiptSummary = {

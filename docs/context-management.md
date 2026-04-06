@@ -4,6 +4,8 @@ Status: Current implementation notes
 Audience: Engineering  
 Scope: How "context" is actually represented, persisted, compacted, and handed off in this repo, with special focus on Factory
 
+For a dedicated memory-specific deep dive, see `docs/memory.md`.
+
 ## Executive Summary
 
 This repo does not have one universal context object.
