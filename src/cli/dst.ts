@@ -5,6 +5,11 @@ import { createRuntime } from "@receipt/core/runtime";
 import type { Chain } from "@receipt/core/types";
 import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
+import {
+  renderReceiptContextDstAuditText,
+  runReceiptContextDstAudit,
+  type ReceiptDstContextAuditReport,
+} from "./dst-context";
 import { initial as initialAgent, reduce as reduceAgent, type AgentEvent } from "../modules/agent";
 import { buildFactoryProjection, initialFactoryState, reduceFactory, type FactoryEvent } from "../modules/factory";
 import { initial as initialJobState, reduce as reduceJob, type JobEvent, type JobStatus } from "../modules/job";
@@ -109,10 +114,13 @@ export type ReceiptDstAuditReport = {
   readonly replayFailures: number;
   readonly deterministicFailures: number;
   readonly streams: ReadonlyArray<ReceiptDstStreamReport>;
+  readonly context?: ReceiptDstContextAuditReport;
 };
 
 type ReceiptDstAuditOptions = {
   readonly prefix?: string;
+  readonly includeContext?: boolean;
+  readonly repoRoot?: string;
 };
 
 const AGENT_EVENT_TYPES = new Set<string>([
@@ -461,6 +469,13 @@ export const runReceiptDstAudit = async (
     }
   }
 
+  const context = opts.includeContext && opts.repoRoot
+    ? await runReceiptContextDstAudit(dataDir, {
+        prefix: opts.prefix,
+        repoRoot: opts.repoRoot,
+      })
+    : undefined;
+
   return {
     scannedAt: new Date().toISOString(),
     dataDir,
@@ -471,6 +486,7 @@ export const runReceiptDstAudit = async (
     replayFailures: ordered.filter((report) => !report.replay.ok).length,
     deterministicFailures: ordered.filter((report) => !report.deterministic.ok).length,
     streams: ordered,
+    context,
   };
 };
 
@@ -521,6 +537,10 @@ export const renderReceiptDstAuditText = (
 
   if (report.streams.length > limit) {
     lines.push(`- ... ${report.streams.length - limit} more stream(s) omitted`);
+  }
+
+  if (report.context) {
+    lines.push("", renderReceiptContextDstAuditText(report.context, opts));
   }
 
   return lines.join("\n");

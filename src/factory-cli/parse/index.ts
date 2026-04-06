@@ -14,6 +14,7 @@ import { initial as initialAgent, reduce as reduceAgent } from "../../modules/ag
 import type { FactoryEvent } from "../../modules/factory";
 import type { JobEvent } from "../../modules/job";
 import { initial as initialJob, reduce as reduceJob } from "../../modules/job";
+import { factoryTaskPacketArchivePaths } from "../../services/factory-task-packet-archive";
 import {
   filterReceiptsAsOf,
   readObjectiveReplaySnapshot,
@@ -221,6 +222,7 @@ type ParsedFileArtifact = {
   readonly sizeBytes?: number;
   readonly modifiedAt?: number;
   readonly preview?: string;
+  readonly text?: string;
   readonly json?: unknown;
 };
 
@@ -240,6 +242,10 @@ type ParsedTaskRun = {
   readonly commands: ReadonlyArray<ParsedJobCommand>;
   readonly manifest: ParsedFileArtifact;
   readonly contextPack: ParsedFileArtifact;
+  readonly contextSummary: ParsedFileArtifact;
+  readonly prompt: ParsedFileArtifact;
+  readonly memoryConfig: ParsedFileArtifact;
+  readonly memoryScript: ParsedFileArtifact;
   readonly resultFile: ParsedFileArtifact;
   readonly lastMessage: ParsedFileArtifact;
   readonly stdout: ParsedTaskLog;
@@ -324,7 +330,10 @@ export type FactoryParsedRun = {
   readonly taskRuns: ReadonlyArray<ParsedTaskRun>;
 };
 
-type ParseReadOptions = {
+export type FactoryParsedJob = NonNullable<FactoryParsedRun["job"]>;
+export type FactoryParsedTaskRun = FactoryParsedRun["taskRuns"][number];
+
+export type ParseReadOptions = {
   readonly asOfTs?: number;
 };
 
@@ -395,6 +404,28 @@ const fileExists = async (filePath: string | undefined): Promise<boolean> => {
   } catch {
     return false;
   }
+};
+
+const preferExistingPath = async (
+  primary: {
+    readonly originalPath?: string;
+    readonly resolvedPath?: string;
+  },
+  fallbackPath: string | undefined,
+): Promise<{
+  readonly originalPath?: string;
+  readonly resolvedPath?: string;
+}> => {
+  if (primary.resolvedPath && await fileExists(primary.resolvedPath)) {
+    return primary;
+  }
+  if (fallbackPath && await fileExists(fallbackPath)) {
+    return {
+      originalPath: primary.originalPath ?? fallbackPath,
+      resolvedPath: fallbackPath,
+    };
+  }
+  return primary;
 };
 
 const normalizePosix = (value: string): string =>
@@ -1055,6 +1086,7 @@ const readFileArtifact = async (
     sizeBytes: stat.size,
     modifiedAt: stat.mtimeMs,
     preview: truncateBlock(raw, options.previewChars ?? 1_200),
+    text: raw,
     json: options.parseJson ? JSON.parse(raw) as unknown : undefined,
   };
 };
@@ -1154,6 +1186,10 @@ const readJob = async (
   const [
     manifestPath,
     contextPackPath,
+    contextSummaryPath,
+    promptPath,
+    memoryConfigPath,
+    memoryScriptPath,
     resultPath,
     lastMessagePath,
     stdoutPath,
@@ -1161,10 +1197,32 @@ const readJob = async (
   ] = await Promise.all([
     resolvePath(asString(payload.manifestPath)),
     resolvePath(asString(payload.contextPackPath)),
+    resolvePath(asString(payload.contextSummaryPath)),
+    resolvePath(asString(payload.promptPath)),
+    resolvePath(asString(payload.memoryConfigPath)),
+    resolvePath(asString(payload.memoryScriptPath)),
     resolvePath(asString(payload.resultPath)),
     resolvePath(asString(payload.lastMessagePath)),
     resolvePath(asString(payload.stdoutPath)),
     resolvePath(asString(payload.stderrPath)),
+  ]);
+  const taskArchive = asString(payload.kind) === "factory.task.run"
+    ? factoryTaskPacketArchivePaths(dataDir, job.id)
+    : undefined;
+  const [
+    effectiveManifestPath,
+    effectiveContextPackPath,
+    effectiveContextSummaryPath,
+    effectivePromptPath,
+    effectiveMemoryConfigPath,
+    effectiveMemoryScriptPath,
+  ] = await Promise.all([
+    preferExistingPath(manifestPath, taskArchive?.manifestPath),
+    preferExistingPath(contextPackPath, taskArchive?.contextPackPath),
+    preferExistingPath(contextSummaryPath, taskArchive?.contextSummaryPath),
+    preferExistingPath(promptPath, taskArchive?.promptPath),
+    preferExistingPath(memoryConfigPath, taskArchive?.memoryConfigPath),
+    preferExistingPath(memoryScriptPath, taskArchive?.memoryScriptPath),
   ]);
 
   const effectiveStatus = projectionOverride?.status ?? job.status;
@@ -1190,8 +1248,12 @@ const readJob = async (
         result: effectiveResult,
         progress,
         commands: queueCommands,
-        manifest: await readFileArtifact(manifestPath.originalPath, manifestPath.resolvedPath, { parseJson: true }),
-        contextPack: await readFileArtifact(contextPackPath.originalPath, contextPackPath.resolvedPath, { parseJson: true }),
+        manifest: await readFileArtifact(effectiveManifestPath.originalPath, effectiveManifestPath.resolvedPath, { parseJson: true }),
+        contextPack: await readFileArtifact(effectiveContextPackPath.originalPath, effectiveContextPackPath.resolvedPath, { parseJson: true }),
+        contextSummary: await readFileArtifact(effectiveContextSummaryPath.originalPath, effectiveContextSummaryPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
+        prompt: await readFileArtifact(effectivePromptPath.originalPath, effectivePromptPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
+        memoryConfig: await readFileArtifact(effectiveMemoryConfigPath.originalPath, effectiveMemoryConfigPath.resolvedPath, { parseJson: true, previewChars: 2_400 }),
+        memoryScript: await readFileArtifact(effectiveMemoryScriptPath.originalPath, effectiveMemoryScriptPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
         resultFile: await readFileArtifact(resultPath.originalPath, resultPath.resolvedPath, { parseJson: true }),
         lastMessage: await readFileArtifact(lastMessagePath.originalPath, lastMessagePath.resolvedPath, { parseJson: false }),
         stdout: await parseStructuredLog(stdoutPath.originalPath, stdoutPath.resolvedPath),
@@ -1228,6 +1290,15 @@ const readJob = async (
     taskRun,
     warnings,
   };
+};
+
+export const readFactoryParsedJobStream = async (
+  dataDir: string,
+  repoRoot: string,
+  stream: string,
+  options: ParseReadOptions = {},
+): Promise<FactoryParsedJob | undefined> => {
+  return readJob(dataDir, repoRoot, stream, options);
 };
 
 const objectiveTimelineItems = (analysis: ObjectiveAnalysis): ReadonlyArray<ParseTimelineItem> =>

@@ -238,7 +238,12 @@ const commandDst = async (args: ReadonlyArray<string>, flags: Flags): Promise<vo
   const asJson = flags.json === true || flags.json === "true";
   const limit = asIntegerFlag(flags, "limit");
   const strict = flags.strict === true || flags.strict === "true";
-  const report = await runReceiptDstAudit(DATA_DIR, { prefix });
+  const includeContext = flags.context === true || flags.context === "true";
+  const report = await runReceiptDstAudit(DATA_DIR, {
+    prefix,
+    includeContext,
+    repoRoot: ROOT,
+  });
 
   if (asJson) {
     console.log(JSON.stringify(report, null, 2));
@@ -246,7 +251,13 @@ const commandDst = async (args: ReadonlyArray<string>, flags: Flags): Promise<vo
     console.log(renderReceiptDstAuditText(report, { limit }));
   }
 
-  if (strict && (report.integrityFailures > 0 || report.replayFailures > 0 || report.deterministicFailures > 0)) {
+  const hasReceiptFailures = report.integrityFailures > 0 || report.replayFailures > 0 || report.deterministicFailures > 0;
+  const hasContextFailures = report.context
+    ? report.context.integrityFailures > 0
+      || report.context.replayFailures > 0
+      || report.context.deterministicFailures > 0
+    : false;
+  if (strict && (hasReceiptFailures || hasContextFailures)) {
     throw new Error("DST audit found receipt issues");
   }
 };

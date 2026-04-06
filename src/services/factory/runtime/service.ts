@@ -60,6 +60,10 @@ import {
   type FactoryChatCodexArtifactPaths,
 } from "../../factory-codex-artifacts";
 import {
+  archiveFactoryTaskPacketArtifacts,
+  archiveFactoryTaskPrompt,
+} from "../../factory-task-packet-archive";
+import {
   helperCatalogArtifactRefs,
   loadFactoryHelperContext,
 } from "../../factory-helper-catalog";
@@ -341,6 +345,12 @@ type FactoryLiveGuidance = {
   readonly jobId?: string;
   readonly appliedAt: number;
 };
+
+const factoryTaskRunJobId = (
+  objectiveId: string,
+  taskId: string,
+  candidateId: string,
+): string => `job_factory_${objectiveId}_${taskId}_${candidateId}`;
 
 const parseFactoryLiveGuidance = (
   signal: { readonly note?: string; readonly meta?: Record<string, unknown> } | undefined,
@@ -2994,6 +3004,7 @@ export class FactoryService {
         status: "blocked",
       };
     }
+    const jobId = factoryTaskRunJobId(parsed.objectiveId, parsed.taskId, parsed.candidateId);
     let rebuiltPacket = false;
     if (parsed.executionMode === "worktree") {
       const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
@@ -3020,7 +3031,16 @@ export class FactoryService {
     }
     const packetPresent = await this.taskPacketPresent(parsed);
     if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
-      await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
+      const packet = await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
+      await archiveFactoryTaskPacketArtifacts({
+        dataDir: this.dataDir,
+        jobId,
+        manifestPath: packet.manifestPath,
+        contextSummaryPath: packet.contextSummaryPath,
+        contextPackPath: packet.contextPackPath,
+        memoryConfigPath: packet.memoryConfigPath,
+        memoryScriptPath: packet.memoryScriptPath,
+      });
     }
     const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
       workspacePath: parsed.workspacePath,
@@ -3040,8 +3060,14 @@ export class FactoryService {
     let execution;
     while (true) {
       try {
+        const prompt = await this.renderTaskPrompt(state, task, parsed, guidanceHistory);
+        await archiveFactoryTaskPrompt({
+          dataDir: this.dataDir,
+          jobId,
+          prompt,
+        });
         execution = await this.codexExecutor.run({
-          prompt: await this.renderTaskPrompt(state, task, parsed, guidanceHistory),
+          prompt,
           workspacePath: parsed.workspacePath,
           promptPath: parsed.promptPath,
           lastMessagePath: parsed.lastMessagePath,
@@ -3990,8 +4016,17 @@ export class FactoryService {
         } satisfies FactoryEvent;
       })()
       : undefined;
+    const jobId = factoryTaskRunJobId(state.objectiveId, task.taskId, candidateId);
     const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, pinnedBaseCommit);
-    const jobId = `job_factory_${state.objectiveId}_${task.taskId}_${candidateId}`;
+    await archiveFactoryTaskPacketArtifacts({
+      dataDir: this.dataDir,
+      jobId,
+      manifestPath: manifest.manifestPath,
+      contextSummaryPath: manifest.contextSummaryPath,
+      contextPackPath: manifest.contextPackPath,
+      memoryConfigPath: manifest.memoryConfigPath,
+      memoryScriptPath: manifest.memoryScriptPath,
+    });
     await this.emitObjectiveBatch(state.objectiveId, [
       ...(opts?.prefixEvents ?? []),
       ...(candidateCreated ? [candidateCreated] : []),

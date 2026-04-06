@@ -9,7 +9,17 @@ import { createRuntime } from "@receipt/core/runtime";
 import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { runReceiptDstAudit } from "../../src/cli/dst";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
-import { DEFAULT_FACTORY_OBJECTIVE_POLICY, DEFAULT_FACTORY_OBJECTIVE_PROFILE } from "../../src/modules/factory";
+import {
+  DEFAULT_FACTORY_OBJECTIVE_POLICY,
+  DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+} from "../../src/modules/factory";
+import { decide as decideJob, initial as initialJobState, reduce as reduceJob, type JobCmd, type JobEvent } from "../../src/modules/job";
+import { buildFactoryMemoryScriptSource } from "../../src/services/factory-codex-artifacts";
+import {
+  archiveFactoryTaskPacketArtifacts,
+  archiveFactoryTaskPrompt,
+} from "../../src/services/factory-task-packet-archive";
+import { buildTaskFilePaths } from "../../src/services/factory/task-packets";
 
 type GenericEvent = Record<string, unknown> & {
   readonly type: string;
@@ -37,6 +47,15 @@ const createGenericRuntime = (dataDir: string) =>
     { ok: true },
   );
 
+const createJobRuntime = (dataDir: string) =>
+  createRuntime<JobCmd, JobEvent, typeof initialJobState>(
+    jsonlStore<JobEvent>(dataDir),
+    jsonBranchStore(dataDir),
+    decideJob,
+    reduceJob,
+    initialJobState,
+  );
+
 const seedEvents = async (
   dataDir: string,
   stream: string,
@@ -50,6 +69,305 @@ const seedEvents = async (
       eventId: `${stream}:${index + 1}`,
     });
   }
+};
+
+const seedJobEvents = async (
+  dataDir: string,
+  stream: string,
+  events: ReadonlyArray<JobEvent>,
+): Promise<void> => {
+  const runtime = createJobRuntime(dataDir);
+  for (const [index, event] of events.entries()) {
+    await runtime.execute(stream, {
+      type: "emit",
+      event,
+      eventId: `${stream}:${index + 1}`,
+    });
+  }
+};
+
+const createFactoryTaskPacketFixture = async (opts: {
+  readonly objectiveId?: string;
+  readonly taskId?: string;
+  readonly candidateId?: string;
+  readonly jobId?: string;
+  readonly guidanceMessage?: string;
+  readonly promptOverrides?: {
+    readonly omitManifestPath?: boolean;
+    readonly omitContextPackPath?: boolean;
+    readonly omitMemoryScriptPath?: boolean;
+    readonly omitGuidanceSection?: boolean;
+  };
+  readonly skipMemoryScript?: boolean;
+} = {}): Promise<{
+  readonly workspacePath: string;
+  readonly payload: Record<string, unknown>;
+}> => {
+  const objectiveId = opts.objectiveId ?? "objective_context_dst";
+  const taskId = opts.taskId ?? "task_01";
+  const candidateId = opts.candidateId ?? "candidate_01";
+  const jobId = opts.jobId ?? "job_context_dst";
+  const workspacePath = await createTempDir("receipt-dst-context-workspace");
+  const files = buildTaskFilePaths(workspacePath, taskId);
+  await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
+  await fs.writeFile(files.skillBundlePath, JSON.stringify({ skills: [] }, null, 2), "utf-8");
+
+  const memoryScopes = [
+    { key: "agent", scope: "factory/agents/codex", label: "Agent memory", defaultQuery: "context", readOnly: true },
+    { key: "repo", scope: "factory/repo/shared", label: "Repo shared memory", defaultQuery: "context", readOnly: true },
+    { key: "objective", scope: `factory/objectives/${objectiveId}`, label: "Objective memory", defaultQuery: objectiveId },
+    { key: "task", scope: `factory/objectives/${objectiveId}/tasks/${taskId}`, label: "Task memory", defaultQuery: taskId },
+    { key: "candidate", scope: `factory/objectives/${objectiveId}/candidates/${candidateId}`, label: "Candidate memory", defaultQuery: candidateId },
+    { key: "integration", scope: `factory/objectives/${objectiveId}/integration`, label: "Integration memory", defaultQuery: "integration" },
+  ];
+  const profile = {
+    ...DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+    rootProfileId: "generalist",
+    rootProfileLabel: "Generalist",
+    promptPath: "profiles/generalist/PROFILE.md",
+    selectedSkills: ["skills/factory-receipt-worker/SKILL.md"],
+    objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    cloudProvider: "aws",
+  };
+  const sharedArtifactRefs = [{ kind: "artifact", ref: "README.md", label: "readme" }];
+  const contextRefs = [{ kind: "artifact", ref: files.contextPackPath, label: "context pack" }];
+  const payload = {
+    kind: "factory.task.run",
+    objectiveId,
+    taskId,
+    workerType: "codex",
+    objectiveMode: "delivery",
+    severity: 2,
+    candidateId,
+    baseCommit: "abc123",
+    executionMode: "worktree",
+    workspaceId: "workspace_01",
+    workspacePath,
+    promptPath: files.promptPath,
+    resultPath: files.resultPath,
+    stdoutPath: files.stdoutPath,
+    stderrPath: files.stderrPath,
+    lastMessagePath: files.lastMessagePath,
+    evidencePath: files.evidencePath,
+    manifestPath: files.manifestPath,
+    contextSummaryPath: files.contextSummaryPath,
+    contextPackPath: files.contextPackPath,
+    memoryScriptPath: files.memoryScriptPath,
+    memoryConfigPath: files.memoryConfigPath,
+    repoSkillPaths: ["skills/factory-receipt-worker/SKILL.md"],
+    skillBundlePaths: [files.skillBundlePath],
+    profile,
+    profilePromptHash: "prompt_hash_01",
+    profileSkillRefs: ["skills/factory-receipt-worker/SKILL.md"],
+    sharedArtifactRefs,
+    contextRefs,
+    problem: "Audit whether the worker packet has the right context.",
+    config: {},
+  } satisfies Record<string, unknown>;
+  const contextSources = {
+    repoSharedMemoryScope: "factory/repo/shared",
+    objectiveMemoryScope: `factory/objectives/${objectiveId}`,
+    integrationMemoryScope: `factory/objectives/${objectiveId}/integration`,
+    profileSkillRefs: payload.profileSkillRefs,
+    repoSkillPaths: payload.repoSkillPaths,
+    sharedArtifactRefs,
+  };
+  const manifest = {
+    objective: {
+      objectiveId,
+      title: "Context DST objective",
+      prompt: "Confirm the worker bootstrap packet stays aligned.",
+      baseHash: "abc123",
+      objectiveMode: "delivery",
+      severity: 2,
+      checks: ["bun run verify"],
+    },
+    profile,
+    task: {
+      taskId,
+      title: "Check worker context",
+      prompt: "Read the packet before acting.",
+      workerType: "codex",
+      executionMode: "worktree",
+      baseCommit: "abc123",
+      dependsOn: [],
+    },
+    candidate: {
+      candidateId,
+      taskId,
+    },
+    integration: {
+      status: "idle",
+    },
+    contract: {
+      acceptanceCriteria: ["worker packet is self-consistent"],
+      allowedScope: ["receipt context audit"],
+      disallowedScope: ["unbounded repo exploration"],
+      requiredChecks: ["bun run verify"],
+      proofExpectation: "packet artifacts",
+    },
+    memory: {
+      scriptPath: files.memoryScriptPath,
+      configPath: files.memoryConfigPath,
+      scopes: memoryScopes,
+    },
+    context: {
+      summaryPath: files.contextSummaryPath,
+      packPath: files.contextPackPath,
+    },
+    contextSources,
+    contextRefs,
+    sharedArtifactRefs,
+    repoSkillPaths: payload.repoSkillPaths,
+    skillBundlePaths: payload.skillBundlePaths,
+    traceRefs: [],
+  };
+  const contextPack = {
+    objectiveId,
+    title: "Context DST objective",
+    prompt: "Confirm the worker bootstrap packet stays aligned.",
+    objectiveMode: "delivery",
+    severity: 2,
+    contract: manifest.contract,
+    profile,
+    task: {
+      taskId,
+      title: "Check worker context",
+      prompt: "Read the packet before acting.",
+      workerType: "codex",
+      executionMode: "worktree",
+      status: "running",
+      candidateId,
+    },
+    integration: {
+      status: "idle",
+    },
+    dependencyTree: [],
+    relatedTasks: [{
+      taskId,
+      taskKind: "planned",
+      title: "Check worker context",
+      status: "running",
+      workerType: "codex",
+      relations: ["focus"],
+    }],
+    candidateLineage: [{
+      candidateId,
+      status: "running",
+      summary: "First pass",
+    }],
+    recentReceipts: [{
+      type: "task.dispatched",
+      at: 1,
+      taskId,
+      candidateId,
+      summary: "Task dispatched for execution.",
+    }],
+    objectiveSlice: {
+      frontierTasks: [{
+        taskId,
+        taskKind: "planned",
+        title: "Check worker context",
+        status: "running",
+        workerType: "codex",
+        relations: ["focus"],
+      }],
+      recentCompletedTasks: [],
+      integrationTasks: [],
+      recentObjectiveReceipts: [{
+        type: "objective.created",
+        at: 1,
+        summary: "Objective created.",
+      }],
+      objectiveMemorySummary: "Objective memory summary.",
+      integrationMemorySummary: "Integration memory summary.",
+    },
+    memory: {
+      overview: "Use the packet before broader memory.",
+      objective: "Objective memory summary.",
+      integration: "Integration memory summary.",
+      repoAudit: "No known repo-wide audit issue.",
+    },
+    investigation: {
+      reports: [],
+    },
+    helperCatalog: {
+      runnerPath: "skills/factory-helper-runtime/runner.py",
+      guidance: ["Prefer checked-in helpers when repeated CLI steps would be lossy."],
+      selectedHelpers: [{
+        id: "aws_resource_inventory",
+        description: "Collect AWS inventory evidence.",
+        tags: ["aws", "inventory"],
+        manifestPath: "skills/factory-helper-runtime/catalog/aws_resource_inventory/manifest.json",
+        entrypointPath: "skills/factory-helper-runtime/catalog/aws_resource_inventory/run.py",
+        requiredArgs: ["--region"],
+        requiredContext: ["aws credentials"],
+        examples: ["--region us-west-2"],
+      }],
+    },
+    contextSources,
+    cloudExecutionContext: {
+      preferredProvider: "aws",
+      availableProviders: ["aws"],
+      activeProviders: ["aws"],
+      summary: "AWS credentials are mounted for this profile.",
+    },
+  };
+  const memoryConfig = {
+    objectiveId,
+    taskId,
+    candidateId,
+    contextSummaryPath: path.basename(files.contextSummaryPath),
+    contextPackPath: path.basename(files.contextPackPath),
+    defaultQuery: "Context DST objective\nCheck worker context\nRead the packet before acting.",
+    defaultLimit: 6,
+    defaultMaxChars: 2400,
+    scopes: memoryScopes,
+  };
+  const promptLines = [
+    "# Factory Task",
+    "",
+    "## Helper-First Execution",
+    "Use the checked-in helper runner at skills/factory-helper-runtime/runner.py.",
+    "- helper: aws_resource_inventory | Collect AWS inventory evidence. | tags aws, inventory",
+    "",
+    "## Live Cloud Context",
+    "AWS credentials are mounted for this profile.",
+    "",
+    "## Bootstrap Context",
+    "The prompt is bootstrap only.",
+    "Follow the checked-in worker bootstrap order: manifest, context pack, then memory script.",
+    "Read, in order:",
+    "1. AGENTS.md and skills/factory-receipt-worker/SKILL.md",
+    ...(opts.promptOverrides?.omitManifestPath ? [] : [`2. Manifest: ${files.manifestPath}`]),
+    ...(opts.promptOverrides?.omitContextPackPath ? [] : [`3. Context Pack: ${files.contextPackPath}`]),
+    ...(opts.promptOverrides?.omitMemoryScriptPath ? [] : [`4. Memory Script: ${files.memoryScriptPath}`]),
+    `5. Task Context Summary (quick overview derived from the packet): ${files.contextSummaryPath}`,
+    "Do not call `receipt factory inspect` from inside this task worktree.",
+    ...(opts.guidanceMessage && !opts.promptOverrides?.omitGuidanceSection
+      ? ["", "## Live Operator Guidance", "", `1. ${opts.guidanceMessage}`]
+      : []),
+  ];
+
+  await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
+  await fs.writeFile(files.contextSummaryPath, [
+    "# Factory Task Context Summary",
+    "",
+    "## Packet Usage",
+    "Use the packet before broader exploration.",
+  ].join("\n"), "utf-8");
+  await fs.writeFile(files.promptPath, promptLines.join("\n"), "utf-8");
+  await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
+  if (!opts.skipMemoryScript) {
+    await fs.writeFile(files.memoryScriptPath, buildFactoryMemoryScriptSource(files.memoryConfigPath), "utf-8");
+  }
+  await fs.writeFile(files.lastMessagePath, "Structured result pending.", "utf-8");
+
+  return {
+    workspacePath,
+    payload,
+  };
 };
 
 const runCli = (
@@ -295,5 +613,215 @@ test("receipt dst agent control summary uses the latest run start on repeated ru
     expect(stream.summary.agentVersion).toBe("2.0.0");
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst context audit summarizes historical factory task packets deterministically", async () => {
+  const dataDir = await createTempDir("receipt-dst-context");
+  const { workspacePath, payload } = await createFactoryTaskPacketFixture({
+    objectiveId: "objective_context_ok",
+    taskId: "task_context_ok",
+    candidateId: "candidate_context_ok",
+    jobId: "job_context_ok",
+    guidanceMessage: "Stay inside the packet and validate the bootstrap order before any broader search.",
+  });
+  try {
+    await seedJobEvents(dataDir, "jobs/job_context_ok", [
+      {
+        type: "job.enqueued",
+        jobId: "job_context_ok",
+        agentId: "codex",
+        lane: "collect",
+        payload,
+        maxAttempts: 2,
+        sessionKey: "factory:objective_context_ok:task_context_ok",
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+      {
+        type: "job.leased",
+        jobId: "job_context_ok",
+        workerId: "worker_1",
+        leaseMs: 60_000,
+        attempt: 1,
+      },
+      {
+        type: "queue.command",
+        jobId: "job_context_ok",
+        commandId: "cmd_steer_01",
+        command: "steer",
+        lane: "steer",
+        payload: {
+          message: "Stay inside the packet and validate the bootstrap order before any broader search.",
+        },
+        by: "factory-cli",
+        createdAt: 2,
+      },
+      {
+        type: "job.progress",
+        jobId: "job_context_ok",
+        workerId: "worker_1",
+        result: {
+          status: "running",
+          summary: "Worker is reading the packet.",
+          eventType: "turn.started",
+        },
+      },
+      {
+        type: "job.completed",
+        jobId: "job_context_ok",
+        workerId: "worker_1",
+        result: {
+          ok: true,
+        },
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      includeContext: true,
+      repoRoot: ROOT,
+    });
+
+    expect(report.context?.runCount).toBe(1);
+    expect(report.context?.integrityFailures).toBe(0);
+    expect(report.context?.replayFailures).toBe(0);
+    expect(report.context?.deterministicFailures).toBe(0);
+    expect(report.context?.runs[0]?.artifacts.prompt).toBe(true);
+    expect(report.context?.runs[0]?.summary.profileId).toBe("generalist");
+    expect(report.context?.runs[0]?.summary.cloudProvider).toBe("aws");
+    expect(report.context?.runs[0]?.summary.helperCount).toBe(1);
+    expect(report.context?.runs[0]?.summary.liveGuidanceCount).toBe(1);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst context audit falls back to archived task packets after workspace cleanup", async () => {
+  const dataDir = await createTempDir("receipt-dst-context-archive");
+  const { workspacePath, payload } = await createFactoryTaskPacketFixture({
+    objectiveId: "objective_context_archive",
+    taskId: "task_context_archive",
+    candidateId: "candidate_context_archive",
+    jobId: "job_context_archive",
+  });
+  try {
+    await archiveFactoryTaskPacketArtifacts({
+      dataDir,
+      jobId: "job_context_archive",
+      manifestPath: String(payload.manifestPath),
+      contextSummaryPath: String(payload.contextSummaryPath),
+      contextPackPath: String(payload.contextPackPath),
+      memoryConfigPath: String(payload.memoryConfigPath),
+      memoryScriptPath: String(payload.memoryScriptPath),
+    });
+    await archiveFactoryTaskPrompt({
+      dataDir,
+      jobId: "job_context_archive",
+      prompt: await fs.readFile(String(payload.promptPath), "utf-8"),
+    });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+
+    await seedJobEvents(dataDir, "jobs/job_context_archive", [
+      {
+        type: "job.enqueued",
+        jobId: "job_context_archive",
+        agentId: "codex",
+        lane: "collect",
+        payload,
+        maxAttempts: 1,
+        sessionKey: "factory:objective_context_archive:task_context_archive",
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+      {
+        type: "job.leased",
+        jobId: "job_context_archive",
+        workerId: "worker_1",
+        leaseMs: 60_000,
+        attempt: 1,
+      },
+      {
+        type: "job.completed",
+        jobId: "job_context_archive",
+        workerId: "worker_1",
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      includeContext: true,
+      repoRoot: ROOT,
+    });
+
+    expect(report.context?.runCount).toBe(1);
+    expect(report.context?.integrityFailures).toBe(0);
+    expect(report.context?.runs[0]?.artifacts.manifest).toBe(true);
+    expect(report.context?.runs[0]?.artifacts.prompt).toBe(true);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst --context --strict exits non-zero when packet context is out of sync", async () => {
+  const dataDir = await createTempDir("receipt-dst-context-strict");
+  const { workspacePath, payload } = await createFactoryTaskPacketFixture({
+    objectiveId: "objective_context_bad",
+    taskId: "task_context_bad",
+    candidateId: "candidate_context_bad",
+    jobId: "job_context_bad",
+    skipMemoryScript: true,
+  });
+  try {
+    await seedJobEvents(dataDir, "jobs/job_context_bad", [
+      {
+        type: "job.enqueued",
+        jobId: "job_context_bad",
+        agentId: "codex",
+        lane: "collect",
+        payload,
+        maxAttempts: 1,
+        sessionKey: "factory:objective_context_bad:task_context_bad",
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+      {
+        type: "job.leased",
+        jobId: "job_context_bad",
+        workerId: "worker_1",
+        leaseMs: 60_000,
+        attempt: 1,
+      },
+      {
+        type: "job.completed",
+        jobId: "job_context_bad",
+        workerId: "worker_1",
+      },
+    ]);
+
+    const result = await runCli(["dst", "--context", "--json", "--strict"], {
+      RECEIPT_DATA_DIR: dataDir,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("DST audit found receipt issues");
+
+    const parsed = JSON.parse(result.stdout) as {
+      readonly context?: {
+        readonly integrityFailures: number;
+        readonly runs: ReadonlyArray<{
+          readonly integrity: {
+            readonly ok: boolean;
+            readonly error?: string;
+          };
+        }>;
+      };
+    };
+    expect(parsed.context?.integrityFailures).toBe(1);
+    expect(parsed.context?.runs[0]?.integrity.ok).toBe(false);
+    expect(parsed.context?.runs[0]?.integrity.error).toContain("missing memory script");
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
   }
 });
