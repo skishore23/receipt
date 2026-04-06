@@ -841,7 +841,61 @@ test("jsonl queue: refresh can stay read-only when lease expiry is owned elsewhe
   }
 });
 
-test.skip("jsonl queue: cross-queue enqueue wakes a worker watching the shared data dir (removed: single-process)", () => {});
+test("jsonl queue: cross-queue enqueue is picked up on the next shared-data-dir resync", async () => {
+  const dir = await mkTmp("receipt-queue-cross-queue-wakeup");
+  try {
+    const runtimeA = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const runtimeB = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const workerQueue = jsonlQueue({ runtime: runtimeA, stream: "jobs", watchDir: dir });
+    const enqueueQueue = jsonlQueue({ runtime: runtimeB, stream: "jobs", watchDir: dir });
+    const handled: string[] = [];
+    let workerError: Error | undefined;
+
+    const worker = new JobWorker({
+      queue: workerQueue,
+      workerId: "worker_cross_queue",
+      idleResyncMs: 250,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async (job) => {
+          handled.push(job.id);
+          return { ok: true, result: { ok: true } };
+        },
+      },
+      onError: (error) => {
+        workerError = error;
+      },
+    });
+
+    worker.start();
+    const job = await enqueueQueue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_cross_queue" },
+      maxAttempts: 1,
+    });
+    const settled = await workerQueue.waitForJob(job.id, 2_000);
+    worker.stop();
+
+    expect(workerError).toBeUndefined();
+    expect(handled).toEqual([job.id]);
+    expect(settled?.status).toBe("completed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("jsonl queue: worker wakes for a child queued by an active parent before the parent finishes", async () => {
   const dir = await mkTmp("receipt-queue-parent-child-wakeup");

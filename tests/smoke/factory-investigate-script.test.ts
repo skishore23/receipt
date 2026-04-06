@@ -906,6 +906,115 @@ test("factory objective audit reuses an existing open auto-fix objective for the
   expect(afterObjectiveIds).toEqual(beforeObjectiveIds);
 }, 120_000);
 
+test("factory objective audit does not create more than three open auto-fix objectives", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Cap auto-fix objective creation",
+    prompt: "Finish an investigation so the audit can attempt to create another auto-fix objective.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  for (let index = 0; index < 5; index += 1) {
+    const historicalObjectiveId = `objective_hist_limit_${index + 1}`;
+    const historicalArtifactDir = path.join(dataDir, "factory", "artifacts", historicalObjectiveId);
+    await fs.mkdir(historicalArtifactDir, { recursive: true });
+    await fs.writeFile(path.join(historicalArtifactDir, "objective.audit.json"), JSON.stringify({
+      requestedId: historicalObjectiveId,
+      links: { objectiveId: historicalObjectiveId },
+      summary: { status: "completed" },
+      audit: {
+        generatedAt: Date.now() - (index + 1) * 1_000,
+        recommendationStatus: "ready",
+        recommendations: [{
+          summary: "Reduce lease expiry during long-running Factory jobs.",
+          anomalyPatterns: ["lease_expired"],
+          scope: "src/services/factory-runtime.ts",
+          confidence: "high",
+          suggestedFix: "Add periodic heartbeats or progress updates for long-running worker steps.",
+        }],
+        recurringPatterns: [{ pattern: "lease_expired", count: 1 }],
+      },
+    }, null, 2), "utf-8");
+    await service.memoryTools!.commit({
+      scope: "factory/audits/repo",
+      text: `[${historicalObjectiveId}] Summary\n${historicalObjectiveId} finished completed with verdict=weak.\n\nRecommendations\n- [high] scope=src/services/factory-runtime.ts patterns=lease_expired Reduce lease expiry during long-running Factory jobs.`,
+      tags: ["factory", "audit", "repo", "completed", "weak"],
+    });
+  }
+
+  const existingAutoFixIds: string[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const summary = `Existing auto-fix objective ${index + 1}`;
+    const scope = `src/existing/auto-fix-${index + 1}.ts`;
+    const key = autoFixRecommendationKey({
+      summary,
+      scope,
+      anomalyPatterns: [`existing_pattern_${index + 1}`],
+    });
+    const existing = await service.createObjective({
+      title: summary,
+      prompt: [
+        "Auto-fix triggered by recurring audit recommendation.",
+        "",
+        "## Recommendation",
+        `Apply fix ${index + 1}.`,
+        "",
+        "## Scope",
+        scope,
+        "",
+        `## Recurring Patterns (existing_pattern_${index + 1})`,
+        `- existing_pattern_${index + 1}: 5 occurrence(s)`,
+        "",
+        "## Audit Deduplication",
+        `factory_auto_fix_key:${key}`,
+      ].join("\n"),
+      objectiveMode: "delivery",
+      severity: 1,
+      channel: "auto-fix",
+      startImmediately: false,
+    });
+    existingAutoFixIds.push(existing.objectiveId);
+  }
+
+  const beforeObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    factoryService: service,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+    },
+    recommendationGenerator: async () => [{
+      summary: "Create a fourth auto-fix objective",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory-runtime.ts",
+      confidence: "high",
+      suggestedFix: "Add a cap so auto-fix objectives cannot fan out without bound.",
+    }],
+  }) as {
+    readonly autoFixObjectiveId?: string;
+  };
+
+  const afterObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+  const existingAutoFixObjectives = await Promise.all(existingAutoFixIds.map((objectiveId) => service.getObjective(objectiveId)));
+
+  expect(result.autoFixObjectiveId).toBeUndefined();
+  expect(afterObjectiveIds).toEqual(beforeObjectiveIds);
+  expect(existingAutoFixObjectives.map((objective) => objective.channel)).toEqual(["auto-fix", "auto-fix", "auto-fix"]);
+}, 120_000);
+
 test("factory objective audit ignores late sidecar failures that happen after objective completion", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService({
     taskResult: {

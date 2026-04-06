@@ -252,6 +252,7 @@ const FACTORY_TASK_CODEX_MODEL =
   process.env.RECEIPT_FACTORY_TASK_MODEL?.trim()
   || "gpt-5.4-mini";
 const MAX_CONSECUTIVE_TASK_FAILURES = 5;
+const MAX_OPEN_AUTO_FIX_OBJECTIVES = 3;
 const USAGE_LIMIT_BLOCK_REASON_RE = /\b(usage_limit_reached|too many requests|rate limit|quota(?: exceeded| exhausted)?|429)\b/i;
 const RETRYABLE_BLOCK_REASON_RE = /\b(factory task failed|lease expired|timed out|timeout|missing structured factory task result|transient|temporary|connection reset|econnreset|spawn|signal|unexpectedly canceled|interrupted)\b/i;
 const NON_RETRYABLE_BLOCK_REASON_RE = /\b(no tracked diff|isolated runtime|cannot run in isolated mode|policy blocked|circuit[- ]broken|integration validation failed)\b/i;
@@ -1678,6 +1679,12 @@ export class FactoryService {
     const title = requireNonEmpty(input.title, "title required");
     const prompt = requireNonEmpty(input.prompt, "prompt required");
     const channel = input.channel?.trim() || "results";
+    if (channel === "auto-fix" && await this.openAutoFixObjectiveCount() >= MAX_OPEN_AUTO_FIX_OBJECTIVES) {
+      throw new FactoryServiceError(
+        409,
+        `auto-fix objective limit reached (${MAX_OPEN_AUTO_FIX_OBJECTIVES} open objectives)`,
+      );
+    }
     const profile = await this.resolveObjectiveProfileSnapshot(input.profileId);
     const objectiveMode = normalizeObjectiveModeInput(
       input.objectiveMode,
@@ -2654,6 +2661,15 @@ export class FactoryService {
       if (!task?.jobId) continue;
       await this.queue.cancel(task.jobId, reason, "factory");
     }
+  }
+
+  private async openAutoFixObjectiveCount(): Promise<number> {
+    const projections = await this.listStoredObjectiveProjections();
+    return projections.filter((projection) =>
+      !projection.archivedAt
+      && projection.state.channel === "auto-fix"
+      && !this.isTerminalObjectiveStatus(projection.status)
+    ).length;
   }
 
   private async listObjectiveProjectionSummaries(): Promise<ReadonlyArray<StoredObjectiveProjectionSummary>> {
@@ -3858,11 +3874,12 @@ export class FactoryService {
     const normalizedStructuredInvestigationReport = hasStructuredInvestigationReport
       ? normalizeInvestigationReport(rawResult.report, summary)
       : undefined;
-    if (hasStructuredInvestigationReport) {
+    if (isInvestigation && isRecord(rawResult.report)) {
+      const report = rawResult.report;
       const structuredEvidenceFailure = validateTaskEvidence({
         objectiveId: payload.objectiveId,
         taskId: payload.taskId,
-        reportIncludesEvidenceRecords: Object.hasOwn(rawResult.report, "evidenceRecords"),
+        reportIncludesEvidenceRecords: Object.hasOwn(report, "evidenceRecords"),
         reportEvidenceRecords: normalizedStructuredInvestigationReport?.evidenceRecords,
       });
       if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
@@ -4600,6 +4617,7 @@ export class FactoryService {
       stdoutPath: manifest.stdoutPath,
       stderrPath: manifest.stderrPath,
       lastMessagePath: manifest.lastMessagePath,
+      evidencePath: manifest.evidencePath,
       manifestPath: manifest.manifestPath,
       contextSummaryPath: manifest.contextSummaryPath,
       contextPackPath: manifest.contextPackPath,
@@ -5700,6 +5718,7 @@ export class FactoryService {
     readonly stdoutPath: string;
     readonly stderrPath: string;
     readonly lastMessagePath: string;
+    readonly evidencePath: string;
     readonly memoryScriptPath: string;
     readonly memoryConfigPath: string;
     readonly repoSkillPaths: ReadonlyArray<string>;
@@ -5827,6 +5846,7 @@ export class FactoryService {
       stdoutPath: files.stdoutPath,
       stderrPath: files.stderrPath,
       lastMessagePath: files.lastMessagePath,
+      evidencePath: files.evidencePath,
       memoryScriptPath: files.memoryScriptPath,
       memoryConfigPath: files.memoryConfigPath,
       repoSkillPaths: dedupeStrings(repoSkillPaths),
@@ -6210,6 +6230,7 @@ export class FactoryService {
       stdoutPath: requireNonEmpty(payload.stdoutPath, "stdoutPath required"),
       stderrPath: requireNonEmpty(payload.stderrPath, "stderrPath required"),
       lastMessagePath: requireNonEmpty(payload.lastMessagePath, "lastMessagePath required"),
+      evidencePath: requireNonEmpty(payload.evidencePath, "evidencePath required"),
       manifestPath: requireNonEmpty(payload.manifestPath, "manifestPath required"),
       contextSummaryPath: optionalTrimmedString(payload.contextSummaryPath),
       contextPackPath: requireNonEmpty(payload.contextPackPath, "contextPackPath required"),

@@ -243,7 +243,7 @@ const findExistingAutoFixObjective = async (
     .filter((objective) => isOpenObjectiveStatus(objective.status));
   for (const objective of activeObjectives) {
     const state = await factoryService.getObjectiveState(objective.objectiveId).catch(() => undefined);
-    if (!state || state.channel !== "auto-fix") continue;
+    if (!state || state.archivedAt || state.channel !== "auto-fix" || !isOpenObjectiveStatus(state.status)) continue;
     if (state.prompt.includes(autoFixPromptMarker(key))) {
       return state.objectiveId;
     }
