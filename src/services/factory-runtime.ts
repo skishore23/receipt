@@ -49,6 +49,7 @@ type FactoryServiceRuntimeOptions = {
   readonly repoSlotConcurrency?: number;
   readonly memoryTools?: MemoryTools;
   readonly redriveQueuedJob?: (job: QueueJob) => Promise<void>;
+  readonly auditAutoFixEnabled?: boolean;
 };
 
 const isNoRetryError = (err: unknown): boolean => {
@@ -579,6 +580,7 @@ export const runFactoryObjectiveAudit = async (input: {
   readonly memoryTools: MemoryTools;
   readonly payload: Record<string, unknown>;
   readonly factoryService?: FactoryService;
+  readonly autoFixEnabled?: boolean;
   readonly recommendationGenerator?: (
     report: FactoryReceiptInvestigation,
     recentAuditEntries: ReadonlyArray<{ readonly text: string }>,
@@ -616,7 +618,7 @@ export const runFactoryObjectiveAudit = async (input: {
 
   // Auto-fix: create a delivery objective when a high-confidence recommendation matches recurring patterns.
   let autoFixObjectiveId: string | undefined;
-  if (input.factoryService) {
+  if (input.factoryService && input.autoFixEnabled !== false) {
     const autoFixRec = selectAutoFixRecommendation(recommendations, patternCounts);
     if (autoFixRec) {
       try {
@@ -744,7 +746,12 @@ export const runFactoryObjectiveAudit = async (input: {
   };
 };
 
-export const createFactoryWorkerHandlers = (service: FactoryService): Record<typeof FACTORY_CONTROL_AGENT_ID | "codex", JobHandler> => ({
+export const createFactoryWorkerHandlers = (
+  service: FactoryService,
+  opts: {
+    readonly auditAutoFixEnabled?: boolean;
+  } = {},
+): Record<typeof FACTORY_CONTROL_AGENT_ID | "codex", JobHandler> => ({
   [FACTORY_CONTROL_AGENT_ID]: async (job, ctx) => {
     await ctx.pullCommands(["abort", "steer"]);
     try {
@@ -756,6 +763,7 @@ export const createFactoryWorkerHandlers = (service: FactoryService): Record<typ
             memoryTools: auditMemoryTools ?? (() => { throw new Error("factory objective audit requires memory tools"); })(),
             payload: job.payload as Record<string, unknown>,
             factoryService: service,
+            autoFixEnabled: opts.auditAutoFixEnabled,
           })
         : await service.runObjectiveControl(job.payload as Record<string, unknown>);
       return { ok: true, result };

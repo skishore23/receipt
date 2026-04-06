@@ -60,6 +60,14 @@ type FactoryCliRuntimeOptions = {
   readonly onWorkerError?: (error: Error) => void;
 };
 
+const parseBooleanEnv = (value: string | undefined, fallback: boolean): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+};
+
 export const createFactoryCliRuntime = (
   config: FactoryCliConfig,
   opts: FactoryCliRuntimeOptions = {},
@@ -160,7 +168,9 @@ export const createFactoryCliRuntime = (
   });
   serviceRef = service;
 
-  const handlers = createFactoryWorkerHandlers(service);
+  const handlers = createFactoryWorkerHandlers(service, {
+    auditAutoFixEnabled: parseBooleanEnv(process.env.RECEIPT_FACTORY_AUTO_FIX_ENABLED, false),
+  });
   const worker = new JobWorker({
     queue,
     workerId: process.env.JOB_WORKER_ID ?? `factory_cli_${process.pid}`,

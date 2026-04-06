@@ -1,4 +1,5 @@
 import { getReceiptDb, isSqliteLockError } from "../db/client";
+import { readObjectiveProjection } from "../db/projectors";
 import * as schema from "../db/schema";
 import { and, desc, eq, like, notLike, sql, type SQL } from "drizzle-orm";
 import {
@@ -145,6 +146,13 @@ const objectiveSnapshotTs = (dataDir: string, objectiveId: string): number | und
   const ts = Number(row?.updatedAt ?? row?.lastTs);
   return Number.isFinite(ts) ? ts : undefined;
 };
+
+const isTerminalObjectiveStatus = (status: string | undefined): boolean =>
+  status === "completed"
+  || status === "blocked"
+  || status === "failed"
+  || status === "canceled"
+  || status === "archived";
 
 const categorizeAnomaly = (summary: string): string => {
   const normalized = summary.toLowerCase();
@@ -294,7 +302,10 @@ export const readFactoryReceiptAudit = async (
   const warnings: string[] = [];
   const investigations = await Promise.all(objectiveIds.map(async (objectiveId) => {
     try {
-      const asOfTs = objectiveSnapshotTs(dataDir, objectiveId);
+      const projection = readObjectiveProjection(dataDir, objectiveId);
+      const asOfTs = isTerminalObjectiveStatus(projection?.status)
+        ? objectiveSnapshotTs(dataDir, objectiveId)
+        : undefined;
       return await readFactoryReceiptInvestigation(
         dataDir,
         repoRoot,
@@ -311,31 +322,34 @@ export const readFactoryReceiptAudit = async (
     }
   }));
   const reports = investigations.filter((report): report is FactoryReceiptInvestigation => Boolean(report));
-  const objectives = reports.map((report) => ({
-    objectiveId: report.links.objectiveId ?? report.resolved.id,
-    title: report.summary.title,
-    status: report.summary.status,
-    verdict: report.assessment.verdict,
-    easyRouteRisk: report.assessment.easyRouteRisk,
-    efficiency: report.assessment.efficiency,
-    controlChurn: report.assessment.controlChurn,
-    alignmentVerdict: report.assessment.alignmentVerdict,
-    correctiveSteerIssued: report.assessment.correctiveSteerIssued,
-    alignedAfterCorrection: report.assessment.alignedAfterCorrection,
-    jobs: report.jobs.length,
-    tasks: report.tasks.length,
-    anomalies: report.anomalies.length,
-    interventions: report.interventions.count,
-    restartCount: report.interventions.restartCount,
-    courseCorrectionWorked: report.interventions.courseCorrectionWorked,
-    auditStale: report.audit?.stale ?? false,
-    recommendationStatus: report.audit?.recommendationStatus,
-    recommendationError: report.audit?.recommendationError,
-    recommendations: report.recommendations,
-    autoFixObjectiveId: report.autoFixObjectiveId,
-    latestSummary: report.summary.text,
-    durationMs: report.window.durationMs,
-  } satisfies AuditObjectiveSample));
+  const objectives = reports.map((report) => {
+    const stalled = report.anomalies.some((anomaly) => anomaly.kind === "job_stalled");
+    return {
+      objectiveId: report.links.objectiveId ?? report.resolved.id,
+      title: report.summary.title,
+      status: stalled && report.summary.status === "executing" ? "stalled" : report.summary.status,
+      verdict: report.assessment.verdict,
+      easyRouteRisk: report.assessment.easyRouteRisk,
+      efficiency: report.assessment.efficiency,
+      controlChurn: report.assessment.controlChurn,
+      alignmentVerdict: report.assessment.alignmentVerdict,
+      correctiveSteerIssued: report.assessment.correctiveSteerIssued,
+      alignedAfterCorrection: report.assessment.alignedAfterCorrection,
+      jobs: report.jobs.length,
+      tasks: report.tasks.length,
+      anomalies: report.anomalies.length,
+      interventions: report.interventions.count,
+      restartCount: report.interventions.restartCount,
+      courseCorrectionWorked: report.interventions.courseCorrectionWorked,
+      auditStale: report.audit?.stale ?? false,
+      recommendationStatus: report.audit?.recommendationStatus,
+      recommendationError: report.audit?.recommendationError,
+      recommendations: report.recommendations,
+      autoFixObjectiveId: report.autoFixObjectiveId,
+      latestSummary: report.summary.text,
+      durationMs: report.window.durationMs,
+    } satisfies AuditObjectiveSample;
+  });
 
   const anomalyCounts = new Map<string, number>();
   for (const report of reports) {

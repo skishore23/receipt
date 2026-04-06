@@ -7,6 +7,7 @@ import { desc } from "drizzle-orm";
 
 import { jsonlStore } from "../../adapters/jsonl";
 import { getReceiptDb } from "../../db/client";
+import { readJobProjection } from "../../db/projectors";
 import * as schema from "../../db/schema";
 import type { AgentEvent } from "../../modules/agent";
 import { initial as initialAgent, reduce as reduceAgent } from "../../modules/agent";
@@ -272,6 +273,7 @@ type ParsedJob = {
   readonly progress: ReadonlyArray<ParsedJobProgress>;
   readonly queueCommands: ReadonlyArray<ParsedJobCommand>;
   readonly taskRun?: ParsedTaskRun;
+  readonly warnings: ReadonlyArray<string>;
 };
 
 export type FactoryParsedRun = {
@@ -347,6 +349,42 @@ const truncateBlock = (value: string | undefined, max = 1_400): string | undefin
   const normalized = value?.trim();
   if (!normalized) return undefined;
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}\u2026`;
+};
+
+const isTerminalJobStatus = (status: string | undefined): boolean =>
+  status === "completed" || status === "failed" || status === "canceled";
+
+const readProjectedJobOverride = (
+  dataDir: string,
+  job: {
+    readonly id: string;
+    readonly status: string;
+    readonly updatedAt: number;
+  },
+  options: ParseReadOptions,
+): {
+  readonly status: string;
+  readonly updatedAt: number;
+  readonly lastError?: string;
+  readonly canceledReason?: string;
+  readonly result?: Readonly<Record<string, unknown>>;
+  readonly warning: string;
+} | undefined => {
+  const projection = readJobProjection(dataDir, job.id);
+  if (!projection) return undefined;
+  if (typeof options.asOfTs === "number" && projection.updatedAt > options.asOfTs) return undefined;
+  if (!isTerminalJobStatus(projection.status) || isTerminalJobStatus(job.status) || projection.updatedAt <= job.updatedAt) {
+    return undefined;
+  }
+  const detail = truncateInline(projection.canceledReason ?? projection.lastError, 160);
+  return {
+    status: projection.status,
+    updatedAt: projection.updatedAt,
+    lastError: projection.lastError,
+    canceledReason: projection.canceledReason,
+    result: projection.result,
+    warning: `Job ${job.id} receipt state ${job.status} is stale; using projection status ${projection.status}${detail ? ` (${detail})` : ""}.`,
+  };
 };
 
 const fileExists = async (filePath: string | undefined): Promise<boolean> => {
@@ -1036,6 +1074,7 @@ const readJob = async (
   const jobId = stream.replace(/^jobs\//u, "");
   const job = state.jobs[jobId];
   if (!job) return undefined;
+  const projectionOverride = readProjectedJobOverride(dataDir, job, options);
 
   const enqueued = chain.find((receipt) => receipt.body.type === "job.enqueued")?.body;
   const payload = asRecord(enqueued && enqueued.type === "job.enqueued" ? enqueued.payload : undefined) ?? {};
@@ -1128,19 +1167,27 @@ const readJob = async (
     resolvePath(asString(payload.stderrPath)),
   ]);
 
+  const effectiveStatus = projectionOverride?.status ?? job.status;
+  const effectiveUpdatedAt = projectionOverride?.updatedAt ?? job.updatedAt;
+  const effectiveLastError = projectionOverride?.lastError ?? job.lastError;
+  const effectiveCanceledReason = projectionOverride?.canceledReason ?? job.canceledReason;
+  const effectiveResult = asRecord(projectionOverride?.result) ?? result;
+  const observedAt = Math.max(chain.at(-1)!.ts, effectiveUpdatedAt);
+  const warnings = projectionOverride ? [projectionOverride.warning] : [];
+
   const taskRun = asString(payload.kind) === "factory.task.run"
     ? {
         jobId: job.id,
         taskId: asString(payload.taskId),
         candidateId: asString(payload.candidateId),
         objectiveId: asString(payload.objectiveId),
-        status: job.status,
+        status: effectiveStatus,
         createdAt: job.createdAt,
-        updatedAt: job.updatedAt,
-        durationMs: Math.max(0, chain.at(-1)!.ts - job.createdAt),
-        summary: progress.at(-1)?.summary ?? truncateInline(asString(result?.summary) ?? job.lastError ?? job.canceledReason, 220),
+        updatedAt: effectiveUpdatedAt,
+        durationMs: Math.max(0, observedAt - job.createdAt),
+        summary: progress.at(-1)?.summary ?? truncateInline(asString(effectiveResult?.summary) ?? effectiveLastError ?? effectiveCanceledReason, 220),
         payload,
-        result,
+        result: effectiveResult,
         progress,
         commands: queueCommands,
         manifest: await readFileArtifact(manifestPath.originalPath, manifestPath.resolvedPath, { parseJson: true }),
@@ -1155,30 +1202,31 @@ const readJob = async (
   return {
     stream,
     jobId: job.id,
-    status: job.status,
+    status: effectiveStatus,
     agentId: job.agentId,
     lane: job.lane,
     payloadKind: asString(payload.kind),
-    objectiveId: asString(payload.objectiveId) ?? asString(result?.objectiveId),
-    taskId: asString(payload.taskId) ?? asString(result?.taskId),
-    candidateId: asString(payload.candidateId) ?? asString(result?.candidateId),
+    objectiveId: asString(payload.objectiveId) ?? asString(effectiveResult?.objectiveId),
+    taskId: asString(payload.taskId) ?? asString(effectiveResult?.taskId),
+    candidateId: asString(payload.candidateId) ?? asString(effectiveResult?.candidateId),
     runId: asString(payload.runId) ?? asString(payload.parentRunId),
     sessionKey: job.sessionKey,
     singletonMode: job.singletonMode,
     receiptCount: chain.length,
     createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    durationMs: Math.max(0, chain.at(-1)!.ts - job.createdAt),
+    updatedAt: effectiveUpdatedAt,
+    durationMs: Math.max(0, observedAt - job.createdAt),
     retryCount: Math.max(0, job.attempt - 1),
     abortRequested: Boolean(job.abortRequested),
-    lastError: job.lastError,
-    canceledReason: job.canceledReason,
+    lastError: effectiveLastError,
+    canceledReason: effectiveCanceledReason,
     payload,
-    result,
+    result: effectiveResult,
     events,
     progress,
     queueCommands,
     taskRun,
+    warnings,
   };
 };
 
@@ -1334,7 +1382,7 @@ export const readFactoryParsedRun = async (
   options: ParseReadOptions = {},
 ): Promise<FactoryParsedRun> => {
   const resolved = await resolveParseTarget(dataDir, requestedId);
-  const warnings = [...resolved.ambiguousMatches].map((stream) => `Additional match: ${stream}`);
+  const baseWarnings = [...resolved.ambiguousMatches].map((stream) => `Additional match: ${stream}`);
 
   if (resolved.kind === "objective") {
     const objectiveContext = await loadObjectiveContext(dataDir, resolved.stream, options);
@@ -1344,6 +1392,7 @@ export const readFactoryParsedRun = async (
     const relatedJobs = (await Promise.all(
       objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
     )).filter((job): job is ParsedJob => Boolean(job));
+    const warnings = [...baseWarnings, ...relatedJobs.flatMap((job) => job.warnings)];
     const taskRuns = relatedJobs
       .map((job) => job.taskRun)
       .filter((taskRun): taskRun is ParsedTaskRun => Boolean(taskRun));
@@ -1426,6 +1475,7 @@ export const readFactoryParsedRun = async (
           objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
         )).filter((job): job is ParsedJob => Boolean(job))
       : [];
+    const warnings = [...baseWarnings, ...relatedJobs.flatMap((job) => job.warnings)];
     const taskRuns = relatedJobs
       .map((job) => job.taskRun)
       .filter((taskRun): taskRun is ParsedTaskRun => Boolean(taskRun));
@@ -1501,6 +1551,7 @@ export const readFactoryParsedRun = async (
           objectiveContext.analysis.jobs.map((job) => readJob(dataDir, repoRoot, job.stream, options)),
         )).filter((job): job is ParsedJob => Boolean(job))
       : [];
+    const warnings = [...baseWarnings, ...relatedJobs.flatMap((job) => job.warnings)];
     const taskRuns = relatedJobs
       .map((job) => job.taskRun)
       .filter((taskRun): taskRun is ParsedTaskRun => Boolean(taskRun));
@@ -1563,6 +1614,7 @@ export const readFactoryParsedRun = async (
 
   const job = await readJob(dataDir, repoRoot, resolved.stream, options);
   if (!job) throw new Error(`No receipts found for ${resolved.stream}`);
+  const warnings = [...baseWarnings, ...job.warnings];
   return {
     requestedId,
     resolved,

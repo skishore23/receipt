@@ -119,11 +119,22 @@ const createCodexStub = async (opts: {
     "    outcome: 'approved',",
     "    summary: 'Stub approved result.',",
     "    artifacts: [],",
-    "    scriptsRun: [],",
+    "    scriptsRun: [{",
+    "      command: 'bun run build',",
+    "      summary: 'Validated the stub workspace after applying the change.',",
+    "      status: 'ok',",
+    "    }],",
     "    completion: {",
     "      changed: taskId === 'task_02' ? ['package.json'] : taskId === 'task_03' ? ['README.md'] : ['CLI_SMOKE.txt'],",
     "      proof: ['Stub workspace mutation applied.'],",
     "      remaining: [],",
+    "    },",
+    "    alignment: {",
+    "      verdict: 'aligned',",
+    "      satisfied: ['Applied the requested delivery change and kept the repository build green.'],",
+    "      missing: [],",
+    "      outOfScope: [],",
+    "      rationale: 'The stub applied the requested change and ran bun run build successfully.',",
     "    },",
     "    nextAction: null,",
     "  };",
@@ -357,6 +368,37 @@ const seedJobReplay = async (
       });
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
+
+test("receipt cli: dst and jobs help return usage without executing the command", async () => {
+  const [dstHelp, jobsHelp] = await Promise.all([
+    runCli(["dst", "--help"]),
+    runCli(["jobs", "--help"]),
+  ]);
+
+  expect(dstHelp.code).toBe(0);
+  expect(dstHelp.stdout).toContain("receipt <command> [args]");
+  expect(dstHelp.stdout).toContain("receipt dst");
+
+  expect(jobsHelp.code).toBe(0);
+  expect(jobsHelp.stdout).toContain("receipt <command> [args]");
+  expect(jobsHelp.stdout).toContain("receipt jobs");
+  expect(jobsHelp.stdout).not.toContain("\"jobs\":");
+});
+
+test("factory cli: investigate and audit help return usage without executing the analysis", async () => {
+  const [investigateHelp, auditHelp] = await Promise.all([
+    runCli(["factory", "investigate", "--help"]),
+    runCli(["factory", "audit", "--help"]),
+  ]);
+
+  expect(investigateHelp.code).toBe(0);
+  expect(investigateHelp.stdout).toContain("receipt factory investigate");
+  expect(investigateHelp.stdout).toContain("--as-of-ts");
+
+  expect(auditHelp.code).toBe(0);
+  expect(auditHelp.stdout).toContain("receipt factory audit");
+  expect(auditHelp.stdout).toContain("--limit");
+});
 
 const makeWorkbenchSnapshot = () => {
   const detail = {

@@ -78,6 +78,9 @@ type InvestigationRunAssessment = {
   readonly notes: ReadonlyArray<string>;
 };
 
+const VALIDATION_KEYWORD_RE = /\b(build|test|verify|lint|smoke|check|validat(?:e|ed|ion))\b/i;
+const VALIDATION_OUTCOME_RE = /\b(passed|failed|completed|captured|executed|ran|run|succeeded|successful)\b/i;
+
 export type FactoryReceiptInvestigation = {
   readonly requestedId?: string;
   readonly resolved: FactoryParsedRun["resolved"];
@@ -405,6 +408,7 @@ const buildAssessment = (
   const evidenceCount = asRecordArray(report?.evidence).length;
   const helperCount = packetContext?.selectedHelpers.length ?? 0;
   const controlJobs = analysis?.jobs.filter((job) => job.payloadKind === "factory.objective.control").length ?? 0;
+  const stalledJobs = analysis?.jobs.filter((job) => job.status === "stalled").length ?? 0;
   const failedJobs = analysis?.jobs.filter((job) => job.status === "failed" || job.status === "canceled").length ?? 0;
   const leaseExpiredCount = analysis?.anomalies.filter((item) => item.summary.includes("lease expired")).length ?? 0;
   const budgetExceededCount = analysis?.anomalies.filter((item) => item.summary.includes("iteration budget exhausted")).length ?? 0;
@@ -422,14 +426,33 @@ const buildAssessment = (
     && item.summary.includes("Alignment correction for this objective"),
   );
   const alignedAfterCorrection = correctiveSteerIssued && alignmentVerdict === "aligned";
-  const validationSignals = [...scriptsRun.map((item) => asString(item.command) ?? ""), ...proof]
-    .filter(Boolean)
-    .join("\n")
-    .toLowerCase();
+  const requiredChecks = uniqueStrings([...(parsed.inputs.checks ?? []), ...(packetContext?.requiredChecks ?? [])]);
+  const validationCommandSignals = uniqueStrings([
+    ...scriptsRun.map((item) => asString(item.command)),
+    ...(focusTaskRun?.stdout.commands.map((item) => item.command) ?? []),
+  ]);
+  const validationNarrativeSignals = uniqueStrings([
+    ...scriptsRun.map((item) => asString(item.summary)),
+    ...(focusTaskRun?.stdout.commands.map((item) => item.outputPreview) ?? []),
+    ...proof,
+  ]);
+  const normalizedValidationCommands = validationCommandSignals.map((item) => item.toLowerCase());
+  const normalizedValidationNarratives = validationNarrativeSignals.map((item) => item.toLowerCase());
+  const normalizedRequiredChecks = requiredChecks.map((item) => item.toLowerCase());
+  const validationRequested = normalizedRequiredChecks.length > 0
+    || parsed.timeline.some((item) =>
+      (item.type === "task.intervention.applied" || item.type === "objective.operator.noted")
+      && VALIDATION_KEYWORD_RE.test(item.summary));
+  const validationCommandMatched = normalizedRequiredChecks.some((check) =>
+    normalizedValidationCommands.some((signal) => signal.includes(check)));
+  const validationNarrativeMatched = normalizedRequiredChecks.some((check) =>
+    normalizedValidationNarratives.some((signal) => signal.includes(check)));
+  const validationNarrativePresent = normalizedValidationNarratives.some((signal) =>
+    VALIDATION_KEYWORD_RE.test(signal) && VALIDATION_OUTCOME_RE.test(signal));
   const followUpValidation: InvestigationValidationSignal =
-    (parsed.inputs.checks?.length ?? 0) === 0
+    !validationRequested
       ? "not-requested"
-      : /\b(build|test|verify|lint|smoke|check)\b/.test(validationSignals)
+      : validationCommandMatched || validationNarrativeMatched || validationNarrativePresent
         ? "done"
         : "skipped";
 
@@ -501,7 +524,7 @@ const buildAssessment = (
     controlJobs >= 20 ? "high" : controlJobs >= 6 ? "medium" : "low";
 
   const efficiency: InvestigationEfficiency =
-    controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
+    stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
       ? "churn-heavy"
       : controlJobs >= 6 || failedJobs >= 2 || leaseExpiredCount > 0 || budgetExceededCount > 0
         ? "noisy"
@@ -512,6 +535,9 @@ const buildAssessment = (
   }
   if (leaseExpiredCount > 0) {
     notes.push(`Lease expiry surfaced ${leaseExpiredCount} time(s); recovery quality is hard to judge until runtime stability improves.`);
+  }
+  if (stalledJobs > 0) {
+    notes.push(`Live execution stalled on ${stalledJobs} job(s); the objective is not making forward progress.`);
   }
   if (budgetExceededCount > 0) {
     notes.push(`Iteration budgets were exhausted ${budgetExceededCount} time(s), which suggests poor convergence or an over-broad task frame.`);
@@ -529,17 +555,21 @@ const buildAssessment = (
   }
 
   const verdict: InvestigationAssessmentVerdict =
-    blocked || easyRouteRisk === "high" || efficiency === "churn-heavy" || alignmentVerdict === "drifted"
+    blocked || stalledJobs > 0 || easyRouteRisk === "high" || efficiency === "churn-heavy" || alignmentVerdict === "drifted"
       ? "weak"
       : easyRouteRisk === "medium" || efficiency === "noisy" || dbLockedCount > 0 || workspaceCollisionCount > 0 || alignmentVerdict === "uncertain"
         ? "mixed"
         : "strong";
+  const primaryOutcomeCaptured = objectiveMode === "delivery"
+    ? repoDiffProduced
+    : repoDiffProduced || evidenceCount > 0 || scriptCount > 0 || commandCount > 0;
+  const alignmentSatisfiedForObjective = objectiveMode !== "delivery" || alignmentVerdict === "aligned";
   const courseCorrectionWorked = (interventions.operatorGuidanceApplied || correctiveSteerIssued)
     && success
-    && repoDiffProduced
+    && primaryOutcomeCaptured
     && proofPresent
     && easyRouteRisk !== "high"
-    && alignmentVerdict === "aligned";
+    && alignmentSatisfiedForObjective;
 
   return {
     verdict,

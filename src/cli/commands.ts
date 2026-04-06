@@ -26,6 +26,7 @@ import {
   asString,
   parseJsonFlag,
   parseNumberFlag,
+  printUsage,
   type ParsedArgs,
 } from "./shared";
 import {
@@ -591,7 +592,18 @@ const commandSessions = async (args: ReadonlyArray<string>, flags: Flags): Promi
   }
 };
 
+const isHelpToken = (value: string | undefined): boolean =>
+  value === "help" || value === "--help" || value === "-h";
+
+const hasHelpFlag = (flags: Flags): boolean =>
+  flags.help === true || flags.help === "true";
+
 export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
+  if (parsed.command !== "factory" && (hasHelpFlag(parsed.flags) || isHelpToken(parsed.args[0]))) {
+    printUsage();
+    return;
+  }
+
   switch (parsed.command) {
     case "new": {
       const id = parsed.args[0];

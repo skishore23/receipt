@@ -85,7 +85,9 @@ test("factory experiment: long-run bundle captures live intervention evidence", 
       readonly courseCorrectionWorked: boolean;
     };
     readonly assessment: {
+      readonly verdict: string;
       readonly easyRouteRisk: string;
+      readonly followUpValidation: string;
       readonly operatorGuidanceApplied: boolean;
       readonly courseCorrectionWorked: boolean;
     };
@@ -97,8 +99,11 @@ test("factory experiment: long-run bundle captures live intervention evidence", 
   expect(report.interventions.restartCount).toBeGreaterThan(0);
   expect(report.interventions.operatorGuidanceApplied).toBe(true);
   expect(report.assessment.operatorGuidanceApplied).toBe(true);
+  expect(report.assessment.followUpValidation).toBe("done");
+  expect(report.assessment.courseCorrectionWorked).toBe(true);
   expect(report.interventions.courseCorrectionWorked).toBe(report.assessment.courseCorrectionWorked);
   expect(report.assessment.easyRouteRisk).not.toBe("high");
+  expect(report.assessment.verdict).toBe("strong");
 
   for (const targetPath of [
     report.transcriptPath,

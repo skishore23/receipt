@@ -236,6 +236,15 @@ test("factory worker packets expose a layered memory script for bounded recall a
           ],
           remaining: [],
         },
+        alignment: {
+          verdict: "aligned",
+          satisfied: [
+            "Used the generated memory script before editing and recorded the resulting delivery evidence.",
+          ],
+          missing: [],
+          outOfScope: [],
+          rationale: "The worker result maps the recalled context and durable note back to the delivery contract.",
+        },
         nextAction: "Candidate is ready for integration.",
       }, null, 2), "utf-8");
       await fs.writeFile(input.lastMessagePath, "Used the generated memory script.", "utf-8");
@@ -599,6 +608,15 @@ test("factory publish commits PR metadata to objective, integration, and publish
           ],
           remaining: [],
         },
+        alignment: {
+          verdict: "aligned",
+          satisfied: [
+            "Implemented the software delivery change and prepared the candidate for integration and publish.",
+          ],
+          missing: [],
+          outOfScope: [],
+          rationale: "The task result stays within the delivery scope and carries explicit validation evidence for the controller.",
+        },
         nextAction: "Ready for integration.",
       });
       await fs.writeFile(input.lastMessagePath, raw, "utf-8");
@@ -713,6 +731,15 @@ test("factory publish failures still commit durable blocker notes to publish mem
             "git status --short showed the workspace diff for MEMORY_PUBLISH_FAILURE.txt.",
           ],
           remaining: [],
+        },
+        alignment: {
+          verdict: "aligned",
+          satisfied: [
+            "Prepared the software delivery candidate and captured the validation context before publish.",
+          ],
+          missing: [],
+          outOfScope: [],
+          rationale: "The worker completed the delivery-side work and left the publish failure to the controller-owned publish stage.",
         },
         nextAction: "Ready for integration.",
       });

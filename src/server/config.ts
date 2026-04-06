@@ -26,6 +26,10 @@ export type ReceiptServerConfig = {
   readonly subJobWaitMs: number;
   readonly subJobPollMs: number;
   readonly subJobJoinWaitMs: number;
+  readonly factoryAutoFixEnabled: boolean;
+  readonly localRuntimeStaleJobMs: number;
+  readonly localRuntimeWorkerStaleMs: number;
+  readonly localRuntimeWatchdogMs: number;
 };
 
 const parseWorkerConcurrency = (value: string | undefined, fallback: number): number => {
@@ -46,6 +50,14 @@ const clampIntegerEnv = (
   return Math.max(lowerBound, Math.min(floored, upperBound));
 };
 
+const parseBooleanEnv = (value: string | undefined, fallback: boolean): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+};
+
 export const resolveServerConfig = async (cwd: string): Promise<ReceiptServerConfig> => {
   const factoryRuntime = await resolveFactoryRuntimeConfig(cwd);
   const jobBackend: ServerJobBackend = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
@@ -60,6 +72,16 @@ export const resolveServerConfig = async (cwd: string): Promise<ReceiptServerCon
     ? "api"
     : resolveProcessRole(requestedProcessRole);
   const runtimeFlags = deriveServerRuntimeFlags(jobBackend, processRole);
+  const localRuntimeStaleJobMs = clampIntegerEnv(
+    process.env.RECEIPT_LOCAL_RUNTIME_STALE_JOB_MS,
+    90_000,
+    { min: 5_000 },
+  );
+  const localRuntimeWorkerStaleMs = clampIntegerEnv(
+    process.env.RECEIPT_LOCAL_RUNTIME_WORKER_STALE_MS,
+    Math.max(20_000, Math.floor(localRuntimeStaleJobMs / 2)),
+    { min: 5_000 },
+  );
   return {
     port: Number(process.env.PORT ?? 8787),
     factoryRuntime,
@@ -85,5 +107,13 @@ export const resolveServerConfig = async (cwd: string): Promise<ReceiptServerCon
     subJobWaitMs: clampIntegerEnv(process.env.SUBJOB_WAIT_MS, 1_500, { min: 0, max: 30_000 }),
     subJobPollMs: clampIntegerEnv(process.env.SUBJOB_WAIT_POLL_MS, 250, { min: 20, max: 2_000 }),
     subJobJoinWaitMs: clampIntegerEnv(process.env.SUBJOB_JOIN_WAIT_MS, 180_000, { min: 0, max: 600_000 }),
+    factoryAutoFixEnabled: parseBooleanEnv(process.env.RECEIPT_FACTORY_AUTO_FIX_ENABLED, false),
+    localRuntimeStaleJobMs,
+    localRuntimeWorkerStaleMs,
+    localRuntimeWatchdogMs: clampIntegerEnv(
+      process.env.RECEIPT_LOCAL_RUNTIME_WATCHDOG_MS,
+      15_000,
+      { min: 1_000, max: 300_000 },
+    ),
   };
 };

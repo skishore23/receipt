@@ -7,6 +7,7 @@ import { render } from "ink";
 import { fold } from "@receipt/core/chain";
 import { jsonlStore } from "../../adapters/jsonl";
 import type { Flags } from "../../cli.types";
+import { printUsage } from "../../cli/shared";
 import type { AgentEvent } from "../../modules/agent";
 import { initial as initialAgent, reduce as reduceAgent } from "../../modules/agent";
 import type { FactoryObjectiveMode, FactoryObjectivePolicy, FactoryObjectiveSeverity, FactoryTaskRecord, FactoryCandidateRecord } from "../../modules/factory";
@@ -76,6 +77,14 @@ const parseIntegerFlag = (
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`--${key} must be a number`);
   return Math.max(input.min, Math.min(Math.floor(parsed), input.max));
+};
+
+const parseOptionalIntegerFlag = (flags: Flags, key: string): number | undefined => {
+  const value = asString(flags, key);
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`--${key} must be a number`);
+  return Math.floor(parsed);
 };
 
 const asString = (flags: Flags, key: string): string | undefined => {
@@ -330,6 +339,40 @@ const parseHelperProvider = (value: string | undefined): FactoryCloudProvider =>
   throw new Error(`Unsupported helper provider '${value}'. Use aws, gcp, or azure.`);
 };
 
+const isHelpToken = (value: string | undefined): boolean =>
+  value === "help" || value === "--help" || value === "-h";
+
+const hasHelpFlag = (flags: Flags): boolean =>
+  flags.help === true || flags.help === "true";
+
+const printFactoryUsage = (subcommand?: string): void => {
+  switch (subcommand) {
+    case "investigate":
+      console.log("receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]");
+      return;
+    case "audit":
+      console.log("receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]");
+      return;
+    case "experiment":
+      console.log("receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]");
+      return;
+    case "codex-probe":
+      console.log("receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]");
+      return;
+    default:
+      printUsage();
+      console.log([
+        "",
+        "Factory commands:",
+        "  receipt factory init [--repo-root <path>]",
+        "  receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
+        "  receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
+        "  receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
+        "  receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]",
+      ].join("\n"));
+  }
+};
+
 const summarizeReplayTask = (task: FactoryTaskRecord) => ({
   taskId: task.taskId,
   title: task.title,
@@ -501,7 +544,13 @@ const printFactoryInvestigation = async (opts: {
   const runtime = await resolveFactoryRuntimeConfig(opts.cwd, repoRootOverride);
   const dataDir = path.resolve(asString(opts.flags, "data-dir") ?? runtime.dataDir);
   const repoRoot = path.resolve(repoRootOverride ?? runtime.repoRoot);
-  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, opts.targetId);
+  const asOfTs = parseOptionalIntegerFlag(opts.flags, "as-of-ts");
+  const report = await readFactoryReceiptInvestigation(
+    dataDir,
+    repoRoot,
+    opts.targetId,
+    typeof asOfTs === "number" ? { asOfTs } : {},
+  );
   if (opts.asJson) {
     await printJson(report);
     return;
@@ -873,6 +922,18 @@ const resolveObjectivePanel = async (
 
 export const handleFactoryCommand = async (cwd: string, args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
   const subcommand = args[0];
+  if (hasHelpFlag(flags)) {
+    printFactoryUsage(isHelpToken(subcommand) ? undefined : subcommand);
+    return;
+  }
+  if (isHelpToken(subcommand)) {
+    printFactoryUsage(args[1]);
+    return;
+  }
+  if (subcommand && isHelpToken(args[1])) {
+    printFactoryUsage(subcommand);
+    return;
+  }
   const json = parseBooleanFlag(flags, "json");
   const objectiveMode = parseObjectiveModeFlag(flags);
   const severity = parseSeverityFlag(flags);

@@ -1025,6 +1025,45 @@ test("job worker: does not busy-spin on queued work it cannot lease", async () =
   }
 });
 
+test("job worker: idle lease loop still emits liveness ticks without matching work", async () => {
+  const dir = await mkTmp("receipt-queue-idle-liveness");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      jsonlStore<JobEvent>(dir),
+      jsonBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    let ticks = 0;
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_idle_liveness",
+      leaseAgentIds: ["writer"],
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async () => ({ ok: true }),
+      },
+      onTick: () => {
+        ticks += 1;
+      },
+    });
+
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    worker.stop();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(ticks).toBeGreaterThan(0);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat error", async () => {
   const dir = await mkTmp("receipt-queue-worker-recover");
   try {

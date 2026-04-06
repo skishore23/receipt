@@ -792,6 +792,31 @@ test("factory no-diff discovery tasks integrate as no-op passes and unlock depen
         handoff: runs === 1
           ? "Proceed to the implementation task now that the link source is known."
           : "Ready for review.",
+        completion: {
+          changed: runs >= 2 ? ["IMPLEMENTED.txt"] : [],
+          proof: runs === 1
+            ? ["Recorded the header-link source location without needing a repository change."]
+            : ["Created IMPLEMENTED.txt to prove the implementation task produced a repository diff."],
+          remaining: [],
+        },
+        scriptsRun: [{
+          command: runs === 1 ? "rg -n \"header link\" src" : "git status --short",
+          summary: runs === 1
+            ? "Located the header-link source in the repository."
+            : "Confirmed the implementation task produced the expected diff.",
+          status: "ok",
+        }],
+        alignment: {
+          verdict: "aligned",
+          satisfied: runs === 1
+            ? ["Completed the scoped discovery task and left implementation to the dependent task."]
+            : ["Removed the header link in the implementation pass and left the repo ready for review."],
+          missing: [],
+          outOfScope: [],
+          rationale: runs === 1
+            ? "The first task was intentionally discovery-only and returned the needed source location."
+            : "The implementation pass made the requested repository change and recorded validation evidence.",
+        },
       };
       const raw = JSON.stringify(structured);
       await fs.writeFile(input.lastMessagePath, raw, "utf-8");
@@ -865,6 +890,23 @@ test("factory runtime: final no-diff task with satisfied operator guidance compl
         outcome: "approved",
         summary: "Validation passed with the existing repository state; no code changes were required for this objective.",
         handoff: "The current repository state already satisfies the objective.",
+        completion: {
+          changed: [],
+          proof: ["git status --short stayed clean while the required behavior was already present."],
+          remaining: [],
+        },
+        scriptsRun: [{
+          command: "git status --short",
+          summary: "Confirmed the repository already satisfied the objective without additional changes.",
+          status: "ok",
+        }],
+        alignment: {
+          verdict: "aligned",
+          satisfied: ["The repository already satisfied the operator guidance and required no additional diff."],
+          missing: [],
+          outOfScope: [],
+          rationale: "The final delivery pass validated the current repository state and found no remaining work.",
+        },
       };
       const raw = JSON.stringify(structured);
       await fs.writeFile(input.lastMessagePath, raw, "utf-8");

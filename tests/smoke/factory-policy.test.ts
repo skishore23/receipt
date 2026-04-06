@@ -195,7 +195,17 @@ const createFactoryService = async (opts?: {
                 ? "Worker completed the requested code change, but validation capture stayed noisy so the controller should decide whether repo-side checks are sufficient."
                 : "Worker is blocked and is handing the blocker back to the controller.",
           artifacts: [],
-          scriptsRun: [],
+          scriptsRun: [{
+            command: "git status --short",
+            summary: codexOutcome === "approved"
+              ? "Verified the task workspace state after the worker stub completed."
+              : codexOutcome === "partial"
+                ? "Captured the current workspace state for the partial delivery result."
+                : codexOutcome === "changes_requested"
+                  ? "Captured the workspace state before requesting another pass."
+                  : "Captured the workspace state while surfacing the blocker.",
+            status: codexOutcome === "blocked" ? "warning" : "ok",
+          }],
           completion: {
             changed: codexOutcome === "approved" || codexOutcome === "partial" ? ["Updated POLICY_TEST.txt in the task workspace."] : [],
             proof: ["POLICY_TEST.txt was written by the worker stub."],
@@ -210,6 +220,42 @@ const createFactoryService = async (opts?: {
                   : [],
           },
           alignment,
+          report: {
+            conclusion: codexOutcome === "approved"
+              ? "The worker stub returned a complete structured result."
+              : codexOutcome === "partial"
+                ? "The worker stub returned a structured partial result."
+                : codexOutcome === "changes_requested"
+                  ? "The worker stub requested another pass with a structured handoff."
+                  : "The worker stub surfaced a structured blocker for the controller.",
+            evidence: [{
+              title: "Worker stub output",
+              summary: "POLICY_TEST.txt was written in the task workspace by the policy test stub.",
+              detail: null,
+            }],
+            evidenceRecords: [],
+            scriptsRun: [{
+              command: "git status --short",
+              summary: codexOutcome === "approved"
+                ? "Verified the task workspace state after the worker stub completed."
+                : codexOutcome === "partial"
+                  ? "Captured the current workspace state for the partial delivery result."
+                  : codexOutcome === "changes_requested"
+                    ? "Captured the workspace state before requesting another pass."
+                    : "Captured the workspace state while surfacing the blocker.",
+              status: codexOutcome === "blocked" ? "warning" : "ok",
+            }],
+            disagreements: [],
+            nextSteps: completionRemaining.length > 0
+              ? [...completionRemaining]
+              : codexOutcome === "changes_requested"
+                ? ["Run another pass."]
+                : codexOutcome === "partial"
+                  ? ["Capture a final clean completion of validation if the orchestration layer needs a terminal success marker."]
+                  : codexOutcome === "blocked"
+                    ? ["Resolve the blocker before retrying."]
+                    : [],
+          },
           nextAction: codexOutcome === "approved"
             ? null
             : codexOutcome === "changes_requested"

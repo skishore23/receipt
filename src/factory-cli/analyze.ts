@@ -2,6 +2,7 @@ import { fold } from "@receipt/core/chain";
 import type { Receipt } from "@receipt/core/types";
 
 import { jsonlStore } from "../adapters/jsonl";
+import { readJobProjection } from "../db/projectors";
 import type { AgentEvent } from "../modules/agent";
 import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent";
 import type {
@@ -96,6 +97,7 @@ type JobAnalysis = {
   readonly payloadRunId?: string;
   readonly sessionKey?: string;
   readonly singletonMode?: string;
+  readonly queueStatus: string;
   readonly status: string;
   readonly attempt: number;
   readonly maxAttempts: number;
@@ -277,6 +279,8 @@ type ToolMetricAccumulator = {
   totalDurationMs: number;
 };
 
+const LIVE_JOB_STALE_AFTER_MS = 90_000;
+
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -292,6 +296,54 @@ const truncateInline = (value: string | undefined, max = 180): string | undefine
   const normalized = value?.replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}\u2026`;
+};
+
+const isTerminalJobStatus = (status: string | undefined): boolean =>
+  status === "completed" || status === "failed" || status === "canceled";
+
+const isActiveJobStatus = (status: string | undefined): boolean =>
+  status === "queued" || status === "leased" || status === "running";
+
+const displayJobStatus = (
+  status: string,
+  updatedAt: number,
+  now: number,
+): string => {
+  if (status === "leased") {
+    return now - updatedAt >= LIVE_JOB_STALE_AFTER_MS ? "stalled" : "running";
+  }
+  if (!isActiveJobStatus(status)) return status;
+  return now - updatedAt >= LIVE_JOB_STALE_AFTER_MS ? "stalled" : status;
+};
+
+const readProjectedJobOverlay = (
+  dataDir: string,
+  job: {
+    readonly id: string;
+    readonly status: string;
+    readonly updatedAt: number;
+  },
+  options: ObjectiveAnalysisReadOptions,
+): {
+  readonly status: string;
+  readonly updatedAt: number;
+  readonly lastError?: string;
+  readonly canceledReason?: string;
+  readonly result?: Readonly<Record<string, unknown>>;
+} | undefined => {
+  const projection = readJobProjection(dataDir, job.id);
+  if (!projection) return undefined;
+  if (typeof options.asOfTs === "number" && projection.updatedAt > options.asOfTs) return undefined;
+  if (!isTerminalJobStatus(projection.status) || isTerminalJobStatus(job.status) || projection.updatedAt <= job.updatedAt) {
+    return undefined;
+  }
+  return {
+    status: projection.status,
+    updatedAt: projection.updatedAt,
+    lastError: projection.lastError,
+    canceledReason: projection.canceledReason,
+    result: projection.result,
+  };
 };
 
 const formatDurationMs = (durationMs: number | undefined): string => {
@@ -541,6 +593,7 @@ const readJobAnalysis = async (
   const jobId = stream.replace(/^jobs\//, "");
   const job = state.jobs[jobId];
   if (!job) return undefined;
+  const projectionOverlay = readProjectedJobOverlay(dataDir, job, options);
   let progressEvents = 0;
   let heartbeats = 0;
   let summary: string | undefined;
@@ -564,7 +617,13 @@ const readJobAnalysis = async (
       tokensUsed = asNumber(result?.tokensUsed) ?? tokensUsed;
     }
   }
-  const terminalTs = chain.at(-1)?.ts;
+  const projectedResult = asRecord(projectionOverlay?.result);
+  const queueStatus = projectionOverlay?.status ?? job.status;
+  const effectiveUpdatedAt = projectionOverlay?.updatedAt ?? job.updatedAt;
+  const effectiveLastError = projectionOverlay?.lastError ?? job.lastError;
+  const effectiveCanceledReason = projectionOverlay?.canceledReason ?? job.canceledReason;
+  const effectiveStatus = displayJobStatus(queueStatus, effectiveUpdatedAt, options.asOfTs ?? Date.now());
+  const observedAt = Math.max(chain.at(-1)?.ts ?? effectiveUpdatedAt, effectiveUpdatedAt);
   return {
     stream,
     jobId: job.id,
@@ -577,21 +636,22 @@ const readJobAnalysis = async (
     payloadRunId: asString(job.payload.runId) ?? asString(job.payload.parentRunId),
     sessionKey: job.sessionKey,
     singletonMode: job.singletonMode,
-    status: job.status,
+    queueStatus,
+    status: effectiveStatus,
     attempt: job.attempt,
     maxAttempts: job.maxAttempts,
     receiptCount: chain.length,
     createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    durationMs: typeof terminalTs === "number" ? Math.max(0, terminalTs - job.createdAt) : undefined,
+    updatedAt: effectiveUpdatedAt,
+    durationMs: Math.max(0, observedAt - job.createdAt),
     progressEvents,
     heartbeats,
     retryCount: Math.max(0, job.attempt - 1),
     abortRequested: Boolean(job.abortRequested),
-    lastError: job.lastError,
-    canceledReason: job.canceledReason,
-    summary: truncateInline(summary ?? job.lastError ?? job.canceledReason),
-    tokensUsed,
+    lastError: effectiveLastError,
+    canceledReason: effectiveCanceledReason,
+    summary: truncateInline(asString(projectedResult?.summary) ?? summary ?? effectiveLastError ?? effectiveCanceledReason),
+    tokensUsed: asNumber(projectedResult?.tokensUsed) ?? tokensUsed,
     commands: job.commands.map((command) => ({
       commandId: command.id,
       command: command.command,
@@ -975,6 +1035,15 @@ export const readObjectiveAnalysis = async (
   }
 
   for (const job of jobs) {
+    if (job.status === "stalled") {
+      addAnomaly(anomalies, {
+        kind: "job_stalled",
+        severity: "high",
+        summary: `${job.jobId}: ${job.payloadKind ?? "job"} is ${job.queueStatus === "queued" ? "still queued without a consumer" : "stalled without fresh progress or lease updates"}`,
+        at: job.updatedAt,
+        jobId: job.jobId,
+      });
+    }
     if (job.status === "failed") {
       addAnomaly(anomalies, {
         kind: "job_failed",

@@ -204,6 +204,8 @@ bun run dev
 bun run start
 ```
 
+Production note: local mode is intended to run as a single API+worker process against one persistent `${DATA_DIR}` volume. Keep `RECEIPT_FACTORY_AUTO_FIX_ENABLED=false` unless you are deliberately re-enabling audit-created auto-fix objectives after the core runtime is stable.
+
 ### Resonate Optional Dispatch
 Starts the Receipt API, Resonate driver, workers (chat, control, codex), and a local Resonate server.
 ```bash

@@ -112,6 +112,8 @@ export class JobWorker {
         await this.tickLeases();
       } catch (err) {
         this.reportError(err);
+      } finally {
+        if (this.onTick) this.onTick();
       }
       if (!this.running) break;
       await new Promise((resolve) => {

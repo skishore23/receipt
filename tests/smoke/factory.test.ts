@@ -1071,6 +1071,51 @@ test("factory service: objective cards reclassify stale execution without waitin
   }
 });
 
+test("factory service: queued execution without a consumer eventually shows as stalled", async () => {
+  const dataDir = await createTempDir("receipt-factory-queued-stalled");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => 10_000;
+  try {
+    const created = await service.createObjective({
+      title: "Queued execution stalled state",
+      prompt: "Surface unleased queued execution as stalled once it ages out.",
+      checks: ["git status --short"],
+    });
+
+    await runObjectiveStartup(service, created.objectiveId);
+
+    const taskJob = (await queue.listJobs({ limit: 20 }))
+      .find((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === created.objectiveId);
+    expect(taskJob?.status).toBe("queued");
+
+    const initialCard = (await service.listObjectives()).find((card) => card.objectiveId === created.objectiveId);
+    expect(initialCard?.executionStalled).toBe(false);
+
+    Date.now = () => 110_001;
+
+    const stalledCard = (await service.listObjectives()).find((card) => card.objectiveId === created.objectiveId);
+    expect(stalledCard?.executionStalled).toBe(true);
+    expect(stalledCard?.nextAction).toContain("Execution appears stalled");
+
+    const detail = await service.getObjective(created.objectiveId);
+    expect(detail.executionStalled).toBe(true);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("factory service: duplicate objective control enqueues steer onto the existing session job", async () => {
   const dataDir = await createTempDir("receipt-factory-control-steer");
   const repoRoot = await createSourceRepo();
@@ -1514,6 +1559,137 @@ test("factory service: resumeObjectives redrives active queued task jobs before 
   expect(controlJobsAfter).toBe(controlJobsBefore);
 });
 
+test("factory service: startup reconciliation cancels stale queued execution and queues a reconcile control", async () => {
+  const dataDir = await createTempDir("receipt-factory-stale-startup-reconcile");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Stale startup reconciliation",
+    prompt: "Cancel stale active execution at startup and queue a reconcile control pass.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const activeQueuedTask = detail.tasks.find((task) =>
+    task.status === "running"
+    && task.jobStatus === "queued"
+    && typeof task.jobId === "string",
+  );
+  expect(activeQueuedTask?.jobId).toBeDefined();
+  const taskJob = await queue.getJob(activeQueuedTask!.jobId!);
+  expect(taskJob?.status).toBe("queued");
+
+  const internals = service as unknown as {
+    reconcileStaleObjectiveExecutionJobs(now: number): Promise<void>;
+  };
+  await internals.reconcileStaleObjectiveExecutionJobs((taskJob?.updatedAt ?? Date.now()) + 100_000);
+
+  expect((await queue.getJob(activeQueuedTask!.jobId!))?.status).toBe("canceled");
+  const reconcileControl = (await queue.listJobs({ limit: 40 }))
+    .find((job) =>
+      job.agentId === "factory-control"
+      && job.payload.kind === "factory.objective.control"
+      && job.payload.objectiveId === created.objectiveId);
+  expect(reconcileControl?.id).toBeTruthy();
+  const reconcileQueued = reconcileControl?.payload.reason === "reconcile";
+  const reconcileSteered = reconcileControl
+    ? (await queue.consumeCommands(reconcileControl.id, ["steer"])).some((command) => {
+      const payload = command.payload as {
+        readonly payload?: {
+          readonly kind?: string;
+          readonly objectiveId?: string;
+          readonly reason?: string;
+        };
+      };
+      return payload.payload?.kind === "factory.objective.control"
+        && payload.payload.objectiveId === created.objectiveId
+        && payload.payload.reason === "reconcile";
+    })
+    : false;
+  expect(reconcileQueued || reconcileSteered).toBe(true);
+});
+
+test("factory service: cancel plus cleanup drains active objective-scoped jobs idempotently", async () => {
+  const dataDir = await createTempDir("receipt-factory-cancel-cleanup-idempotent");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Cancel cleanup objective drain",
+    prompt: "Cancel and cleanup should leave no active objective-scoped jobs behind.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const activeQueuedTask = detail.tasks.find((task) =>
+    task.status === "running"
+    && task.jobStatus === "queued"
+    && typeof task.jobId === "string",
+  );
+  expect(activeQueuedTask?.jobId).toBeDefined();
+
+  const monitorJob = await queue.enqueue({
+    agentId: "codex",
+    lane: "collect",
+    sessionKey: `factory:monitor:${created.objectiveId}:task_01`,
+    singletonMode: "allow",
+    maxAttempts: 1,
+    payload: {
+      kind: "factory.task.monitor",
+      objectiveId: created.objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      codexJobId: activeQueuedTask!.jobId!,
+    },
+  });
+  const auditJob = await queue.enqueue({
+    agentId: "factory-control",
+    lane: "collect",
+    sessionKey: `factory:audit:${created.objectiveId}`,
+    singletonMode: "allow",
+    maxAttempts: 1,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "canceled",
+      objectiveUpdatedAt: Date.now(),
+    },
+  });
+
+  await service.cancelObjective(created.objectiveId, "test objective cancel");
+  await service.cleanupObjectiveWorkspaces(created.objectiveId);
+  await service.cleanupObjectiveWorkspaces(created.objectiveId);
+
+  const objectiveJobs = (await queue.listJobs({ limit: 80 })).filter((job) =>
+    typeof job.payload.objectiveId === "string" && job.payload.objectiveId === created.objectiveId,
+  );
+  expect(objectiveJobs.filter((job) => ["queued", "leased", "running"].includes(job.status))).toEqual([]);
+  expect((await queue.getJob(activeQueuedTask!.jobId!))?.status).toBe("canceled");
+  expect((await queue.getJob(monitorJob.id))?.status).toBe("canceled");
+  expect((await queue.getJob(auditJob.id))?.status).toBe("canceled");
+});
+
 test("factory service: getObjective reads task jobs without scanning the full queue index", async () => {
   const dataDir = await createTempDir("receipt-factory-objective-task-job");
   const repoRoot = await createSourceRepo();
@@ -1788,6 +1964,18 @@ test("factory service: software task runs inherit worktree cli and local tool ac
           outcome: "approved",
           summary: "Validated worktree command access for the software task runtime.",
           artifacts: [],
+          completion: {
+            changed: ["Confirmed worktree-local CLI access for the software task runtime."],
+            proof: ["workspace-tool and receipt CLI executed successfully from the task worktree."],
+            remaining: [],
+          },
+          alignment: {
+            verdict: "aligned",
+            satisfied: ["Confirmed the software task runtime can use repo-local commands from its worktree."],
+            missing: [],
+            outOfScope: [],
+            rationale: "The task only verified local worktree command access and stayed within the requested scope.",
+          },
           scriptsRun: [{
             command: "workspace-tool && receipt --help",
             summary: "Verified local tool and receipt CLI access from the task worktree.",

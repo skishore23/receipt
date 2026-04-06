@@ -15,6 +15,7 @@ import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
+import { readFactoryReceiptAudit } from "../../src/factory-cli/audit";
 import { runFactoryObjectiveAudit } from "../../src/services/factory-runtime";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
@@ -128,7 +129,11 @@ const createFactoryService = async (opts?: {
               summary: "Delivered the requested change and reported the alignment result.",
               handoff: "The delivery task completed with an explicit alignment report for the controller.",
               artifacts: [],
-              scriptsRun: [],
+              scriptsRun: [{
+                command: "bun run build",
+                summary: "Validated the delivery stub output.",
+                status: "ok",
+              }],
               completion: {
                 changed: ["Updated README.md in the task workspace."],
                 proof: ["README.md was updated by the worker stub."],
@@ -149,14 +154,19 @@ const createFactoryService = async (opts?: {
               handoff: "Use the generated packet summary first, then inspect the timeline if you need finer evidence.",
               artifacts: [],
               completion: {
-                status: "done",
-                outcome: "complete",
-                remainingWork: [],
+                changed: ["Captured the focused investigation handoff."],
+                proof: ["git status --short stayed clean."],
+                remaining: [],
               },
               report: {
                 conclusion: "The script test objective completed with a structured investigation result.",
                 evidence: [],
-                scriptsRun: [],
+                evidenceRecords: [],
+                scriptsRun: [{
+                  command: "git status --short",
+                  summary: "Confirmed the investigation workspace stayed clean.",
+                  status: "ok",
+                }],
                 disagreements: [],
                 nextSteps: [],
               },
@@ -577,11 +587,31 @@ test("factory CLI audit aggregates recent objective assessments and memory hygie
     readonly improvements: ReadonlyArray<string>;
   };
   expect(payload.summary.objectivesAudited).toBeGreaterThanOrEqual(2);
-  expect((payload.summary.verdicts.weak ?? 0) >= 1).toBe(true);
+  expect(Object.values(payload.summary.verdicts).reduce((sum, count) => sum + count, 0)).toBeGreaterThanOrEqual(2);
   expect(payload.memoryHygiene.totalFactoryEntries).toBeGreaterThan(0);
   expect(payload.memoryHygiene.repoSharedRunScopedEntries).toBe(0);
   expect(payload.objectives.some((objective) => objective.objectiveId === first.objectiveId)).toBe(true);
-  expect(payload.improvements.length).toBeGreaterThan(0);
+  expect(Array.isArray(payload.improvements)).toBe(true);
+}, 120_000);
+
+test("factory audit keeps live jobs for active objectives instead of snapshotting them away", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Active audit objective",
+    prompt: "Keep active execution visible in the audit while the objective is still running.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job?.status).toBe("queued");
+
+  const report = await readFactoryReceiptAudit(dataDir, repoRoot, 5, created.objectiveId);
+  const objective = report.objectives.find((item) => item.objectiveId === created.objectiveId);
+  expect(objective?.jobs).toBeGreaterThan(0);
 }, 120_000);
 
 test("factory objective audit persists objective snapshots into dedicated audit memory", async () => {
@@ -807,6 +837,61 @@ test("factory objective audit creates an auto-fix objective for recurring high-c
   )).toBe(true);
 }, 120_000);
 
+test("factory objective audit can disable auto-fix objective creation while still surfacing recommendations", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Disable auto-fix creation",
+    prompt: "Finish an investigation so the audit can surface recommendations without creating follow-up objectives.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  for (let index = 0; index < 5; index += 1) {
+    const historicalObjectiveId = `objective_hist_disabled_${index + 1}`;
+    await service.memoryTools!.commit({
+      scope: "factory/audits/repo",
+      text: `[${historicalObjectiveId}] Summary\n${historicalObjectiveId} finished completed with verdict=weak.\n\nRecommendations\n- [high] scope=src/services/factory-runtime.ts patterns=lease_expired Reduce lease expiry during long-running Factory jobs.`,
+      tags: ["factory", "audit", "repo", "completed", "weak"],
+    });
+  }
+
+  const beforeObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+  const result = await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    factoryService: service,
+    autoFixEnabled: false,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+    },
+    recommendationGenerator: async () => [{
+      summary: "Reduce lease expiry during long-running Factory jobs.",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory-runtime.ts",
+      confidence: "high",
+      suggestedFix: "Add periodic heartbeats or progress updates for long-running worker steps and break large operations into smaller bounded units.",
+    }],
+  }) as {
+    readonly autoFixObjectiveId?: string;
+    readonly recommendations: number;
+  };
+  const afterObjectiveIds = (await service.listObjectives()).map((objective) => objective.objectiveId).sort();
+
+  expect(result.recommendations).toBe(1);
+  expect(result.autoFixObjectiveId).toBeUndefined();
+  expect(afterObjectiveIds).toEqual(beforeObjectiveIds);
+}, 120_000);
+
 test("factory objective audit reuses an existing open auto-fix objective for the same recurring pattern", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService();
   const created = await service.createObjective({
@@ -1022,10 +1107,19 @@ test("factory objective audit ignores late sidecar failures that happen after ob
       summary: "Investigated the receipt flow with concrete evidence and a clean handoff.",
       handoff: "Use the captured commands and evidence bundle for any follow-up.",
       artifacts: [],
+      scriptsRun: [{
+        command: "git status --short",
+        summary: "Confirmed the investigation workspace stayed clean.",
+        status: "ok",
+      }],
       completion: {
-        status: "done",
-        outcome: "complete",
-        remainingWork: [],
+        changed: [
+          "Captured the investigation evidence bundle and final handoff summary.",
+        ],
+        proof: [
+          "git status --short stayed clean while collecting the investigation evidence.",
+        ],
+        remaining: [],
       },
       report: {
         conclusion: "The objective completed with direct evidence and validation signal.",

@@ -8,6 +8,7 @@ import path from "node:path";
 import { Hono } from "hono";
 import { createServerComposition } from "./composition";
 import { resolveServerConfig } from "./config";
+import { summarizeLocalRuntimeHealth, type LocalRuntimeWorkerRole } from "./local-runtime-health";
 import { resolveAssetDir } from "./assets";
 import {
   agentStreamForJob,
@@ -79,6 +80,10 @@ const {
   subJobWaitMs,
   subJobPollMs,
   subJobJoinWaitMs,
+  factoryAutoFixEnabled: FACTORY_AUTO_FIX_ENABLED,
+  localRuntimeStaleJobMs: LOCAL_RUNTIME_STALE_JOB_MS,
+  localRuntimeWorkerStaleMs: LOCAL_RUNTIME_WORKER_STALE_MS,
+  localRuntimeWatchdogMs: LOCAL_RUNTIME_WATCHDOG_MS,
 } = serverConfig;
 
 // ============================================================================
@@ -424,7 +429,70 @@ const { service: factoryService } = createFactoryServiceRuntime({
     : undefined,
 });
 factoryServiceRef = factoryService;
-const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService);
+const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService, {
+  auditAutoFixEnabled: FACTORY_AUTO_FIX_ENABLED,
+});
+type MutableLocalWorkerState = {
+  role: LocalRuntimeWorkerRole;
+  workerId: string;
+  concurrency: number;
+  startedAt?: number;
+  lastTickAt?: number;
+  lastErrorAt?: number;
+  lastError?: string;
+};
+const localWorkerStates = new Map<LocalRuntimeWorkerRole, MutableLocalWorkerState>([
+  ["chat", { role: "chat", workerId: `${jobWorkerId}:chat`, concurrency: chatJobConcurrency }],
+  ["orchestration", { role: "orchestration", workerId: `${jobWorkerId}:orchestration`, concurrency: orchestrationJobConcurrency }],
+  ["codex", { role: "codex", workerId: `${jobWorkerId}:codex`, concurrency: codexJobConcurrency }],
+]);
+const localWorkerOrder: ReadonlyArray<LocalRuntimeWorkerRole> = ["chat", "orchestration", "codex"];
+const runtimeHealthState = {
+  lastResumeAt: undefined as number | undefined,
+  lastResumeError: undefined as string | undefined,
+  lastResumeErrorAt: undefined as number | undefined,
+  lastWatchdogAt: undefined as number | undefined,
+  lastWatchdogWarningSignature: "",
+};
+const markLocalWorkerStarted = (role: LocalRuntimeWorkerRole): void => {
+  const state = localWorkerStates.get(role);
+  if (!state) return;
+  state.startedAt ??= Date.now();
+};
+const markLocalWorkerTick = (role: LocalRuntimeWorkerRole): void => {
+  const state = localWorkerStates.get(role);
+  if (!state) return;
+  if (!state.startedAt) state.startedAt = Date.now();
+  state.lastTickAt = Date.now();
+};
+const markLocalWorkerError = (role: LocalRuntimeWorkerRole, error: Error): void => {
+  const state = localWorkerStates.get(role);
+  if (!state) return;
+  state.lastErrorAt = Date.now();
+  state.lastError = error.message;
+};
+const buildLocalRuntimeHealth = async () => {
+  if (JOB_BACKEND !== "local") return undefined;
+  return summarizeLocalRuntimeHealth({
+    jobs: await queue.listJobs({ limit: 2000 }),
+    workers: [...localWorkerStates.values()],
+    lastResumeAt: runtimeHealthState.lastResumeAt,
+    lastResumeError: runtimeHealthState.lastResumeError,
+    lastResumeErrorAt: runtimeHealthState.lastResumeErrorAt,
+    staleAfterMs: LOCAL_RUNTIME_STALE_JOB_MS,
+    workerStaleAfterMs: LOCAL_RUNTIME_WORKER_STALE_MS,
+  });
+};
+const evaluateLocalRuntimeWatchdog = async (): Promise<void> => {
+  const health = await buildLocalRuntimeHealth();
+  if (!health) return;
+  runtimeHealthState.lastWatchdogAt = health.watchdog.evaluatedAt;
+  const warningSignature = health.watchdog.warnings.join("\n");
+  if (warningSignature && warningSignature !== runtimeHealthState.lastWatchdogWarningSignature) {
+    console.warn(`[local runtime watchdog] ${health.watchdog.warnings.join(" | ")}`);
+  }
+  runtimeHealthState.lastWatchdogWarningSignature = warningSignature;
+};
 const agentRunner = createAgentRunner({
   defaultAgentId: "agent",
   defaultStream: "agents/agent", sseTopic: "agent", sseTokenEvent: "agent-token",
@@ -798,37 +866,49 @@ const workers = [
   new JobWorker({
     queue,
     handlers: jobHandlers,
-    workerId: `${jobWorkerId}:chat`,
+    workerId: localWorkerStates.get("chat")!.workerId,
     leaseAgentIds: ["factory"],
     leaseLanes: ["chat"],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: chatJobConcurrency,
+    onTick: () => {
+      markLocalWorkerTick("chat");
+    },
     onError: (error) => {
+      markLocalWorkerError("chat", error);
       console.error(`[job-worker ${jobWorkerId}:chat]`, error);
     },
   }),
   new JobWorker({
     queue,
     handlers: jobHandlers,
-    workerId: `${jobWorkerId}:orchestration`,
+    workerId: localWorkerStates.get("orchestration")!.workerId,
     leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: orchestrationJobConcurrency,
+    onTick: () => {
+      markLocalWorkerTick("orchestration");
+    },
     onError: (error) => {
+      markLocalWorkerError("orchestration", error);
       console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
     },
   }),
   new JobWorker({
     queue,
     handlers: jobHandlers,
-    workerId: `${jobWorkerId}:codex`,
+    workerId: localWorkerStates.get("codex")!.workerId,
     leaseAgentIds: ["codex"],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: codexJobLeaseMs,
     concurrency: codexJobConcurrency,
+    onTick: () => {
+      markLocalWorkerTick("codex");
+    },
     onError: (error) => {
+      markLocalWorkerError("codex", error);
       console.error(`[job-worker ${jobWorkerId}:codex]`, error);
     },
   }),
@@ -870,7 +950,10 @@ if (JOB_BACKEND === "resonate") {
 }
 const startRuntimeWorkers = async (): Promise<void> => {
   if (JOB_BACKEND === "local") {
-    for (const worker of workers) worker.start();
+    for (const [index, worker] of workers.entries()) {
+      markLocalWorkerStarted(localWorkerOrder[index]!);
+      worker.start();
+    }
     return;
   }
   await resonateRoleRuntime?.start();
@@ -881,16 +964,28 @@ const scheduleObjectiveResume = (): void => {
   if (objectiveResumeScheduled) return;
   if (JOB_BACKEND === "resonate" && PROCESS_ROLE !== "api") return;
   objectiveResumeScheduled = true;
-  const runResume = () => {
-    factoryService.resumeObjectives().catch((err) => {
+  const runResume = async () => {
+    try {
+      await factoryService.resumeObjectives();
+      runtimeHealthState.lastResumeAt = Date.now();
+      runtimeHealthState.lastResumeError = undefined;
+      runtimeHealthState.lastResumeErrorAt = undefined;
+      await evaluateLocalRuntimeWatchdog();
+    } catch (err) {
+      runtimeHealthState.lastResumeError = err instanceof Error ? err.message : String(err);
+      runtimeHealthState.lastResumeErrorAt = Date.now();
       console.error("[factory resume]", err);
-    });
+    }
   };
   if (STARTUP_SETTLE_MS <= 0) {
-    queueMicrotask(runResume);
+    queueMicrotask(() => {
+      void runResume();
+    });
     return;
   }
-  const timer = setTimeout(runResume, STARTUP_SETTLE_MS);
+  const timer = setTimeout(() => {
+    void runResume();
+  }, STARTUP_SETTLE_MS);
   timer.unref();
 };
 
@@ -1031,16 +1126,28 @@ app.post("/agents/:id/jobs", async (c) => {
   return jsonResponse(202, { ok: true, job });
 });
 
-app.get("/healthz", async () => jsonResponse(200, {
-  ok: true,
-  uptimeSec: Math.floor(process.uptime()),
-  dataDir: DATA_DIR,
-  jobBackend: JOB_BACKEND,
-  processRole: PROCESS_ROLE,
-  queue: queue.snapshot(),
-  codexBin: process.env.RECEIPT_CODEX_BIN ?? "codex",
-  resonateUrl: process.env.RESONATE_URL ?? "http://127.0.0.1:8001",
-}));
+app.get("/healthz", async () => {
+  const localHealth = await buildLocalRuntimeHealth();
+  return jsonResponse(200, {
+    ok: true,
+    ready: localHealth?.ready ?? true,
+    degraded: localHealth?.degraded ?? false,
+    uptimeSec: Math.floor(process.uptime()),
+    dataDir: DATA_DIR,
+    jobBackend: JOB_BACKEND,
+    processRole: PROCESS_ROLE,
+    queue: queue.snapshot(),
+    checks: localHealth?.checks,
+    workers: localHealth?.workers,
+    stalledObjectives: localHealth?.stalledObjectives ?? 0,
+    oldestQueuedMsByLane: localHealth?.oldestQueuedMsByLane,
+    lastResumeAt: localHealth?.lastResumeAt,
+    lastResumeError: localHealth?.lastResumeError,
+    watchdog: localHealth?.watchdog,
+    codexBin: process.env.RECEIPT_CODEX_BIN ?? "codex",
+    resonateUrl: process.env.RESONATE_URL ?? "http://127.0.0.1:8001",
+  });
+});
 
 app.post("/jobs/:id/steer", async (c) => {
   const jobId = c.req.param("id");
@@ -1283,6 +1390,30 @@ if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "api" && Number.isFinite(queu
   };
   scheduleNextQueueRefresh();
 }
+let localRuntimeWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
+if (JOB_BACKEND === "local" && Number.isFinite(LOCAL_RUNTIME_WATCHDOG_MS) && LOCAL_RUNTIME_WATCHDOG_MS > 0) {
+  let watchdogInFlight = false;
+  const watchdogIntervalMs = Math.max(1_000, Math.floor(LOCAL_RUNTIME_WATCHDOG_MS));
+  const scheduleNextLocalRuntimeWatchdog = (): void => {
+    localRuntimeWatchdogTimer = setTimeout(async () => {
+      if (watchdogInFlight) {
+        scheduleNextLocalRuntimeWatchdog();
+        return;
+      }
+      watchdogInFlight = true;
+      try {
+        await evaluateLocalRuntimeWatchdog();
+      } catch (err) {
+        console.error("[local runtime watchdog]", err);
+      } finally {
+        watchdogInFlight = false;
+        scheduleNextLocalRuntimeWatchdog();
+      }
+    }, watchdogIntervalMs);
+    localRuntimeWatchdogTimer.unref();
+  };
+  scheduleNextLocalRuntimeWatchdog();
+}
 
 let receiptWatcher: ReturnType<typeof setInterval> | undefined;
 if (shouldServeHttp) {
@@ -1340,6 +1471,7 @@ const shutdown = (signal: string): void => {
   console.log(`Receipt server shutting down (${signal})`);
   if (receiptWatcher) clearInterval(receiptWatcher);
   if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+  if (localRuntimeWatchdogTimer) clearTimeout(localRuntimeWatchdogTimer);
   for (const worker of workers) worker.stop();
   for (const hb of heartbeats) hb.stop();
   resonateRoleRuntime?.stop();

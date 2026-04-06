@@ -9,7 +9,7 @@ import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
 import { jsonlQueue, type JsonlQueue, type QueueJob } from "../adapters/jsonl-queue";
 import { isSqliteLockError } from "../db/client";
 import type { FactoryReceiptAuditReport } from "./audit";
-import type { FactoryReceiptInvestigation } from "./investigate";
+import { readFactoryReceiptInvestigation, type FactoryReceiptInvestigation } from "./investigate";
 import { resolveBunRuntime } from "../lib/runtime-paths";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../modules/job";
 import { createRuntime } from "@receipt/core/runtime";
@@ -89,9 +89,15 @@ const RESUME_TIMEOUT_MS = 120_000;
 const ACTIVE_JOB_WAIT_TIMEOUT_MS = RESUME_TIMEOUT_MS;
 const ACTIVE_JOB_WAIT_POLL_MS = 400;
 const LIVE_GUIDANCE_WINDOW_MS = 20_000;
+const OBJECTIVE_SETTLE_TIMEOUT_MS = 15_000;
+const OBJECTIVE_SETTLE_POLL_MS = 250;
+const OBJECTIVE_SETTLE_QUIET_MS = 750;
 
 const isActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
+
+const isTerminalObjectiveStatus = (status?: string): boolean =>
+  status === "completed" || status === "blocked" || status === "failed" || status === "canceled";
 
 const createExperimentQueue = (dataDir: string): JsonlQueue =>
   jsonlQueue({
@@ -295,7 +301,7 @@ const createLongRunCodexStub = async (root: string): Promise<string> => {
     "    ],",
     "    scriptsRun: [{",
     "      command: 'bun run receipt:long-run-evidence',",
-    "      summary: validation.status === 0 ? 'Validation passed.' : ((validation.stderr || validation.stdout || 'Validation failed.').trim().slice(0, 240) || 'Validation failed.'),",
+    "      summary: validation.status === 0 ? 'Validation passed by delegating to bun run build.' : ((validation.stderr || validation.stdout || 'Validation failed.').trim().slice(0, 240) || 'Validation failed.'),",
     "      status: validation.status === 0 ? 'ok' : 'error',",
     "    }],",
     "    disagreements: [],",
@@ -309,7 +315,7 @@ const createLongRunCodexStub = async (root: string): Promise<string> => {
     "    completion: {",
     "      changed: ['README.md', 'package.json'],",
     "      proof: validation.status === 0",
-    "        ? ['Added receipt:long-run-evidence script.', 'Appended the README experiment note.', 'Ran bun run receipt:long-run-evidence successfully.']",
+    "        ? ['Added receipt:long-run-evidence script.', 'Appended the README experiment note.', 'Ran bun run receipt:long-run-evidence successfully as a wrapper around bun run build.']",
     "        : ['Added receipt:long-run-evidence script.', 'Appended the README experiment note.'],",
     "      remaining: validation.status === 0 ? [] : ['Review validation output.'],",
     "    },",
@@ -352,6 +358,36 @@ const waitForActiveJobId = async (
     await sleep(ACTIVE_JOB_WAIT_POLL_MS);
   }
   throw new Error(`Timed out waiting for an active Factory job for ${objectiveId}${recentSummary ? ` (${recentSummary})` : ""}`);
+};
+
+const waitForObjectiveSnapshotTs = async (
+  dataDir: string,
+  repoRoot: string,
+  objectiveId: string,
+): Promise<number> => {
+  const startedAt = Date.now();
+  let recentStatus: string | undefined;
+  let stableUpdatedAt: number | undefined;
+  let stableSince: number | undefined;
+  while (Date.now() - startedAt < OBJECTIVE_SETTLE_TIMEOUT_MS) {
+    const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, objectiveId);
+    recentStatus = report.summary.status;
+    if (isTerminalObjectiveStatus(recentStatus) && typeof report.window.updatedAt === "number") {
+      if (stableUpdatedAt !== report.window.updatedAt) {
+        stableUpdatedAt = report.window.updatedAt;
+        stableSince = Date.now();
+      } else if (stableSince !== undefined && Date.now() - stableSince >= OBJECTIVE_SETTLE_QUIET_MS) {
+        return report.window.updatedAt;
+      }
+    } else {
+      stableUpdatedAt = undefined;
+      stableSince = undefined;
+    }
+    await sleep(OBJECTIVE_SETTLE_POLL_MS);
+  }
+  throw new Error(
+    `Timed out waiting for ${objectiveId} to reach a terminal snapshot${recentStatus ? ` (${recentStatus})` : ""}`,
+  );
 };
 
 const renderExperimentSummaryText = (report: FactoryLongRunExperimentReport): string => {
@@ -491,12 +527,15 @@ export const runFactoryLongRunExperiment = async (
   if (resumeEntry.exitCode !== 0 && resumeEntry.exitCode !== 2) {
     throw new Error(`factory resume exited with ${resumeEntry.exitCode}`);
   }
+  const settledAsOfTs = await waitForObjectiveSnapshotTs(dataDir, sandboxRoot, objectiveId);
 
   const investigateJson = await runCli(transcript, "factory investigate json", [
     "factory",
     "investigate",
     objectiveId,
     "--json",
+    "--as-of-ts",
+    String(settledAsOfTs),
     "--repo-root",
     sandboxRoot,
   ], env);
@@ -504,6 +543,8 @@ export const runFactoryLongRunExperiment = async (
     "factory",
     "investigate",
     objectiveId,
+    "--as-of-ts",
+    String(settledAsOfTs),
     "--repo-root",
     sandboxRoot,
     "--timeline-limit",
@@ -541,6 +582,7 @@ export const runFactoryLongRunExperiment = async (
 
   const investigation = JSON.parse(investigateJson.stdout) as FactoryReceiptInvestigation;
   const audit = JSON.parse(auditJson.stdout) as FactoryReceiptAuditReport;
+  const auditObjective = audit.objectives.find((item) => item.objectiveId === objectiveId);
   const inspectPayload = JSON.parse(finalInspect.stdout) as {
     readonly data?: {
       readonly status?: string;
@@ -566,6 +608,29 @@ export const runFactoryLongRunExperiment = async (
   const investigateTextPath = path.join(evidenceDir, "investigate.md");
   const auditJsonPath = path.join(evidenceDir, "audit.json");
   const auditTextPath = path.join(evidenceDir, "audit.md");
+  const effectiveInterventions = auditObjective
+    ? {
+        count: auditObjective.interventions,
+        restartCount: auditObjective.restartCount,
+        operatorGuidanceApplied: auditObjective.interventions > 0 || investigation.interventions.operatorGuidanceApplied,
+        courseCorrectionWorked: auditObjective.courseCorrectionWorked,
+      }
+    : {
+        count: investigation.interventions.count,
+        restartCount: investigation.interventions.restartCount,
+        operatorGuidanceApplied: investigation.interventions.operatorGuidanceApplied,
+        courseCorrectionWorked: investigation.interventions.courseCorrectionWorked,
+      };
+  const effectiveAssessment = auditObjective
+    ? {
+        ...investigation.assessment,
+        verdict: auditObjective.verdict,
+        easyRouteRisk: auditObjective.easyRouteRisk,
+        efficiency: auditObjective.efficiency,
+        controlChurn: auditObjective.controlChurn,
+        courseCorrectionWorked: auditObjective.courseCorrectionWorked,
+      }
+    : investigation.assessment;
 
   const report: FactoryLongRunExperimentReport = {
     experimentId,
@@ -578,13 +643,8 @@ export const runFactoryLongRunExperiment = async (
     status: inspectPayload.data?.status,
     changedFiles,
     diffStat,
-    interventions: {
-      count: investigation.interventions.count,
-      restartCount: investigation.interventions.restartCount,
-      operatorGuidanceApplied: investigation.interventions.operatorGuidanceApplied,
-      courseCorrectionWorked: investigation.interventions.courseCorrectionWorked,
-    },
-    assessment: investigation.assessment,
+    interventions: effectiveInterventions,
+    assessment: effectiveAssessment,
     summaryPath,
     artifactsPath,
     timelinePath,

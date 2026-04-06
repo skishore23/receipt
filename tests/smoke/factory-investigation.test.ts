@@ -9,8 +9,10 @@ import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
 import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
 import { CodexControlSignalError, type CodexExecutorInput, type CodexRunControl } from "../../src/adapters/codex-executor";
 import { createRuntime } from "@receipt/core/runtime";
+import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
+import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
 import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
 
@@ -71,6 +73,7 @@ const createFactoryService = async (opts: {
   readonly service: FactoryService;
   readonly queue: ReturnType<typeof jsonlQueue>;
   readonly repoRoot: string;
+  readonly dataDir: string;
 }> => {
   const dataDir = await createTempDir("receipt-factory-investigation");
   const repoRoot = await createSourceRepo({ seed: opts.seedRepo });
@@ -100,7 +103,7 @@ const createFactoryService = async (opts: {
     profileRoot: process.cwd(),
     cloudExecutionContextProvider: opts.cloudExecutionContextProvider,
   });
-  return { service, queue, repoRoot };
+  return { service, queue, repoRoot, dataDir };
 };
 
 const objectiveTaskJobs = async (
@@ -523,7 +526,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
         conclusion: "Service health evidence points to an application-side fault.",
         evidence: [{ title: "Health checks", summary: "Service health degraded before the deployment change.", detail: null }],
         evidenceRecords: [],
-        scriptsRun: [],
+        scriptsRun: [{ command: "cat health-check-summary.json", summary: "Reviewed the captured health-check evidence.", status: "ok" }],
         disagreements: ["Initial attribution differed across observed signals."],
         nextSteps: [],
       },
@@ -547,7 +550,7 @@ test("factory investigation: multiple reported tasks synthesize directly without
         conclusion: "Deployment evidence points to an infrastructure-side drift.",
         evidence: [{ title: "Deployment diff", summary: "The latest rollout changed core infrastructure settings.", detail: null }],
         evidenceRecords: [],
-        scriptsRun: [],
+        scriptsRun: [{ command: "git diff --stat HEAD~1 HEAD", summary: "Reviewed the deployment change set.", status: "ok" }],
         disagreements: [],
         nextSteps: ["Validate the application fix path before any infra rollback."],
       },
@@ -634,7 +637,26 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
   };
   const { service } = await createFactoryService({
     codexRun: async () => {
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Confirmed the infrastructure helper-first prompt guidance.",
+        handoff: "Worker reviewed the mounted AWS helper guidance and is handing the prompt validation back.",
+        artifacts: [],
+        completion: {
+          changed: ["Captured the helper-first prompt validation result."],
+          proof: ["The rendered prompt included the expected AWS helper-first guidance and packet instructions."],
+          remaining: [],
+        },
+        nextAction: null,
+        report: {
+          conclusion: "The infrastructure prompt enforces helper-first AWS investigation guidance.",
+          evidence: [{ title: "Rendered prompt", summary: "The prompt included the expected helper-first AWS instructions.", detail: null }],
+          evidenceRecords: [],
+          scriptsRun: [{ command: "cat .receipt/factory/task_01.prompt.md", summary: "Reviewed the rendered investigation prompt.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => mixedContext,
@@ -732,7 +754,26 @@ test("factory investigation: infrastructure task prompts require helper-first AW
       capturedSandboxMode = input.sandboxMode;
       capturedCompletionSignalPath = input.completionSignalPath;
       capturedReasoningEffort = input.reasoningEffort;
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Confirmed the infrastructure helper-first prompt guidance.",
+        handoff: "Worker reviewed the mounted AWS helper guidance and is handing the prompt validation back.",
+        artifacts: [],
+        completion: {
+          changed: ["Captured the helper-first prompt validation result."],
+          proof: ["The rendered prompt included the expected AWS helper-first guidance and packet instructions."],
+          remaining: [],
+        },
+        nextAction: null,
+        report: {
+          conclusion: "The infrastructure prompt enforces helper-first AWS investigation guidance.",
+          evidence: [{ title: "Rendered prompt", summary: "The prompt included the expected helper-first AWS instructions.", detail: null }],
+          evidenceRecords: [],
+          scriptsRun: [{ command: "cat .receipt/factory/task_01.prompt.md", summary: "Reviewed the rendered investigation prompt.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => mixedContext,
@@ -836,12 +877,17 @@ test("factory investigation: infrastructure task packets mount selected checked-
         summary: "Checked-in helpers were available in the task packet.",
         handoff: "Worker confirmed the helper catalog was mounted and is handing the result back.",
         artifacts: [],
+        completion: {
+          changed: ["Confirmed the selected AWS helper catalog for the task packet."],
+          proof: ["The context pack included the checked-in helper runner and the aws_resource_inventory helper."],
+          remaining: [],
+        },
         nextAction: null,
         report: {
           conclusion: "The task packet mounted checked-in helper metadata for the AWS bucket prompt.",
           evidence: [],
           evidenceRecords: [],
-          scriptsRun: [],
+          scriptsRun: [{ command: "cat .receipt/factory/task_01.context-pack.json", summary: "Reviewed the mounted helper catalog for the task packet.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
         },
@@ -925,12 +971,17 @@ test("factory investigation: IAM user count prompts select the checked-in IAM he
         summary: "IAM helper was selected.",
         handoff: "Worker confirmed the IAM helper selection and is handing the result back.",
         artifacts: [],
+        completion: {
+          changed: ["Confirmed the selected IAM helper metadata for the task packet."],
+          proof: ["The context pack selected aws_iam_user_inventory for the IAM user count prompt."],
+          remaining: [],
+        },
         nextAction: null,
         report: {
           conclusion: "The task packet mounted the IAM user helper for the count prompt.",
           evidence: [],
           evidenceRecords: [],
-          scriptsRun: [],
+          scriptsRun: [{ command: "cat .receipt/factory/task_01.context-pack.json", summary: "Reviewed the IAM helper selection in the mounted task packet.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
         },
@@ -997,7 +1048,26 @@ test("factory investigation: resource-specific helper prompts tell Codex to use 
   };
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
-      const raw = JSON.stringify({ outcome: "approved", summary: "noop", handoff: "noop", report: { conclusion: "noop", evidence: [], evidenceRecords: [], scriptsRun: [], disagreements: [], nextSteps: [] } });
+      const raw = JSON.stringify({
+        outcome: "approved",
+        summary: "Confirmed the prompt uses real resource identifiers for helper-backed checks.",
+        handoff: "Worker verified the resource-specific helper guidance and is handing the prompt validation back.",
+        artifacts: [],
+        completion: {
+          changed: ["Captured the resource-specific helper prompt validation result."],
+          proof: ["The rendered prompt included the concrete S3 public-access helper invocation guidance."],
+          remaining: [],
+        },
+        nextAction: null,
+        report: {
+          conclusion: "The resource-specific helper prompt tells Codex to use real identifiers instead of placeholders.",
+          evidence: [{ title: "Rendered prompt", summary: "The prompt included the expected concrete helper invocation template.", detail: null }],
+          evidenceRecords: [],
+          scriptsRun: [{ command: "cat .receipt/factory/task_01.prompt.md", summary: "Reviewed the rendered prompt for concrete helper arguments.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      });
       return { stdout: raw, stderr: "", lastMessage: raw };
     },
     cloudExecutionContextProvider: async () => awsContext,
@@ -1033,12 +1103,17 @@ test("factory investigation: infrastructure objectives can start from a dirty so
         summary: "Collected bucket count.",
         handoff: "Worker completed the bucket inventory and is handing the report back.",
         artifacts: [],
+        completion: {
+          changed: ["Captured the bucket inventory summary."],
+          proof: ["The worker recorded the bucket inventory result against the pinned base hash."],
+          remaining: [],
+        },
         nextAction: null,
         report: {
           conclusion: "Bucket inventory completed.",
           evidence: [],
           evidenceRecords: [],
-          scriptsRun: [],
+          scriptsRun: [{ command: "aws s3api list-buckets", summary: "Collected the bucket inventory from the mounted AWS context.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
         },
@@ -1066,7 +1141,7 @@ test("factory investigation: infrastructure objectives can start from a dirty so
 test("factory investigation: live guidance restarts once, rewrites the prompt, and preserves workspace changes", async () => {
   let attempts = 0;
   let guidancePending = true;
-  const { service, queue } = await createFactoryService({
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
     seedRepo: async (repoRoot) => {
       await fs.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({
         name: "factory-investigation-live-guidance",
@@ -1101,7 +1176,10 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
         artifacts: [],
         completion: {
           changed: ["README.md", "package.json"],
-          proof: ["Workspace marker survived the restart.", "Validation proof was captured."],
+          proof: [
+            "Workspace marker survived the restart.",
+            "Ran bun run receipt:long-run-evidence successfully as a wrapper around bun run build.",
+          ],
           remaining: [],
         },
         nextAction: null,
@@ -1109,7 +1187,7 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
           conclusion: "The rerun completed after live operator guidance was applied.",
           evidence: [{ title: "Restart marker", summary: "The workspace marker survived the restart boundary.", detail: null }],
           evidenceRecords: [],
-          scriptsRun: [{ command: "bun run build", summary: "Validation passed.", status: "ok" }],
+          scriptsRun: [{ command: "bun run receipt:long-run-evidence", summary: "Validation passed by delegating to bun run build.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
         },
@@ -1159,6 +1237,116 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
   await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Applied the live-guided investigation fix.");
   await expect(fs.readFile(path.join(payload.workspacePath, "RESTART_MARKER.txt"), "utf-8")).resolves.toContain("created before restart");
+
+  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(report.assessment.verdict).toBe("strong");
+  expect(report.assessment.followUpValidation).toBe("done");
+  expect(report.assessment.operatorGuidanceApplied).toBe(true);
+  expect(report.assessment.courseCorrectionWorked).toBe(true);
+}, 120_000);
+
+test("factory investigation: prefers terminal job projection over stale receipt-only job state", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Projection drift investigation",
+    prompt: "Keep investigation job state aligned with the current queue projection.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob?.status).toBe("queued");
+  if (!taskJob) throw new Error("expected dispatched task job");
+
+  const db = getReceiptDb(dataDir);
+  db.write(() => {
+    db.sqlite.query(`
+      INSERT INTO job_projection (
+        job_id,
+        stream,
+        agent_id,
+        lane,
+        session_key,
+        singleton_mode,
+        payload_json,
+        status,
+        attempt,
+        max_attempts,
+        created_at,
+        updated_at,
+        lease_owner,
+        lease_until,
+        last_error,
+        result_json,
+        canceled_reason,
+        abort_requested,
+        commands_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)
+      ON CONFLICT(job_id) DO UPDATE SET
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        canceled_reason = excluded.canceled_reason,
+        payload_json = excluded.payload_json,
+        commands_json = excluded.commands_json
+    `).run(
+      taskJob.id,
+      `jobs/${taskJob.id}`,
+      taskJob.agentId,
+      taskJob.lane,
+      taskJob.sessionKey ?? null,
+      taskJob.singletonMode ?? null,
+      JSON.stringify(taskJob.payload),
+      "canceled",
+      taskJob.attempt,
+      taskJob.maxAttempts,
+      taskJob.createdAt,
+      taskJob.updatedAt + 5_000,
+      "local db cleanup",
+      taskJob.abortRequested ? 1 : 0,
+      JSON.stringify(taskJob.commands),
+    );
+  });
+
+  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  const correctedJob = report.jobs.find((job) => job.jobId === taskJob.id);
+  expect(correctedJob?.status).toBe("canceled");
+  expect(correctedJob?.canceledReason).toBe("local db cleanup");
+  expect(report.warnings.some((warning) =>
+    warning.includes(taskJob.id) && warning.includes("projection status canceled") && warning.includes("local db cleanup"))).toBe(true);
+}, 120_000);
+
+test("factory investigation: stale queued execution is downgraded to stalled", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Queued execution without a consumer",
+    prompt: "Detect when active execution has gone stale instead of presenting it as healthy.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob?.status).toBe("queued");
+  if (!taskJob) throw new Error("expected dispatched task job");
+
+  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId, {
+    asOfTs: taskJob.updatedAt + 120_000,
+  });
+  const stalledJob = report.jobs.find((job) => job.jobId === taskJob.id);
+  expect(stalledJob?.status).toBe("stalled");
+  expect(report.anomalies.some((anomaly) =>
+    anomaly.kind === "job_stalled" && anomaly.jobId === taskJob.id)).toBe(true);
+  expect(report.assessment.verdict).toBe("weak");
+  expect(report.assessment.notes.some((note) => note.includes("Live execution stalled"))).toBe(true);
 }, 120_000);
 
 test("factory investigation: abort signals win over restart handling", async () => {

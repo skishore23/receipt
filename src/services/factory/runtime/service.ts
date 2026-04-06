@@ -201,6 +201,14 @@ import {
   isTerminalQueueJobStatusValue,
   objectiveIdForQueueJob,
 } from "../objective-status";
+import {
+  displayLiveJobStatus,
+  isActiveQueueJobStatus,
+  isFactoryExecutionQueueJob,
+  isTerminalQueueJobStatus,
+  liveExecutionSnapshotForJobs,
+  liveJobStaleAt,
+} from "../live-jobs";
 import { reactFactoryObjective } from "../objective/reactor";
 import { planTaskResult } from "../planner";
 import {
@@ -219,7 +227,7 @@ import { type GraphRef } from "@receipt/core/graph";
 import { makeEventId, optionalTrimmedString, requireTrimmedString, trimmedString } from "../../../framework/http";
 import type { SseHub } from "../../../framework/sse-hub";
 import { resolveCliInvocation } from "../../../lib/runtime-paths";
-import type { JobCmd, JobEvent, JobRecord, JobState, JobStatus } from "../../../modules/job";
+import type { JobCmd, JobEvent, JobRecord, JobState } from "../../../modules/job";
 import {
   listObjectiveProjectionRows,
   readObjectiveProjection,
@@ -387,70 +395,8 @@ const renderLiveOperatorGuidanceSection = (
 };
 const dedupeStrings = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
   [...new Set(values.map((item) => item.trim()).filter(Boolean))];
-const isTerminalJobStatus = (status?: JobStatus | "missing"): boolean =>
-  status === "completed" || status === "failed" || status === "canceled";
-const isActiveJobStatus = (status?: JobStatus | "missing"): boolean =>
-  status === "queued" || status === "leased" || status === "running";
-const LIVE_JOB_STALE_AFTER_MS = 90_000;
-const jobProgressAt = (job: QueueJob | undefined): number | undefined => {
-  const result = isRecord(job?.result) ? job.result : undefined;
-  return typeof result?.progressAt === "number" && Number.isFinite(result.progressAt)
-    ? result.progressAt
-    : undefined;
-};
-const displayLiveJobStatus = (job: QueueJob | undefined, now = Date.now()): string | undefined => {
-  if (!job) return undefined;
-  if (isTerminalJobStatus(job.status)) return job.status;
-  const progressAt = jobProgressAt(job);
-  if (job.status === "running" && typeof progressAt === "number" && now - progressAt >= LIVE_JOB_STALE_AFTER_MS) {
-    return "stalled";
-  }
-  if (job.status === "leased") return "running";
-  return job.status;
-};
 const isDisplayActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "running";
-const liveExecutionObjectiveId = (job: QueueJob | undefined): string | undefined => {
-  const payload = isRecord(job?.payload) ? job.payload : undefined;
-  const kind = typeof payload?.kind === "string" ? payload.kind : undefined;
-  if (
-    kind !== "factory.task.run"
-    && kind !== "factory.integration.validate"
-    && kind !== "factory.integration.publish"
-  ) {
-    return undefined;
-  }
-  return typeof payload?.objectiveId === "string" && payload.objectiveId.trim().length > 0
-    ? payload.objectiveId
-    : undefined;
-};
-const liveExecutionSnapshotForJobs = (
-  jobs: ReadonlyArray<QueueJob>,
-  now = Date.now(),
-): {
-  readonly stalledObjectiveIds: ReadonlySet<string>;
-  readonly nextStatusChangeAt?: number;
-} => {
-  const stalledObjectiveIds = new Set<string>();
-  let nextStatusChangeAt: number | undefined;
-  for (const job of jobs) {
-    const objectiveId = liveExecutionObjectiveId(job);
-    if (!objectiveId) continue;
-    const displayStatus = displayLiveJobStatus(job, now);
-    if (displayStatus === "stalled") {
-      stalledObjectiveIds.add(objectiveId);
-      continue;
-    }
-    const progressAt = jobProgressAt(job);
-    if (job.status !== "running" || typeof progressAt !== "number") continue;
-    const staleAt = progressAt + LIVE_JOB_STALE_AFTER_MS;
-    if (staleAt <= now) continue;
-    if (nextStatusChangeAt === undefined || staleAt < nextStatusChangeAt) {
-      nextStatusChangeAt = staleAt;
-    }
-  }
-  return { stalledObjectiveIds, nextStatusChangeAt };
-};
 const boardSectionForObjective = (
   objective: Pick<FactoryObjectiveCard, "displayState">,
 ): FactoryBoardSection => {
@@ -1371,7 +1317,7 @@ export class FactoryService {
 
       // Check if codex job is still running
       const codexJob = await this.queue.getJob(monitorPayload.codexJobId);
-      if (!codexJob || isTerminalJobStatus(codexJob.status)) {
+      if (!codexJob || isTerminalQueueJobStatus(codexJob.status)) {
         return { status: "codex_job_completed", checkpoints: checkpoint };
       }
 
@@ -1766,7 +1712,7 @@ export class FactoryService {
   async cancelObjective(objectiveId: string, reason?: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "cancel");
-    await this.cancelObjectiveTaskJobs(state, reason ?? "factory objective canceled");
+    await this.cancelObjectiveScopedJobs(objectiveId, reason ?? "factory objective canceled", "factory");
     const canceledAt = Date.now();
     const summary = reason ? `Objective canceled: ${reason}` : "Objective canceled.";
     await this.emitObjectiveBatch(objectiveId, [
@@ -1791,7 +1737,7 @@ export class FactoryService {
   async archiveObjective(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "archive");
-    await this.cancelObjectiveTaskJobs(state, "factory objective archived");
+    await this.cancelObjectiveScopedJobs(objectiveId, "factory objective archived", "factory");
     if (!state.archivedAt) {
       await this.emitObjective(objectiveId, {
         type: "objective.archived",
@@ -1806,6 +1752,7 @@ export class FactoryService {
   async cleanupObjectiveWorkspaces(objectiveId: string): Promise<FactoryObjectiveDetail> {
     const state = await this.getObjectiveState(objectiveId);
     this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "cleanup");
+    await this.cancelObjectiveScopedJobs(objectiveId, "factory objective cleanup", "factory.cleanup");
     const workspacePaths = new Set<string>();
     for (const taskId of state.workflow.taskIds) {
       const task = state.workflow.tasksById[taskId];
@@ -1887,6 +1834,7 @@ export class FactoryService {
   async resumeObjectives(): Promise<void> {
     await this.queue.refresh();
     await this.reconcileQueuedObjectiveControlJobs();
+    await this.reconcileStaleObjectiveExecutionJobs();
     await this.rebalanceObjectiveSlots();
     const objectives = await this.listObjectives();
     for (const objective of objectives.filter((item) =>
@@ -1990,6 +1938,40 @@ export class FactoryService {
     }
   }
 
+  private async reconcileStaleObjectiveExecutionJobs(now = Date.now()): Promise<void> {
+    const jobs = await this.queue.listJobs({ limit: 2000 });
+    const summaries = await this.listObjectiveProjectionSummaries();
+    const summariesById = new Map(summaries.map((summary) => [summary.objectiveId, summary] as const));
+    const reconciledObjectiveIds = new Set<string>();
+
+    for (const job of jobs) {
+      if (!isActiveQueueJobStatus(job.status) || !isFactoryExecutionQueueJob(job)) continue;
+      const objectiveId = objectiveIdForQueueJob(job);
+      if (!objectiveId) continue;
+      const summary = summariesById.get(objectiveId);
+      if (!summary || summary.archivedAt || this.isTerminalObjectiveStatus(summary.status)) {
+        await this.queue.cancel(
+          job.id,
+          summary ? this.objectiveCleanupReason(summary) : "objective execution job retired during startup reconciliation",
+          "factory.resume",
+        );
+        continue;
+      }
+      const staleAt = liveJobStaleAt(job);
+      if (typeof staleAt !== "number" || staleAt > now) continue;
+      if (job.status === "queued" && this.redriveQueuedJob) {
+        await this.redriveQueuedJob(job);
+        continue;
+      }
+      await this.queue.cancel(job.id, "stale active objective job reconciled during startup recovery", "factory.resume");
+      reconciledObjectiveIds.add(objectiveId);
+    }
+
+    for (const objectiveId of reconciledObjectiveIds) {
+      await this.enqueueObjectiveControl(objectiveId, "reconcile");
+    }
+  }
+
   private async queueJobCommand(
     jobId: string,
     input: {
@@ -2039,7 +2021,7 @@ export class FactoryService {
   ): Promise<void> {
     const jobs = await this.listObjectiveScopedJobs(objectiveId, 2000);
     for (const job of jobs) {
-      if (!isActiveJobStatus(job.status)) continue;
+      if (!isActiveQueueJobStatus(job.status)) continue;
       if (job.payload.kind === "factory.objective.audit" || job.payload.kind === "factory.objective.control") continue;
       await this.queue.cancel(job.id, reason, "factory.cleanup");
     }
@@ -2065,14 +2047,15 @@ export class FactoryService {
     return releasesProjectedObjectiveSlot(summary);
   }
 
-  private async cancelObjectiveTaskJobs(
-    state: FactoryState,
+  private async cancelObjectiveScopedJobs(
+    objectiveId: string,
     reason: string,
+    by: string,
   ): Promise<void> {
-    for (const taskId of state.workflow.taskIds) {
-      const task = state.workflow.tasksById[taskId];
-      if (!task?.jobId) continue;
-      await this.queue.cancel(task.jobId, reason, "factory");
+    const jobs = await this.listObjectiveScopedJobs(objectiveId, 2000);
+    for (const job of jobs) {
+      if (!isActiveQueueJobStatus(job.status)) continue;
+      await this.queue.cancel(job.id, reason, by);
     }
   }
 
@@ -2587,7 +2570,7 @@ export class FactoryService {
       const task = state.workflow.tasksById[taskId];
       if (!task?.jobId) continue;
       const job = await this.loadFreshJob(task.jobId);
-      if (!job || !isTerminalJobStatus(job.status)) continue;
+      if (!job || !isTerminalQueueJobStatus(job.status)) continue;
       if ((job.status === "failed" || job.status === "canceled") && (task.status === "running" || task.status === "reviewing")) {
         const reason = job.lastError ?? job.canceledReason ?? "factory task failed";
         const blockedAt = Date.now();
@@ -3290,16 +3273,6 @@ export class FactoryService {
     const normalizedStructuredInvestigationReport = hasStructuredInvestigationReport
       ? normalizeInvestigationReport(rawResult.report, summary)
       : undefined;
-    if (isInvestigation && isRecord(rawResult.report)) {
-      const report = rawResult.report;
-      const structuredEvidenceFailure = validateTaskEvidence({
-        objectiveId: payload.objectiveId,
-        taskId: payload.taskId,
-        reportIncludesEvidenceRecords: Object.hasOwn(report, "evidenceRecords"),
-        reportEvidenceRecords: normalizedStructuredInvestigationReport?.evidenceRecords,
-      });
-      if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
-    }
     let outcome: FactoryTaskResultOutcome;
     switch (optionalTrimmedString(rawResult.outcome)) {
       case "changes_requested":
@@ -3353,6 +3326,27 @@ export class FactoryService {
           this.defaultDeliveryAlignment(state, initialCompletion),
         )
       : undefined;
+    const structuredEvidenceFailure = validateTaskEvidence({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      objectiveMode: state.objectiveMode,
+      outcome,
+      completion: initialCompletion,
+      scriptsRun: state.objectiveMode === "investigation"
+        ? normalizedStructuredInvestigationReport?.scriptsRun
+        : scriptsRun,
+      hasAlignment: state.objectiveMode === "delivery"
+        ? isRecord(rawResult.alignment)
+        : undefined,
+      hasStructuredReport: state.objectiveMode === "investigation"
+        ? hasStructuredInvestigationReport
+        : undefined,
+      reportIncludesEvidenceRecords: hasStructuredInvestigationReport && isRecord(rawResult.report)
+        ? Object.hasOwn(rawResult.report, "evidenceRecords")
+        : false,
+      reportEvidenceRecords: normalizedStructuredInvestigationReport?.evidenceRecords,
+    });
+    if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
 
     if (outcome === "blocked" && !hasStructuredInvestigationReport) {
       await commitFactoryTaskMemory(

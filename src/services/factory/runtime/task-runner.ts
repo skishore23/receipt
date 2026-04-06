@@ -24,6 +24,7 @@ export const canAutonomouslyResolveDeliveryPartial = (input: {
   if (input.failedCheck) return false;
   if (input.completion.changed.length === 0) return false;
   if (input.completion.proof.length === 0) return false;
+  if (input.scriptsRun.length === 0) return false;
   if (input.scriptsRun.some((item) => item.status === "error")) return false;
   const unresolved = [
     ...input.completion.remaining,
@@ -37,9 +38,30 @@ export const canAutonomouslyResolveDeliveryPartial = (input: {
 export const validateTaskEvidence = (input: {
   readonly objectiveId: string;
   readonly taskId: string;
+  readonly objectiveMode?: "delivery" | "investigation";
+  readonly outcome?: "approved" | "changes_requested" | "blocked" | "partial";
+  readonly completion?: FactoryTaskCompletionRecord;
+  readonly scriptsRun?: ReadonlyArray<FactoryExecutionScriptRun>;
+  readonly hasAlignment?: boolean;
+  readonly hasStructuredReport?: boolean;
   readonly reportIncludesEvidenceRecords: boolean;
   readonly reportEvidenceRecords?: ReadonlyArray<FactoryEvidenceRecord>;
 }): string | undefined => {
+  const successOutcome = input.outcome === "approved";
+  if (successOutcome) {
+    if ((input.completion?.proof.length ?? 0) === 0) {
+      return `factory task ${input.taskId} completed without proof items`;
+    }
+    if ((input.scriptsRun?.length ?? 0) === 0) {
+      return `factory task ${input.taskId} completed without scriptsRun evidence`;
+    }
+    if (input.objectiveMode === "delivery" && input.hasAlignment === false) {
+      return `factory task ${input.taskId} completed without an explicit alignment report`;
+    }
+    if (input.objectiveMode === "investigation" && input.hasStructuredReport === false) {
+      return `factory task ${input.taskId} completed without a structured investigation report`;
+    }
+  }
   if (!input.reportIncludesEvidenceRecords) return undefined;
   return undefined;
 };
