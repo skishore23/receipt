@@ -10,6 +10,7 @@ export type FactoryWorkbenchRouteInput = {
   readonly inspectorTab?: "overview" | "chat";
   readonly detailTab?: "action" | "review" | "queue";
   readonly filter?: FactoryWorkbenchFilterKey;
+  readonly page?: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
 };
@@ -50,6 +51,7 @@ export const buildFactoryWorkbenchSearchParams = (
   if (input.inspectorTab && input.inspectorTab !== "overview") params.set("inspectorTab", input.inspectorTab);
   if (input.detailTab) params.set("detailTab", input.detailTab);
   if (input.filter && input.filter !== DEFAULT_FACTORY_WORKBENCH_FILTER) params.set("filter", input.filter);
+  if (typeof input.page === "number" && Number.isFinite(input.page) && input.page > 1) params.set("page", String(Math.floor(input.page)));
   if (input.focusKind && input.focusId) {
     params.set("focusKind", input.focusKind);
     params.set("focusId", input.focusId);
