@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { zodTextFormat } from "openai/helpers/zod";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import type { DelegationTools } from "../../src/adapters/delegation";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
 import { runAgent, type AgentRunInput } from "../../src/agents/agent";
@@ -18,8 +18,8 @@ const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 
 const mkRuntime = (dir: string) => createRuntime<AgentCmd, AgentEvent, AgentState>(
-  jsonlStore<AgentEvent>(dir),
-  jsonBranchStore(dir),
+  sqliteReceiptStore<AgentEvent>(dir),
+  sqliteBranchStore(dir),
   decideAgent,
   reduceAgent,
   initialAgent

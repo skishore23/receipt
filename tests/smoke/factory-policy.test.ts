@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue, type QueueJob } from "../../src/adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import {
@@ -61,15 +61,15 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
   );
 
 const latestFactoryJob = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
   kind: "factory.task.run" | "factory.integration.validate" | "factory.integration.publish",
 ): Promise<QueueJob> => {
@@ -94,13 +94,13 @@ const createFactoryService = async (opts?: {
   };
 }): Promise<{
   readonly service: FactoryService;
-  readonly queue: ReturnType<typeof jsonlQueue>;
+  readonly queue: ReturnType<typeof sqliteQueue>;
   readonly repoRoot: string;
   readonly publishRuns: { count: number };
 }> => {
   const dataDir = await createTempDir("receipt-factory-policy");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexOutcome = opts?.codexOutcome ?? "approved";
   const publishMode = opts?.publishMode ?? "success";
   const completionRemaining = opts?.completionRemaining ?? [];

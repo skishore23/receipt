@@ -1,5 +1,5 @@
 import type { AgentState } from "../../modules/agent";
-import type { QueueJob } from "../../adapters/jsonl-queue";
+import type { QueueJob } from "../../adapters/sqlite-queue";
 import { summarizeFactoryQueueJob } from "../../views/factory/job-presenters";
 import type {
   FactoryLiveChildCard,

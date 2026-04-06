@@ -1,7 +1,7 @@
 import { fold } from "@receipt/core/chain";
 import type { Receipt } from "@receipt/core/types";
 
-import { jsonlStore } from "../../adapters/jsonl";
+import { sqliteReceiptStore } from "../../adapters/sqlite";
 import type { FactoryEvent, FactoryProjection, FactoryState } from "../../modules/factory";
 import { buildFactoryProjection, initialFactoryState, reduceFactory } from "../../modules/factory";
 
@@ -40,7 +40,7 @@ export const readObjectiveReplaySnapshot = async (
 ): Promise<FactoryObjectiveReplaySnapshot> => {
   const { objectiveId, stream } = objectiveReplayStream(objectiveIdOrStream);
   const chain = filterReceiptsAsOf(
-    await jsonlStore<FactoryEvent>(dataDir).read(stream),
+    await sqliteReceiptStore<FactoryEvent>(dataDir).read(stream),
     options.asOfTs,
   );
   if (chain.length === 0) {

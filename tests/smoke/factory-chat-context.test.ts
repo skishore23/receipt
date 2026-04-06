@@ -6,7 +6,7 @@ import path from "node:path";
 import { receipt } from "@receipt/core/chain";
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { agentRunStream } from "../../src/agents/agent.streams";
 import { buildChatItemsForRun } from "../../src/agents/factory/chat-items";
 import type { FactoryChatContextProjection } from "../../src/agents/factory/chat-context";
@@ -20,8 +20,8 @@ const createTempDir = async (label: string): Promise<string> =>
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,

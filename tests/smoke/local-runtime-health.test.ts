@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import type { QueueJob } from "../../src/adapters/sqlite-queue";
 import { summarizeLocalRuntimeHealth, type LocalRuntimeWorkerState } from "../../src/server/local-runtime-health";
 
 const makeJob = (input: Partial<QueueJob> & Pick<QueueJob, "id" | "agentId" | "lane" | "payload" | "status" | "attempt" | "maxAttempts" | "createdAt" | "updatedAt" | "commands">): QueueJob => ({

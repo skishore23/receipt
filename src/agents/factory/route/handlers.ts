@@ -44,7 +44,7 @@ import {
   type FactoryWorkbenchStatModel,
   type FactoryWorkbenchWorkspaceModel,
 } from "../../../views/factory-models";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import { buildChatItemsForRun, buildChatItemsFromConversation } from "../chat-items";
 import {
 } from "../chat-context";
@@ -77,6 +77,8 @@ import {
 import {
   buildWorkbenchLink,
 } from "./navigation";
+import { getReceiptDb } from "../../../db/client";
+import { syncChangedChatContextProjections } from "../../../db/projectors";
 import { createFactoryRouteCache } from "./cache";
 import { createFactoryRouteEvents } from "./events";
 import { registerFactoryApiRoutes } from "./register-factory-api-routes";
@@ -123,11 +125,79 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const {
     loadRecentJobs,
     loadFactoryProfiles,
-    resolveObjectiveProjectionVersion,
-    resolveSessionStreamVersion,
+    resolveObjectiveProjectionVersionCached,
+    resolveSessionStreamVersionCached,
     loadChatContextProjectionForSession,
     withProjectionCache,
   } = routeCache;
+
+  type WorkbenchServerTiming = {
+    readonly measure: <T>(name: string, run: () => Promise<T> | T) => Promise<T>;
+  };
+
+  type WorkbenchResolvedVersions = {
+    readonly sessionVersion?: string;
+    readonly objectiveVersion: number;
+  };
+
+  type ObjectiveChatBinding = {
+    readonly objectiveId: string;
+    readonly chatId: string;
+    readonly profileId: string;
+  };
+
+  const readObjectiveChatBindings = async (
+    objectiveIds: ReadonlyArray<string>,
+    profileId?: string,
+  ): Promise<ReadonlyMap<string, ObjectiveChatBinding>> => {
+    const normalizedObjectiveIds = [...new Set(
+      objectiveIds
+        .map((value) => value.trim())
+        .filter(Boolean),
+    )];
+    if (!chatProjectionDataDir || normalizedObjectiveIds.length === 0) return new Map();
+    await syncChangedChatContextProjections(chatProjectionDataDir).catch(() => undefined);
+    const db = getReceiptDb(chatProjectionDataDir);
+    const normalizedProfileId = profileId?.trim();
+    const placeholders = normalizedObjectiveIds.map(() => "?").join(", ");
+    const rows = db.read(() => db.sqlite.query(`
+      SELECT
+        bound_objective_id AS objectiveId,
+        chat_id AS chatId,
+        profile_id AS profileId,
+        updated_at AS updatedAt
+      FROM chat_context_projection
+      WHERE bound_objective_id IN (${placeholders})
+        ${normalizedProfileId ? "AND profile_id = ?" : ""}
+      ORDER BY updated_at DESC, stream DESC
+    `).all(
+      ...normalizedObjectiveIds,
+      ...(normalizedProfileId ? [normalizedProfileId] : []),
+    ) as ReadonlyArray<{
+      readonly objectiveId?: string;
+      readonly chatId?: string;
+      readonly profileId?: string;
+      readonly updatedAt?: number;
+    }>);
+    const bindings = new Map<string, ObjectiveChatBinding>();
+    for (const row of rows) {
+      const objectiveId = row.objectiveId?.trim();
+      const chatId = row.chatId?.trim();
+      const resolvedProfileId = row.profileId?.trim();
+      if (!objectiveId || !chatId || !resolvedProfileId || bindings.has(objectiveId)) continue;
+      bindings.set(objectiveId, {
+        objectiveId,
+        chatId,
+        profileId: resolvedProfileId,
+      });
+    }
+    return bindings;
+  };
+
+  type WorkbenchRequestContext = {
+    readonly request: FactoryWorkbenchRequestState;
+    readonly versions: WorkbenchResolvedVersions;
+  };
 
   const wrap = async <T>(
     fn: () => Promise<T>,
@@ -838,6 +908,16 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       : selectedBoardObjective
         ? toFactorySelectedObjectiveCard(selectedBoardObjective)
         : undefined;
+    const objectiveChatBindings = await readObjectiveChatBindings([
+      ...board.objectives.map((objective) => objective.objectiveId),
+      ...(resolvedObjectiveId ? [resolvedObjectiveId] : []),
+    ], effectiveProfile.id);
+    const objectiveChatIdsByObjectiveId = new Map<string, string>(
+      [...objectiveChatBindings.entries()].map(([objectiveId, binding]) => [objectiveId, binding.chatId]),
+    );
+    const effectiveChatId = resolvedObjectiveId
+      ? objectiveChatBindings.get(resolvedObjectiveId)?.chatId ?? input.chatId
+      : input.chatId;
     const { jobs: recentJobs } = detail
       ? await collectExplicitObjectiveJobs(
           detail,
@@ -864,8 +944,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       requestedFocusId: initialWorkbench?.focus?.focusId ?? input.focusId,
       liveOutput,
     });
-    const sessionStream = input.chatId
-      ? factoryChatSessionStream(repoRoot, effectiveProfile.id, input.chatId)
+    const sessionStream = effectiveChatId
+      ? factoryChatSessionStream(repoRoot, effectiveProfile.id, effectiveChatId)
       : undefined;
     const sessionChatContext = sessionStream
       ? await loadChatContextProjectionForSession({
@@ -931,7 +1011,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         updatedAt: latestRun.updatedAt,
         link: buildChatLink({
           profileId: effectiveProfile.id,
-          chatId: input.chatId,
+          chatId: effectiveChatId,
           objectiveId: resolvedObjectiveId,
           runId: latestRun.runId,
           focusKind: workbench?.focus?.focusKind,
@@ -946,19 +1026,25 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const filters = workbenchFilterModels(workbenchBoard, input.filter);
     const blockedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "needs_attention")
-        ? buildObjectiveNavCards(workbenchBoard.sections.needs_attention, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.needs_attention, resolvedObjectiveId, {
+            chatIdsByObjectiveId: objectiveChatIdsByObjectiveId,
+          })
         : [],
     );
     const blockedPage = paginateObjectiveCards(blockedObjectives, input.page);
     const runningObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "active")
-        ? buildObjectiveNavCards(workbenchBoard.sections.active, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.active, resolvedObjectiveId, {
+            chatIdsByObjectiveId: objectiveChatIdsByObjectiveId,
+          })
         : [],
     );
     const runningPage = paginateObjectiveCards(runningObjectives, input.page);
     const queuedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "queued")
-        ? buildObjectiveNavCards(workbenchBoard.sections.queued, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.queued, resolvedObjectiveId, {
+            chatIdsByObjectiveId: objectiveChatIdsByObjectiveId,
+          })
         : [],
     );
     const queuedPage = paginateObjectiveCards(queuedObjectives, input.page);
@@ -969,7 +1055,9 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     ]).slice(0, 10);
     const pastObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "completed")
-        ? buildObjectiveNavCards(workbenchBoard.sections.completed, resolvedObjectiveId)
+        ? buildObjectiveNavCards(workbenchBoard.sections.completed, resolvedObjectiveId, {
+            chatIdsByObjectiveId: objectiveChatIdsByObjectiveId,
+          })
         : [],
     );
     const pastPage = paginateObjectiveCards(pastObjectives, input.page);
@@ -990,6 +1078,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     return {
       activeProfileId: effectiveProfile.id,
       activeProfileLabel: effectiveProfile.label,
+      chatId: effectiveChatId ?? "",
       objectiveId: resolvedObjectiveId,
       inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       detailTab,
@@ -1028,11 +1117,13 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly chatId?: string;
     readonly objectiveId?: string;
     readonly seedJobs?: ReadonlyArray<QueueJob>;
+    readonly versions?: WorkbenchResolvedVersions;
   }): Promise<Awaited<ReturnType<typeof buildWorkbenchSessionRuntime>>> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
+    const sessionVersion = input.versions?.sessionVersion
+      ?? await resolveSessionStreamVersionCached({
+        profileId: input.profileId,
+        chatId: input.chatId,
+      });
     return withProjectionCache(
       workbenchSessionRuntimeCache,
       JSON.stringify({
@@ -1054,12 +1145,15 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
     readonly page: number;
+    readonly versions?: WorkbenchResolvedVersions;
   }): Promise<FactoryWorkbenchWorkspaceModel> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    const sessionVersion = input.versions?.sessionVersion
+      ?? await resolveSessionStreamVersionCached({
+        profileId: input.profileId,
+        chatId: input.chatId,
+      });
+    const objectiveVersion = input.versions?.objectiveVersion
+      ?? await resolveObjectiveProjectionVersionCached();
     return withProjectionCache(
       workbenchWorkspaceCache,
       JSON.stringify({
@@ -1180,12 +1274,15 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly chatId: string;
     readonly inspectorTab?: FactoryInspectorTab;
     readonly selectedObjectiveId?: string;
+    readonly versions?: WorkbenchResolvedVersions;
   }): Promise<FactoryChatIslandModel> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    const sessionVersion = input.versions?.sessionVersion
+      ?? await resolveSessionStreamVersionCached({
+        profileId: input.profileId,
+        chatId: input.chatId,
+      });
+    const objectiveVersion = input.versions?.objectiveVersion
+      ?? await resolveObjectiveProjectionVersionCached();
     return withProjectionCache(
       workbenchChatCache,
       JSON.stringify({
@@ -1208,6 +1305,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
     readonly page: number;
+    readonly versions?: WorkbenchResolvedVersions;
   }): Promise<FactoryWorkbenchPageModel> => {
     const workspace = await buildWorkbenchWorkspaceModelCached({
       profileId: input.profileId,
@@ -1219,18 +1317,20 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       focusId: input.focusId,
       filter: input.filter,
       page: input.page,
+      versions: input.versions,
     });
     await ensureObjectiveHandoffInSession({
       profileId: workspace.activeProfileId,
-      chatId: input.chatId,
+      chatId: workspace.chatId,
       objective: workspace.selectedObjective,
     });
     const [baseChat, profiles] = await Promise.all([
       buildWorkbenchChatModelCached({
         profileId: workspace.activeProfileId,
-        chatId: input.chatId,
+        chatId: workspace.chatId,
         inspectorTab: input.inspectorTab,
         selectedObjectiveId: workspace.objectiveId,
+        versions: input.versions,
       }),
       loadFactoryProfiles(),
     ]);
@@ -1247,7 +1347,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     return {
       activeProfileId: workspace.activeProfileId,
       activeProfileLabel: workspace.activeProfileLabel,
-      chatId: input.chatId,
+      chatId: workspace.chatId,
       objectiveId: workspace.objectiveId,
       inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       detailTab: workspace.detailTab,
@@ -1260,7 +1360,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         label: profile.label,
         href: buildWorkbenchLink({
           profileId: profile.id,
-          chatId: input.chatId,
+          chatId: workspace.chatId,
           objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
           inspectorTab: workspace.selectedObjective?.profileId === profile.id
             ? normalizedWorkbenchInspectorTab(input.inspectorTab)
@@ -1289,12 +1389,15 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
     readonly page: number;
+    readonly versions?: WorkbenchResolvedVersions;
   }): Promise<FactoryWorkbenchPageModel> => {
-    const sessionVersion = await resolveSessionStreamVersion({
-      profileId: input.profileId,
-      chatId: input.chatId,
-    });
-    const objectiveVersion = await resolveObjectiveProjectionVersion();
+    const sessionVersion = input.versions?.sessionVersion
+      ?? await resolveSessionStreamVersionCached({
+        profileId: input.profileId,
+        chatId: input.chatId,
+      });
+    const objectiveVersion = input.versions?.objectiveVersion
+      ?? await resolveObjectiveProjectionVersionCached();
     return withProjectionCache(
       workbenchPageCache,
       JSON.stringify({
@@ -1307,37 +1410,96 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     );
   };
 
+  const loadWorkbenchRequestContext = async (
+    req: Request,
+    timing?: WorkbenchServerTiming,
+  ): Promise<WorkbenchRequestContext> => {
+    const request = timing
+      ? await timing.measure("request_normalization", () => Promise.resolve(readWorkbenchRequest(req)))
+      : readWorkbenchRequest(req);
+    const [sessionVersion, objectiveVersion] = await Promise.all([
+      timing
+        ? timing.measure("session_version", () => resolveSessionStreamVersionCached({
+            profileId: request.profileId,
+            chatId: request.chatId,
+          }))
+        : resolveSessionStreamVersionCached({
+            profileId: request.profileId,
+            chatId: request.chatId,
+          }),
+      timing
+        ? timing.measure("objective_version", () => resolveObjectiveProjectionVersionCached())
+        : resolveObjectiveProjectionVersionCached(),
+    ]);
+    return {
+      request,
+      versions: {
+        sessionVersion,
+        objectiveVersion,
+      },
+    };
+  };
+
   const loadWorkbenchRequestModel = async (
     req: Request,
+    timing?: WorkbenchServerTiming,
   ): Promise<{
     readonly request: FactoryWorkbenchRequestState;
     readonly model: FactoryWorkbenchPageModel;
   }> => {
-    const request = readWorkbenchRequest(req);
-    const model = await buildWorkbenchPageModelCached(request);
-    return { request, model };
+    const context = await loadWorkbenchRequestContext(req, timing);
+    const model = timing
+      ? await timing.measure("page_model", () => buildWorkbenchPageModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchPageModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    return { request: context.request, model };
   };
 
   const loadWorkbenchRequestWorkspaceModel = async (
     req: Request,
+    timing?: WorkbenchServerTiming,
   ): Promise<{
     readonly request: FactoryWorkbenchRequestState;
     readonly model: FactoryWorkbenchWorkspaceModel;
   }> => {
-    const request = readWorkbenchRequest(req);
-    const model = await buildWorkbenchWorkspaceModelCached(request);
-    return { request, model };
+    const context = await loadWorkbenchRequestContext(req, timing);
+    const model = timing
+      ? await timing.measure("workspace_model", () => buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    return { request: context.request, model };
   };
 
   const loadWorkbenchRequestHeaderModel = async (
     req: Request,
+    timing?: WorkbenchServerTiming,
   ): Promise<{
     readonly request: FactoryWorkbenchRequestState;
     readonly model: FactoryWorkbenchHeaderIslandModel;
   }> => {
-    const request = readWorkbenchRequest(req);
-    const workspace = await buildWorkbenchWorkspaceModelCached(request);
-    const profiles = await loadFactoryProfiles();
+    const context = await loadWorkbenchRequestContext(req, timing);
+    const workspace = timing
+      ? await timing.measure("workspace_model", () => buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    const profiles = timing
+      ? await timing.measure("profiles", () => loadFactoryProfiles())
+      : await loadFactoryProfiles();
     const activeProfile = profiles.find((profile) => profile.id === workspace.activeProfileId);
     const activeProfileOverview = !workspace.selectedObjective && activeProfile
       ? describeProfileMarkdown(activeProfile)
@@ -1351,7 +1513,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       return summary && summary !== role ? summary : undefined;
     })();
     return {
-      request,
+      request: context.request,
       model: {
         activeProfileId: workspace.activeProfileId,
         activeProfileLabel: workspace.activeProfileLabel,
@@ -1360,10 +1522,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           label: profile.label,
           href: buildWorkbenchLink({
             profileId: profile.id,
-            chatId: request.chatId,
+            chatId: workspace.chatId,
             objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
             inspectorTab: workspace.selectedObjective?.profileId === profile.id
-              ? normalizedWorkbenchInspectorTab(request.inspectorTab)
+              ? normalizedWorkbenchInspectorTab(context.request.inspectorTab)
               : undefined,
             detailTab: workspace.detailTab,
             page: workspace.page,
@@ -1383,28 +1545,175 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
 
   const loadWorkbenchRequestChatModel = async (
     req: Request,
+    timing?: WorkbenchServerTiming,
   ): Promise<{
     readonly request: FactoryWorkbenchRequestState;
     readonly model: FactoryChatIslandModel;
   }> => {
-    const request = readWorkbenchRequest(req);
-    if (request.inspectorTab === "chat") {
-      const model = await buildWorkbenchChatModelCached({
-        profileId: request.profileId,
-        chatId: request.chatId,
-        inspectorTab: request.inspectorTab,
-        selectedObjectiveId: request.objectiveId,
-      });
-      return { request, model };
+    const context = await loadWorkbenchRequestContext(req, timing);
+    if (context.request.inspectorTab === "chat" && !context.request.objectiveId) {
+      const model = timing
+        ? await timing.measure("chat_model", () => buildWorkbenchChatModelCached({
+            profileId: context.request.profileId,
+            chatId: context.request.chatId,
+            inspectorTab: context.request.inspectorTab,
+            selectedObjectiveId: context.request.objectiveId,
+            versions: context.versions,
+          }))
+        : await buildWorkbenchChatModelCached({
+            profileId: context.request.profileId,
+            chatId: context.request.chatId,
+            inspectorTab: context.request.inspectorTab,
+            selectedObjectiveId: context.request.objectiveId,
+            versions: context.versions,
+          });
+      return { request: context.request, model };
     }
-    const workspace = await buildWorkbenchWorkspaceModelCached(request);
-    const model = await buildWorkbenchChatModelCached({
-      profileId: workspace.activeProfileId,
-      chatId: request.chatId,
-      inspectorTab: request.inspectorTab,
-      selectedObjectiveId: workspace.objectiveId,
+    const workspace = timing
+      ? await timing.measure("workspace_model", () => buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    const model = timing
+      ? await timing.measure("chat_model", () => buildWorkbenchChatModelCached({
+          profileId: workspace.activeProfileId,
+          chatId: workspace.chatId,
+          inspectorTab: context.request.inspectorTab,
+          selectedObjectiveId: workspace.objectiveId,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchChatModelCached({
+          profileId: workspace.activeProfileId,
+          chatId: workspace.chatId,
+          inspectorTab: context.request.inspectorTab,
+          selectedObjectiveId: workspace.objectiveId,
+          versions: context.versions,
+        });
+    return { request: context.request, model };
+  };
+
+  const loadWorkbenchRequestChatShellModel = async (
+    req: Request,
+    timing?: WorkbenchServerTiming,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly workspace: FactoryWorkbenchWorkspaceModel;
+    readonly chat: FactoryChatIslandModel;
+  }> => {
+    const context = await loadWorkbenchRequestContext(req, timing);
+    const workspace = timing
+      ? await timing.measure("workspace_model", () => buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    const chat = timing
+      ? await timing.measure("chat_model", () => buildWorkbenchChatModelCached({
+          profileId: workspace.activeProfileId,
+          chatId: workspace.chatId,
+          inspectorTab: context.request.inspectorTab,
+          selectedObjectiveId: workspace.objectiveId,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchChatModelCached({
+          profileId: workspace.activeProfileId,
+          chatId: workspace.chatId,
+          inspectorTab: context.request.inspectorTab,
+          selectedObjectiveId: workspace.objectiveId,
+          versions: context.versions,
     });
-    return { request, model };
+    return { request: context.request, workspace, chat };
+  };
+
+  const loadWorkbenchRequestSelectionModel = async (
+    req: Request,
+    timing?: WorkbenchServerTiming,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly header: FactoryWorkbenchHeaderIslandModel;
+    readonly workspace: FactoryWorkbenchWorkspaceModel;
+    readonly chat: FactoryChatIslandModel;
+  }> => {
+    const context = await loadWorkbenchRequestContext(req, timing);
+    const workspace = timing
+      ? await timing.measure("workspace_model", () => buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        }))
+      : await buildWorkbenchWorkspaceModelCached({
+          ...context.request,
+          versions: context.versions,
+        });
+    const [chat, profiles] = await Promise.all([
+      timing
+        ? timing.measure("chat_model", () => buildWorkbenchChatModelCached({
+            profileId: workspace.activeProfileId,
+            chatId: workspace.chatId,
+            inspectorTab: context.request.inspectorTab,
+            selectedObjectiveId: workspace.objectiveId,
+            versions: context.versions,
+          }))
+        : buildWorkbenchChatModelCached({
+            profileId: workspace.activeProfileId,
+            chatId: workspace.chatId,
+            inspectorTab: context.request.inspectorTab,
+            selectedObjectiveId: workspace.objectiveId,
+            versions: context.versions,
+          }),
+      timing
+        ? timing.measure("profiles", () => loadFactoryProfiles())
+        : loadFactoryProfiles(),
+    ]);
+    const activeProfile = profiles.find((profile) => profile.id === workspace.activeProfileId);
+    const activeProfileOverview = !workspace.selectedObjective && activeProfile
+      ? describeProfileMarkdown(activeProfile)
+      : undefined;
+    const currentRole = activeProfileOverview?.primaryRole
+      ?? activeProfileOverview?.roles?.[0]
+      ?? activeProfileOverview?.summary;
+    const currentPresence = (() => {
+      const summary = activeProfileOverview?.summary?.trim();
+      const role = currentRole?.trim();
+      return summary && summary !== role ? summary : undefined;
+    })();
+    return {
+      request: context.request,
+      workspace,
+      chat,
+      header: {
+        activeProfileId: workspace.activeProfileId,
+        activeProfileLabel: workspace.activeProfileLabel,
+        profiles: profiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          href: buildWorkbenchLink({
+            profileId: profile.id,
+            chatId: workspace.chatId,
+            objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
+            inspectorTab: workspace.selectedObjective?.profileId === profile.id
+              ? normalizedWorkbenchInspectorTab(context.request.inspectorTab)
+              : undefined,
+            detailTab: workspace.detailTab,
+            page: workspace.page,
+            focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
+            focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
+            filter: workspace.filter,
+          }),
+          summary: describeProfileMarkdown(profile).summary,
+          selected: profile.id === workspace.activeProfileId,
+        })),
+        workspace,
+        currentRole,
+        currentPresence,
+      },
+    };
   };
 
   return {
@@ -1423,6 +1732,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         loadWorkbenchRequestHeaderModel,
         loadWorkbenchRequestWorkspaceModel,
         loadWorkbenchRequestChatModel,
+        loadWorkbenchRequestChatShellModel,
+        loadWorkbenchRequestSelectionModel,
       });
       registerFactoryApiRoutes({
         app,

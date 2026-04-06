@@ -1,7 +1,7 @@
 import type { Runtime } from "@receipt/core/runtime";
 
 import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryChatProfile } from "../../../services/factory-chat-profiles";
 import { factoryChatSessionStream, discoverFactoryChatProfiles, resolveFactoryChatProfile } from "../../../services/factory-chat-profiles";
 import { projectFactoryChatContextFromReceipts } from "../chat-context";
@@ -104,6 +104,14 @@ export const createFactoryRouteCache = (input: {
     return head ? `${chain.length}:${head.hash}` : "0:";
   };
 
+  const resolveSessionStreamVersionCached = async (inputStream: {
+    readonly profileId?: string;
+    readonly chatId?: string;
+  }): Promise<string | undefined> => resolveSessionStreamVersion(inputStream);
+
+  const resolveObjectiveProjectionVersionCached = async (): Promise<number> =>
+    resolveObjectiveProjectionVersion();
+
   const fallbackChatContextFromChain = (inputChain: {
     readonly sessionStream: string;
     readonly chain: AgentRunChain;
@@ -140,7 +148,9 @@ export const createFactoryRouteCache = (input: {
     loadRecentJobs,
     loadFactoryProfiles,
     resolveObjectiveProjectionVersion,
+    resolveObjectiveProjectionVersionCached,
     resolveSessionStreamVersion,
+    resolveSessionStreamVersionCached,
     loadChatContextProjectionForSession,
     withProjectionCache,
     projectionCacheTtlMs,

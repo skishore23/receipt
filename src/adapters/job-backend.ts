@@ -1,4 +1,4 @@
-import type { EnqueueJobInput, LeaseOptions, QueueCommandInput, QueueCommandRecord, QueueJob, QueueSnapshot, WaitForWorkOptions } from "./jsonl-queue";
+import type { EnqueueJobInput, LeaseOptions, QueueCommandInput, QueueCommandRecord, QueueJob, QueueSnapshot, WaitForWorkOptions } from "./sqlite-queue";
 import type { JobLane, JobStatus, QueueCommandType } from "../modules/job";
 
 export type JobBackend = {

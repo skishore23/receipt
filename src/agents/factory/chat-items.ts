@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentState } from "../../modules/agent";
-import type { QueueJob } from "../../adapters/jsonl-queue";
+import type { QueueJob } from "../../adapters/sqlite-queue";
 import type { FactoryChatItem, FactoryWorkCard } from "../../views/factory-models";
 import { displayLabel } from "../../views/ui";
 import type { FactoryChatContextMessage, FactoryChatContextRun } from "./chat-context";

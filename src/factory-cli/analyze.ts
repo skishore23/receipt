@@ -1,7 +1,7 @@
 import { fold } from "@receipt/core/chain";
 import type { Receipt } from "@receipt/core/types";
 
-import { jsonlStore } from "../adapters/jsonl";
+import { sqliteReceiptStore } from "../adapters/sqlite";
 import { readJobProjection } from "../db/projectors";
 import type { AgentEvent } from "../modules/agent";
 import { initial as initialAgent, reduce as reduceAgent } from "../modules/agent";
@@ -586,7 +586,7 @@ const readJobAnalysis = async (
   stream: string,
   options: ObjectiveAnalysisReadOptions = {},
 ): Promise<JobAnalysis | undefined> => {
-  const store = jsonlStore<JobEvent>(dataDir);
+  const store = sqliteReceiptStore<JobEvent>(dataDir);
   const chain = filterReceiptsAsOf(await store.read(stream), options.asOfTs);
   if (chain.length === 0) return undefined;
   const state = fold(chain, reduceJob, initialJob);
@@ -668,7 +668,7 @@ const readRelatedJobs = async (
   knownJobIds: ReadonlySet<string>,
   options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ReadonlyArray<JobAnalysis>> => {
-  const store = jsonlStore<JobEvent>(dataDir);
+  const store = sqliteReceiptStore<JobEvent>(dataDir);
   const jobStreams = store.listStreams ? await store.listStreams("jobs/") : [];
   const related = new Set<string>();
   for (const stream of jobStreams) {
@@ -895,7 +895,7 @@ const readRelatedAgentRuns = async (
   objectiveId: string,
   options: ObjectiveAnalysisReadOptions = {},
 ): Promise<ReadonlyArray<AgentRunAnalysis>> => {
-  const store = jsonlStore<AgentEvent>(dataDir);
+  const store = sqliteReceiptStore<AgentEvent>(dataDir);
   const streams = store.listStreams ? await store.listStreams("agents/") : [];
   const runStreams = streams.filter((stream) => stream.includes(`/objectives/${objectiveId}/runs/`));
   const analyses: AgentRunAnalysis[] = [];

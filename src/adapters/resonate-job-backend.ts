@@ -1,5 +1,5 @@
 import { ACTIVE_JOB_STATUSES, type JobBackend } from "./job-backend";
-import type { EnqueueJobInput, QueueJob } from "./jsonl-queue";
+import type { EnqueueJobInput, QueueJob } from "./sqlite-queue";
 
 type ResonateJobBackendOptions = {
   readonly base: JobBackend;

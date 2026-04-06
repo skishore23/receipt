@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -36,8 +36,8 @@ const createSourceRepo = async (): Promise<string> => {
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -54,7 +54,7 @@ const createService = (
 ) =>
   new FactoryService({
     dataDir,
-    queue: jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" }),
+    queue: sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" }),
     jobRuntime: createJobRuntime(dataDir),
     sse: new SseHub(),
     codexExecutor: noopCodex,

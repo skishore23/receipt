@@ -25,7 +25,7 @@ import type {
   FactoryLiveRunCard,
   FactorySelectedObjectiveCard,
 } from "../../../views/factory-models";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import { renderObjectiveHandoffMessage } from "../chat-items";
 import {
   buildActiveCodexCard,

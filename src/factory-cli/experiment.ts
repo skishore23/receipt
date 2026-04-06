@@ -5,8 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { jsonlQueue, type JsonlQueue, type QueueJob } from "../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
+import { sqliteQueue, type SqliteQueue, type QueueJob } from "../adapters/sqlite-queue";
 import { isSqliteLockError } from "../db/client";
 import type { FactoryReceiptAuditReport } from "./audit";
 import { readFactoryReceiptInvestigation, type FactoryReceiptInvestigation } from "./investigate";
@@ -99,11 +99,11 @@ const isActiveJobStatus = (status?: string): boolean =>
 const isTerminalObjectiveStatus = (status?: string): boolean =>
   status === "completed" || status === "blocked" || status === "failed" || status === "canceled";
 
-const createExperimentQueue = (dataDir: string): JsonlQueue =>
-  jsonlQueue({
+const createExperimentQueue = (dataDir: string): SqliteQueue =>
+  sqliteQueue({
     runtime: createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dataDir),
-      jsonBranchStore(dataDir),
+      sqliteReceiptStore<JobEvent>(dataDir),
+      sqliteBranchStore(dataDir),
       decideJob,
       reduceJob,
       initialJob,
@@ -345,7 +345,7 @@ const createLongRunCodexStub = async (root: string): Promise<string> => {
 };
 
 const waitForActiveJobId = async (
-  queue: JsonlQueue,
+  queue: SqliteQueue,
   objectiveId: string,
 ): Promise<string> => {
   const startedAt = Date.now();

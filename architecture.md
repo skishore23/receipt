@@ -161,7 +161,7 @@ Memory:
 
 ## 8. Storage and integrity
 
-Default store: JSONL.
+Default store: SQLite-backed receipt tables.
 
 Integrity guarantees:
 

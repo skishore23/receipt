@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -35,8 +35,8 @@ const createSourceRepo = async (): Promise<string> => {
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -45,7 +45,7 @@ const createJobRuntime = (dataDir: string) =>
 test("splitTask supersedes parent and creates subtasks with correct splitDepth", async () => {
   const dataDir = await createTempDir("receipt-task-splitting");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -112,7 +112,7 @@ test("splitTask supersedes parent and creates subtasks with correct splitDepth",
 test("splitTask at depth 2 is the maximum", async () => {
   const dataDir = await createTempDir("receipt-task-splitting-depth");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,

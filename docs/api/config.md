@@ -5,7 +5,7 @@
 | Variable | Default | Impact |
 |---|---|---|
 | `PORT` | `8787` | HTTP server listen port. |
-| `DATA_DIR` | `<cwd>/.receipt/data` | Root directory for JSONL streams, queue, and memory storage. |
+| `DATA_DIR` | `<cwd>/.receipt/data` | Root directory for the receipt SQLite database, queue state, memory state, and runtime artifacts. |
 | `JOB_WORKER_ID` | `worker_<pid>` | Worker identity for leasing and heartbeats. |
 | `JOB_POLL_MS` | `100` | Queue polling interval in milliseconds. |
 | `JOB_LEASE_MS` | `30000` | Lease duration for worker-owned jobs. |

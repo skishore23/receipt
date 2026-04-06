@@ -3,7 +3,7 @@ import { resolveFactoryChatProfile } from "../../../services/factory-chat-profil
 import { isRelevantShellJob, jobParentRunId, jobRunId, type AgentRunChain } from "../shared";
 import { collectRunLineageIds, jobMatchesRunIds } from "../live-jobs";
 import { resolveChatViewStream } from "../links";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryService } from "../../../services/factory-service";
 
 export const createFactoryRouteEvents = (input: {

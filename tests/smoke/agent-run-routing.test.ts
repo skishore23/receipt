@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { agentRunStream } from "../../src/agents/agent.streams";
 import { emitToContinuedRun, resolveContinuedRunTarget } from "../../src/agents/run-target";
 import { makeEventId } from "../../src/framework/http";
@@ -16,8 +16,8 @@ const createTempDir = async (label: string): Promise<string> =>
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,

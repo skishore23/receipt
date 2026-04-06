@@ -14,7 +14,7 @@ Instead, "context" is split across several layers that serve different jobs:
 
 | Layer | What it stores | Where it lives | Typical consumer |
 | --- | --- | --- | --- |
-| Receipts | Raw, append-only event history | JSONL streams via the runtime | Reducers, inspectors, debugging tools |
+| Receipts | Raw, append-only event history | SQLite-backed receipt streams via the runtime | Reducers, inspectors, debugging tools |
 | Reduced state | Structured current view derived from receipts | In-memory replay result from reducers | Services, routes, projections |
 | Prompt context | The exact text or bounded summary sent to an LLM | Prompt builders and `prompt.context` / compaction events | Factory flows |
 | Scoped memory | Durable summaries/facts keyed by scope | `memory/<scope>` streams | Long-running agents, Factory workers |
@@ -56,10 +56,8 @@ Two consequences matter for understanding context:
 
 The simplest context path is in `src/adapters/receipt-tools.ts`.
 
-That file gives the repo four basic primitives:
+That file gives the repo two basic presentation primitives:
 
-- `readReceiptFile(...)`: load raw JSONL receipt lines
-- `sliceReceiptRecords(...)`: take a bounded head or tail slice
 - `buildReceiptContext(...)`: concatenate raw receipt lines until a char budget is hit
 - `buildReceiptTimeline(...)`: group receipt counts into timeline buckets
 

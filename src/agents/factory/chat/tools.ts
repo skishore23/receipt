@@ -15,7 +15,7 @@ import {
   profileHandoffCapability,
   repoStatusCapability,
 } from "../../capabilities";
-import type { JsonlQueue } from "../../../adapters/jsonl-queue";
+import type { SqliteQueue } from "../../../adapters/sqlite-queue";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import type { FactoryService, FactoryObjectiveInput } from "../../../services/factory-service";
 import {
@@ -36,7 +36,7 @@ import { codexJobSnapshot } from "./status";
 import { FactorySupervisorConfig, queueSupervisorCommandOnce, isSupervisorStallSummary } from "./supervisor";
 
 type FactoryChatToolsInput = {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly repoRoot: string;

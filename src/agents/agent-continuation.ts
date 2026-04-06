@@ -1,4 +1,4 @@
-import type { EnqueueJobInput } from "../adapters/jsonl-queue";
+import type { EnqueueJobInput } from "../adapters/sqlite-queue";
 import type { AgentIterationBudgetHandler } from "./agent";
 import { isStuckProgress } from "./agent";
 

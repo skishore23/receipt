@@ -1,7 +1,7 @@
 import { Resonate } from "@resonatehq/sdk";
 
 import type { JobBackend } from "./job-backend";
-import type { QueueJob } from "./jsonl-queue";
+import type { QueueJob } from "./sqlite-queue";
 import {
   RESONATE_DRIVER_FUNCTION,
   RESONATE_EXECUTE_FUNCTION,

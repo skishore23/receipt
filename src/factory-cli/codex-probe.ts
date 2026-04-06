@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { LocalCodexExecutor } from "../adapters/codex-executor";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { jsonlQueue, type QueueJob } from "../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
+import { sqliteQueue, type QueueJob } from "../adapters/sqlite-queue";
 import { runFactoryCodexJob } from "../agents/factory-chat";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../engine/runtime/job-worker";
@@ -249,13 +249,13 @@ const runQueueProbe = async (
   opts: RunProbeOptions,
 ): Promise<CodexProbeRunReport> => {
   const jobRuntime = createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(opts.dataDir),
-    jsonBranchStore(opts.dataDir),
+    sqliteReceiptStore<JobEvent>(opts.dataDir),
+    sqliteBranchStore(opts.dataDir),
     decideJob,
     reduceJob,
     initialJob,
   );
-  const queue = jsonlQueue({
+  const queue = sqliteQueue({
     runtime: jobRuntime,
     stream: "jobs",
   });

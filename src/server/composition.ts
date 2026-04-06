@@ -1,6 +1,6 @@
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
 import {
   decideMemory,
   initialMemoryState,
@@ -15,8 +15,8 @@ import type { JobCmd, JobEvent, JobState } from "../modules/job";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob } from "../modules/job";
 
 export const createServerComposition = (dataDir: string) => {
-  const branchStore = jsonBranchStore(dataDir);
-  const agentStore = jsonlStore<AgentEvent>(dataDir);
+  const branchStore = sqliteBranchStore(dataDir);
+  const agentStore = sqliteReceiptStore<AgentEvent>(dataDir);
   const agentRuntime = createRuntime<AgentCmd, AgentEvent, AgentState>(
     agentStore,
     branchStore,
@@ -24,7 +24,7 @@ export const createServerComposition = (dataDir: string) => {
     reduceAgent,
     initialAgent,
   );
-  const jobStore = jsonlStore<JobEvent>(dataDir);
+  const jobStore = sqliteReceiptStore<JobEvent>(dataDir);
   const jobRuntime = createRuntime<JobCmd, JobEvent, JobState>(
     jobStore,
     branchStore,
@@ -32,7 +32,7 @@ export const createServerComposition = (dataDir: string) => {
     reduceJob,
     initialJob,
   );
-  const memoryStore = jsonlStore<MemoryEvent>(dataDir);
+  const memoryStore = sqliteReceiptStore<MemoryEvent>(dataDir);
   const memoryRuntime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
     memoryStore,
     branchStore,

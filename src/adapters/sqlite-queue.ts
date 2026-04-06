@@ -1,5 +1,5 @@
 // ============================================================================
-// Receipt-native Queue Adapter - derives queue state from job receipts
+// SQLite-backed receipt queue adapter - derives queue state from job receipts
 // ============================================================================
 
 import { randomUUID } from "node:crypto";
@@ -98,7 +98,7 @@ export type WaitForWorkOptions = {
   readonly wakeOnQueued?: boolean;
 };
 
-export type JsonlQueue = {
+export type SqliteQueue = {
   readonly enqueue: (input: EnqueueJobInput) => Promise<QueueJob>;
   readonly leaseNext: (opts: LeaseOptions) => Promise<QueueJob | undefined>;
   readonly leaseJob: (jobId: string, workerId: string, leaseMs: number) => Promise<QueueJob | undefined>;
@@ -131,7 +131,7 @@ export type JsonlQueue = {
   readonly refresh: () => Promise<QueueSnapshot>;
 };
 
-type JsonlQueueOptions = {
+type SqliteQueueOptions = {
   readonly runtime: Runtime<JobCmd, JobEvent, JobState>;
   readonly stream: string;
   readonly now?: () => number;
@@ -222,7 +222,7 @@ const sameJob = (left: QueueJob | undefined, right: QueueJob | undefined): boole
   return JSON.stringify(left) === JSON.stringify(right);
 };
 
-export const jsonlQueue = (opts: JsonlQueueOptions): JsonlQueue => {
+export const sqliteQueue = (opts: SqliteQueueOptions): SqliteQueue => {
   const nowTs = opts.now ?? Date.now;
   const expireLeasesOnRefresh = opts.expireLeasesOnRefresh ?? true;
   const fullRefreshWindowMs = Number.isFinite(opts.fullRefreshWindowMs)

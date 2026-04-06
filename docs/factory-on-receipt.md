@@ -97,7 +97,7 @@ The current implementation adds a command-center layer on top of the original fa
 ```mermaid
 flowchart LR
   subgraph Control["Receipt Control Plane"]
-    Runtime["Runtime + JSONL stores"]
+    Runtime["Runtime + SQLite receipt stores"]
     Reducer["Factory reducer\nsrc/modules/factory.ts"]
     Service["Factory runtime\nsrc/services/factory/runtime/base-service.ts"]
     Orchestrator["Factory chat/supervisor\nentrypoint"]
@@ -139,8 +139,8 @@ flowchart LR
 
 - `packages/core/src/runtime.ts`
 - `packages/core/src/graph.ts`
-- `src/adapters/jsonl.ts`
-- `src/adapters/jsonl-queue.ts`
+- `src/adapters/sqlite.ts`
+- `src/adapters/sqlite-queue.ts`
 - `src/adapters/memory-tools.ts`
 - `src/framework/sse-hub.ts`
 

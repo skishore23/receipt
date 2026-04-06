@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { agentRunStream } from "../../src/agents/agent.streams";
 import { syncChangedChatContextProjections } from "../../src/db/projectors";
 import { decide as decideAgent, initial as initialAgent, reduce as reduceAgent, type AgentCmd, type AgentEvent, type AgentState } from "../../src/modules/agent";
@@ -27,8 +27,8 @@ const initGitRepo = async (repoRoot: string): Promise<void> => {
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,

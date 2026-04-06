@@ -1,7 +1,7 @@
 import type { Runtime } from "@receipt/core/runtime";
 
 import type { AgentCmd, AgentEvent, AgentState } from "../../modules/agent";
-import type { QueueJob } from "../../adapters/jsonl-queue";
+import type { QueueJob } from "../../adapters/sqlite-queue";
 
 export type AgentRunChain = Awaited<ReturnType<Runtime<AgentCmd, AgentEvent, AgentState>["chain"]>>;
 

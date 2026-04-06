@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
 import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
@@ -289,8 +289,8 @@ const seedObjectiveReplay = async (
   receipts: ReadonlyArray<FactoryEvent>,
 ): Promise<void> => {
   const runtime = createRuntime<FactoryCmd, FactoryEvent, typeof initialFactoryState>(
-    jsonlStore<FactoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<FactoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideFactory,
     reduceFactory,
     initialFactoryState,
@@ -311,8 +311,8 @@ const seedAgentReplay = async (
   receipts: ReadonlyArray<AgentEvent>,
 ): Promise<void> => {
   const runtime = createRuntime<AgentCmd, AgentEvent, typeof initialAgent>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,
@@ -332,8 +332,8 @@ const seedJobReplay = async (
   receipts: ReadonlyArray<JobEvent>,
 ): Promise<void> => {
   const runtime = createRuntime<JobCmd, JobEvent, typeof initialJobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJobState,

@@ -53,7 +53,7 @@ These tables make memory fast to query, but they are still derived from receipt 
 When embeddings are enabled, memory search stores vectors in per-scope cache files under:
 
 ```text
-<DATA_DIR>/memory/*.embeddings.json
+SQLite table: `memory_embeddings`
 ```
 
 This cache accelerates semantic retrieval. It is not the source of truth.

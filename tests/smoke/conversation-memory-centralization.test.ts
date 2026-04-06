@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import {
   createMemoryTools,
   decideMemory,
@@ -47,8 +47,8 @@ const initGitRepo = async (repoRoot: string): Promise<string> => {
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,
@@ -56,8 +56,8 @@ const createAgentRuntime = (dataDir: string) =>
 
 const createMemoryRuntime = (dataDir: string) =>
   createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<MemoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideMemory,
     reduceMemory,
     initialMemoryState,

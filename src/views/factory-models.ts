@@ -61,6 +61,7 @@ export type FactoryChatProfileNav = {
 
 export type FactoryChatObjectiveNav = {
   readonly objectiveId: string;
+  readonly chatId?: string;
   readonly profileId?: string;
   readonly profileLabel?: string;
   readonly title: string;
@@ -368,6 +369,7 @@ export type FactoryInspectorModel = FactoryInspectorRouteModel & {
 export type FactoryWorkbenchWorkspaceModel = {
   readonly activeProfileId: string;
   readonly activeProfileLabel: string;
+  readonly chatId: string;
   readonly objectiveId?: string;
   readonly inspectorTab?: FactoryInspectorTab;
   readonly detailTab: FactoryWorkbenchDetailTab;

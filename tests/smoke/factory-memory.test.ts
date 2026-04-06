@@ -8,8 +8,8 @@ import { promisify } from "node:util";
 
 import { type CodexExecutor } from "../../src/adapters/codex-executor";
 import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryTools, type MemoryState } from "../../src/adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -65,8 +65,8 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -74,8 +74,8 @@ const createJobRuntime = (dataDir: string) =>
 
 const createTestMemoryTools = (dataDir: string): MemoryTools => {
   const runtime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<MemoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideMemory,
     reduceMemory,
     initialMemoryState,
@@ -87,7 +87,7 @@ const createTestMemoryTools = (dataDir: string): MemoryTools => {
 };
 
 const findObjectiveJob = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
   kind: "factory.task.run" | "factory.integration.validate" | "factory.integration.publish",
 ) => {
@@ -155,7 +155,7 @@ test("factory worker packets expose a layered memory script for bounded recall a
   const dataDir = await createTempDir("receipt-factory-memory");
   const repoDir = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createTestMemoryTools(dataDir);
   const captured = {
     context: "",
@@ -456,7 +456,7 @@ test("factory investigation synthesis commits a sectioned operator report to obj
   const dataDir = await createTempDir("receipt-factory-investigation-memory");
   const repoDir = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createTestMemoryTools(dataDir);
 
   const codexExecutor: CodexExecutor = {
@@ -561,7 +561,7 @@ test("factory publish commits PR metadata to objective, integration, and publish
   const dataDir = await createTempDir("receipt-factory-publish-memory");
   const repoDir = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createTestMemoryTools(dataDir);
 
   const codexExecutor: CodexExecutor = {
@@ -701,7 +701,7 @@ test("factory publish failures still commit durable blocker notes to publish mem
   const dataDir = await createTempDir("receipt-factory-publish-memory-failure");
   const repoDir = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createTestMemoryTools(dataDir);
 
   const codexExecutor: CodexExecutor = {

@@ -7,8 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue, type QueueJob } from "../../src/adapters/sqlite-queue";
 import {
   createMemoryTools,
   decideMemory,
@@ -113,8 +113,8 @@ const createSourceRepo = async (): Promise<string> => {
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -122,8 +122,8 @@ const createJobRuntime = (dataDir: string) =>
 
 const createMemoryRuntime = (dataDir: string) =>
   createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<MemoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideMemory,
     reduceMemory,
     initialMemoryState,
@@ -152,13 +152,13 @@ const createFactoryService = async (opts?: {
   };
 }): Promise<{
   readonly service: FactoryService;
-  readonly queue: ReturnType<typeof jsonlQueue>;
+  readonly queue: ReturnType<typeof sqliteQueue>;
   readonly repoRoot: string;
   readonly dataDir: string;
 }> => {
   const dataDir = await createTempDir("receipt-investigate-script");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({
+  const queue = sqliteQueue({
     runtime: createJobRuntime(dataDir),
     stream: "jobs",
   });
@@ -263,7 +263,7 @@ const createFactoryService = async (opts?: {
 };
 
 const objectiveTaskJobs = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
 ): Promise<ReadonlyArray<QueueJob>> => {
   const jobs = await queue.listJobs({ limit: 80 });

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
 import { runAgentLoop } from "../../src/engine/runtime/agent-loop";
 import { action, assistant, tool } from "../../src/sdk/actions";
@@ -29,8 +29,8 @@ const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 
 const mkRuntime = (dir: string) => createRuntime<Cmd, Event, { readonly ok: true }>(
-  jsonlStore<Event>(dir),
-  jsonBranchStore(dir),
+  sqliteReceiptStore<Event>(dir),
+  sqliteBranchStore(dir),
   (cmd) => [cmd.event],
   (state) => state,
   { ok: true }

@@ -2,7 +2,7 @@
 // Background Job Worker - queue wakeups + leased execution + retries
 // ============================================================================
 
-import type { QueueCommandRecord, QueueJob, JsonlQueue } from "../../adapters/jsonl-queue";
+import type { QueueCommandRecord, QueueJob, SqliteQueue } from "../../adapters/sqlite-queue";
 import type { JobLane } from "../../modules/job";
 
 export type JobLeaseProcessRegistration = {
@@ -27,7 +27,7 @@ export type JobExecutionResult = {
 export type JobHandler = (job: QueueJob, ctx: JobExecutionContext) => Promise<JobExecutionResult>;
 
 export type JobWorkerOptions = {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly handlers: Readonly<Record<string, JobHandler>>;
   readonly workerId: string;
   readonly leaseAgentIds?: ReadonlyArray<string>;
@@ -48,7 +48,7 @@ type ActiveLeaseState = {
 };
 
 export class JobWorker {
-  private readonly queue: JsonlQueue;
+  private readonly queue: SqliteQueue;
   private readonly handlers: Readonly<Record<string, JobHandler>>;
   private readonly workerId: string;
   private readonly leaseAgentIds?: ReadonlyArray<string>;
@@ -183,7 +183,7 @@ export class JobWorker {
     }
   }
 
-  private async waitForQueueAdvance(sinceVersion: number): Promise<ReturnType<JsonlQueue["snapshot"]>> {
+  private async waitForQueueAdvance(sinceVersion: number): Promise<ReturnType<SqliteQueue["snapshot"]>> {
     const waited = await this.queue.waitForWork({
       sinceVersion,
       timeoutMs: this.idleResyncMs,

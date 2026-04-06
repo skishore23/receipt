@@ -1,4 +1,4 @@
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { StoredObjectiveProjectionSummary } from "../../../db/projectors";
 import type { FactoryObjectiveAuditMetadata } from "../objective-audit-artifacts";
 import type { FactoryObjectiveDetail } from "../../factory-types";

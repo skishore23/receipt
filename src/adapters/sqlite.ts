@@ -47,7 +47,7 @@ const rowToBranch = (row: {
   createdAt: Number(row.createdAt),
 });
 
-export const jsonlStore = <B>(dir: string): Store<B> => {
+export const sqliteReceiptStore = <B>(dir: string): Store<B> => {
   const db = getReceiptDb(dir);
 
   const readRows = (stream: string, limit?: number): Chain<B> => {
@@ -194,8 +194,8 @@ export const jsonlStore = <B>(dir: string): Store<B> => {
   };
 };
 
-export const jsonBranchStore = (dir: string): BranchStore => {
-  const store = jsonlStore<BranchMetaEvent>(dir);
+export const sqliteBranchStore = (dir: string): BranchStore => {
+  const store = sqliteReceiptStore<BranchMetaEvent>(dir);
   const db = getReceiptDb(dir);
   let queue = Promise.resolve();
 

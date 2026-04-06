@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { jsonlQueue } from "../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
+import { sqliteQueue } from "../adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../engine/runtime/job-worker";
 import { SseHub } from "../framework/sse-hub";
@@ -36,7 +36,7 @@ import {
 
 export type FactoryCliRuntime = {
   readonly config: FactoryCliConfig;
-  readonly queue: ReturnType<typeof jsonlQueue>;
+  readonly queue: ReturnType<typeof sqliteQueue>;
   readonly service: FactoryService;
   readonly worker: JobWorker;
   readonly subscribe: (listener: FactoryCliRuntimeListener) => () => void;
@@ -145,14 +145,14 @@ export const createFactoryCliRuntime = (
     }
   };
   const jobRuntime = createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(config.dataDir),
-    jsonBranchStore(config.dataDir),
+    sqliteReceiptStore<JobEvent>(config.dataDir),
+    sqliteBranchStore(config.dataDir),
     decideJob,
     reduceJob,
     initialJob,
   );
   let serviceRef: FactoryService | undefined;
-  const queue = jsonlQueue({
+  const queue = sqliteQueue({
     runtime: jobRuntime,
     stream: "jobs",
     watchDir: config.dataDir,

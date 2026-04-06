@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { fold } from "@receipt/core/chain";
 import { createRuntime } from "@receipt/core/runtime";
 import type { Chain } from "@receipt/core/types";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
 import { CONTROL_RECEIPT_TYPES } from "../engine/runtime/control-receipts";
 import {
   renderReceiptContextDstAuditText,
@@ -155,8 +155,8 @@ const EMPTY_STATUS_COUNTS: SummaryStatusMap = {};
 
 const createGenericRuntime = (dataDir: string) =>
   createRuntime<GenericCmd, GenericEvent, { readonly ok: true }>(
-    jsonlStore<GenericEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<GenericEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     (cmd) => [cmd.event],
     (state) => state,
     { ok: true },

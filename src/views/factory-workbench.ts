@@ -1,4 +1,4 @@
-import type { QueueJob } from "../adapters/jsonl-queue";
+import type { QueueJob } from "../adapters/sqlite-queue";
 import type {
   FactoryArtifactActivity,
   FactoryLiveOutputSnapshot,

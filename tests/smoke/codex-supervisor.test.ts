@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import type { DelegationTools } from "../../src/adapters/delegation";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
 import { runCodexSupervisor } from "../../src/agents/codex-supervisor";
@@ -32,16 +32,16 @@ const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> =>
 };
 
 const mkAgentRuntime = (dir: string) => createRuntime<AgentCmd, AgentEvent, AgentState>(
-  jsonlStore<AgentEvent>(dir),
-  jsonBranchStore(dir),
+  sqliteReceiptStore<AgentEvent>(dir),
+  sqliteBranchStore(dir),
   decideAgent,
   reduceAgent,
   initialAgent,
 );
 
 const mkJobRuntime = (dir: string) => createRuntime<JobCmd, JobEvent, JobState>(
-  jsonlStore<JobEvent>(dir),
-  jsonBranchStore(dir),
+  sqliteReceiptStore<JobEvent>(dir),
+  sqliteBranchStore(dir),
   decideJob,
   reduceJob,
   initialJob,
@@ -87,7 +87,7 @@ test("codex supervisor blocks direct workspace tools and keeps the agent as a th
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -166,7 +166,7 @@ test("codex supervisor queues a codex child and rejects premature finalization w
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -251,7 +251,7 @@ test("codex supervisor reuses the active codex probe instead of queueing a dupli
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -368,7 +368,7 @@ test("codex supervisor can recover from a dirty-repo factory dispatch failure by
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -502,7 +502,7 @@ test("codex supervisor can poll a completed codex child and then finalize", asyn
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -609,7 +609,7 @@ test("codex supervisor can inspect direct codex child logs and artifact paths", 
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -731,7 +731,7 @@ test("codex supervisor can inspect factory objectives, worktrees, and live outpu
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -921,7 +921,7 @@ test("codex supervisor can wait for factory.status changes instead of tight poll
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
 
@@ -1042,7 +1042,7 @@ test("codex supervisor only caps the first factory.status wait before allowing l
 
   const runtime = mkAgentRuntime(dataDir);
   const jobRuntime = mkJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = mkMemoryTools();
   const delegationTools = mkDelegationTools();
   let firstStatusSnapshotAt: number | undefined;

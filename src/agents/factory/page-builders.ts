@@ -16,8 +16,10 @@ export const compareObjectivesByRecency = (
 export const toObjectiveNavCard = (
   objective: FactoryObjectiveListItem,
   selectedObjectiveId?: string,
+  chatId?: string,
 ): FactoryChatObjectiveNav => ({
   objectiveId: objective.objectiveId,
+  chatId,
   profileId: objective.profile.rootProfileId,
   profileLabel: objective.profile.rootProfileLabel,
   title: objective.title,
@@ -45,6 +47,7 @@ export const buildObjectiveNavCards = (
   selectedObjectiveId?: string,
   options?: {
     readonly includeArchivedSelectedOnly?: boolean;
+    readonly chatIdsByObjectiveId?: ReadonlyMap<string, string>;
   },
 ): ReadonlyArray<FactoryChatObjectiveNav> =>
   [...objectives]
@@ -53,7 +56,11 @@ export const buildObjectiveNavCards = (
         ? !objective.archivedAt || objective.objectiveId === selectedObjectiveId
         : true)
     .sort(compareObjectivesByRecency)
-    .map((objective) => toObjectiveNavCard(objective, selectedObjectiveId));
+    .map((objective) => toObjectiveNavCard(
+      objective,
+      selectedObjectiveId,
+      options?.chatIdsByObjectiveId?.get(objective.objectiveId),
+    ));
 
 export const collectTerminalRunIds = (
   runIds: ReadonlyArray<string>,

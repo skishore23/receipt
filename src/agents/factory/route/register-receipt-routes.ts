@@ -10,7 +10,7 @@ import {
 } from "../../../db/client";
 import {
   buildReceiptTimeline,
-  type ReceiptFileInfo,
+  type ReceiptStreamInfo,
   type ReceiptRecord,
 } from "../../../adapters/receipt-tools";
 import {
@@ -27,7 +27,7 @@ export const registerReceiptRoutes = (input: {
   const { app, ctx } = input;
   const receiptDb = getReceiptDb(ctx.dataDir);
 
-  const dbStreamsToFileInfo = (streams: ReadonlyArray<{ name: string; receiptCount: number; updatedAt: number }>): ReceiptFileInfo[] =>
+  const dbStreamsToStreamInfo = (streams: ReadonlyArray<{ name: string; receiptCount: number; updatedAt: number }>): ReceiptStreamInfo[] =>
     streams.map((stream) => ({
       name: stream.name,
       size: stream.receiptCount,
@@ -35,6 +35,7 @@ export const registerReceiptRoutes = (input: {
     }));
 
   const dbReceiptsToRecords = (
+    stream: string,
     rows: ReadonlyArray<{
       globalSeq: number;
       streamSeq: number;
@@ -45,7 +46,7 @@ export const registerReceiptRoutes = (input: {
     }>,
   ): ReceiptRecord[] => rows.map((row) => {
     const envelope = {
-      stream: "",
+      stream,
       seq: row.streamSeq,
       ts: row.ts,
       hash: row.hash,
@@ -62,7 +63,7 @@ export const registerReceiptRoutes = (input: {
     const order = parseOrder(c.req.query("order"));
     const limit = parseLimit(c.req.query("limit"));
     const depth = parseInspectorDepth(c.req.query("depth"));
-    const files = dbStreamsToFileInfo(listReceiptStreams(receiptDb));
+    const files = dbStreamsToStreamInfo(listReceiptStreams(receiptDb));
     const selected = files.find((entry) => entry.name === file)?.name ?? files[0]?.name;
     return html(receiptShell({ selected, limit, order, depth }));
   });
@@ -73,7 +74,7 @@ export const registerReceiptRoutes = (input: {
     const limit = parseLimit(c.req.query("limit"));
     const depth = parseInspectorDepth(c.req.query("depth"));
     return html(receiptFoldsHtml(
-      dbStreamsToFileInfo(listReceiptStreams(receiptDb)),
+      dbStreamsToStreamInfo(listReceiptStreams(receiptDb)),
       selected,
       order,
       limit,
@@ -90,7 +91,7 @@ export const registerReceiptRoutes = (input: {
     if (rows.length === 0) return html(`<div class="empty">Stream not found.</div>`);
     return html(receiptRecordsHtml({
       selected: file,
-      records: dbReceiptsToRecords(rows),
+      records: dbReceiptsToRecords(file, rows),
       order,
       limit,
       total: countReceiptsInStream(receiptDb, file),
@@ -110,10 +111,7 @@ export const registerReceiptRoutes = (input: {
       return html(receiptSideHtml({ selected: file, order, limit, depth, total: 0, shown: 0 }));
     }
     const rows = readReceiptsByStream(receiptDb, file, { order, limit });
-    const records = dbReceiptsToRecords(rows);
-    const allRecords = order === "desc" || rows.length < total
-      ? dbReceiptsToRecords(readReceiptsByStream(receiptDb, file, { order: "asc", limit: total }))
-      : records;
+    const records = dbReceiptsToRecords(file, rows);
     return html(receiptSideHtml({
       selected: file,
       order,
@@ -121,7 +119,7 @@ export const registerReceiptRoutes = (input: {
       depth,
       total,
       shown: records.length,
-      timeline: buildReceiptTimeline(allRecords, depth),
+      timeline: buildReceiptTimeline(records, depth),
     }));
   });
 

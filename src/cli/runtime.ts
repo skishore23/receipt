@@ -8,8 +8,8 @@ import { createRuntime } from "@receipt/core/runtime";
 import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryState } from "../adapters/memory-tools";
 import { embed } from "../adapters/openai";
 import type { JobBackend } from "../adapters/job-backend";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import { jsonlQueue } from "../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
+import { sqliteQueue } from "../adapters/sqlite-queue";
 import { resonateJobBackend } from "../adapters/resonate-job-backend";
 import { resolveResonateGroups, resolveResonateUrl } from "../adapters/resonate-config";
 import { createResonateClient, createResonateDriverStarter } from "../adapters/resonate-runtime";
@@ -22,19 +22,19 @@ export const FACTORY_RUNTIME = await resolveFactoryRuntimeConfig(ROOT);
 export const DATA_DIR = FACTORY_RUNTIME.dataDir;
 export const JOB_BACKEND = process.env.JOB_BACKEND === "resonate" ? "resonate" : "local";
 
-export const getJsonlQueue = () => {
+export const getSqliteQueue = () => {
   const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(DATA_DIR),
-    jsonBranchStore(DATA_DIR),
+    sqliteReceiptStore<JobEvent>(DATA_DIR),
+    sqliteBranchStore(DATA_DIR),
     decideJob,
     reduceJob,
     initialJob,
   );
-  return jsonlQueue({ runtime, stream: "jobs", watchDir: DATA_DIR });
+  return sqliteQueue({ runtime, stream: "jobs", watchDir: DATA_DIR });
 };
 
 export const getJobBackend = (): JobBackend => {
-  const base = getJsonlQueue();
+  const base = getSqliteQueue();
   if (JOB_BACKEND !== "resonate") return base;
   const client = createResonateClient("api");
   return resonateJobBackend({
@@ -45,8 +45,8 @@ export const getJobBackend = (): JobBackend => {
 
 export const getMemoryRuntime = () =>
   createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(DATA_DIR),
-    jsonBranchStore(DATA_DIR),
+    sqliteReceiptStore<MemoryEvent>(DATA_DIR),
+    sqliteBranchStore(DATA_DIR),
     decideMemory,
     reduceMemory,
     initialMemoryState,
@@ -101,7 +101,7 @@ export const loadAgentDefault = async (agentId: string): Promise<unknown | undef
 
 export const resolveStream = async (runOrStream: string): Promise<string> => {
   if (runOrStream.includes("/")) return runOrStream;
-  const store = jsonlStore<Record<string, unknown>>(DATA_DIR);
+  const store = sqliteReceiptStore<Record<string, unknown>>(DATA_DIR);
   const streams = await store.listStreams?.();
   const direct = streams?.find((stream) => stream === runOrStream);
   if (direct) return direct;
@@ -112,7 +112,7 @@ export const resolveStream = async (runOrStream: string): Promise<string> => {
 };
 
 export const readChain = async (stream: string): Promise<ReadonlyArray<{ readonly ts: number; readonly body: Record<string, unknown> }>> => {
-  const store = jsonlStore<Record<string, unknown>>(DATA_DIR);
+  const store = sqliteReceiptStore<Record<string, unknown>>(DATA_DIR);
   const chain = await store.read(stream);
   return chain.map((receipt) => ({ ts: receipt.ts, body: receipt.body }));
 };

@@ -4,7 +4,7 @@ import type { AgentLoaderContext } from "../../../framework/agent-types";
 import type { Runtime } from "@receipt/core/runtime";
 import { agentRunStream } from "../../agent.streams";
 import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryService } from "../../../services/factory-service";
 import { getReceiptDb } from "../../../db/client";
 import * as receiptSchema from "../../../db/schema";

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import type { QueueJob } from "../../src/adapters/sqlite-queue";
 import type { FactoryEvent, FactoryState, FactoryTaskRecord } from "../../src/modules/factory";
 import {
   buildBlockedExplanation,

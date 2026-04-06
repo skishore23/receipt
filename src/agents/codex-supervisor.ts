@@ -1,4 +1,4 @@
-import type { JsonlQueue, QueueJob } from "../adapters/jsonl-queue";
+import type { SqliteQueue, QueueJob } from "../adapters/sqlite-queue";
 import type { FactoryObjectiveInput, FactoryService } from "../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../services/factory-codex-artifacts";
 import { summarizeFactoryObjective } from "../views/factory/objective-presenters";
@@ -61,7 +61,7 @@ export const CODEX_SUPERVISOR_TOOL_ALLOWLIST = [
 ] as const;
 
 export type CodexSupervisorRunInput = AgentRunInput & {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly supervisorSessionId?: string;
   readonly dataDir?: string;
   readonly factoryService?: FactoryService;
@@ -81,7 +81,7 @@ const unique = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
 const stableCodexSessionKey = (supervisorSessionId: string): string =>
   `codex:${supervisorSessionId}`;
 
-const latestActiveCodexJob = async (queue: JsonlQueue, input: {
+const latestActiveCodexJob = async (queue: SqliteQueue, input: {
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;
@@ -148,7 +148,7 @@ const jobMatchesSupervisor = (
 };
 
 const listSupervisorJobs = async (
-  queue: JsonlQueue,
+  queue: SqliteQueue,
   input: {
     readonly runId: string;
     readonly stream: string;
@@ -160,7 +160,7 @@ const listSupervisorJobs = async (
 };
 
 const createCodexRunTool = (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;
@@ -220,7 +220,7 @@ const createCodexRunTool = (input: {
   };
 
 const createCodexStatusTool = (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;
@@ -287,7 +287,7 @@ const createCodexStatusTool = (input: {
   };
 
 const createCodexLogsTool = (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;
@@ -316,7 +316,7 @@ const createCodexLogsTool = (input: {
   };
 
 const createJobsListTool = (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;
@@ -539,7 +539,7 @@ const createFactoryOutputTool = (input: {
   };
 
 const createActiveCodexChildFinalizer = (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly supervisorSessionId: string;

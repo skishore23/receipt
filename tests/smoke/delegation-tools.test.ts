@@ -1,18 +1,16 @@
 import { test, expect } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-
 import { createDelegationTools } from "../../src/adapters/delegation";
-import { jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { receipt } from "@receipt/core/chain";
 
 const createTempDir = async (label: string): Promise<string> =>
-  fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
+  fs.mkdtemp(`${os.tmpdir()}/${label}-`);
 
 test("delegation tools: agent.inspect accepts a stream id and reads it from the sqlite-backed store", async () => {
   const dataDir = await createTempDir("receipt-delegation-inspect");
-  const store = jsonlStore<Record<string, unknown>>(dataDir);
+  const store = sqliteReceiptStore<Record<string, unknown>>(dataDir);
   const stream = "agents/factory/demo/generalist";
 
   await store.append(receipt(stream, undefined, {
@@ -38,11 +36,8 @@ test("delegation tools: agent.inspect accepts a stream id and reads it from the 
   expect(result.output).toContain("Queued Codex");
 });
 
-test("delegation tools: agent.inspect still accepts bare jsonl filenames", async () => {
-  const dataDir = await createTempDir("receipt-delegation-inspect-file");
-  const rawFile = path.join(dataDir, "manual.jsonl");
-  await fs.writeFile(rawFile, `${JSON.stringify({ body: { type: "manual.event", note: "ok" } })}\n`, "utf-8");
-
+test("delegation tools: agent.inspect rejects non-stream references", async () => {
+  const dataDir = await createTempDir("receipt-delegation-inspect-invalid");
   const tools = createDelegationTools({
     enqueue: async () => ({ id: "job_unused" }),
     waitForJob: async () => ({ id: "job_unused", status: "completed" }),
@@ -50,10 +45,7 @@ test("delegation tools: agent.inspect still accepts bare jsonl filenames", async
     dataDir,
   });
 
-  const result = await tools["agent.inspect"]({
-    file: "manual.jsonl",
-  });
-
-  expect(result.summary).toContain("manual.jsonl");
-  expect(result.output).toContain("\"manual.event\"");
+  await expect(tools["agent.inspect"]({
+    file: "manual-reference",
+  })).rejects.toThrow("must be a stream id");
 });

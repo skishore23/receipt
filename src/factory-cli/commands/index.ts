@@ -13,7 +13,7 @@ import {
 import { render } from "ink";
 
 import { fold } from "@receipt/core/chain";
-import { jsonlStore } from "../../adapters/jsonl";
+import { sqliteReceiptStore } from "../../adapters/sqlite";
 import type { Flags } from "../../cli.types";
 import { printUsage } from "../../cli/shared";
 import type { AgentEvent } from "../../modules/agent";
@@ -565,7 +565,7 @@ const renderObjectiveReplayText = (
 };
 
 const readChatReplay = async (dataDir: string, stream: string) => {
-  const chain = await jsonlStore<AgentEvent>(dataDir).read(stream);
+  const chain = await sqliteReceiptStore<AgentEvent>(dataDir).read(stream);
   if (chain.length === 0) {
     throw new Error(`No receipts found for ${stream}`);
   }

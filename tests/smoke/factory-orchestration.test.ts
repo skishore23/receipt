@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 
 import { type CodexExecutor } from "../../src/adapters/codex-executor";
 import { createMemoryTools, decideMemory, initialMemoryState, reduceMemory, type MemoryCmd, type MemoryEvent, type MemoryState } from "../../src/adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -50,8 +50,8 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -61,8 +61,8 @@ const createMemoryToolsForTest = (dataDir: string) =>
   createMemoryTools({
     dir: dataDir,
     runtime: createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-      jsonlStore<MemoryEvent>(dataDir),
-      jsonBranchStore(dataDir),
+      sqliteReceiptStore<MemoryEvent>(dataDir),
+      sqliteBranchStore(dataDir),
       decideMemory,
       reduceMemory,
       initialMemoryState,
@@ -70,7 +70,7 @@ const createMemoryToolsForTest = (dataDir: string) =>
   });
 
 const findLatestFactoryJob = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
 ): Promise<FactoryTaskJobPayload> => {
   const jobs = await queue.listJobs({ limit: 20 });
@@ -82,7 +82,7 @@ const findLatestFactoryJob = async (
 };
 
 const findLatestObjectiveJob = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
   kind: string,
 ) => {
@@ -96,7 +96,7 @@ const findLatestObjectiveJob = async (
 };
 
 const countObjectiveControlJobs = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
 ): Promise<number> => {
   const jobs = await queue.listJobs({ limit: 80 });
@@ -110,7 +110,7 @@ const countObjectiveControlJobs = async (
 };
 
 const expectObjectiveReconcileIntent = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
 ): Promise<void> => {
   const controlJob = await findLatestObjectiveJob(queue, objectiveId, "factory.objective.control");
@@ -140,7 +140,7 @@ const expectObjectiveReconcileIntent = async (
 test("factory scheduling: queued objectives preserve FIFO order without invoking llm decomposition", async () => {
   const dataDir = await createTempDir("receipt-factory-scheduling-fifo");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -182,7 +182,7 @@ test("factory scheduling: queued objectives preserve FIFO order without invoking
 test("factory scheduling: startImmediately boots an admitted objective inline and queues codex work directly", async () => {
   const dataDir = await createTempDir("receipt-factory-start-immediate");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -214,7 +214,7 @@ test("factory scheduling: startImmediately boots an admitted objective inline an
 test("factory scheduling: archiving an active objective cancels queued task jobs and admits the next objective immediately", async () => {
   const dataDir = await createTempDir("receipt-factory-archive-rebalance");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -270,7 +270,7 @@ test("factory scheduling: archiving an active objective cancels queued task jobs
 test("factory scheduling: resume ignores archived objectives instead of re-enqueueing control work for them", async () => {
   const dataDir = await createTempDir("receipt-factory-archive-resume");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -311,7 +311,7 @@ test("factory scheduling: resume ignores archived objectives instead of re-enque
 test("factory runtime: blocked tasks stay blocked instead of spawning mutation follow-ups", async () => {
   const dataDir = await createTempDir("receipt-factory-mutation");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
       await fs.writeFile(input.promptPath, input.prompt, "utf-8");
@@ -359,7 +359,7 @@ test("factory runtime: blocked tasks stay blocked instead of spawning mutation f
 test("factory runtime: transient blocked tasks retry once automatically before asking for help", async () => {
   const dataDir = await createTempDir("receipt-factory-autonomous-retry");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   let runs = 0;
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
@@ -413,7 +413,7 @@ test("factory runtime: transient blocked tasks retry once automatically before a
 test("factory runtime: transient dispatch failures queue reconcile instead of blocking the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-transient-dispatch");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -465,7 +465,7 @@ test("factory runtime: transient dispatch failures queue reconcile instead of bl
 test("factory runtime: transient integration queue failures reconcile instead of blocking the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-transient-integration");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -572,7 +572,7 @@ test("factory runtime: transient integration queue failures reconcile instead of
 test("factory runtime: blocked tasks can record an explicit ask-human decision", async () => {
   const dataDir = await createTempDir("receipt-factory-ask-human");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
       await fs.writeFile(input.promptPath, input.prompt, "utf-8");
@@ -623,7 +623,7 @@ test("factory runtime: blocked tasks can record an explicit ask-human decision",
 test("factory runtime: blocked objectives stay inert on bare react but follow-up guidance queues a new attempt", async () => {
   const dataDir = await createTempDir("receipt-factory-blocked-react");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
       await fs.writeFile(input.promptPath, input.prompt, "utf-8");
@@ -690,7 +690,7 @@ test("factory runtime: blocked objectives stay inert on bare react but follow-up
 test("factory candidate lineage: rework dispatch mints a fresh candidate id", async () => {
   const dataDir = await createTempDir("receipt-factory-candidate-lineage");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   let runs = 0;
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
@@ -740,7 +740,7 @@ test("factory candidate lineage: rework dispatch mints a fresh candidate id", as
 test("factory profile policy: non-worktree specialist workers are normalized to codex task execution", async () => {
   const dataDir = await createTempDir("receipt-factory-profile-policy");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -773,7 +773,7 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
 test("factory no-diff discovery tasks integrate as no-op passes and unlock dependent work", async () => {
   const dataDir = await createTempDir("receipt-factory-no-diff-bypass");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   let runs = 0;
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
@@ -880,7 +880,7 @@ test("factory no-diff discovery tasks integrate as no-op passes and unlock depen
 test("factory runtime: final no-diff task with satisfied operator guidance completes the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-no-diff-complete");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const codexExecutor: CodexExecutor = {
     run: async (input) => {
       await fs.writeFile(input.promptPath, input.prompt, "utf-8");
@@ -951,7 +951,7 @@ test("factory runtime: final no-diff task with satisfied operator guidance compl
 test("factory dispatch refreshes stale state before pinning the task workspace base", async () => {
   const dataDir = await createTempDir("receipt-factory-dispatch-refresh");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1049,7 +1049,7 @@ test("factory dispatch refreshes stale state before pinning the task workspace b
 test("factory optimistic mutation append: stale heads are rejected without mutating the objective", async () => {
   const dataDir = await createTempDir("receipt-factory-stale-append");
   const repoRoot = await createSourceRepo();
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,

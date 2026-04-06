@@ -77,6 +77,7 @@ test("factory workbench state: replay merges only missing view state and preserv
       inspectorTab: "notes" as unknown as "overview",
       detailTab: "queue",
       filter: "objective.completed",
+      page: 3,
       focusKind: "job",
       focusId: "job_42",
     },
@@ -92,6 +93,7 @@ test("factory workbench state: replay merges only missing view state and preserv
   expect(replayed.inspectorTab).toBe("overview");
   expect(replayed.detailTab).toBe("queue");
   expect(replayed.filter).toBe("objective.completed");
+  expect(replayed.page).toBe(3);
   expect(replayed.focusKind).toBe("job");
   expect(replayed.focusId).toBe("job_42");
 
@@ -108,5 +110,29 @@ test("factory workbench state: replay merges only missing view state and preserv
   expect(parsed?.route.inspectorTab).toBe("overview");
   expect(parsed?.route.detailTab).toBe("queue");
   expect(parsed?.route.filter).toBe("objective.completed");
+  expect(parsed?.route.page).toBe(3);
   expect(parsed?.liveOverlay?.runId).toBe("run_1");
+});
+
+test("factory workbench state: explicit page selection wins over replayed page", () => {
+  const route = createWorkbenchRouteState({
+    profileId: "generalist",
+    chatId: "chat_demo",
+    objectiveId: "objective_demo",
+    page: 2,
+  });
+
+  const replayed = mergeReplayRoute(route, {
+    savedAt: Date.now(),
+    route: {
+      profileId: "generalist",
+      chatId: "chat_demo",
+      objectiveId: "objective_demo",
+      page: 4,
+    },
+  }, {
+    preserveExplicitPage: true,
+  });
+
+  expect(replayed.page).toBe(2);
 });

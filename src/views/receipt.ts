@@ -1,8 +1,8 @@
 // ============================================================================
-// Receipt Browser UI — browse JSONL receipt streams
+// Receipt Browser UI — browse SQLite-backed receipt streams
 // ============================================================================
 
-import type { ReceiptFileInfo, ReceiptRecord } from "../adapters/receipt-tools";
+import type { ReceiptStreamInfo, ReceiptRecord } from "../adapters/receipt-tools";
 import {
   esc,
   liveIslandAttrs,
@@ -22,11 +22,8 @@ const receiptRecordsRefreshOn = [
   { event: "receipt-refresh", throttleMs: 900 },
 ] as const;
 
-const formatBytes = (n: number): string => {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-};
+const formatReceiptCount = (n: number): string =>
+  `${n.toLocaleString()} receipt${n === 1 ? "" : "s"}`;
 
 const formatTime = (ts: number): string => new Date(ts).toLocaleString();
 
@@ -182,20 +179,20 @@ export const receiptShell = (opts: {
 };
 
 export const receiptFoldsHtml = (
-  files: ReadonlyArray<ReceiptFileInfo>,
+  files: ReadonlyArray<ReceiptStreamInfo>,
   selected?: string,
   order: "asc" | "desc" = "desc",
   limit = 200,
   depth = 2,
 ): string => {
-  if (!files.length) return `<div class="text-xs text-muted-foreground">No JSONL streams found.</div>`;
+  if (!files.length) return `<div class="text-xs text-muted-foreground">No receipt streams found.</div>`;
   const sorted = [...files].sort((a, b) => b.mtime - a.mtime);
   return sorted.map((f) => {
     const active = f.name === selected;
     const borderClass = active ? "border-info/30" : "border-border hover:border-border";
     return `<a class="block border ${borderClass} bg-muted px-3 py-2.5 no-underline transition" href="/receipt?file=${encodeURIComponent(f.name)}&order=${order}&limit=${limit}&depth=${depth}">
       <div class="text-xs font-semibold text-foreground break-all">${esc(f.name)}</div>
-      <div class="mt-1 text-[10px] text-muted-foreground">${formatBytes(f.size)} \u00b7 ${formatTime(f.mtime)}</div>
+      <div class="mt-1 text-[10px] text-muted-foreground">${formatReceiptCount(f.size)} \u00b7 ${formatTime(f.mtime)}</div>
     </a>`;
   }).join("");
 };
@@ -276,7 +273,7 @@ export const receiptSideHtml = (opts: {
     <div class="${sectionLabelClass}">Stream</div>
     ${selected ? `<div class="mt-3 grid gap-1.5 text-xs text-card-foreground">
       <div class="truncate">${esc(selected)}</div>
-      ${fileMeta ? `<div class="text-muted-foreground">${formatBytes(fileMeta.size)} \u00b7 ${formatTime(fileMeta.mtime)}</div>` : ""}
+      ${fileMeta ? `<div class="text-muted-foreground">${formatReceiptCount(fileMeta.size)} \u00b7 ${formatTime(fileMeta.mtime)}</div>` : ""}
       <div class="text-muted-foreground">Showing ${shown}/${total} receipts</div>
       <div class="text-muted-foreground">Order: ${order} \u00b7 Limit: ${limit}</div>
     </div>` : `<div class="mt-3 text-xs text-muted-foreground">Select a stream.</div>`}
@@ -296,7 +293,8 @@ export const receiptSideHtml = (opts: {
   </section>
 
   ${timelineRows ? `<section class="${cardClass}">
-    <div class="${sectionLabelClass}">Timeline</div>
+    <div class="${sectionLabelClass}">Window Timeline</div>
+    <div class="mt-2 text-[11px] text-muted-foreground">Built from the current result window to keep stream inspection responsive.</div>
     <div class="mt-3 grid gap-2">${timelineRows}</div>
   </section>` : ""}`;
 };

@@ -5,8 +5,8 @@ import path from "node:path";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import {
   decide as decideJob,
   initial as initialJob,
@@ -21,16 +21,16 @@ const createTempDir = async (label: string): Promise<string> =>
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
   );
 
-test("jsonl queue bootstrap refresh does not replay historical jobs through onJobChange", async () => {
-  const dataDir = await createTempDir("receipt-jsonl-queue-bootstrap");
-  const seedQueue = jsonlQueue({
+test("sqlite queue bootstrap refresh does not replay historical jobs through onJobChange", async () => {
+  const dataDir = await createTempDir("receipt-sqlite-queue-bootstrap");
+  const seedQueue = sqliteQueue({
     runtime: createJobRuntime(dataDir),
     stream: "jobs",
   });
@@ -63,7 +63,7 @@ test("jsonl queue bootstrap refresh does not replay historical jobs through onJo
   });
 
   const observed: string[] = [];
-  const refreshedQueue = jsonlQueue({
+  const refreshedQueue = sqliteQueue({
     runtime: createJobRuntime(dataDir),
     stream: "jobs",
     watchDir: dataDir,

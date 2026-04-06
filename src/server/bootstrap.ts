@@ -22,10 +22,10 @@ import {
 
 import type { JobBackend } from "../adapters/job-backend";
 import {
-  jsonlQueue,
+  sqliteQueue,
   type EnqueueJobInput,
   type QueueJob,
-} from "../adapters/jsonl-queue";
+} from "../adapters/sqlite-queue";
 import { createMemoryTools } from "../adapters/memory-tools";
 import { createDelegationTools } from "../adapters/delegation";
 import {
@@ -182,7 +182,7 @@ const shouldQueueFactoryObjectiveAudit = async (
   });
 };
 
-const baseQueue = jsonlQueue({
+const baseQueue = sqliteQueue({
   runtime: jobRuntime,
   stream: JOB_STREAM,
   watchDir: DATA_DIR,

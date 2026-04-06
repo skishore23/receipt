@@ -1,4 +1,4 @@
-import type { QueueJob } from "../../adapters/jsonl-queue";
+import type { QueueJob } from "../../adapters/sqlite-queue";
 import type { FactoryEvent, FactoryState, FactoryTaskRecord } from "../../modules/factory";
 import { CONTROL_RECEIPT_TYPES } from "../../engine/runtime/control-receipts";
 import type {

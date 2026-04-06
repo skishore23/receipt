@@ -1,4 +1,4 @@
-import type { QueueJob } from "../adapters/jsonl-queue";
+import type { QueueJob } from "../adapters/sqlite-queue";
 import type { FactoryObjectiveMode, FactoryObjectivePolicy, FactoryObjectiveSeverity } from "../modules/factory";
 import { FactoryServiceError, type FactoryObjectiveDetail, type FactoryLiveProjection } from "../services/factory-service";
 import type { FactoryCliRuntime } from "./runtime";

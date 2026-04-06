@@ -10,7 +10,7 @@ Instead of treating traces and job state as incidental logs, Receipt stores immu
 **Receipt** is the event-native substrate. Everything durable—agent runs, jobs, memory, Factory objectives—is meant to be replayed by folding the same receipts, not by mutating hidden rows.
 
 - **Primitives**: Live in `@receipt/core` (`packages/core/src/`). Features include `createRuntime`, hashing, `fold`, branching, and `Store` / `BranchStore` contracts.
-- **Persistence**: Implemented via SQLite (`src/adapters/jsonl.ts`, backing `receipts` and `streams` tables). Projections are maintained for quick query access (`drizzle/`).
+- **Persistence**: Implemented via SQLite-backed receipt adapters backed by the `receipts` and `streams` tables. Projections are maintained for quick query access (`drizzle/`).
 - **Domain Modules**: Typed events, reducers, and decide functions sit in `src/modules/` (notably `agent.ts`, `job.ts`, and the `factory/` directory).
 
 ### What is "Factory"?
@@ -98,7 +98,7 @@ The repository is built in stacked layers:
 | **HTTP Framework**| Hono |
 | **Validation** | Zod, `@hono/zod-validator` |
 | **Database** | Drizzle ORM + SQLite |
-| **Queue** | Resonate (`@resonatehq/sdk`, optional) or Local JSONL Queue |
+| **Queue** | Resonate (`@resonatehq/sdk`, optional) or local SQLite-backed queue |
 | **LLM** | OpenAI SDK |
 | **CLI / Workers** | Ink, React, `@clack/prompts` |
 | **Web UI** | HTMX, `htmx-ext-sse`, Vanilla JS/TS |

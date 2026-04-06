@@ -5,9 +5,9 @@ import path from "node:path";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { type JobBackend } from "../../src/adapters/job-backend";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { resonateJobBackend } from "../../src/adapters/resonate-job-backend";
 import { createResonateDriverStarter } from "../../src/adapters/resonate-runtime";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -17,13 +17,13 @@ const mkTmp = async (label: string): Promise<string> =>
 
 const makeBackend = async (dir: string): Promise<JobBackend> => {
   const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dir),
-    jsonBranchStore(dir),
+    sqliteReceiptStore<JobEvent>(dir),
+    sqliteBranchStore(dir),
     decideJob,
     reduceJob,
     initialJob,
   );
-  return jsonlQueue({ runtime, stream: "jobs" });
+  return sqliteQueue({ runtime, stream: "jobs" });
 };
 
 test("resonate job backend: dispatches newly enqueued jobs", async () => {

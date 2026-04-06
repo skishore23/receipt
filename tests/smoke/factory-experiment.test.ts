@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import type { QueueJob } from "../../src/adapters/sqlite-queue";
 import { findActiveObjectiveJobId } from "../../src/factory-cli/experiment";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 

@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 
 import { createRuntime } from "@receipt/core/runtime";
 import { receipt } from "@receipt/core/chain";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { getReceiptDb } from "../../src/db/client";
 
 const createTempDir = async (label: string): Promise<string> =>
@@ -24,10 +24,10 @@ const nowMs = (): number => performance.now();
 test("perf: sqlite receipt store replays 100k receipts without timing out", async () => {
   const dataDir = await createTempDir("receipt-perf-100k");
   try {
-    const store = jsonlStore<PerfEvent>(dataDir);
+    const store = sqliteReceiptStore<PerfEvent>(dataDir);
     const runtime = createRuntime<PerfCmd, PerfEvent, { readonly count: number }>(
       store,
-      jsonBranchStore(dataDir),
+      sqliteBranchStore(dataDir),
       (cmd) => [cmd.event],
       (state) => ({ count: state.count + 1 }),
       { count: 0 }

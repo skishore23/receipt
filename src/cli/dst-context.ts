@@ -2,7 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { createRuntime } from "@receipt/core/runtime";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
 import {
   readFactoryParsedJobStream,
   type FactoryParsedJob,
@@ -81,8 +81,8 @@ type ContextPass = {
 
 const createGenericRuntime = (dataDir: string) =>
   createRuntime<GenericCmd, GenericEvent, { readonly ok: true }>(
-    jsonlStore<GenericEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<GenericEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     (cmd) => [cmd.event],
     (state) => state,
     { ok: true },

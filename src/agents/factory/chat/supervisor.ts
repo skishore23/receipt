@@ -1,5 +1,5 @@
 import { clampWaitMs } from "../../orchestration-utils";
-import type { JsonlQueue } from "../../../adapters/jsonl-queue";
+import type { SqliteQueue } from "../../../adapters/sqlite-queue";
 
 export type FactorySupervisorConfig = {
   readonly steerAfterMs?: number;
@@ -18,7 +18,7 @@ export const readSupervisorConfig = (value: unknown): FactorySupervisorConfig =>
 };
 
 export const queueSupervisorCommandOnce = async (input: {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly jobId: string;
   readonly command: "steer" | "follow_up" | "abort";
   readonly payload: Record<string, unknown>;

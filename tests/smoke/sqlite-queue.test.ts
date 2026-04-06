@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { receipt } from "@receipt/core/chain";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { createRuntime } from "@receipt/core/runtime";
 import { JobWorker } from "../../src/engine/runtime/job-worker";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
@@ -26,17 +26,17 @@ const waitFor = async (
   }
 };
 
-test("jsonl queue: lease/retry/wait lifecycle", async () => {
+test("sqlite queue: lease/retry/wait lifecycle", async () => {
   const dir = await mkTmp("receipt-queue");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const job = await queue.enqueue({
       agentId: "writer",
       payload: { kind: "writer.run", runId: "r1" },
@@ -69,17 +69,17 @@ test("jsonl queue: lease/retry/wait lifecycle", async () => {
   }
 });
 
-test("jsonl queue: lane filters keep fast chat work separate from heavy jobs", async () => {
+test("sqlite queue: lane filters keep fast chat work separate from heavy jobs", async () => {
   const dir = await mkTmp("receipt-queue-lanes");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const heavy = await queue.enqueue({
       agentId: "factory",
@@ -114,17 +114,17 @@ test("jsonl queue: lane filters keep fast chat work separate from heavy jobs", a
   }
 });
 
-test("jsonl queue: leaseJob leases a specific queued job without scanning order", async () => {
+test("sqlite queue: leaseJob leases a specific queued job without scanning order", async () => {
   const dir = await mkTmp("receipt-queue-lease-job");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const first = await queue.enqueue({
       agentId: "writer",
@@ -148,17 +148,17 @@ test("jsonl queue: leaseJob leases a specific queued job without scanning order"
   }
 });
 
-test("jsonl queue: steer/follow-up/abort command lanes", async () => {
+test("sqlite queue: steer/follow-up/abort command lanes", async () => {
   const dir = await mkTmp("receipt-queue-cmd");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const job = await queue.enqueue({
       agentId: "theorem",
       payload: { kind: "theorem.run", runId: "r2" },
@@ -193,17 +193,17 @@ test("jsonl queue: steer/follow-up/abort command lanes", async () => {
   }
 });
 
-test("jsonl queue: failed jobs retain terminal result metadata", async () => {
+test("sqlite queue: failed jobs retain terminal result metadata", async () => {
   const dir = await mkTmp("receipt-queue-failed-result");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const job = await queue.enqueue({
       agentId: "axiom-guild",
       payload: { kind: "axiom-guild.run", runId: "r_failed" },
@@ -236,17 +236,17 @@ test("jsonl queue: failed jobs retain terminal result metadata", async () => {
   }
 });
 
-test("jsonl queue: session singleton cancel and steer modes", async () => {
+test("sqlite queue: session singleton cancel and steer modes", async () => {
   const dir = await mkTmp("receipt-queue-singleton");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const first = await queue.enqueue({
       agentId: "writer",
@@ -294,17 +294,17 @@ test("jsonl queue: session singleton cancel and steer modes", async () => {
   }
 });
 
-test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => {
+test("sqlite queue: getJob reads authoritative jobs/<jobId> stream", async () => {
   const dir = await mkTmp("receipt-queue-authoritative");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     await runtime.execute("jobs", {
       type: "emit",
@@ -326,17 +326,17 @@ test("jsonl queue: getJob reads authoritative jobs/<jobId> stream", async () => 
   }
 });
 
-test("jsonl queue: cold getJob does not require scanning the full job manifest", async () => {
+test("sqlite queue: cold getJob does not require scanning the full job manifest", async () => {
   const dir = await mkTmp("receipt-queue-cold-get-job");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const created = await queue.enqueue({
       agentId: "writer",
@@ -363,17 +363,17 @@ test("jsonl queue: cold getJob does not require scanning the full job manifest",
   }
 });
 
-test("jsonl queue: cold targeted job mutations do not require scanning the full job manifest", async () => {
+test("sqlite queue: cold targeted job mutations do not require scanning the full job manifest", async () => {
   const dir = await mkTmp("receipt-queue-cold-targeted-job-op");
   try {
     const runtimeA = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queueA = jsonlQueue({ runtime: runtimeA, stream: "jobs" });
+    const queueA = sqliteQueue({ runtime: runtimeA, stream: "jobs" });
     const created = await queueA.enqueue({
       agentId: "writer",
       payload: { kind: "writer.run", runId: "r_targeted_ops" },
@@ -381,13 +381,13 @@ test("jsonl queue: cold targeted job mutations do not require scanning the full 
     });
 
     const runtimeB = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queueB = jsonlQueue({ runtime: runtimeB, stream: "jobs" });
+    const queueB = sqliteQueue({ runtime: runtimeB, stream: "jobs" });
 
     if (!runtimeB.listStreams) {
       throw new Error("expected runtime.listStreams to exist for this regression");
@@ -417,17 +417,17 @@ test("jsonl queue: cold targeted job mutations do not require scanning the full 
   }
 });
 
-test("jsonl queue: cold enqueue without singleton scans does not require the full job manifest", async () => {
+test("sqlite queue: cold enqueue without singleton scans does not require the full job manifest", async () => {
   const dir = await mkTmp("receipt-queue-cold-enqueue");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     await queue.enqueue({
       agentId: "writer",
@@ -460,25 +460,25 @@ test("jsonl queue: cold enqueue without singleton scans does not require the ful
   }
 });
 
-test("jsonl queue: cross-process stale heartbeat does not append after external completion", async () => {
+test("sqlite queue: cross-process stale heartbeat does not append after external completion", async () => {
   const dir = await mkTmp("receipt-queue-stale-heartbeat");
   try {
     const runtimeA = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
     const runtimeB = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queueA = jsonlQueue({ runtime: runtimeA, stream: "jobs" });
-    const queueB = jsonlQueue({ runtime: runtimeB, stream: "jobs" });
+    const queueA = sqliteQueue({ runtime: runtimeA, stream: "jobs" });
+    const queueB = sqliteQueue({ runtime: runtimeB, stream: "jobs" });
 
     const job = await queueA.enqueue({
       agentId: "writer",
@@ -503,18 +503,18 @@ test("jsonl queue: cross-process stale heartbeat does not append after external 
   }
 });
 
-test("jsonl queue: replay tolerates late heartbeat receipts after completion", async () => {
+test("sqlite queue: replay tolerates late heartbeat receipts after completion", async () => {
   const dir = await mkTmp("receipt-queue-late-heartbeat-replay");
   try {
-    const store = jsonlStore<JobEvent>(dir);
+    const store = sqliteReceiptStore<JobEvent>(dir);
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
       store,
-      jsonBranchStore(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const stream = "jobs/job_replay_late_heartbeat";
 
     const enqueued = receipt(stream, undefined, {
@@ -563,19 +563,19 @@ test("jsonl queue: replay tolerates late heartbeat receipts after completion", a
   }
 });
 
-test("jsonl queue: onJobChange receives the current job snapshot without deadlocking enqueue", async () => {
+test("sqlite queue: onJobChange receives the current job snapshot without deadlocking enqueue", async () => {
   const dir = await mkTmp("receipt-queue-on-change");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
 
     let observedJobId: string | undefined;
-    const queue = jsonlQueue({
+    const queue = sqliteQueue({
       runtime,
       stream: "jobs",
       onJobChange: async (jobs) => {
@@ -597,12 +597,12 @@ test("jsonl queue: onJobChange receives the current job snapshot without deadloc
   }
 });
 
-test("jsonl queue: listJobs remains readable while onJobChange is still awaiting", async () => {
+test("sqlite queue: listJobs remains readable while onJobChange is still awaiting", async () => {
   const dir = await mkTmp("receipt-queue-read-while-callback");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
@@ -617,7 +617,7 @@ test("jsonl queue: listJobs remains readable while onJobChange is still awaiting
       unblockCallback = resolve;
     });
 
-    const queue = jsonlQueue({
+    const queue = sqliteQueue({
       runtime,
       stream: "jobs",
       onJobChange: async () => {
@@ -645,17 +645,17 @@ test("jsonl queue: listJobs remains readable while onJobChange is still awaiting
   }
 });
 
-test("jsonl queue: list and lease derive from authoritative jobs/<jobId> streams", async () => {
+test("sqlite queue: list and lease derive from authoritative jobs/<jobId> streams", async () => {
   const dir = await mkTmp("receipt-queue-authoritative-list");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     await runtime.execute("jobs/job_direct", {
       type: "emit",
@@ -681,17 +681,17 @@ test("jsonl queue: list and lease derive from authoritative jobs/<jobId> streams
   }
 });
 
-test("jsonl queue: enqueue wakes an idle worker without relying on a short poll interval", async () => {
+test("sqlite queue: enqueue wakes an idle worker without relying on a short poll interval", async () => {
   const dir = await mkTmp("receipt-queue-worker-wakeup");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const handled: string[] = [];
     let workerError: Error | undefined;
 
@@ -729,12 +729,12 @@ test("jsonl queue: enqueue wakes an idle worker without relying on a short poll 
   }
 });
 
-test("jsonl queue: waitForWork performs at most one refresh per idle timeout window", async () => {
+test("sqlite queue: waitForWork performs at most one refresh per idle timeout window", async () => {
   const dir = await mkTmp("receipt-queue-idle-refresh");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
@@ -748,7 +748,7 @@ test("jsonl queue: waitForWork performs at most one refresh per idle timeout win
       return baseListStreams(prefix);
     };
 
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const startedAt = Date.now();
     const snapshot = await queue.waitForWork({ timeoutMs: 650 });
 
@@ -761,17 +761,17 @@ test("jsonl queue: waitForWork performs at most one refresh per idle timeout win
   }
 });
 
-test("jsonl queue: refresh reaps expired leases even when no new lease is requested", async () => {
+test("sqlite queue: refresh reaps expired leases even when no new lease is requested", async () => {
   const dir = await mkTmp("receipt-queue-refresh-expired-lease");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const retryable = await queue.enqueue({
       agentId: "writer",
@@ -804,17 +804,17 @@ test("jsonl queue: refresh reaps expired leases even when no new lease is reques
   }
 });
 
-test("jsonl queue: refresh can stay read-only when lease expiry is owned elsewhere", async () => {
+test("sqlite queue: refresh can stay read-only when lease expiry is owned elsewhere", async () => {
   const dir = await mkTmp("receipt-queue-refresh-read-only");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({
+    const queue = sqliteQueue({
       runtime,
       stream: "jobs",
       expireLeasesOnRefresh: false,
@@ -841,25 +841,25 @@ test("jsonl queue: refresh can stay read-only when lease expiry is owned elsewhe
   }
 });
 
-test("jsonl queue: cross-queue enqueue is picked up on the next shared-data-dir resync", async () => {
+test("sqlite queue: cross-queue enqueue is picked up on the next shared-data-dir resync", async () => {
   const dir = await mkTmp("receipt-queue-cross-queue-wakeup");
   try {
     const runtimeA = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
     const runtimeB = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const workerQueue = jsonlQueue({ runtime: runtimeA, stream: "jobs", watchDir: dir });
-    const enqueueQueue = jsonlQueue({ runtime: runtimeB, stream: "jobs", watchDir: dir });
+    const workerQueue = sqliteQueue({ runtime: runtimeA, stream: "jobs", watchDir: dir });
+    const enqueueQueue = sqliteQueue({ runtime: runtimeB, stream: "jobs", watchDir: dir });
     const handled: string[] = [];
     let workerError: Error | undefined;
 
@@ -897,17 +897,17 @@ test("jsonl queue: cross-queue enqueue is picked up on the next shared-data-dir 
   }
 });
 
-test("jsonl queue: worker wakes for a child queued by an active parent before the parent finishes", async () => {
+test("sqlite queue: worker wakes for a child queued by an active parent before the parent finishes", async () => {
   const dir = await mkTmp("receipt-queue-parent-child-wakeup");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const handled: string[] = [];
     const workerErrors: string[] = [];
     let childJobId = "";
@@ -985,13 +985,13 @@ test("job worker: does not busy-spin on queued work it cannot lease", async () =
   const dir = await mkTmp("receipt-queue-unmatched-worker");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     await queue.enqueue({
       agentId: "codex",
       payload: { kind: "factory.codex.run", runId: "r_unmatched" },
@@ -1029,13 +1029,13 @@ test("job worker: idle lease loop still emits liveness ticks without matching wo
   const dir = await mkTmp("receipt-queue-idle-liveness");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     let ticks = 0;
 
     const worker = new JobWorker({
@@ -1064,17 +1064,17 @@ test("job worker: idle lease loop still emits liveness ticks without matching wo
   }
 });
 
-test("jsonl queue: worker keeps leasing later jobs after an unexpected heartbeat error", async () => {
+test("sqlite queue: worker keeps leasing later jobs after an unexpected heartbeat error", async () => {
   const dir = await mkTmp("receipt-queue-worker-recover");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const baseQueue = jsonlQueue({ runtime, stream: "jobs" });
+    const baseQueue = sqliteQueue({ runtime, stream: "jobs" });
     let failHeartbeatForJobId: string | undefined;
     const queue: typeof baseQueue = {
       ...baseQueue,
@@ -1135,13 +1135,13 @@ test("job worker: registered child liveness fails a codex job before lease expir
   const dir = await mkTmp("receipt-queue-worker-child-liveness");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const childScript = path.join(dir, "child-exit.js");
     await fs.writeFile(childScript, "setTimeout(() => process.exit(0), 50);\n", "utf-8");
 
@@ -1189,13 +1189,13 @@ test("job worker: clearing registered child liveness lets post-processing finish
   const dir = await mkTmp("receipt-queue-worker-child-liveness-clear");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const childScript = path.join(dir, "child-exit.js");
     await fs.writeFile(childScript, "setTimeout(() => process.exit(0), 50);\n", "utf-8");
 
@@ -1244,17 +1244,17 @@ test("job worker: clearing registered child liveness lets post-processing finish
   }
 });
 
-test("jsonl queue: scoped workers prevent parent and control jobs from starving a codex child", async () => {
+test("sqlite queue: scoped workers prevent parent and control jobs from starving a codex child", async () => {
   const dir = await mkTmp("receipt-queue-scoped-workers");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob,
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
     const handled: string[] = [];
     const workerErrors: string[] = [];
     let resolveCodexRan: (() => void) | undefined;
@@ -1380,17 +1380,17 @@ test("jsonl queue: scoped workers prevent parent and control jobs from starving 
 // Performance optimization tests
 // ============================================================================
 
-test("jsonl queue: heartbeat updates lease without full projection sync", async () => {
+test("sqlite queue: heartbeat updates lease without full projection sync", async () => {
   const dir = await mkTmp("receipt-queue-hb-fast");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs", watchDir: dir });
+    const queue = sqliteQueue({ runtime, stream: "jobs", watchDir: dir });
     const job = await queue.enqueue({
       agentId: "writer",
       payload: { kind: "writer.run", runId: "r1" },
@@ -1415,17 +1415,17 @@ test("jsonl queue: heartbeat updates lease without full projection sync", async 
   }
 });
 
-test("jsonl queue: leaseNext with agent/lane filters skips non-matching index entries", async () => {
+test("sqlite queue: leaseNext with agent/lane filters skips non-matching index entries", async () => {
   const dir = await mkTmp("receipt-queue-lease-filter");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({ runtime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
 
     const agents = ["alpha", "beta", "gamma", "delta", "target"];
     const jobs = [];
@@ -1457,17 +1457,17 @@ test("jsonl queue: leaseNext with agent/lane filters skips non-matching index en
   }
 });
 
-test("jsonl queue: handleExpiredLeases only processes leased/running jobs", async () => {
+test("sqlite queue: handleExpiredLeases only processes leased/running jobs", async () => {
   const dir = await mkTmp("receipt-queue-expire-opt");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({
+    const queue = sqliteQueue({
       runtime,
       stream: "jobs",
       expireLeasesOnRefresh: true,
@@ -1510,17 +1510,17 @@ test("jsonl queue: handleExpiredLeases only processes leased/running jobs", asyn
   }
 });
 
-test("jsonl queue: refreshAllJobs skips reloading terminal jobs from disk", async () => {
+test("sqlite queue: refreshAllJobs skips reloading terminal jobs from disk", async () => {
   const dir = await mkTmp("receipt-queue-refresh-skip");
   try {
     const runtime = createRuntime<JobCmd, JobEvent, JobState>(
-      jsonlStore<JobEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
       decideJob,
       reduceJob,
       initialJob
     );
-    const queue = jsonlQueue({
+    const queue = sqliteQueue({
       runtime,
       stream: "jobs",
       expireLeasesOnRefresh: true,

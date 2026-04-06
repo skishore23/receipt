@@ -5,7 +5,7 @@ import { fold } from "@receipt/core/chain";
 import type { Receipt } from "@receipt/core/types";
 import { desc } from "drizzle-orm";
 
-import { jsonlStore } from "../../adapters/jsonl";
+import { sqliteReceiptStore } from "../../adapters/sqlite";
 import { getReceiptDb } from "../../db/client";
 import { readJobProjection } from "../../db/projectors";
 import * as schema from "../../db/schema";
@@ -203,7 +203,7 @@ type ParsedTaskLog = {
   readonly resolvedPath?: string;
   readonly sizeBytes?: number;
   readonly modifiedAt?: number;
-  readonly format?: "jsonl" | "text" | "mixed";
+  readonly format?: "structured" | "text" | "mixed";
   readonly preview?: string;
   readonly commands: ReadonlyArray<ParsedTaskCommandEvent>;
   readonly agentMessages: ReadonlyArray<string>;
@@ -510,7 +510,7 @@ const findObjectiveByFocus = async (
   const objectiveEntries = [...entries]
     .filter((entry) => entry.stream.startsWith("factory/objectives/"))
     .sort((left, right) => right.mtimeMs - left.mtimeMs || right.stream.localeCompare(left.stream));
-  const store = jsonlStore<FactoryEvent>(dataDir);
+  const store = sqliteReceiptStore<FactoryEvent>(dataDir);
   const matches: StreamEntry[] = [];
   for (const entry of objectiveEntries) {
     const chain = await store.read(entry.stream);
@@ -658,7 +658,7 @@ const isRunContinuedEvent = (
   event.type === "run.continued";
 
 const readChatReplay = async (dataDir: string, stream: string): Promise<FactoryChatReplay> => {
-  const chain = await jsonlStore<AgentEvent>(dataDir).read(stream);
+  const chain = await sqliteReceiptStore<AgentEvent>(dataDir).read(stream);
   if (chain.length === 0) {
     throw new Error(`No receipts found for ${stream}`);
   }
@@ -809,7 +809,7 @@ const readAgentRun = async (
   } = {},
 ): Promise<ParsedAgentRun | undefined> => {
   const streamChain = filterReceiptsAsOf(
-    await jsonlStore<AgentEvent>(dataDir).read(stream),
+    await sqliteReceiptStore<AgentEvent>(dataDir).read(stream),
     options.asOfTs,
   );
   const chain = options.runId
@@ -988,7 +988,7 @@ const parseStructuredLog = async (
   const commands = new Map<string, ParsedTaskCommandAccumulator>();
   const agentMessages: string[] = [];
   const eventTypes: string[] = [];
-  let format: ParsedTaskLog["format"] = "jsonl";
+  let format: ParsedTaskLog["format"] = "structured";
   let usage: ParsedTaskLog["usage"];
   let preview = truncateBlock(raw, 1_400);
 
@@ -998,7 +998,7 @@ const parseStructuredLog = async (
     try {
       parsed = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      format = format === "jsonl" ? "mixed" : "text";
+      format = format === "structured" ? "mixed" : "text";
       continue;
     }
     const type = asString(parsed.type);
@@ -1041,7 +1041,7 @@ const parseStructuredLog = async (
     commands.set(itemId, current);
   }
 
-  if (format === "jsonl" && !lines.every((line) => line.trim().startsWith("{"))) {
+  if (format === "structured" && !lines.every((line) => line.trim().startsWith("{"))) {
     format = "mixed";
   }
 
@@ -1098,7 +1098,7 @@ const readJob = async (
   options: ParseReadOptions = {},
 ): Promise<ParsedJob | undefined> => {
   const chain = filterReceiptsAsOf(
-    await jsonlStore<JobEvent>(dataDir).read(stream),
+    await sqliteReceiptStore<JobEvent>(dataDir).read(stream),
     options.asOfTs,
   );
   if (chain.length === 0) return undefined;
@@ -1442,7 +1442,7 @@ const resolveRunStreamForChatRun = async (
   runId: string,
 ): Promise<string> => {
   const direct = `${chatStream}/runs/${runId}`;
-  const directChain = await jsonlStore<AgentEvent>(dataDir).count(direct);
+  const directChain = await sqliteReceiptStore<AgentEvent>(dataDir).count(direct);
   return directChain > 0 ? direct : chatStream;
 };
 

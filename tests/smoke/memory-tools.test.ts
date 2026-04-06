@@ -12,8 +12,9 @@ import {
   type MemoryEvent,
   type MemoryState,
 } from "../../src/adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
+import { getReceiptDb } from "../../src/db/client";
 
 const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -22,8 +23,8 @@ test("memory tools: commit/read/search/summarize/diff", async () => {
   const dir = await mkTmp("receipt-memory");
   try {
     const runtime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-      jsonlStore<MemoryEvent>(dir),
-      jsonBranchStore(dir),
+      sqliteReceiptStore<MemoryEvent>(dir),
+      sqliteBranchStore(dir),
       decideMemory,
       reduceMemory,
       initialMemoryState
@@ -87,6 +88,56 @@ test("memory tools: commit/read/search/summarize/diff", async () => {
     ]);
     const latestAccess = chain.at(-1)?.body;
     expect(latestAccess && typeof latestAccess === "object" && "type" in latestAccess ? latestAccess.type : "").toBe("memory.accessed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("memory tools: semantic embeddings are stored in sqlite and reused", async () => {
+  const dir = await mkTmp("receipt-memory-embeddings");
+  let embedCalls = 0;
+  const embed = async (texts: ReadonlyArray<string>): Promise<ReadonlyArray<ReadonlyArray<number>>> => {
+    embedCalls += texts.length;
+    return texts.map((text) => [text.length, text.includes("proof") ? 10 : 1]);
+  };
+
+  try {
+    const runtime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
+      sqliteReceiptStore<MemoryEvent>(dir),
+      sqliteBranchStore(dir),
+      decideMemory,
+      reduceMemory,
+      initialMemoryState,
+    );
+    const tools = createMemoryTools({ dir, runtime, embed });
+    const entry = await tools.commit({
+      scope: "theorem.run.semantic",
+      text: "Proof search should stay indexed.",
+    });
+
+    const first = await tools.search({
+      scope: "theorem.run.semantic",
+      query: "proof",
+      limit: 5,
+    });
+    expect(first.map((item) => item.id)).toContain(entry.id);
+
+    const second = await tools.search({
+      scope: "theorem.run.semantic",
+      query: "proof",
+      limit: 5,
+    });
+    expect(second.map((item) => item.id)).toContain(entry.id);
+    expect(embedCalls).toBe(3);
+
+    const db = getReceiptDb(dir);
+    const row = db.read(() => db.sqlite.query(`
+      SELECT scope, vector_json AS vectorJson
+      FROM memory_embeddings
+      WHERE entry_id = ?
+    `).get(entry.id) as { readonly scope: string; readonly vectorJson: string } | null);
+    expect(row?.scope).toBe("theorem.run.semantic");
+    expect(row?.vectorJson).toContain("[");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

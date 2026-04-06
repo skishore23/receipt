@@ -2,7 +2,7 @@ import type { Resonate } from "@resonatehq/sdk";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../adapters/sqlite";
 import { targetForGroup } from "../../adapters/resonate-config";
 import { buildAgentView } from "./agent-loop";
 import { loadDefinedAgentSpec } from "../../sdk/agent-spec-loader";
@@ -36,8 +36,8 @@ export type RemoteActionInvocation = {
 };
 
 const createAgentRuntime = (dataDir: string) => createRuntime<GenericCmd, GenericEvent, { readonly ok: true }>(
-  jsonlStore<GenericEvent>(dataDir),
-  jsonBranchStore(dataDir),
+  sqliteReceiptStore<GenericEvent>(dataDir),
+  sqliteBranchStore(dataDir),
   (cmd) => [cmd.event],
   (state) => state,
   { ok: true },

@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createRuntime } from "@receipt/core/runtime";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { runReceiptDstAudit } from "../../src/cli/dst";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 import {
@@ -40,8 +40,8 @@ const createTempDir = async (label: string): Promise<string> =>
 
 const createGenericRuntime = (dataDir: string) =>
   createRuntime<GenericCmd, GenericEvent, { readonly ok: true }>(
-    jsonlStore<GenericEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<GenericEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     (cmd) => [cmd.event],
     (state) => state,
     { ok: true },
@@ -49,8 +49,8 @@ const createGenericRuntime = (dataDir: string) =>
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, typeof initialJobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJobState,

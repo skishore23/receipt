@@ -181,6 +181,7 @@ export const clearReceiptDb = (db: ReceiptDb): void => {
     tx.delete(schema.objectiveProjection).run();
     tx.delete(schema.chatContextProjection).run();
     tx.delete(schema.memoryAccesses).run();
+    tx.delete(schema.memoryEmbeddings).run();
     tx.delete(schema.memoryEntries).run();
     tx.delete(schema.branches).run();
     tx.delete(schema.receipts).run();

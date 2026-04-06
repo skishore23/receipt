@@ -1,4 +1,4 @@
-import type { QueueJob } from "../adapters/jsonl-queue";
+import type { QueueJob } from "../adapters/sqlite-queue";
 
 type ObjectiveJobKind = "factory.objective.audit" | "factory.objective.control";
 type ObjectiveReconcileSignalKind =

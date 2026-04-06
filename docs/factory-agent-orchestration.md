@@ -301,7 +301,7 @@ flowchart TD
   Scope --> EmbedGate{"OPENAI_API_KEY set?"}
 
   EmbedGate -->|"yes"| Semantic["Semantic retrieval\ntext-embedding-3-small"]
-  Semantic --> Cache["Per-scope embeddings cache\n<dataDir>/memory/*.embeddings.json"]
+  Semantic --> Cache["Per-scope embeddings cache\nSQLite memory_embeddings table"]
   Semantic --> Ranked["Cosine-ranked entries"]
 
   EmbedGate -->|"no"| Keyword["Keyword fallback\nmatch query terms in entry text/tags"]

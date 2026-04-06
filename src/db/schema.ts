@@ -187,6 +187,15 @@ export const memoryAccesses = sqliteTable("memory_accesses", {
   index("memory_accesses_scope_ts_idx").on(table.scope, table.ts),
 ]);
 
+export const memoryEmbeddings = sqliteTable("memory_embeddings", {
+  entryId: text("entry_id").primaryKey(),
+  scope: text("scope").notNull(),
+  vectorJson: text("vector_json").notNull(),
+  updatedAt: integer("updated_at", { mode: "number" }).notNull(),
+}, (table) => [
+  index("memory_embeddings_scope_idx").on(table.scope, table.updatedAt),
+]);
+
 export const schemaMigrations = sqliteTable("schema_migrations", {
   name: text("name").primaryKey(),
   appliedAt: integer("applied_at", { mode: "number" }).notNull(),

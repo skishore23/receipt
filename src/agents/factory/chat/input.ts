@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 
-import type { JsonlQueue, QueueJob } from "../../../adapters/jsonl-queue";
+import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import type { FactoryService, FactoryObjectiveReceiptSummary } from "../../../services/factory-service";
 import type {
@@ -96,7 +96,7 @@ export const normalizeJobSnapshot = (job: QueueJob): Record<string, unknown> => 
   };
 };
 
-export const listChildJobsForRun = async (queue: JsonlQueue, runId: string): Promise<ReadonlyArray<QueueJob>> => {
+export const listChildJobsForRun = async (queue: SqliteQueue, runId: string): Promise<ReadonlyArray<QueueJob>> => {
   const jobs = await queue.listJobs({ limit: 200 });
   return jobs.filter((job) => asString(job.payload.parentRunId) === runId);
 };
@@ -122,7 +122,7 @@ export const jobMatchesProfileContext = (
     || (Boolean(input.objectiveId) && objectiveId === input.objectiveId);
 };
 
-export const latestActiveCodexJob = async (queue: JsonlQueue, input: {
+export const latestActiveCodexJob = async (queue: SqliteQueue, input: {
   readonly runId: string;
   readonly stream: string;
   readonly profileId: string;
@@ -194,7 +194,7 @@ export const buildFactoryChatContextImports = async (input: {
   readonly runId: string;
   readonly iteration: number;
   readonly objectiveId?: string;
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly stream: string;
   readonly factoryService: FactoryService;
   readonly includeBoundObjectiveContext?: boolean;

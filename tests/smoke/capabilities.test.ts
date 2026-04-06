@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import { createRuntime } from "@receipt/core/runtime";
 import type { DelegationTools } from "../../src/adapters/delegation";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import {
   AgentCapabilityRegistry,
   capabilityDefinition,
@@ -45,8 +45,8 @@ const mkDelegationTools = (): DelegationTools => ({
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,

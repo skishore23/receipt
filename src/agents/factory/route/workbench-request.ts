@@ -70,6 +70,7 @@ export const shouldRedirectWorkbenchRequest = (
     || request.focusId !== model.focusId
   );
   return shouldRedirectForProfile
+    || request.chatId !== model.chatId
     || shouldRedirectForObjective
     || request.inspectorTab !== model.inspectorTab
     || request.detailTab !== model.detailTab

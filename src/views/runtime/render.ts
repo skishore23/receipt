@@ -441,7 +441,7 @@ const runtimeActors = (model: RuntimeDashboardModel): ReadonlyArray<RuntimeActor
       plane: "control",
       group: "poll-loop",
       icon: "iconWorker",
-      impl: "jsonl-queue.ts → leaseNext() · heartbeat()",
+      impl: "SQLite queue adapter → leaseNext() · heartbeat()",
       owns: "Acquire, renew, release exclusive run ownership",
       reads: ["job_projection", "queue snapshot", "lease timestamps"],
       writes: ["job leases", "running job state", "lease heartbeats"],

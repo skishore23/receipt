@@ -1,4 +1,4 @@
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryService } from "../../../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../../../services/factory-codex-artifacts";
 import { asString, listChildJobsForRun, reusableInfrastructureRefs, summarizeObjectiveReceipts, normalizeJobSnapshot } from "./input";
@@ -24,7 +24,7 @@ export const codexJobSnapshot = async (job: QueueJob, dataDir?: string): Promise
 };
 
 export const buildFactorySituation = async (input: {
-  readonly queue: import("../../../adapters/jsonl-queue").JsonlQueue;
+  readonly queue: import("../../../adapters/sqlite-queue").SqliteQueue;
   readonly runId: string;
   readonly stream: string;
   readonly profile: { readonly root: { readonly label: string; readonly id: string } };

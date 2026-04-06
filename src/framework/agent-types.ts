@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 
 import type { LlmTextOptions } from "../adapters/openai";
-import type { EnqueueJobInput, JsonlQueue } from "../adapters/jsonl-queue";
+import type { EnqueueJobInput, SqliteQueue } from "../adapters/sqlite-queue";
 import type { Runtime } from "@receipt/core/runtime";
 import type { JobCmd, JobEvent, JobState } from "../modules/job";
 import type { SseHub } from "./sse-hub";
@@ -18,7 +18,7 @@ export type AgentLoaderContext = {
   readonly sse: SseHub;
   readonly llmText: (opts: LlmTextOptions) => Promise<string>;
   readonly enqueueJob: (job: EnqueueJobInput) => Promise<void>;
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
   readonly runtimes: Readonly<Record<string, unknown>>;
   readonly prompts: Readonly<Record<string, unknown>>;

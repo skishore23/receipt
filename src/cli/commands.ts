@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { createRuntime } from "@receipt/core/runtime";
 
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
 import { createResonateClient } from "../adapters/resonate-runtime";
 import type { Flags } from "../cli.types";
 import { renderReceiptDstAuditText, runReceiptDstAudit } from "./dst";
@@ -132,8 +132,8 @@ const commandRun = async (agentId: string, flags: Flags): Promise<void> => {
     };
 
     const runtime = createRuntime<Cmd, Event, { readonly ok: true }>(
-      jsonlStore<Event>(DATA_DIR),
-      jsonBranchStore(DATA_DIR),
+      sqliteReceiptStore<Event>(DATA_DIR),
+      sqliteBranchStore(DATA_DIR),
       (cmd) => [cmd.event],
       (state) => state,
       { ok: true },
@@ -280,8 +280,8 @@ const commandFork = async (runOrStream: string, flags: Flags): Promise<void> => 
   };
 
   const runtime = createRuntime<AnyCmd, AnyEvent, { readonly ok: true }>(
-    jsonlStore<AnyEvent>(DATA_DIR),
-    jsonBranchStore(DATA_DIR),
+    sqliteReceiptStore<AnyEvent>(DATA_DIR),
+    sqliteBranchStore(DATA_DIR),
     (cmd) => [cmd.event],
     (state) => state,
     { ok: true },

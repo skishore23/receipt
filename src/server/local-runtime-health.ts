@@ -1,4 +1,4 @@
-import type { QueueJob } from "../adapters/jsonl-queue";
+import type { QueueJob } from "../adapters/sqlite-queue";
 import {
   LIVE_JOB_STALE_AFTER_MS,
   isFactoryExecutionQueueJob,

@@ -2,8 +2,8 @@
 // Delegation Tools - framework-level agent-to-agent delegation primitives
 // ============================================================================
 
-import { jsonlStore } from "./jsonl";
-import { assertReceiptFileName, buildReceiptContext, readReceiptFile } from "./receipt-tools";
+import { sqliteReceiptStore } from "./sqlite";
+import { buildReceiptContext } from "./receipt-tools";
 
 export type DelegationDeps = {
   readonly enqueue: (opts: {
@@ -52,14 +52,11 @@ const truncate = (text: string, limit: number): { readonly text: string; readonl
   return { text: `${text.slice(0, limit - 3)}...`, truncated: true };
 };
 
-const hasPathSeparator = (value: string): boolean =>
-  value.includes("/") || value.includes("\\");
-
 export const createDelegationTools = (deps: DelegationDeps): DelegationTools => {
-  let store: ReturnType<typeof jsonlStore<Record<string, unknown>>> | undefined;
-  const getStore = (): ReturnType<typeof jsonlStore<Record<string, unknown>>> => {
+  let store: ReturnType<typeof sqliteReceiptStore<Record<string, unknown>>> | undefined;
+  const getStore = (): ReturnType<typeof sqliteReceiptStore<Record<string, unknown>>> => {
     if (store) return store;
-    store = jsonlStore<Record<string, unknown>>(deps.dataDir);
+    store = sqliteReceiptStore<Record<string, unknown>>(deps.dataDir);
     return store;
   };
   return {
@@ -112,22 +109,8 @@ export const createDelegationTools = (deps: DelegationDeps): DelegationTools => 
     "agent.inspect": async (input) => {
       const reference = requireString(input, "file");
       const maxChars = requireNumber(input, "maxChars", 4_000);
-      if (reference.endsWith(".jsonl")) {
-        const fileName = assertReceiptFileName(reference);
-        const records = await readReceiptFile(deps.dataDir, fileName);
-        if (records.length === 0) {
-          return { output: "(empty chain)", summary: `${reference}: 0 records` };
-        }
-        const context = buildReceiptContext(records, maxChars);
-        const clipped = truncate(context, maxChars);
-        return {
-          output: clipped.text,
-          summary: `${reference}: ${records.length} records${clipped.truncated ? " (truncated)" : ""}`,
-        };
-      }
-
-      if (!hasPathSeparator(reference)) {
-        throw new Error(`receipt reference '${reference}' must be a stream id or a bare .jsonl filename.`);
+      if (!reference.includes("/") && !reference.includes("\\")) {
+        throw new Error(`receipt reference '${reference}' must be a stream id.`);
       }
 
       const chain = await getStore().read(reference);

@@ -1,5 +1,5 @@
 import type { GraphRef } from "@receipt/core/graph";
-import type { QueueCommandRecord, QueueJob } from "../adapters/jsonl-queue";
+import type { QueueCommandRecord, QueueJob } from "../adapters/sqlite-queue";
 import type { AuditRecommendation } from "../factory-cli/analyze";
 import type {
   FactoryBudgetState,
@@ -42,7 +42,7 @@ export class FactoryServiceError extends Error {
 
 export type FactoryServiceOptions = {
   readonly dataDir: string;
-  readonly queue: import("../adapters/jsonl-queue").JsonlQueue;
+  readonly queue: import("../adapters/sqlite-queue").SqliteQueue;
   readonly jobRuntime: import("@receipt/core/runtime").Runtime<
     import("../modules/job").JobCmd,
     import("../modules/job").JobEvent,

@@ -2,15 +2,13 @@
 // Memory Tools - runtime-backed memory tool contracts
 // ============================================================================
 
-import fs from "node:fs";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Decide, Reducer } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
 import { desc, eq } from "drizzle-orm";
 import { getReceiptDb } from "../db/client";
-import { jsonParseOptional, jsonStringifyOptional } from "../db/json";
+import { jsonParse, jsonParseOptional, jsonStringify, jsonStringifyOptional } from "../db/json";
 import * as schema from "../db/schema";
 
 export type MemoryEntry = {
@@ -163,26 +161,6 @@ type EmbeddingCache = Record<string, ReadonlyArray<number>>;
 const safeScope = (scope: string): string =>
   (scope || "default").toLowerCase().replace(/[^a-z0-9_.-/]/g, "_");
 
-const scopeToEmbeddingsFile = (root: string, scope: string): string =>
-  path.join(root, `${safeScope(scope).replace(/[\\/]/g, "__")}.embeddings.json`);
-
-const loadEmbeddingCache = async (file: string): Promise<EmbeddingCache> => {
-  const exists = await fs.promises.access(file, fs.constants.F_OK).then(() => true).catch(() => false);
-  if (!exists) return {};
-  const raw = await fs.promises.readFile(file, "utf-8");
-  try {
-    return JSON.parse(raw) as EmbeddingCache;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`invalid embedding cache ${file}: ${message}`);
-  }
-};
-
-const saveEmbeddingCache = async (file: string, cache: EmbeddingCache): Promise<void> => {
-  await fs.promises.mkdir(path.dirname(file), { recursive: true });
-  await fs.promises.writeFile(file, JSON.stringify(cache), "utf-8");
-};
-
 const cosine = (a: ReadonlyArray<number>, b: ReadonlyArray<number>): number => {
   let dot = 0;
   let normA = 0;
@@ -278,16 +256,95 @@ export const forgetMemoryEntry = async (input: {
     db.orm.delete(schema.memoryEntries)
       .where(eq(schema.memoryEntries.entryId, input.entryId))
       .run();
+    db.orm.delete(schema.memoryEmbeddings)
+      .where(eq(schema.memoryEmbeddings.entryId, input.entryId))
+      .run();
   });
   return true;
 };
 
 export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
-  const root = path.join(deps.dir, "memory");
   const db = getReceiptDb(deps.dir);
   const embedFn = deps.embed;
   const now = deps.now ?? Date.now;
   const streamForScope = deps.streamForScope ?? ((scope: string) => `memory/${safeScope(scope)}`);
+
+  const loadEmbeddingCache = (scope: string): EmbeddingCache =>
+    db.read(() => db.orm.select({
+      entryId: schema.memoryEmbeddings.entryId,
+      vectorJson: schema.memoryEmbeddings.vectorJson,
+    })
+      .from(schema.memoryEmbeddings)
+      .where(eq(schema.memoryEmbeddings.scope, scope))
+      .all())
+      .reduce<EmbeddingCache>((cache, row) => {
+        cache[row.entryId] = jsonParse<ReadonlyArray<number>>(row.vectorJson, []);
+        return cache;
+      }, {});
+
+  const upsertEmbeddingCache = (scope: string, cache: EmbeddingCache): void => {
+    const rows = Object.entries(cache).map(([entryId, vector]) => ({
+      entryId,
+      scope,
+      vectorJson: jsonStringify(vector),
+      updatedAt: now(),
+    }));
+    if (rows.length === 0) return;
+    db.write(() => {
+      for (const row of rows) {
+        db.orm.insert(schema.memoryEmbeddings)
+          .values(row)
+          .onConflictDoUpdate({
+            target: schema.memoryEmbeddings.entryId,
+            set: {
+              scope: row.scope,
+              vectorJson: row.vectorJson,
+              updatedAt: row.updatedAt,
+            },
+          })
+          .run();
+      }
+    });
+  };
+
+  const replaceEmbeddingCache = (scope: string, cache: EmbeddingCache): void => {
+    const updatedAt = now();
+    db.transaction((tx) => {
+      tx.delete(schema.memoryEmbeddings)
+        .where(eq(schema.memoryEmbeddings.scope, scope))
+        .run();
+      const rows = Object.entries(cache).map(([entryId, vector]) => ({
+        entryId,
+        scope,
+        vectorJson: jsonStringify(vector),
+        updatedAt,
+      }));
+      if (rows.length > 0) {
+        tx.insert(schema.memoryEmbeddings).values(rows).run();
+      }
+    });
+  };
+
+  const saveEmbedding = (scope: string, entryId: string, vector: ReadonlyArray<number>): void => {
+    db.write(() => {
+      db.orm.insert(schema.memoryEmbeddings)
+        .values({
+          entryId,
+          scope,
+          vectorJson: jsonStringify(vector),
+          updatedAt: now(),
+        })
+        .onConflictDoUpdate({
+          target: schema.memoryEmbeddings.entryId,
+          set: {
+            scope,
+            vectorJson: jsonStringify(vector),
+            updatedAt: now(),
+          },
+        })
+        .run();
+    });
+  };
 
   const readEntries = async (scope: string): Promise<ReadonlyArray<MemoryEntry>> =>
     db.read(() => db.orm.select({
@@ -315,10 +372,14 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
     if (!embedFn) throw new Error("semantic search requires embed dependency");
     const entries = await readEntries(scope);
     if (entries.length === 0) return [];
-    const embFile = scopeToEmbeddingsFile(root, scope);
-    const cache = await loadEmbeddingCache(embFile);
+    const cache = loadEmbeddingCache(scope);
+    const missingEntries = entries.filter((entry) => !(entry.id in cache));
     const updated = await ensureEmbeddings(entries, cache, embedFn);
-    if (updated !== cache) await saveEmbeddingCache(embFile, updated);
+    if (updated !== cache) {
+      upsertEmbeddingCache(scope, Object.fromEntries(
+        missingEntries.map((entry) => [entry.id, updated[entry.id]!]),
+      ));
+    }
     const [queryVec] = await embedFn([query]);
     return entries
       .filter((entry) => entry.id in updated)
@@ -474,10 +535,8 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
       });
 
       if (embedFn) {
-        const embFile = scopeToEmbeddingsFile(root, input.scope);
-        const cache = await loadEmbeddingCache(embFile);
         const [vector] = await embedFn([text]);
-        await saveEmbeddingCache(embFile, { ...cache, [entry.id]: vector });
+        saveEmbedding(input.scope, entry.id, vector);
       }
 
       return entry;
@@ -502,13 +561,20 @@ export const createMemoryTools = (deps: MemoryToolsDeps): MemoryTools => {
     reindex: async (scope) => {
       if (!embedFn) throw new Error("reindex requires embed dependency");
       const entries = await readEntries(scope);
-      if (entries.length === 0) return 0;
+      if (entries.length === 0) {
+        db.write(() => {
+          db.orm.delete(schema.memoryEmbeddings)
+            .where(eq(schema.memoryEmbeddings.scope, scope))
+            .run();
+        });
+        return 0;
+      }
       const vectors = await embedFn(entries.map((entry) => entry.text));
       const cache: EmbeddingCache = {};
       for (let idx = 0; idx < entries.length; idx += 1) {
         cache[entries[idx].id] = vectors[idx];
       }
-      await saveEmbeddingCache(scopeToEmbeddingsFile(root, scope), cache);
+      replaceEmbeddingCache(scope, cache);
       await emitAccess(scope, {
         operation: "reindex",
         strategy: "reindex",

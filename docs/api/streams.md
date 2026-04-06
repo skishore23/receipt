@@ -1,6 +1,6 @@
 # Streams and Receipt Model
 
-Receipt persists append-only hash-linked receipts in per-stream JSONL files.
+Receipt persists append-only hash-linked receipts in SQLite-backed receipt tables.
 
 ## Stream Families
 

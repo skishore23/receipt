@@ -1,6 +1,6 @@
 import { factoryChatSessionStream, factoryChatStream } from "../../services/factory-chat-profiles";
 import type { FactoryChatItem, FactoryInspectorPanel, FactoryInspectorTab } from "../../views/factory-models";
-import type { QueueJob } from "../../adapters/jsonl-queue";
+import type { QueueJob } from "../../adapters/sqlite-queue";
 
 import { tryParseJson } from "./formatters";
 import {

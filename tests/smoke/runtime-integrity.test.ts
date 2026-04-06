@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
 import { receipt } from "@receipt/core/chain";
 
@@ -25,8 +25,8 @@ test("smoke: single-stream concurrent writes preserve integrity", async () => {
   const dataDir = await createTempDir("receipt-smoke-integrity");
 
   try {
-    const store = jsonlStore<CounterEvent>(dataDir);
-    const branchStore = jsonBranchStore(dataDir);
+    const store = sqliteReceiptStore<CounterEvent>(dataDir);
+    const branchStore = sqliteBranchStore(dataDir);
     const runtime = createRuntime<CounterCmd, CounterEvent, CounterState>(
       store,
       branchStore,
@@ -58,8 +58,8 @@ test("smoke: reducer rejections do not append invalid receipts", async () => {
   const dataDir = await createTempDir("receipt-smoke-invalid-reducer");
 
   try {
-    const store = jsonlStore<CounterEvent>(dataDir);
-    const branchStore = jsonBranchStore(dataDir);
+    const store = sqliteReceiptStore<CounterEvent>(dataDir);
+    const branchStore = sqliteBranchStore(dataDir);
     const runtime = createRuntime<CounterCmd, CounterEvent, CounterState>(
       store,
       branchStore,
@@ -91,7 +91,7 @@ test("smoke: stream discovery reads known streams from SQLite metadata", async (
   const dataDir = await createTempDir("receipt-smoke-stream-discovery");
 
   try {
-    const store = jsonlStore<CounterEvent>(dataDir);
+    const store = sqliteReceiptStore<CounterEvent>(dataDir);
     await store.append(receipt("factory/objectives/objective_alpha", undefined, { type: "counter.inc", seq: 1 }), undefined);
     await store.append(receipt("agents/factory-chat/generalist/chats/chat_01/objectives/objective_alpha/runs/run_01", undefined, { type: "counter.inc", seq: 2 }), undefined);
     const discovered = await store.listStreams?.();

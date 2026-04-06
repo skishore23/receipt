@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { QueueJob } from "./jsonl-queue";
+import type { QueueJob } from "./sqlite-queue";
 
 export type ReceiptProcessRole =
   | "all"

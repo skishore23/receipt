@@ -19,7 +19,7 @@ import { buildFactoryProjection } from "../modules/factory/selectors";
 import type { FactoryCmd, FactoryEvent } from "../modules/factory/events";
 import type { FactoryProjection, FactoryState } from "../modules/factory/types";
 import { decideMemory, initialMemoryState, reduceMemory } from "../adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
 
 export const JOB_PROJECTOR = "job_projection";
 export const OBJECTIVE_PROJECTOR = "objective_projection";
@@ -768,8 +768,8 @@ export const readChatContextProjectionVersion = (
 export const rebuildMemoryProjection = async (dataDir: string): Promise<void> => {
   const db = getReceiptDb(dataDir);
   const memoryRuntime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<MemoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideMemory,
     reduceMemory,
     initialMemoryState,

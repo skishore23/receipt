@@ -3,8 +3,8 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { jsonBranchStore, jsonlStore } from "../../../adapters/jsonl";
-import type { JsonlQueue, QueueJob } from "../../../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
+import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
 import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../../../adapters/codex-executor";
 import { HubGit } from "../../../adapters/hub-git";
 import type { MemoryTools } from "../../../adapters/memory-tools";
@@ -561,7 +561,7 @@ const objectiveStream = (objectiveId: string): string => `${FACTORY_STREAM_PREFI
 
 export class FactoryService {
   readonly dataDir: string;
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
   readonly sse: SseHub;
   readonly codexExecutor: CodexExecutor;
@@ -616,8 +616,8 @@ export class FactoryService {
       ? Math.max(1, Math.floor(opts.repoSlotConcurrency as number))
       : 1;
     this.runtime = createRuntime<FactoryCmd, FactoryEvent, FactoryState>(
-      jsonlStore<FactoryEvent>(opts.dataDir),
-      jsonBranchStore(opts.dataDir),
+      sqliteReceiptStore<FactoryEvent>(opts.dataDir),
+      sqliteBranchStore(opts.dataDir),
       decideFactory,
       reduceFactory,
       initialFactoryState,

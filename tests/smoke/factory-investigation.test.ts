@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue, type QueueJob } from "../../src/adapters/sqlite-queue";
 import { CodexControlSignalError, type CodexExecutorInput, type CodexRunControl } from "../../src/adapters/codex-executor";
 import { createRuntime } from "@receipt/core/runtime";
 import { getReceiptDb } from "../../src/db/client";
@@ -47,8 +47,8 @@ const createSourceRepo = async (opts?: {
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -71,13 +71,13 @@ const createFactoryService = async (opts: {
   readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
 }): Promise<{
   readonly service: FactoryService;
-  readonly queue: ReturnType<typeof jsonlQueue>;
+  readonly queue: ReturnType<typeof sqliteQueue>;
   readonly repoRoot: string;
   readonly dataDir: string;
 }> => {
   const dataDir = await createTempDir("receipt-factory-investigation");
   const repoRoot = await createSourceRepo({ seed: opts.seedRepo });
-  const queue = jsonlQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -107,7 +107,7 @@ const createFactoryService = async (opts: {
 };
 
 const objectiveTaskJobs = async (
-  queue: ReturnType<typeof jsonlQueue>,
+  queue: ReturnType<typeof sqliteQueue>,
   objectiveId: string,
 ): Promise<ReadonlyArray<QueueJob>> => {
   const jobs = await queue.listJobs({ limit: 80 });

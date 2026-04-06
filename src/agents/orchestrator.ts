@@ -1,5 +1,5 @@
 import type { AgentRunInput, AgentRunResult } from "./agent";
-import type { JsonlQueue } from "../adapters/jsonl-queue";
+import type { SqliteQueue } from "../adapters/sqlite-queue";
 import type { FactoryService } from "../services/factory-service";
 import type { ZodTypeAny, infer as ZodInfer } from "zod";
 import {
@@ -23,7 +23,7 @@ export {
 };
 
 export type OrchestratorRunInput = AgentRunInput & {
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly dataDir?: string;
   readonly factoryService?: FactoryService;
   readonly repoRoot?: string;

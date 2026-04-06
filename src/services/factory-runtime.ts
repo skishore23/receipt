@@ -16,8 +16,8 @@ import {
   type MemoryState,
   type MemoryTools,
 } from "../adapters/memory-tools";
-import { jsonBranchStore, jsonlStore } from "../adapters/jsonl";
-import type { QueueJob } from "../adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../adapters/sqlite";
+import type { QueueJob } from "../adapters/sqlite-queue";
 import { embed, llmStructured } from "../adapters/openai";
 import { z } from "zod";
 import { createRuntime } from "@receipt/core/runtime";
@@ -726,8 +726,8 @@ const renderObjectiveAuditMemoryText = (input: {
 
 const createDefaultMemoryTools = (dataDir: string): MemoryTools => {
   const memoryRuntime = createRuntime<MemoryCmd, MemoryEvent, MemoryState>(
-    jsonlStore<MemoryEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<MemoryEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideMemory,
     reduceMemory,
     initialMemoryState,

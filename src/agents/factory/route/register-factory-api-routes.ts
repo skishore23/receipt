@@ -21,7 +21,7 @@ import {
   parseComposerDraft,
 } from "../../../factory-cli/composer";
 import type { AgentLoaderContext } from "../../../framework/agent-types";
-import type { QueueJob } from "../../../adapters/jsonl-queue";
+import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryWorkbenchPageModel } from "../../../views/factory-models";
 import {
   buildWorkbenchLink,
@@ -142,6 +142,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: request.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
               focusKind: request.focusKind,
               focusId: request.focusId,
@@ -164,6 +165,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: nextObjectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: "action",
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -203,6 +205,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: created.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: "action",
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -220,6 +223,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: detail.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -237,6 +241,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: detail.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -254,6 +259,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: detail.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -271,6 +277,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: detail.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -288,6 +295,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: detail.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
             }), {
               chatId: request.chatId,
@@ -307,6 +315,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
               focusKind: "job",
               focusId: queued.job.id,
@@ -326,6 +335,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
               focusKind: "job",
               focusId: queued.job.id,
@@ -345,6 +355,7 @@ export const registerFactoryApiRoutes = (input: {
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: request.detailTab,
+              page: request.page,
               filter: request.filter,
               focusKind: "job",
               focusId: queued.job.id,
@@ -383,6 +394,7 @@ export const registerFactoryApiRoutes = (input: {
         objectiveId: request.objectiveId,
         inspectorTab: request.inspectorTab,
         detailTab: request.detailTab,
+        page: request.page,
         filter: request.filter,
         focusKind: request.focusKind,
         focusId: request.focusId,
