@@ -377,6 +377,20 @@ const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArra
   }];
 };
 
+export const describeTranscriptState = (
+  model: FactoryChatIslandModel,
+): {
+  readonly signature: string;
+  readonly lastItemKind?: FactoryChatItem["kind"];
+} => {
+  const items = synthesizedTranscriptItems(model);
+  const latest = items[items.length - 1];
+  return {
+    signature: `${items.length}:${latest?.key ?? "empty"}`,
+    lastItemKind: latest?.kind,
+  };
+};
+
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
@@ -446,17 +460,27 @@ export const renderFactoryStreamingShell = (
     readonly liveMode?: "sse" | "js";
   },
 ): string => `<div id="factory-chat-streaming" class="space-y-2" aria-live="polite">
-  <section data-factory-stream-shell class="flex justify-start">
+  <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle" class="factory-stream-shell justify-start">
     <div class="w-full max-w-3xl space-y-2">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex min-w-0 items-center gap-1.5 ${sectionLabelClass}">${iconChat("w-3.5 h-3.5")} <span id="factory-chat-streaming-label-text">${esc(profileLabel)}</span></div>
-        <span class="text-[11px] text-muted-foreground">Streaming</span>
+        <span id="factory-chat-streaming-status" class="text-[11px] text-muted-foreground">Streaming</span>
       </div>
       <div class="${assistantResponseCardClass}">
         <div class="${assistantResponseBodyClass}">
+          <div id="factory-chat-streaming-loader" class="factory-stream-loader hidden" aria-hidden="true">
+            <span class="factory-stream-loader-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+            <div class="min-w-0 flex-1">
+              <div class="factory-stream-loader-row">
+                <span id="factory-chat-streaming-loader-label" class="factory-stream-loader-label">Sending</span>
+                <span class="factory-stream-loader-separator" aria-hidden="true"></span>
+                <span id="factory-chat-streaming-loader-meta" class="factory-stream-loader-meta">Waiting for the reply.</span>
+              </div>
+            </div>
+          </div>
           <div
             id="factory-chat-streaming-content"
-            class="whitespace-pre-wrap text-sm leading-6 text-foreground"
+            class="factory-streaming-content whitespace-pre-wrap text-sm leading-6 text-foreground"
             ${options?.liveMode === "js"
               ? ""
               : 'sse-swap="factory-stream-token" hx-swap="beforeend"'}

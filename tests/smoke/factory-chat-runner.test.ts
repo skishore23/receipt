@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
-import { jsonlQueue } from "../../src/adapters/jsonl-queue";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import type { MemoryTools } from "../../src/adapters/memory-tools";
 import { createRuntime } from "@receipt/core/runtime";
 import type { JobCmd, JobEvent, JobState } from "../../src/modules/job";
@@ -19,7 +19,7 @@ import {
   runFactoryChat,
   runFactoryCodexJob,
 } from "../../src/agents/factory-chat";
-import type { QueueJob } from "../../src/adapters/jsonl-queue";
+import type { QueueJob } from "../../src/adapters/sqlite-queue";
 import {
   historicalInfrastructureLoop,
   historicalInfrastructureObjectiveId,
@@ -66,6 +66,32 @@ test("factory chat prompt guidance: analyzes turn shape with the model", async (
     includeBoundObjectiveContext: false,
   });
   expect(renderFactoryResponseStyleGuidance("work")).toContain("Choose the amount of structure");
+});
+
+test("factory chat prompt guidance: prefers structured turn analysis so classifier JSON does not leak to streaming", async () => {
+  let structuredCalled = false;
+  const analysis = await analyzeFactoryChatTurn({
+    apiReady: true,
+    problem: "Check the current objective and tell me what to do next.",
+    llmText: async () => {
+      throw new Error("llmText should not be used when llmStructured is available");
+    },
+    llmStructured: async () => {
+      structuredCalled = true;
+      return {
+        parsed: {
+          responseStyle: "work",
+          includeBoundObjectiveContext: true,
+        },
+        raw: "{\"responseStyle\":\"work\",\"includeBoundObjectiveContext\":true}",
+      };
+    },
+  });
+  expect(structuredCalled).toBe(true);
+  expect(analysis).toEqual({
+    responseStyle: "work",
+    includeBoundObjectiveContext: true,
+  });
 });
 
 const createNoopDelegationTools = () => ({
@@ -179,7 +205,7 @@ const createFactoryServiceStub = (overrides: Partial<Record<string, unknown>> = 
   ...overrides,
 });
 
-const enqueueRunningFactoryTaskJob = async (queue: ReturnType<typeof jsonlQueue>, input: {
+const enqueueRunningFactoryTaskJob = async (queue: ReturnType<typeof sqliteQueue>, input: {
   readonly jobId: string;
   readonly objectiveId: string;
   readonly taskId: string;
@@ -237,8 +263,8 @@ const makeSupervisorObjectiveDetail = (input: {
 
 const createAgentRuntime = (dataDir: string) =>
   createRuntime<AgentCmd, AgentEvent, AgentState>(
-    jsonlStore<AgentEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<AgentEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideAgent,
     reduceAgent,
     initialAgent,
@@ -246,8 +272,8 @@ const createAgentRuntime = (dataDir: string) =>
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -373,7 +399,7 @@ test("factory chat runner: codex.run queues work asynchronously and returns imme
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -448,7 +474,7 @@ test("factory chat runner: codex.run reuses the active codex probe for the same 
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -539,7 +565,7 @@ test("factory chat runner: codex.status reports live codex work for the current 
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -619,7 +645,7 @@ test("factory chat runner: status.read tools expose codex logs, objective status
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -765,7 +791,7 @@ test("factory chat runner: default live objective policy preserves the operator 
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_live_finalizer";
   await writeProfile(profileRoot, {
@@ -858,7 +884,7 @@ test("factory chat runner: live objective waiting-message policy rewrites premat
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_live_waiting_message";
   await writeProfile(profileRoot, {
@@ -954,7 +980,7 @@ test("factory chat runner: active supervisor only monitors healthy objective-bac
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_supervisor_healthy";
   const taskId = "task_01";
@@ -1077,7 +1103,7 @@ test("factory chat runner: active supervisor steers a stalled objective-backed c
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_supervisor_steer";
   const taskId = "task_03";
@@ -1209,7 +1235,7 @@ test("factory chat runner: active supervisor follows up on historical infrastruc
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = historicalInfrastructureObjectiveId;
   const taskId = "task_03";
@@ -1356,7 +1382,7 @@ test("factory chat runner: active supervisor aborts a repeatedly stalled child a
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_supervisor_abort";
   const taskId = "task_03";
@@ -1496,7 +1522,7 @@ test("factory chat runner: agent.delegate queues work and agent.status sees the 
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -1587,7 +1613,7 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -1692,7 +1718,7 @@ test("factory chat runner: profile.handoff finalizes the current run after queue
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -1769,7 +1795,7 @@ test("factory chat runner: profile.handoff accepts common profile id aliases", a
     const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
     const agentRuntime = createAgentRuntime(dataDir);
     const jobRuntime = createJobRuntime(dataDir);
-    const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+    const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
     const memoryTools = createMemoryStub();
     await writeProfile(profileRoot, {
       id: "generalist",
@@ -1839,7 +1865,7 @@ test("factory chat runner: profile.handoff requires a structured engineer handof
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -1917,7 +1943,7 @@ test("factory chat runner: agent.status rejects the current factory job id", asy
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -1991,7 +2017,7 @@ test("factory chat runner: software profile rejects a third discovery step befor
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2087,7 +2113,7 @@ test("factory chat runner: blocking monitor polls do not consume discovery budge
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2191,7 +2217,7 @@ test("factory chat runner: first factory.output wait is short before later waits
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const objectiveId = "objective_live_wait";
   const taskId = "task_live_wait";
@@ -2301,7 +2327,7 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   const llmCalls: string[] = [];
   const stableTs = 1_700_000_000_000;
@@ -2427,7 +2453,7 @@ test("factory chat runner: terminal-objective reads do not consume discovery bud
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2567,7 +2593,7 @@ test("factory chat runner: factory.output infers the single task from objectiveI
   const profileRoot = await createTempDir("receipt-factory-chat-output-single-task-profile");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
 
   await writeProfile(profileRoot, {
@@ -2679,7 +2705,7 @@ test("factory chat runner: software profile rejects follow-up polling while a co
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2771,7 +2797,7 @@ test("factory chat runner: finalizer rewrites premature software success text wh
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2842,7 +2868,7 @@ test("factory chat runner: active-monitor software policy keeps polling and pres
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -2931,7 +2957,7 @@ test("factory chat runner: accepts valid JSON-object strings for tool input", as
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -2994,7 +3020,7 @@ test("factory chat runner: retries once when the model emits malformed tool-inpu
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3066,7 +3092,7 @@ test("factory chat runner: startup binds the current objective to the chat sessi
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3121,7 +3147,7 @@ test("factory chat runner: prompt keeps profile memory separate from explicit ob
   const profileRoot = await createTempDir("receipt-factory-chat-layered-memory-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const repoKey = repoKeyForRoot(repoRoot);
   const objectiveId = "objective_demo";
   const profileId = "generalist";
@@ -3224,7 +3250,7 @@ test("factory chat runner: remembers durable chat presentation preferences and r
   const profileRoot = await createTempDir("receipt-factory-chat-preferences-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const repoKey = repoKeyForRoot(repoRoot);
   const profileId = "generalist";
   const preferenceScope = `repos/${repoKey}/users/default/preferences`;
@@ -3357,7 +3383,7 @@ test("factory chat runner: injects session recall from older transcript messages
   const profileRoot = await createTempDir("receipt-factory-chat-session-recall-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3425,7 +3451,7 @@ test("factory chat runner: lightweight conversational turns skip bound objective
   const profileRoot = await createTempDir("receipt-factory-chat-lightweight-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3504,7 +3530,7 @@ test("factory chat runner: factory.dispatch create starts a new objective instea
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3603,7 +3629,7 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3722,7 +3748,7 @@ test("factory chat runner: Tech Lead cannot promote objectives through factory.d
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -3808,7 +3834,7 @@ test("factory chat runner: Software Engineer can promote objectives through fact
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "software",
@@ -3890,7 +3916,7 @@ test("factory chat runner: Infrastructure Engineer cannot create delivery object
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "infrastructure",
@@ -3959,7 +3985,7 @@ test("factory chat runner: QA Engineer cannot create investigation objectives", 
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "qa",
@@ -4028,7 +4054,7 @@ test("factory chat runner: factory.dispatch rejects profileId reassignment", asy
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4097,7 +4123,7 @@ test("factory chat runner: terminal bound objectives create a follow-up objectiv
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4218,7 +4244,7 @@ test("factory chat runner: canonical follow-up note reacts the active bound obje
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4300,7 +4326,7 @@ test("factory chat runner: canonical completed-objective follow-up fields create
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4411,7 +4437,7 @@ test("factory chat runner: compatibility aliases and single-string checks no lon
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4534,7 +4560,7 @@ test("factory chat runner: exhausted slices queue an automatic continuation on t
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4598,7 +4624,7 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "generalist",
@@ -4695,7 +4721,7 @@ test("factory chat runner: historical infrastructure loop continues on the lates
   const profileRoot = await createTempDir("receipt-factory-chat-historical-infra-profile-root");
   const agentRuntime = createAgentRuntime(dataDir);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const memoryTools = createMemoryStub();
   await writeProfile(profileRoot, {
     id: "infrastructure",

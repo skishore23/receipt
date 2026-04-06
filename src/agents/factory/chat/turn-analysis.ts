@@ -34,6 +34,12 @@ const parseJsonObject = (raw: string): unknown => {
 
 export const analyzeFactoryChatTurn = async (input: {
   readonly llmText: (opts: { system?: string; user: string }) => Promise<string>;
+  readonly llmStructured?: (opts: {
+    readonly system?: string;
+    readonly user: string;
+    readonly schema: typeof FactoryChatTurnAnalysisSchema;
+    readonly schemaName: string;
+  }) => Promise<{ readonly parsed: FactoryChatTurnAnalysis; readonly raw: string }>;
   readonly apiReady: boolean;
   readonly problem: string;
 }): Promise<FactoryChatTurnAnalysis> => {
@@ -54,6 +60,14 @@ export const analyzeFactoryChatTurn = async (input: {
     `User turn: ${problem}`,
   ].join("\n");
   try {
+    if (input.llmStructured) {
+      const result = await input.llmStructured({
+        user,
+        schema: FactoryChatTurnAnalysisSchema,
+        schemaName: "FactoryChatTurnAnalysis",
+      });
+      return FactoryChatTurnAnalysisSchema.parse(result.parsed);
+    }
     const raw = await input.llmText({ user });
     return FactoryChatTurnAnalysisSchema.parse(parseJsonObject(raw));
   } catch {

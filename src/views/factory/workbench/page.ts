@@ -18,6 +18,7 @@ import {
   truncate,
 } from "../../ui";
 import {
+  describeTranscriptState,
   renderFactoryStreamingShell,
   renderFactoryTranscriptSection,
 } from "../transcript";
@@ -89,16 +90,22 @@ export type FactoryWorkbenchHeaderIslandModel = {
   readonly currentPresence?: string;
 };
 
+export type FactoryWorkbenchChatHeaderModel = {
+  readonly route: FactoryWorkbenchRouteContext;
+  readonly activeProfileLabel: string;
+  readonly activeRole?: string;
+};
+
 type WorkbenchProjection = "profile-board" | "objective-runtime";
 
 const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspectorTab" | "objectiveId">) => input.inspectorTab === "chat"
   ? [
-      { event: "agent-refresh", throttleMs: 180 },
-      { event: "job-refresh", throttleMs: 180 },
+      { kind: "body", event: "agent-refresh", throttleMs: 180 },
+      { kind: "body", event: "job-refresh", throttleMs: 180 },
     ] as const
   : [
-      { event: "profile-board-refresh", throttleMs: 300 },
-      ...(input.objectiveId ? [{ event: "objective-runtime-refresh", throttleMs: 300 }] : []),
+      { kind: "body", event: "profile-board-refresh", throttleMs: 300 },
+      ...(input.objectiveId ? [{ kind: "body" as const, event: "objective-runtime-refresh", throttleMs: 300 }] : []),
     ] as const;
 const workbenchBackgroundRefreshOn = [] as const;
 const workbenchHeaderRefreshOn = [] as const;
@@ -147,6 +154,37 @@ const workbenchIslandPath = (input: FactoryWorkbenchRouteContext): string =>
 
 const chatIslandPath = (input: FactoryWorkbenchRouteContext): string =>
   `/factory/island/chat${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchFocusPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/workbench/focus${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchRailPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/workbench/rail${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchChatShellPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/workbench/chat-shell${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchChatBodyPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/workbench/chat-body${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchSelectionPath = (input: FactoryWorkbenchRouteContext): string =>
+  `/factory/island/workbench/select${buildFactoryWorkbenchSearch(input)}`;
+
+const htmxNavAttrs = (
+  path: string,
+  targetId: string,
+  swap: "innerHTML" | "outerHTML" = "outerHTML",
+): string => `hx-get="${esc(path)}" hx-target="${esc(targetId)}" hx-swap="${esc(swap)}" hx-push-url="true"`;
+
+const passiveRefreshAttrs = (path: string): string => `data-refresh-path="${esc(path)}"`;
+
+const htmxOobAttrs = (targetId: string): string =>
+  `hx-swap-oob="outerHTML:${esc(targetId)}"`;
+
+const withOuterHtmlOob = (targetId: string, markup: string): string =>
+  markup.replace(/^(<\w+)/, `$1 ${htmxOobAttrs(targetId)}`);
+
+const workbenchChatRegionTarget = "#factory-workbench-chat-region";
 
 const workbenchIslandBindings = (input: FactoryWorkbenchRouteContext) => ({
   header: {
@@ -198,6 +236,7 @@ const workbenchBlockRefreshOn = (
   projections: ReadonlyArray<WorkbenchProjection>,
 ) => [
   ...uniqueWorkbenchProjections(projections).map((projection) => ({
+    kind: "body" as const,
     event: workbenchProjectionEvent(projection),
     throttleMs: 320,
   })),
@@ -447,6 +486,31 @@ const engineerPresence = (model: FactoryChatIslandModel): string | undefined => 
   return primaryRole && primaryRole === summary ? undefined : summary;
 };
 
+const partitionWorkbenchBlocks = (workspace: FactoryWorkbenchWorkspaceModel) => {
+  const showSummary = isSummaryVisible(workspace);
+  const leftDetailTab = workspace.detailTab === "review" ? "review" : "action";
+  const activityBlock = workspace.blocks.find((block) => block.key === "activity");
+  const summaryBlock = showSummary ? workspace.blocks.find((block) => block.key === "summary") : undefined;
+  const liveBlocks = leftDetailTab === "review"
+    ? [
+        ...(activityBlock ? [activityBlock] : []),
+      ]
+    : [
+        ...(summaryBlock ? [summaryBlock] : []),
+      ];
+  const feedBlocks = workspace.blocks.filter((block) =>
+    block.key !== "summary" && block.key !== "activity",
+  );
+  const visibleBlocks = showSummary
+    ? workspace.blocks
+    : workspace.blocks.filter((block) => block.key !== "summary");
+  return {
+    feedBlocks,
+    liveBlocks,
+    visibleBlocks,
+  };
+};
+
 const engineerResponsibilities = (model: FactoryChatIslandModel): ReadonlyArray<string> => {
   if ((model.activeProfileResponsibilities?.length ?? 0) > 0) {
     return model.activeProfileResponsibilities!.slice(0, 4);
@@ -454,6 +518,85 @@ const engineerResponsibilities = (model: FactoryChatIslandModel): ReadonlyArray<
   const responsibilitiesSection = (model.activeProfileSections ?? [])
     .find((section) => section.title.trim().toLowerCase() === "responsibilities");
   return (responsibilitiesSection?.items ?? []).slice(0, 4);
+};
+
+const uniqueProfileSummaries = (model: FactoryChatIslandModel): ReadonlyArray<string> => {
+  const seen = new Set<string>();
+  const summaries: string[] = [];
+  for (const value of [
+    model.activeProfileProfileSummary,
+    model.activeProfileSoulSummary,
+    model.activeProfileSummary,
+  ]) {
+    const trimmed = value?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    summaries.push(trimmed);
+  }
+  return summaries;
+};
+
+const renderProfileOverviewPanel = (
+  model: FactoryChatIslandModel,
+): string => {
+  const primaryRole = engineerPrimaryRole(model);
+  const summaries = uniqueProfileSummaries(model);
+  const responsibilities = engineerResponsibilities(model);
+  const sections = (model.activeProfileSections ?? [])
+    .filter((section) => section.title.trim().toLowerCase() !== "responsibilities")
+    .slice(0, 3);
+  const tools = (model.activeProfileTools ?? []).slice(0, 6);
+  if (
+    !primaryRole
+    && summaries.length === 0
+    && responsibilities.length === 0
+    && sections.length === 0
+    && tools.length === 0
+  ) {
+    return "";
+  }
+  return `<section class="border border-border bg-card">
+    <div class="flex items-center gap-3 border-b border-border px-4 py-3">
+      <span class="flex h-7 w-7 shrink-0 items-center justify-center text-primary">${iconWorker("h-4 w-4")}</span>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Profile Brief</div>
+          <div class="text-sm font-semibold text-foreground">${esc(model.activeProfileLabel)}</div>
+          ${primaryRole ? `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground"${tooltipAttr(primaryRole)}>${esc(truncate(primaryRole, 36))}</span>` : ""}
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-col">
+      ${summaries.length > 0 ? `<section class="border-b border-border">
+        <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</div>
+        <div class="factory-scrollbar h-48 space-y-4 overflow-x-hidden overflow-y-auto px-4 pb-4 text-sm leading-6 text-foreground">
+          ${summaries.map((summary) => `<div${tooltipAttr(summary)}>${esc(summary)}</div>`).join("")}
+        </div>
+      </section>` : ""}
+      ${responsibilities.length > 0 ? `<section class="border-b border-border">
+        <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Responsibilities</div>
+        <div class="factory-scrollbar h-40 space-y-0 overflow-x-hidden overflow-y-auto">
+          ${responsibilities.map((item, index) => `<div class="px-4 py-3 text-sm leading-6 text-foreground${index > 0 ? " border-t border-border" : ""}">${esc(item)}</div>`).join("")}
+        </div>
+      </section>` : ""}
+      ${sections.map((section, index) => `<section class="${index === sections.length - 1 && tools.length === 0 ? "" : "border-b border-border"}">
+        <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">${esc(section.title)}</div>
+        <div class="factory-scrollbar h-40 space-y-0 overflow-x-hidden overflow-y-auto">
+          ${section.items.map((item, itemIndex) => `<div class="px-4 py-3 text-sm leading-6 text-foreground${itemIndex > 0 ? " border-t border-border" : ""}">${esc(item)}</div>`).join("")}
+        </div>
+      </section>`).join("")}
+      ${tools.length > 0 ? `<section>
+        <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Tool Access</div>
+        <div class="factory-scrollbar h-32 overflow-x-hidden overflow-y-auto px-4 pb-4">
+          <div class="flex flex-wrap gap-2">
+            ${tools.map((tool) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground">${esc(tool)}</span>`).join("")}
+          </div>
+        </div>
+      </section>` : ""}
+    </div>
+  </section>`;
 };
 
 const renderEngineerCard = (model: FactoryChatIslandModel): string => {
@@ -483,7 +626,11 @@ const renderFilterPill = (
   filter: FactoryWorkbenchWorkspaceModel["filters"][number],
 ): string => {
   const href = filterHref(routeContext, filter.key);
-  return `<a href="${esc(href)}" data-factory-href="${esc(href)}" ${filter.selected ? 'aria-current="page"' : ""} class="inline-flex items-center border-b-2 px-0 py-1.5 text-sm font-medium transition ${filter.selected
+  const targetRoute = {
+    ...routeContext,
+    filter: filter.key,
+  };
+  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchRailPath(targetRoute), "#factory-workbench-rail-shell")} ${filter.selected ? 'aria-current="page"' : ""} class="inline-flex items-center border-b-2 px-0 py-1.5 text-sm font-medium transition ${filter.selected
   ? "border-primary text-foreground"
   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}">${esc(filter.label)}</a>`;
 };
@@ -519,7 +666,17 @@ const renderObjectiveCard = (
   objective: FactoryChatObjectiveNav,
   section?: FactoryWorkbenchObjectiveListSectionModel,
 ): string => {
-  const href = objectiveHref(routeContext, objective.objectiveId, undefined, objective.profileId);
+  const objectiveRouteContext: FactoryWorkbenchRouteContext = {
+    ...routeContext,
+    chatId: objective.chatId ?? routeContext.chatId,
+  };
+  const href = objectiveHref(objectiveRouteContext, objective.objectiveId, undefined, objective.profileId);
+  const selectRoute: FactoryWorkbenchRouteContext = {
+    ...objectiveRouteContext,
+    profileId: objective.profileId ?? routeContext.profileId,
+    objectiveId: objective.objectiveId,
+    inspectorTab: "chat",
+  };
   const summary = truncate(
     objective.summary ?? objective.blockedReason ?? "Objective activity will appear here.",
     objective.selected ? 180 : 120,
@@ -538,7 +695,7 @@ const renderObjectiveCard = (
   const statusTileClass = objective.selected
     ? "border-primary/20 bg-primary/10"
     : "border-border/80 bg-background/80";
-  return `<a href="${esc(href)}" data-factory-href="${esc(href)}" data-objective-id="${esc(objective.objectiveId)}" data-selected="${objective.selected ? "true" : "false"}" ${objective.selected ? 'aria-current="page"' : ""} class="block px-2 py-2 transition">
+  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchSelectionPath(selectRoute), "#factory-workbench-focus-shell")} data-objective-id="${esc(objective.objectiveId)}" data-selected="${objective.selected ? "true" : "false"}" ${objective.selected ? 'aria-current="page"' : ""} class="block px-2 py-2 transition">
     <div class="${cardClass} px-4 py-4 transition-colors">
     <div class="flex items-start gap-3">
       <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center border ${statusTileClass}">${statusDot(stateTone)}</div>
@@ -577,7 +734,11 @@ const renderWorkbenchActionButton = (
       ? workbenchPrimaryActionClass
       : workbenchSecondaryActionClass;
   if (action.focusOnly) {
-    return `<a href="${esc(focusHref)}" data-factory-href="${esc(focusHref)}" class="${className}">${esc(action.label)}</a>`;
+    return `<a href="${esc(focusHref)}" ${htmxNavAttrs(workbenchChatShellPath({
+      ...routeContext,
+      inspectorTab: "chat",
+      objectiveId: routeContext.objectiveId,
+    }), workbenchChatRegionTarget)} class="${className}">${esc(action.label)}</a>`;
   }
   const command = action.command ?? "";
   const href = commandHref(focusHref, command);
@@ -610,7 +771,11 @@ const renderLiveFocusControls = (
     renderWorkbenchCommandButton("Abort Job", "/abort-job ", chatHref, `${dangerButtonClass} !px-3 !py-1.5 !text-[13px]`),
   ];
   if (chatHref) {
-    buttons.push(`<a href="${esc(chatHref)}" data-factory-href="${esc(chatHref)}" class="${workbenchSecondaryActionClass}">Open Chat</a>`);
+    buttons.push(`<a href="${esc(chatHref)}" ${htmxNavAttrs(workbenchChatShellPath({
+      ...routeContext,
+      inspectorTab: "chat",
+      objectiveId: routeContext.objectiveId,
+    }), workbenchChatRegionTarget)} class="${workbenchSecondaryActionClass}">Open Chat</a>`);
   }
   return `<div class="mt-3 flex flex-wrap gap-2">${buttons.join("")}</div>`;
 };
@@ -725,6 +890,18 @@ const renderObjectiveSelfImprovementSnapshot = (
   </section>`;
 };
 
+const normalizeSummaryCardValue = (value?: string): string =>
+  (value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[.]+$/g, "")
+    .toLowerCase();
+
+const renderSummaryTextCard = (label: string, body: string): string => `<section class="border border-border bg-muted/25 px-4 py-3">
+  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
+  <div class="mt-2 text-sm leading-6 text-foreground">${esc(body)}</div>
+</section>`;
+
 const renderSummarySection = (
   section: FactoryWorkbenchSummarySectionModel,
   routeContext: FactoryWorkbenchRouteContext,
@@ -811,6 +988,18 @@ const renderSummarySection = (
     ...(objective.secondaryActions ?? []).map((action) => renderWorkbenchActionButton(routeContext, action)),
   ].filter(Boolean).join("");
   const compactStats = section.stats.slice(0, 4);
+  const summaryCards = [
+    { label: "Latest Outcome", value: latestOutcome },
+    { label: "Next Operator Action", value: nextOperatorAction },
+    { label: "Latest Decision", value: section.latestDecisionSummary },
+  ].filter((entry): entry is { label: string; value: string } => Boolean(entry.value?.trim()))
+    .filter((entry, index, entries) => {
+      const normalized = normalizeSummaryCardValue(entry.value);
+      if (!normalized) return false;
+      return entries.findIndex((candidate) => normalizeSummaryCardValue(candidate.value) === normalized) === index;
+    });
+  const primarySummaryCard = summaryCards[0];
+  const secondarySummaryCards = summaryCards.slice(1);
   return `<section class="space-y-4 border border-border bg-card px-5 py-5">
     ${currentRunCard}
     <div class="space-y-4">
@@ -826,23 +1015,11 @@ const renderSummarySection = (
       </div>
       ${actions ? `<div class="flex flex-wrap items-center gap-2">${actions}</div>` : ""}
     </div>
-    <div class="grid gap-3 xl:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
-      <section class="space-y-3">
-        <section class="border border-border bg-muted/25 px-4 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Outcome</div>
-          <div class="mt-2 text-sm leading-6 text-foreground">${esc(latestOutcome)}</div>
-        </section>
-        <section class="border border-border bg-muted/25 px-4 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Next Operator Action</div>
-          <div class="mt-2 text-sm leading-6 text-foreground">${esc(nextOperatorAction)}</div>
-        </section>
-        ${section.latestDecisionSummary ? `<section class="border border-border bg-muted/25 px-4 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Latest Decision</div>
-          <div class="mt-2 text-sm leading-6 text-foreground">${esc(section.latestDecisionSummary)}</div>
-        </section>` : ""}
-        ${renderObjectiveSelfImprovementSnapshot(objective, routeContext)}
+    <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_220px] xl:items-start">
+      <section class="min-w-0">
+        ${primarySummaryCard ? renderSummaryTextCard(primarySummaryCard.label, primarySummaryCard.value) : ""}
       </section>
-      <aside class="border border-border bg-muted/25 px-4 py-3">
+      <aside class="border border-border bg-muted/25 px-4 py-3 xl:max-w-[220px]">
         <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Snapshot</div>
         <div class="mt-3 grid gap-2">
           ${compactStats.map((stat) => `<div class="border border-border bg-background px-3 py-2">
@@ -851,6 +1028,10 @@ const renderSummarySection = (
           </div>`).join("")}
         </div>
       </aside>
+    </div>
+    <div class="space-y-3">
+      ${secondarySummaryCards.map((card) => renderSummaryTextCard(card.label, card.value)).join("")}
+      ${renderObjectiveSelfImprovementSnapshot(objective, routeContext)}
     </div>
   </section>`;
 };
@@ -861,11 +1042,15 @@ const renderObjectiveListSection = (
 ): string => {
   const pinned = section.key === "selected";
   const pageHref = (page: number): string => routeHref(routeContext, { page });
+  const pageRailPath = (page: number): string => workbenchRailPath({
+    ...routeContext,
+    page,
+  });
   const pagination = section.pageCount > 1 ? `<div class="flex items-center gap-2 border-t border-border px-4 py-3 text-[12px] text-muted-foreground">
     <span>Page ${esc(String(section.page))} of ${esc(String(section.pageCount))}</span>
     <div class="ml-auto flex items-center gap-2">
-      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasPreviousPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.max(1, section.page - 1)))}" ${section.hasPreviousPage ? "" : 'aria-disabled="true" tabindex="-1"'}>Previous</a>
-      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasNextPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.min(section.pageCount, section.page + 1)))}" ${section.hasNextPage ? "" : 'aria-disabled="true" tabindex="-1"'}>Next</a>
+      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasPreviousPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.max(1, section.page - 1)))}" ${section.hasPreviousPage ? htmxNavAttrs(pageRailPath(Math.max(1, section.page - 1)), "#factory-workbench-rail-shell") : 'aria-disabled="true" tabindex="-1"'}>Previous</a>
+      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasNextPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.min(section.pageCount, section.page + 1)))}" ${section.hasNextPage ? htmxNavAttrs(pageRailPath(Math.min(section.pageCount, section.page + 1)), "#factory-workbench-rail-shell") : 'aria-disabled="true" tabindex="-1"'}>Next</a>
     </div>
   </div>` : "";
   return `<section class="border border-border bg-card/70">
@@ -1032,30 +1217,12 @@ const renderBlock = (
   return rendered;
 };
 
-const workbenchBlockRefreshBindings = (
-  block: FactoryWorkbenchWorkspaceModel["blocks"][number],
-): ReadonlyArray<{
-  readonly event: string;
-  readonly throttleMs: number;
-}> => {
-  const projections = workbenchBlockProjections(block);
-  switch (block.key) {
-    default:
-      return workbenchBlockRefreshOn(projections);
-  }
-};
-
 const renderWorkbenchBlockIsland = (
   block: FactoryWorkbenchWorkspaceModel["blocks"][number],
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const projections = workbenchBlockProjections(block);
-  const refreshOn = workbenchBlockRefreshBindings(block);
-  return `<div id="factory-workbench-block-${esc(block.key)}" class="min-w-0" data-workbench-projections="${esc(projections.join(" "))}" ${liveIslandAttrs({
-    path: workbenchBlockPath(routeContext, block.key),
-    refreshOn,
-    clientOnly: true,
-  })}>
+  return `<div id="factory-workbench-block-${esc(block.key)}" class="min-w-0" data-workbench-projections="${esc(projections.join(" "))}" ${passiveRefreshAttrs(workbenchBlockPath(routeContext, block.key))}>
     ${renderBlock(block, routeContext)}
   </div>`;
 };
@@ -1080,7 +1247,10 @@ const renderWorkbenchPrimaryTabLink = (
   active: boolean,
 ): string => {
   const href = routeHref(routeContext, { detailTab: tab });
-  return `<a href="${esc(href)}" data-factory-href="${esc(href)}" ${active ? 'aria-current="page"' : ""} class="inline-flex items-center border-b-2 px-0 py-1.5 text-sm font-medium transition ${active
+  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchFocusPath({
+    ...routeContext,
+    detailTab: tab,
+  }), "#factory-workbench-focus-shell")} ${active ? 'aria-current="page"' : ""} class="inline-flex items-center border-b-2 px-0 py-1.5 text-sm font-medium transition ${active
     ? "border-primary text-foreground"
     : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}">${esc(label)}</a>`;
 };
@@ -1105,43 +1275,51 @@ export const factoryWorkbenchWorkspaceIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
-  const showSummary = isSummaryVisible(workspace);
-  const leftDetailTab = workspace.detailTab === "review" ? "review" : "action";
-  const activityBlock = workspace.blocks.find((block) => block.key === "activity");
-  const summaryBlock = showSummary ? workspace.blocks.find((block) => block.key === "summary") : undefined;
-  const liveBlocks = [
-    ...(summaryBlock ? [summaryBlock] : []),
-    ...(leftDetailTab === "review" && activityBlock ? [activityBlock] : []),
-  ];
-  const feedBlocks = workspace.blocks.filter((block) =>
-    block.key !== "summary" && block.key !== "activity",
-  );
-  const visibleBlocks = showSummary
-    ? workspace.blocks
-    : workspace.blocks.filter((block) => block.key !== "summary");
-  if (feedBlocks.length === 0) {
-    return `<div id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar flex min-w-0 flex-col gap-6 overflow-x-hidden pr-1 lg:h-full lg:min-h-0 lg:overflow-y-auto" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
-      ${visibleBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
-    </div>`;
-  }
   return `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)] lg:gap-5 lg:overflow-hidden" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
-    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35">
-      ${renderWorkbenchPrimaryHeader(workspace, routeContext)}
-      <div id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5 lg:pr-1">
-        <div class="flex min-w-0 flex-col gap-6">
-      ${liveBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
-        </div>
-      </div>
-    </section>
-    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35">
-      ${renderWorkbenchFeedHeader(workspace, routeContext)}
-      <div id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5">
-        <div class="flex min-w-0 flex-col gap-6">
-          ${feedBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
-        </div>
-      </div>
-    </section>
+    ${factoryWorkbenchFocusIsland(workspace, routeContext)}
+    ${factoryWorkbenchRailIsland(workspace, routeContext)}
   </div>`;
+};
+
+export const factoryWorkbenchFocusIsland = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
+  const { feedBlocks, liveBlocks, visibleBlocks } = partitionWorkbenchBlocks(workspace);
+  const content = feedBlocks.length === 0
+    ? visibleBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")
+    : `<div class="flex min-w-0 flex-col gap-6">
+      ${liveBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
+    </div>`;
+  return `<section id="factory-workbench-focus-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
+    path: workbenchFocusPath(routeContext),
+    refreshOn: workbenchBlockRefreshOn(["profile-board", "objective-runtime"]),
+    swap: "outerHTML",
+  })}>
+    ${feedBlocks.length === 0 ? "" : renderWorkbenchPrimaryHeader(workspace, routeContext)}
+    <div id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5 lg:pr-1">
+      ${content}
+    </div>
+  </section>`;
+};
+
+export const factoryWorkbenchRailIsland = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
+  const { feedBlocks } = partitionWorkbenchBlocks(workspace);
+  return `<section id="factory-workbench-rail-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
+    path: workbenchRailPath(routeContext),
+    refreshOn: workbenchBlockRefreshOn(["profile-board"]),
+    swap: "outerHTML",
+  })}>
+    ${renderWorkbenchFeedHeader(workspace, routeContext)}
+    <div id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5">
+      <div class="flex min-w-0 flex-col gap-6">
+        ${feedBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
+      </div>
+    </div>
+  </section>`;
 };
 
 const renderInspectorTabLink = (
@@ -1153,7 +1331,10 @@ const renderInspectorTabLink = (
   const href = routeHref(routeContext, { inspectorTab: tab });
   const active = (routeContext.inspectorTab ?? "overview") === tab;
   const pad = compact ? "px-2.5 py-1 text-[10px]" : "px-3 py-2 text-[12px]";
-  return `<a href="${esc(href)}" data-factory-href="${esc(href)}" ${active ? 'aria-current="page"' : ""} class="inline-flex items-center justify-center border font-semibold uppercase tracking-[0.14em] transition ${pad} ${active
+  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchChatShellPath({
+    ...routeContext,
+    inspectorTab: tab,
+  }), workbenchChatRegionTarget)} ${active ? 'aria-current="page"' : ""} class="inline-flex items-center justify-center border font-semibold uppercase tracking-[0.14em] transition ${pad} ${active
     ? "border-primary/20 bg-primary/10 text-primary"
     : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"}">${esc(label)}</a>`;
 };
@@ -1170,10 +1351,14 @@ const renderEmployeeOverviewPanel = (
       objective.primaryAction ? renderWorkbenchActionButton(routeContext, objective.primaryAction) : "",
       ...(objective.secondaryActions ?? []).map((action) => renderWorkbenchActionButton(routeContext, action)),
     ].filter(Boolean).join("")
-    : `<a href="${esc(focusHref)}" data-factory-href="${esc(focusHref)}" class="${workbenchPrimaryActionClass}">Message engineer</a>`;
+    : `<a href="${esc(focusHref)}" ${htmxNavAttrs(workbenchChatShellPath({
+      ...routeContext,
+      inspectorTab: "chat",
+    }), workbenchChatRegionTarget)} class="${workbenchPrimaryActionClass}">Message engineer</a>`;
   const overviewNote = model.activeRun || model.activeCodex || (model.liveChildren?.length ?? 0) > 0
     ? "Current run updates stay pinned on the left."
     : "Pick an objective from the queue when you want its dedicated chat.";
+  const profileOverview = renderProfileOverviewPanel(model);
   return `<div class="space-y-4">
     ${objective ? `<section class="border border-border bg-card px-4 py-4">
       <div class="flex items-start justify-between gap-3">
@@ -1198,6 +1383,7 @@ const renderEmployeeOverviewPanel = (
       No objective is selected. Start in New Chat to discuss the work, or select an objective from the queue to reopen its chat.
       <div class="mt-4">${actions}</div>
     </section>`}
+    ${profileOverview}
   </div>`;
 };
 
@@ -1220,6 +1406,7 @@ export const factoryWorkbenchChatIsland = (
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const inspectorTab = routeContext.inspectorTab ?? "overview";
+  const transcriptState = describeTranscriptState(model);
   const content = inspectorTab === "chat"
     ? `${renderRememberedPreferencesPanel(model)}
       ${model.items.length === 0 ? renderEngineerCard(model) : ""}
@@ -1233,7 +1420,7 @@ export const factoryWorkbenchChatIsland = (
         },
       })}`
     : renderEmployeeOverviewPanel(model, routeContext);
-  return `<div class="flex min-h-0 flex-col gap-4" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}">
+  return `<div class="flex min-h-0 flex-col gap-4" data-active-profile="${esc(model.activeProfileId)}" data-active-profile-label="${esc(model.activeProfileLabel)}" data-chat-id="${esc(model.chatId ?? "")}" data-objective-id="${esc(model.objectiveId ?? "")}" data-active-run-id="${esc(model.runId ?? "")}" data-known-run-ids="${esc((model.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((model.terminalRunIds ?? []).join(","))}" data-transcript-signature="${esc(transcriptState.signature)}" data-last-item-kind="${esc(transcriptState.lastItemKind ?? "")}">
     ${content}
   </div>`;
 };
@@ -1320,33 +1507,18 @@ export const factoryWorkbenchHeaderIsland = (
   return renderWorkbenchHeader(model);
 };
 
-export const factoryWorkbenchChatHeaderIsland = (
-  model: FactoryWorkbenchPageModel,
-): string => renderWorkbenchChatHeader(model, engineerPrimaryRole(model.chat));
-
 const renderWorkbenchChatHeader = (
-  model: FactoryWorkbenchPageModel,
-  activeRole?: string,
+  model: FactoryWorkbenchChatHeaderModel,
 ): string => {
-  const resolvedRole = activeRole?.trim();
-  const routeContext: FactoryWorkbenchRouteContext = {
-    profileId: model.activeProfileId,
-    chatId: model.chatId,
-    objectiveId: model.objectiveId,
-    inspectorTab: model.inspectorTab,
-    detailTab: model.detailTab,
-    page: model.page,
-    focusKind: model.focusKind,
-    focusId: model.focusId,
-    filter: model.filter,
-  };
-  const newChatHref = `/factory/new-chat?${new URLSearchParams({
-    profile: model.activeProfileId,
-    inspectorTab: "chat",
-    detailTab: model.detailTab,
-    filter: model.filter,
-  }).toString()}`;
-  const newChatClass = model.inspectorTab === "chat" && !model.objectiveId
+  const resolvedRole = model.activeRole?.trim();
+  const routeContext = model.route;
+  const newChatParams = new URLSearchParams();
+  newChatParams.set("profile", routeContext.profileId);
+  newChatParams.set("inspectorTab", "chat");
+  if (routeContext.detailTab) newChatParams.set("detailTab", routeContext.detailTab);
+  newChatParams.set("filter", routeContext.filter);
+  const newChatHref = `/factory/new-chat?${newChatParams.toString()}`;
+  const newChatClass = routeContext.inspectorTab === "chat" && !routeContext.objectiveId
     ? "border-primary/20 bg-primary/10 text-primary"
     : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground";
   return `<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
@@ -1357,10 +1529,150 @@ const renderWorkbenchChatHeader = (
     </div>
     <div class="flex flex-wrap items-center gap-1.5">
       ${renderInspectorTabLink(routeContext, "overview", "Overview", true)}
-      <a href="${esc(newChatHref)}" data-factory-href="${esc(newChatHref)}" class="inline-flex items-center justify-center border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${newChatClass}">New Chat</a>
+      <a href="${esc(newChatHref)}" ${htmxNavAttrs(workbenchChatShellPath({
+        ...routeContext,
+        objectiveId: undefined,
+        inspectorTab: "chat",
+      }), workbenchChatRegionTarget)} class="inline-flex items-center justify-center border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${newChatClass}">New Chat</a>
       <a href="/receipt" class="inline-flex items-center px-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition hover:text-foreground">Receipts</a>
     </div>
   </div>`;
+};
+
+const toWorkbenchChatHeaderModel = (
+  routeContext: FactoryWorkbenchRouteContext,
+  model: Pick<FactoryChatIslandModel, "activeProfileLabel">,
+  activeRole?: string,
+): FactoryWorkbenchChatHeaderModel => ({
+  route: routeContext,
+  activeProfileLabel: model.activeProfileLabel,
+  activeRole,
+});
+
+export const factoryWorkbenchChatHeaderIsland = (
+  model: FactoryWorkbenchPageModel,
+): string => renderWorkbenchChatHeader(toWorkbenchChatHeaderModel({
+  profileId: model.activeProfileId,
+  chatId: model.chatId,
+  objectiveId: model.objectiveId,
+  inspectorTab: model.inspectorTab,
+  detailTab: model.detailTab,
+  page: model.page,
+  focusKind: model.focusKind,
+  focusId: model.focusId,
+  filter: model.filter,
+}, model.chat, engineerPrimaryRole(model.chat)));
+
+export const factoryWorkbenchHeaderShell = (
+  model: FactoryWorkbenchHeaderIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => `<header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:col-start-1 lg:row-start-1 lg:border-r lg:border-border" ${liveIslandAttrs({
+  ...workbenchIslandBindings(routeContext).header,
+  clientOnly: true,
+})}>
+  ${factoryWorkbenchHeaderIsland(model)}
+</header>`;
+
+export const factoryWorkbenchChatHeaderShell = (
+  model: FactoryWorkbenchChatHeaderModel,
+  options?: {
+    readonly inPane?: boolean;
+  },
+): string => `<div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5 ${options?.inPane ? "" : "lg:col-start-2 lg:row-start-1"}">
+  ${renderWorkbenchChatHeader(model)}
+</div>`;
+
+export const factoryWorkbenchChatRegion = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  chat: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => `<div id="factory-workbench-chat-region" class="flex min-w-0 flex-1 flex-col bg-background lg:min-h-0" ${passiveRefreshAttrs(workbenchChatShellPath(routeContext))}>
+  ${factoryWorkbenchChatHeaderShell(toWorkbenchChatHeaderModel(routeContext, chat, engineerPrimaryRole(chat)), { inPane: true })}
+  ${factoryWorkbenchChatBody(workspace, chat, routeContext)}
+</div>`;
+
+export const factoryWorkbenchChatBody = (
+  _workspace: FactoryWorkbenchWorkspaceModel,
+  chat: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => `<div id="factory-workbench-chat-body" class="flex min-h-0 flex-1 flex-col lg:min-h-0" ${liveIslandAttrs({
+  path: workbenchChatBodyPath(routeContext),
+  refreshOn: workbenchChatRefreshOn(routeContext),
+  swap: "outerHTML",
+})}>
+  <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
+    <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
+      <div id="factory-workbench-chat" ${passiveRefreshAttrs(chatIslandPath(routeContext))}>
+        ${factoryWorkbenchChatIsland(chat, routeContext)}
+      </div>
+      <div id="factory-chat-live" class="mt-4 space-y-3">
+        ${renderFactoryStreamingShell(chat.activeProfileLabel, { liveMode: "js" })}
+        <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+</div>`;
+
+export const factoryWorkbenchChatShell = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  _chat: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => {
+  const composerActions = renderWorkbenchComposerQuickActions({
+    objectiveId: routeContext.objectiveId,
+    selectedObjective: workspace.selectedObjective,
+  });
+  const composerHelper = workbenchComposerHelperText({
+    objectiveId: routeContext.objectiveId,
+    selectedObjective: workspace.selectedObjective,
+  });
+  return `<div id="factory-workbench-chat-shell" class="factory-workbench-chat-shell flex shrink-0 flex-col overflow-hidden">
+    <section id="factory-workbench-composer-shell" class="shrink-0 border-t border-border bg-background px-4 py-4">
+      <form id="factory-composer" action="${esc(`/factory/compose${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
+        <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="" />
+        <label class="sr-only" for="factory-prompt">Factory prompt</label>
+        <div class="space-y-3">
+          ${composerActions}
+          <div class="relative">
+            <textarea id="factory-prompt" name="prompt" class="min-h-[120px] w-full resize-none border border-border bg-background px-3 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30" rows="3" placeholder="${esc(workbenchComposerPlaceholderForSelection({
+              objectiveId: routeContext.objectiveId,
+              selectedObjective: workspace.selectedObjective,
+            }))}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
+            <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-xs leading-5 text-muted-foreground">${esc(composerHelper)}</div>
+            <button id="factory-composer-submit" class="inline-flex items-center justify-center  border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
+          </div>
+        </div>
+        <div id="factory-composer-status" class="mt-3 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+      </form>
+    </section>
+  </div>`;
+};
+
+export const factoryWorkbenchChatShellResponse = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  chat: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+): string => factoryWorkbenchChatRegion(workspace, chat, routeContext);
+
+export const factoryWorkbenchSelectionResponse = (input: {
+  readonly header: FactoryWorkbenchHeaderIslandModel;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly chat: FactoryChatIslandModel;
+  readonly routeContext: FactoryWorkbenchRouteContext;
+}): string => {
+  const focus = factoryWorkbenchFocusIsland(input.workspace, input.routeContext);
+  const rail = factoryWorkbenchRailIsland(input.workspace, input.routeContext);
+  const header = factoryWorkbenchHeaderShell(input.header, input.routeContext);
+  const chatRegion = factoryWorkbenchChatRegion(input.workspace, input.chat, input.routeContext);
+  return [
+    focus,
+    withOuterHtmlOob("#factory-workbench-rail-shell", rail),
+    withOuterHtmlOob("#factory-workbench-header", header),
+    withOuterHtmlOob("#factory-workbench-chat-region", chatRegion),
+  ].join("");
 };
 
 export const buildFactoryWorkbenchShellSnapshot = (
@@ -1391,7 +1703,7 @@ export const buildFactoryWorkbenchShellSnapshot = (
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
     workbenchHeaderHtml: renderWorkbenchHeader(headerModel),
-    chatHeaderHtml: renderWorkbenchChatHeader(model, activeRole),
+    chatHeaderHtml: renderWorkbenchChatHeader(toWorkbenchChatHeaderModel(routeContext, model.chat, activeRole)),
     workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext),
     chatHtml: factoryWorkbenchChatIsland(model.chat, routeContext),
     composeAction: `/factory/compose${pageQuery}`,
@@ -1407,14 +1719,7 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   const shell = buildFactoryWorkbenchShellSnapshot(model);
   const routeContext = shell.route;
   const islandBindings = workbenchIslandBindings(routeContext);
-  const composerActions = renderWorkbenchComposerQuickActions({
-    objectiveId: routeContext.objectiveId,
-    selectedObjective: model.workspace.selectedObjective,
-  });
-  const composerHelper = workbenchComposerHelperText({
-    objectiveId: routeContext.objectiveId,
-    selectedObjective: model.workspace.selectedObjective,
-  });
+  const headerModel = toWorkbenchHeaderModel(model);
   return `<!doctype html>
 <html class="dark h-full">
 <head>
@@ -1425,24 +1730,14 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/assets/factory.css?v=${CSS_VERSION}" />
+  <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
+  <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
 <body data-factory-workbench data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
     <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
-      <header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:border-r lg:border-border" ${liveIslandAttrs({
-        ...islandBindings.header,
-        clientOnly: true,
-      })}>
-        ${shell.workbenchHeaderHtml}
-      </header>
-      <div id="factory-workbench-chat-header" class="border-b border-border bg-background px-3 py-1.5" ${liveIslandAttrs({
-        path: chatHeaderPath(routeContext),
-        refreshOn: [],
-        clientOnly: true,
-      })}>
-        ${shell.chatHeaderHtml}
-      </div>
-      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:border-r lg:border-border">
+      ${factoryWorkbenchHeaderShell(headerModel, routeContext)}
+      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:col-start-1 lg:row-start-2 lg:border-r lg:border-border">
         <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
           <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
             <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${liveIslandAttrs({
@@ -1454,41 +1749,9 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
           </div>
         </div>
       </section>
-      <aside class="flex min-w-0 flex-col bg-background lg:min-h-0">
-        <div class="factory-workbench-chat-shell flex min-h-[42rem] flex-col overflow-hidden lg:h-full lg:min-h-0">
-          <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
-            <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
-              <div id="factory-workbench-chat" ${liveIslandAttrs({
-                ...islandBindings.chat,
-                clientOnly: true,
-              })}>
-                ${shell.chatHtml}
-              </div>
-              <div id="factory-chat-live" class="mt-4 space-y-3">
-                ${renderFactoryStreamingShell(model.activeProfileLabel, { liveMode: "js" })}
-                <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
-              </div>
-            </section>
-            <section id="factory-workbench-composer-shell" class="shrink-0 border-t border-border bg-background px-4 py-4">
-              <form id="factory-composer" action="${esc(shell.composeAction)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
-                <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="" />
-                <label class="sr-only" for="factory-prompt">Factory prompt</label>
-                <div class="space-y-3">
-                  ${composerActions}
-                  <div class="relative">
-                    <textarea id="factory-prompt" name="prompt" class="min-h-[120px] w-full resize-none border border-border bg-background px-3 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/30" rows="3" placeholder="${esc(shell.composerPlaceholder)}" autofocus aria-autocomplete="list" aria-expanded="false" aria-controls="factory-composer-completions" aria-haspopup="listbox"></textarea>
-                    <div id="factory-composer-completions" class="hidden mt-2 max-h-56 overflow-auto  border border-border bg-background shadow-lg" role="listbox" aria-label="Slash command suggestions"></div>
-                  </div>
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="text-xs leading-5 text-muted-foreground">${esc(composerHelper)}</div>
-                    <button id="factory-composer-submit" class="inline-flex items-center justify-center  border border-primary/40 bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:border-border disabled:bg-secondary disabled:text-muted-foreground" type="submit">Send</button>
-                  </div>
-                </div>
-                <div id="factory-composer-status" class="mt-3 hidden  border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
-              </form>
-            </section>
-          </div>
-        </div>
+      <aside id="factory-workbench-chat-pane" class="flex min-w-0 flex-col bg-background lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:min-h-0 lg:overflow-hidden">
+        ${factoryWorkbenchChatRegion(model.workspace, model.chat, routeContext)}
+        ${factoryWorkbenchChatShell(model.workspace, model.chat, routeContext)}
       </aside>
     </div>
   </div>

@@ -10,7 +10,7 @@ import {
   type AgentRunInput,
   type AgentRunResult,
 } from "../../agent";
-import type { JsonlQueue } from "../../../adapters/jsonl-queue";
+import type { SqliteQueue } from "../../../adapters/sqlite-queue";
 import type { FactoryService } from "../../../services/factory-service";
 import {
   factoryChatStream,
@@ -60,7 +60,7 @@ export const FACTORY_CHAT_DEFAULT_CONFIG: FactoryChatRunConfig = {
 
 export type FactoryChatRunInput = Omit<AgentRunInput, "config" | "prompts" | "llmStructured"> & {
   readonly config: FactoryChatRunConfig;
-  readonly queue: JsonlQueue;
+  readonly queue: SqliteQueue;
   readonly factoryService: FactoryService;
   readonly dataDir?: string;
   readonly repoRoot: string;
@@ -241,6 +241,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     if (cached) return cached;
     const created = analyzeFactoryChatTurn({
       llmText: input.llmText,
+      llmStructured: input.llmStructured,
       apiReady: input.apiReady,
       problem: key,
     });

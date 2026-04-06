@@ -69,28 +69,20 @@ const leadingSlashCommand = (payload: string) => {
 };
 
 const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "workbench-chat") => {
-  const title = mode === "thread"
-    ? "Updating thread"
-    : mode === "workbench-chat"
-    ? "Sending in chat"
-    : "Queued thread";
-  const detail = mode === "thread"
-    ? "Applying your note to this thread..."
-    : mode === "workbench-chat"
-    ? "Sending this as a normal chat turn. Background work, if any, keeps updating on the left."
-    : "Creating the thread and starting work...";
-  const statusLabel = mode === "thread"
-    ? "Updating"
-    : mode === "workbench-chat"
-    ? "Chat"
-    : "Queued";
-  const statusMeta = mode === "thread" ? "Updated just now" : "Queued just now";
-  return '<section class="flex justify-end">' +
+  const statusMeta = mode === "thread" ? "Updated just now" : "Just now";
+  const echo = '<section class="flex justify-end">' +
     '<div class="max-w-3xl space-y-1">' +
       '<div class="text-right text-[11px] text-muted-foreground">' + statusMeta + "</div>" +
       '<div class="border border-info/15 bg-info/10 px-4 py-2.5 text-sm leading-6 text-foreground">' + escapeHtml(payload) + "</div>" +
     "</div>" +
-  "</section>" +
+  "</section>";
+  if (mode === "workbench-chat") return echo;
+  const title = mode === "thread" ? "Updating thread" : "Queued thread";
+  const detail = mode === "thread"
+    ? "Applying your note to this thread..."
+    : "Creating the thread and starting work...";
+  const statusLabel = mode === "thread" ? "Updating" : "Queued";
+  return echo +
   '<section class=" border border-primary/20 bg-primary/5 px-3 py-2">' +
     '<div class="flex min-w-0 items-center justify-between gap-2">' +
       '<div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">' +
@@ -128,6 +120,7 @@ export const composerFeedback = (
           buttonLabel: "Analyzing...",
           status: isWorkbenchSurface ? "Analyzing objective..." : "Analyzing thread...",
           optimisticHtml: renderOptimisticPrompt(payload, isWorkbenchSurface ? "workbench-chat" : (hasThread ? "thread" : "chat")),
+          showPendingStream: true,
         };
       case "help":
         return { buttonLabel: "Opening...", status: "Opening help..." };
@@ -157,12 +150,14 @@ export const composerFeedback = (
     return {
       buttonLabel: "Sending...",
       optimisticHtml: renderOptimisticPrompt(payload, "workbench-chat"),
-      status: "Sending in chat...",
+      status: "",
+      showPendingStream: true,
     };
   }
   return {
     buttonLabel: hasThread ? "Updating..." : "Starting...",
     optimisticHtml: renderOptimisticPrompt(payload, hasThread ? "thread" : "chat"),
     status: hasThread ? "Updating the thread..." : "Starting a new thread...",
+    showPendingStream: true,
   };
 };

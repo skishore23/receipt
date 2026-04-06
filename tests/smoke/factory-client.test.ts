@@ -210,22 +210,25 @@ const chatMarkup = (input: {
   readonly activeRunId?: string;
   readonly knownRunIds?: ReadonlyArray<string>;
   readonly terminalRunIds?: ReadonlyArray<string>;
+  readonly transcriptSignature?: string;
+  readonly lastItemKind?: "user" | "assistant" | "system" | "work" | "objective_event";
 } = {}) =>
-  `<div data-active-profile="generalist" data-active-profile-label="${input.profileLabel ?? "Generalist"}" data-chat-id="${input.chatId ?? ""}" data-objective-id="${input.objectiveId ?? ""}" data-active-run-id="${input.activeRunId ?? ""}" data-known-run-ids="${(input.knownRunIds ?? []).join(",")}" data-terminal-run-ids="${(input.terminalRunIds ?? []).join(",")}"></div>`;
+  `<div data-active-profile="generalist" data-active-profile-label="${input.profileLabel ?? "Generalist"}" data-chat-id="${input.chatId ?? ""}" data-objective-id="${input.objectiveId ?? ""}" data-active-run-id="${input.activeRunId ?? ""}" data-known-run-ids="${(input.knownRunIds ?? []).join(",")}" data-terminal-run-ids="${(input.terminalRunIds ?? []).join(",")}" data-transcript-signature="${input.transcriptSignature ?? "0:empty"}" data-last-item-kind="${input.lastItemKind ?? ""}"></div>`;
 
-const WORKBENCH_CHAT_DESCRIPTOR = "sse:agent-refresh@180,sse:job-refresh@180";
+const WORKBENCH_CHAT_DESCRIPTOR = "body:agent-refresh@180,body:job-refresh@180";
 const WORKBENCH_BACKGROUND_DESCRIPTOR = "";
 const WORKBENCH_HEADER_DESCRIPTOR = "";
-const WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR = "sse:profile-board-refresh@320";
-const WORKBENCH_SUMMARY_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
-const WORKBENCH_ACTIVITY_DESCRIPTOR = "sse:objective-runtime-refresh@320";
+const WORKBENCH_RAIL_DESCRIPTOR = "body:profile-board-refresh@320";
+const WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR = "body:profile-board-refresh@320";
+const WORKBENCH_SUMMARY_DESCRIPTOR = "body:profile-board-refresh@320,body:objective-runtime-refresh@320";
+const WORKBENCH_ACTIVITY_DESCRIPTOR = "body:objective-runtime-refresh@320";
 
 const workbenchChatDescriptor = (inspectorTab: string, objectiveId?: string) =>
   inspectorTab === "chat"
     ? WORKBENCH_CHAT_DESCRIPTOR
     : [
-        "sse:profile-board-refresh@300",
-        ...(objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
+        "body:profile-board-refresh@300",
+        ...(objectiveId ? ["body:objective-runtime-refresh@300"] : []),
       ].join(",");
 
 const workbenchHeaderPath = (search: string) => `/factory/island/workbench/header${search}`;
@@ -239,13 +242,17 @@ const workbenchBlockPath = (search: string, block: "summary" | "activity" | "obj
 
 const workbenchPanelMarkup = (search: string, objectiveId?: string, content = "workbench panel") =>
   `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:grid-cols-[minmax(320px,0.88fr)_minmax(0,1.12fr)]" data-workbench-objective-id="${objectiveId ?? ""}">
-    <section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto">
-      <div id="factory-workbench-block-summary" data-workbench-projections="profile-board objective-runtime" data-refresh-path="${workbenchBlockPath(search, "summary")}" data-refresh-on="${WORKBENCH_SUMMARY_DESCRIPTOR}"><div>${content} summary</div></div>
-      <div id="factory-workbench-block-objectives" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "objectives")}" data-refresh-on="${WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR}"><div>${content} objectives</div></div>
-      <div id="factory-workbench-block-history" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "history")}" data-refresh-on="${WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR}"><div>${content} history</div></div>
+    <section id="factory-workbench-rail-shell" data-refresh-path="/factory/island/workbench/rail${search}" data-refresh-on="${WORKBENCH_RAIL_DESCRIPTOR}">
+      <section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto">
+        <div id="factory-workbench-block-summary" data-workbench-projections="profile-board objective-runtime" data-refresh-path="${workbenchBlockPath(search, "summary")}"><div>${content} summary</div></div>
+        <div id="factory-workbench-block-objectives" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "objectives")}"><div>${content} objectives</div></div>
+        <div id="factory-workbench-block-history" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "history")}"><div>${content} history</div></div>
+      </section>
     </section>
-    <section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 overflow-y-auto">
-      <div id="factory-workbench-block-activity" data-workbench-projections="objective-runtime" data-refresh-path="${workbenchBlockPath(search, "activity")}" data-refresh-on="${WORKBENCH_ACTIVITY_DESCRIPTOR}"><div>${content} activity</div></div>
+    <section id="factory-workbench-focus-shell" data-refresh-path="/factory/island/workbench/focus${search}" data-refresh-on="${WORKBENCH_SUMMARY_DESCRIPTOR}">
+      <section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 overflow-y-auto">
+        <div id="factory-workbench-block-activity" data-workbench-projections="objective-runtime" data-refresh-path="${workbenchBlockPath(search, "activity")}"><div>${content} activity</div></div>
+      </section>
     </section>
   </div>`;
 
@@ -285,15 +292,27 @@ const workbenchShellMarkup = (input: {
   <div id="factory-workbench-background-root" data-events-path="/factory/background/events${search}">
     <div id="factory-workbench-panel" data-refresh-path="/factory/island/workbench${search}" data-refresh-on="${WORKBENCH_BACKGROUND_DESCRIPTOR}">${input.workbenchHtml ?? workbenchPanelMarkup(search, objectiveId)}</div>
   </div>
-  <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${search}"><span>${profileLabel}</span></div>
-  <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
-    <div id="factory-workbench-chat-scroll">
-      <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
-      <div id="factory-chat-live">
-        <span id="factory-chat-streaming-label-text">${profileLabel}</span>
-        <div id="factory-chat-streaming"></div>
-        <div id="factory-chat-stream-reset-listener"></div>
-        <div id="factory-chat-optimistic"></div>
+  <aside id="factory-workbench-chat-pane">
+    <div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${search}">
+      <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${search}"><span>${profileLabel}</span></div>
+      <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
+        <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+          <div id="factory-workbench-chat-scroll">
+            <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${search}">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
+            <div id="factory-chat-live">
+              <div id="factory-chat-streaming">
+                <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
+                  <span id="factory-chat-streaming-label-text">${profileLabel}</span>
+                  <span id="factory-chat-streaming-status">Streaming</span>
+                  <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
+                  <div id="factory-chat-streaming-content"></div>
+                </section>
+              </div>
+              <div id="factory-chat-stream-reset-listener"></div>
+              <div id="factory-chat-optimistic"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <form id="factory-composer" action="/factory/compose${search}" data-composer-commands='${COMMANDS}'></form>
@@ -302,7 +321,7 @@ const workbenchShellMarkup = (input: {
     <div id="factory-composer-completions" class="hidden"></div>
     <div id="factory-composer-status"></div>
     <button id="factory-composer-submit">Send</button>
-  </div>
+  </aside>
 </body>
 </html>`;
 };
@@ -455,12 +474,16 @@ const createWorkbenchHarness = async (options: {
     readonly body: MockElement;
     readonly workbenchHeader: MockElement;
     readonly workbenchPanel: MockElement;
+    readonly workbenchRailShell: MockElement;
     readonly workbenchRailScroll: MockElement;
+    readonly workbenchFocusShell: MockElement;
     readonly workbenchFocusScroll: MockElement;
     readonly workbenchSummary: MockElement;
     readonly workbenchActivity: MockElement;
     readonly workbenchObjectives: MockElement;
     readonly workbenchHistory: MockElement;
+    readonly chatRegion: MockElement;
+    readonly chatBody: MockElement;
     readonly chat: MockElement;
   }) => void;
   readonly fetchImpl?: (url: string, init: { readonly body?: FormData; readonly signal?: AbortSignal }) => Promise<{
@@ -491,11 +514,17 @@ const createWorkbenchHarness = async (options: {
   workbenchRailScroll.scrollHeight = 1080;
   workbenchRailScroll.clientHeight = 360;
 
+  const workbenchRailShell = new MockElement("SECTION");
+  workbenchRailShell.id = "factory-workbench-rail-shell";
+
   const workbenchFocusScroll = new MockElement("SECTION");
   workbenchFocusScroll.id = "factory-workbench-focus-scroll";
   workbenchFocusScroll.setAttribute("data-preserve-scroll-key", "focus");
   workbenchFocusScroll.scrollHeight = 1240;
   workbenchFocusScroll.clientHeight = 420;
+
+  const workbenchFocusShell = new MockElement("SECTION");
+  workbenchFocusShell.id = "factory-workbench-focus-shell";
 
   const workbenchSummary = new MockElement("DIV");
   workbenchSummary.id = "factory-workbench-block-summary";
@@ -511,6 +540,15 @@ const createWorkbenchHarness = async (options: {
 
   const workbenchChatHeader = new MockElement("DIV");
   workbenchChatHeader.id = "factory-workbench-chat-header";
+
+  const chatPane = new MockElement("ASIDE");
+  chatPane.id = "factory-workbench-chat-pane";
+
+  const chatRegion = new MockElement("DIV");
+  chatRegion.id = "factory-workbench-chat-region";
+
+  const chatBody = new MockElement("DIV");
+  chatBody.id = "factory-workbench-chat-body";
 
   const chatRoot = new MockElement("DIV");
   chatRoot.id = "factory-workbench-chat-root";
@@ -530,9 +568,26 @@ const createWorkbenchHarness = async (options: {
   const streamingShell = new MockElement("DIV");
   streamingShell.id = "factory-chat-streaming";
 
+  const streamingCard = new MockElement("SECTION");
+  streamingCard.id = "factory-chat-stream-shell";
+  streamingCard.setAttribute("data-factory-stream-shell", "true");
+  streamingCard.setAttribute("data-stream-state", "idle");
+
   const streamingLabel = new MockElement("SPAN");
   streamingLabel.id = "factory-chat-streaming-label-text";
   streamingLabel.textContent = "Generalist";
+
+  const streamingStatus = new MockElement("SPAN");
+  streamingStatus.id = "factory-chat-streaming-status";
+  streamingStatus.textContent = "Streaming";
+
+  const streamingLoader = new MockElement("DIV");
+  streamingLoader.id = "factory-chat-streaming-loader";
+  streamingLoader.classList.add("hidden");
+
+  const streamingLoaderLabel = new MockElement("SPAN");
+  streamingLoaderLabel.id = "factory-chat-streaming-loader-label";
+  streamingLoaderLabel.textContent = "Sending";
 
   const streaming = new MockElement("DIV");
   streaming.id = "factory-chat-streaming-content";
@@ -570,19 +625,28 @@ const createWorkbenchHarness = async (options: {
     [workbenchPanel.id, workbenchPanel],
     [workbenchHeader.id, workbenchHeader],
     [backgroundRoot.id, backgroundRoot],
+    [workbenchRailShell.id, workbenchRailShell],
     [workbenchRailScroll.id, workbenchRailScroll],
+    [workbenchFocusShell.id, workbenchFocusShell],
     [workbenchFocusScroll.id, workbenchFocusScroll],
     [workbenchSummary.id, workbenchSummary],
     [workbenchActivity.id, workbenchActivity],
     [workbenchObjectives.id, workbenchObjectives],
     [workbenchHistory.id, workbenchHistory],
+    [chatPane.id, chatPane],
+    [chatRegion.id, chatRegion],
+    [chatBody.id, chatBody],
     [workbenchChatHeader.id, workbenchChatHeader],
     [chatRoot.id, chatRoot],
     [scroll.id, scroll],
     [chat.id, chat],
     [chatLive.id, chatLive],
     [streamingShell.id, streamingShell],
+    [streamingCard.id, streamingCard],
     [streamingLabel.id, streamingLabel],
+    [streamingStatus.id, streamingStatus],
+    [streamingLoader.id, streamingLoader],
+    [streamingLoaderLabel.id, streamingLoaderLabel],
     [streaming.id, streaming],
     [streamingReset.id, streamingReset],
     [optimistic.id, optimistic],
@@ -609,14 +673,16 @@ const createWorkbenchHarness = async (options: {
   workbenchHeader.setAttribute("data-refresh-on", WORKBENCH_HEADER_DESCRIPTOR);
   workbenchPanel.setAttribute("data-refresh-path", `/factory/island/workbench${initialLocation.search}`);
   workbenchPanel.setAttribute("data-refresh-on", WORKBENCH_BACKGROUND_DESCRIPTOR);
+  workbenchRailShell.setAttribute("data-refresh-path", `/factory/island/workbench/rail${initialLocation.search}`);
+  workbenchRailShell.setAttribute("data-refresh-on", WORKBENCH_RAIL_DESCRIPTOR);
+  workbenchRailShell.setAttribute("hx-swap", "outerHTML");
+  workbenchFocusShell.setAttribute("data-refresh-path", `/factory/island/workbench/focus${initialLocation.search}`);
+  workbenchFocusShell.setAttribute("data-refresh-on", WORKBENCH_SUMMARY_DESCRIPTOR);
+  workbenchFocusShell.setAttribute("hx-swap", "outerHTML");
   workbenchSummary.setAttribute("data-refresh-path", workbenchBlockPath(initialLocation.search, "summary"));
-  workbenchSummary.setAttribute("data-refresh-on", WORKBENCH_SUMMARY_DESCRIPTOR);
   workbenchActivity.setAttribute("data-refresh-path", workbenchBlockPath(initialLocation.search, "activity"));
-  workbenchActivity.setAttribute("data-refresh-on", WORKBENCH_ACTIVITY_DESCRIPTOR);
   workbenchObjectives.setAttribute("data-refresh-path", workbenchBlockPath(initialLocation.search, "objectives"));
-  workbenchObjectives.setAttribute("data-refresh-on", WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR);
   workbenchHistory.setAttribute("data-refresh-path", workbenchBlockPath(initialLocation.search, "history"));
-  workbenchHistory.setAttribute("data-refresh-on", WORKBENCH_PROFILE_BOARD_BLOCK_DESCRIPTOR);
   const chatEvents = new URLSearchParams();
   chatEvents.set("profile", initialLocation.searchParams.get("profile") || "generalist");
   if (initialLocation.searchParams.get("chat")) chatEvents.set("chat", initialLocation.searchParams.get("chat")!);
@@ -625,23 +691,30 @@ const createWorkbenchHarness = async (options: {
     chatEvents.set("job", initialLocation.searchParams.get("focusId")!);
   }
   chatRoot.setAttribute("data-events-path", `/factory/chat/events?${chatEvents.toString()}`);
-  workbenchChatHeader.setAttribute("data-refresh-path", `/factory/island/chat/header${initialLocation.search}`);
-  chat.setAttribute("data-refresh-path", `/factory/island/chat${initialLocation.search}`);
-  chat.setAttribute(
+  chatRegion.setAttribute("data-refresh-path", `/factory/island/workbench/chat-shell${initialLocation.search}`);
+  chatBody.setAttribute("data-refresh-path", `/factory/island/workbench/chat-body${initialLocation.search}`);
+  chatBody.setAttribute(
     "data-refresh-on",
     workbenchChatDescriptor(initialInspectorTab, initialLocation.searchParams.get("objective") || undefined),
   );
+  chatBody.setAttribute("hx-swap", "outerHTML");
+  workbenchChatHeader.setAttribute("data-refresh-path", `/factory/island/chat/header${initialLocation.search}`);
+  chat.setAttribute("data-refresh-path", `/factory/island/chat${initialLocation.search}`);
   form.action = "/factory/compose" + initialLocation.search;
   options.beforeBoot?.({
     body,
     workbenchHeader,
     workbenchPanel,
+    workbenchRailShell,
     workbenchRailScroll,
+    workbenchFocusShell,
     workbenchFocusScroll,
     workbenchSummary,
     workbenchActivity,
     workbenchObjectives,
     workbenchHistory,
+    chatRegion,
+    chatBody,
     chat,
   });
 
@@ -732,10 +805,42 @@ const createWorkbenchHarness = async (options: {
     const markup = await response.text();
     performSwap(target, markup);
   };
+  const processedBodyTriggers = new Set<string>();
   const htmx = {
     process: (root: Element) => {
       if (!(root instanceof MockElement)) return;
-      void root;
+      const candidates = Array.from(elements.values()).filter((element) =>
+        root === body || root === element || root.contains(element),
+      );
+      for (const candidate of candidates) {
+        const refreshPath = candidate.getAttribute("data-refresh-path");
+        if (refreshPath && candidate.getAttribute("hx-get") === null) {
+          candidate.setAttribute("hx-get", refreshPath);
+        }
+        const descriptor = candidate.getAttribute("data-refresh-on");
+        if (candidate.getAttribute("hx-trigger") === null && descriptor) {
+          const hxTrigger = splitTriggerList(descriptor).flatMap((part) => {
+            const bodyMatch = part.match(/^body:([^@]+)(?:@(\d+))?$/i);
+            if (bodyMatch && bodyMatch[1]) {
+              return [`${bodyMatch[1]} from:body`];
+            }
+            const sseMatch = part.match(/^sse:([^@]+)(?:@(\d+))?$/i);
+            if (sseMatch && sseMatch[1]) {
+              return [`sse:${sseMatch[1]}`];
+            }
+            return [];
+          }).join(", ");
+          if (hxTrigger) candidate.setAttribute("hx-trigger", hxTrigger);
+        }
+        for (const eventName of bodyTriggerEvents(candidate.getAttribute("hx-trigger"))) {
+          const key = `${candidate.id}:${eventName}`;
+          if (processedBodyTriggers.has(key)) continue;
+          processedBodyTriggers.add(key);
+          body.addEventListener(eventName, () => {
+            void refreshElement(candidate);
+          });
+        }
+      }
     },
   };
   const sandbox = {
@@ -811,6 +916,97 @@ const createWorkbenchHarness = async (options: {
           text: async () => `<div>${parsed.searchParams.get("block") || "summary"} refreshed</div>`,
         };
       }
+      if (parsed.pathname === "/factory/island/workbench/rail") {
+        return {
+          ok: true,
+          headers: { get: () => "text/html" },
+          json: async () => ({}),
+          text: async () => `<section id="factory-workbench-rail-shell" data-refresh-path="/factory/island/workbench/rail${parsed.search}" data-refresh-on="${WORKBENCH_RAIL_DESCRIPTOR}">
+            <section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>rail refreshed</div></section>
+          </section>`,
+        };
+      }
+      if (parsed.pathname === "/factory/island/workbench/focus") {
+        return {
+          ok: true,
+          headers: { get: () => "text/html" },
+          json: async () => ({}),
+          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="/factory/island/workbench/focus${parsed.search}" data-refresh-on="${WORKBENCH_SUMMARY_DESCRIPTOR}">
+            <section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>focus refreshed</div></section>
+          </section>`,
+        };
+      }
+      if (parsed.pathname === "/factory/island/workbench/chat-shell") {
+        const profileLabel = "Generalist";
+        const chatId = parsed.searchParams.get("chat") || undefined;
+        const objectiveId = parsed.searchParams.get("objective") || undefined;
+        const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
+        const chatEvents = new URLSearchParams();
+        chatEvents.set("profile", parsed.searchParams.get("profile") || "generalist");
+        if (chatId) chatEvents.set("chat", chatId);
+        if (objectiveId) chatEvents.set("objective", objectiveId);
+        return {
+          ok: true,
+          headers: { get: () => "text/html" },
+          json: async () => ({}),
+          text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
+            <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>${profileLabel}</span></div>
+            <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
+              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+                <div id="factory-workbench-chat-scroll">
+                  <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
+                  <div id="factory-chat-live">
+                    <div id="factory-chat-streaming">
+                      <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
+                        <span id="factory-chat-streaming-label-text">${profileLabel}</span>
+                        <span id="factory-chat-streaming-status">Streaming</span>
+                        <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
+                        <div id="factory-chat-streaming-content"></div>
+                      </section>
+                    </div>
+                    <div id="factory-chat-stream-reset-listener"></div>
+                    <div id="factory-chat-optimistic"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>`,
+        };
+      }
+      if (parsed.pathname === "/factory/island/workbench/chat-body") {
+        const profileLabel = "Generalist";
+        const chatId = parsed.searchParams.get("chat") || undefined;
+        const objectiveId = parsed.searchParams.get("objective") || undefined;
+        const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
+        const chatEvents = new URLSearchParams();
+        chatEvents.set("profile", parsed.searchParams.get("profile") || "generalist");
+        if (chatId) chatEvents.set("chat", chatId);
+        if (objectiveId) chatEvents.set("objective", objectiveId);
+        return {
+          ok: true,
+          headers: { get: () => "text/html" },
+          json: async () => ({}),
+          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
+            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+              <div id="factory-workbench-chat-scroll">
+                <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
+                <div id="factory-chat-live">
+                  <div id="factory-chat-streaming">
+                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
+                      <span id="factory-chat-streaming-label-text">${profileLabel}</span>
+                      <span id="factory-chat-streaming-status">Streaming</span>
+                      <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
+                      <div id="factory-chat-streaming-content"></div>
+                    </section>
+                  </div>
+                  <div id="factory-chat-stream-reset-listener"></div>
+                  <div id="factory-chat-optimistic"></div>
+                </div>
+              </div>
+            </div>
+          </div>`,
+        };
+      }
       if (parsed.pathname === "/factory/island/workbench") {
         return {
           ok: true,
@@ -884,7 +1080,10 @@ const createWorkbenchHarness = async (options: {
     workbenchRailScroll,
     workbenchFocusScroll,
     chat,
-    streaming: streamingShell,
+    streaming,
+    streamingShell: streamingCard,
+    streamingLoader,
+    streamingStatus,
     fetchCalls,
     locationState,
     historyState,
@@ -910,23 +1109,19 @@ test("factory workbench client: profile-board and objective-runtime events refre
   await flushAsync(380);
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=activity")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=objectives")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=history")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/rail?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
   expect(document.body.scrollTop).toBe(220);
 
   backgroundSource()?.emit("objective-runtime-refresh", "objective_demo");
   await flushAsync(380);
 
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(2);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=activity")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=objectives")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/rail?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
   expect(document.body.scrollTop).toBe(220);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(2);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
 });
 
@@ -936,31 +1131,26 @@ test("factory workbench client: SSE refresh routing follows data-refresh-on decl
     beforeBoot: ({
       workbenchHeader,
       workbenchPanel,
-      workbenchSummary,
-      workbenchActivity,
-      workbenchObjectives,
-      workbenchHistory,
-      chat,
+      workbenchFocusShell,
+      workbenchRailShell,
+      chatBody,
     }) => {
       workbenchHeader.setAttribute("data-refresh-on", "");
       workbenchPanel.setAttribute("data-refresh-on", "");
-      workbenchSummary.setAttribute("data-refresh-on", "sse:summary-only@0");
-      workbenchActivity.setAttribute("data-refresh-on", "");
-      workbenchObjectives.setAttribute("data-refresh-on", "");
-      workbenchHistory.setAttribute("data-refresh-on", "");
-      chat.setAttribute("data-refresh-on", "");
+      workbenchFocusShell.setAttribute("data-refresh-on", "body:summary-only@0");
+      workbenchRailShell.setAttribute("data-refresh-on", "");
+      chatBody.setAttribute("data-refresh-on", "");
     },
   });
 
   backgroundSource()?.emit("summary-only", "objective_demo");
   await flushAsync();
 
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=summary")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=activity")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=objectives")).toHaveLength(0);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/block?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&block=history")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/rail?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
 });
 
 test("factory workbench client: objective navigation updates background scope without rewriting the chat stream", async () => {
@@ -977,11 +1167,30 @@ test("factory workbench client: objective navigation updates background scope wi
   expect(historyState.replaced).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/chat/header?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/chat/header?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action");
   expect(chatSource()).toBeNull();
+});
+
+test("factory workbench client: page-only navigation preserves the requested pagination state", async () => {
+  const { document, historyState, locationState, fetchCalls, backgroundSource } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
+  });
+  const anchor = new MockElement("A");
+  anchor.setAttribute("href", "/factory?profile=generalist&chat=chat_demo&objective=objective_demo&page=2");
+
+  document.dispatchEvent(new MockEvent({ type: "click", target: anchor }));
+  await flushAsync();
+
+  expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2"]);
+  expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2");
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/chat/header?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2");
 });
 
 test("factory workbench client: profile dropdown updates the page route and stream bindings together", async () => {
@@ -1000,8 +1209,8 @@ test("factory workbench client: profile dropdown updates the page route and stre
   expect(locationState.pathname).toBe("/factory");
   expect(locationState.search).toBe("?profile=software&chat=chat_demo&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/header?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/chat/header?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/chat/header?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=software&chat=chat_demo&detailTab=action");
   expect(chatSource()).toBeNull();
@@ -1013,19 +1222,37 @@ test("factory workbench client: chat events stream tokens and refresh the transc
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
     fetchImpl: async (url) => {
       const parsed = new URL(url, "http://receipt.test");
-      if (parsed.pathname === "/factory/island/chat") {
+      if (parsed.pathname === "/factory/island/workbench/chat-body") {
         chatRefreshes += 1;
         return {
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => chatMarkup({
-            profileLabel: "Generalist",
-            chatId: "chat_demo",
-            activeRunId: chatRefreshes === 1 ? "run_demo" : undefined,
-            knownRunIds: chatRefreshes === 1 ? ["run_demo"] : [],
-            terminalRunIds: chatRefreshes > 1 ? ["run_demo"] : [],
-          }),
+          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
+              <div id="factory-workbench-chat-scroll">
+                <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
+                  profileLabel: "Generalist",
+                  chatId: "chat_demo",
+                  activeRunId: chatRefreshes === 1 ? "run_demo" : undefined,
+                  knownRunIds: chatRefreshes === 1 ? ["run_demo"] : [],
+                  terminalRunIds: chatRefreshes > 1 ? ["run_demo"] : [],
+                })}</div>
+                <div id="factory-chat-live">
+                  <div id="factory-chat-streaming">
+                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
+                      <span id="factory-chat-streaming-label-text">Generalist</span>
+                      <span id="factory-chat-streaming-status">Streaming</span>
+                      <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
+                      <div id="factory-chat-streaming-content"></div>
+                    </section>
+                  </div>
+                  <div id="factory-chat-stream-reset-listener"></div>
+                  <div id="factory-chat-optimistic"></div>
+                </div>
+              </div>
+            </div>
+          </div>`,
         };
       }
       if (parsed.pathname === "/factory/island/workbench") {
@@ -1054,8 +1281,40 @@ test("factory workbench client: chat events stream tokens and refresh the transc
   chatSource()?.emit("job-refresh", "job_demo");
   await flushAsync(260);
 
-  expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(chatRefreshes).toBeGreaterThan(0);
+});
+
+test("factory workbench client: live chat refresh preserves composer text", async () => {
+  const { chatSource, textarea, fetchCalls } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat",
+  });
+
+  textarea.value = "Do not wipe this draft.";
+  textarea.selectionStart = textarea.value.length;
+
+  chatSource()?.emit("agent-refresh", "run_demo");
+  await flushAsync(220);
+
+  expect(textarea.value).toBe("Do not wipe this draft.");
+  expect(fetchCalls.some((call) => call.url.includes("/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat"))).toBe(true);
+  expect(fetchCalls.some((call) => call.url.includes("/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat"))).toBe(false);
+});
+
+test("factory workbench client: pressing Enter submits while Shift+Enter does not", async () => {
+  const { textarea, fetchCalls } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
+  });
+
+  textarea.value = "Send with enter";
+  textarea.selectionStart = textarea.value.length;
+  textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "Enter", shiftKey: true, target: textarea }));
+  await flushAsync();
+  expect(fetchCalls.some((call) => call.url.startsWith("/factory/compose?profile=generalist&chat=chat_demo&inspectorTab=chat"))).toBe(false);
+
+  textarea.dispatchEvent(new MockEvent({ type: "keydown", key: "Enter", shiftKey: false, target: textarea }));
+  await flushAsync();
+  expect(fetchCalls.some((call) => call.url.startsWith("/factory/compose?profile=generalist&chat=chat_demo&inspectorTab=chat"))).toBe(true);
 });
 
 test("factory workbench client: selected objectives ignore token streams from unrelated runs", async () => {
@@ -1083,7 +1342,23 @@ test("factory workbench client: selected objectives ignore token streams from un
 
 test("factory workbench client: plain prompts stay chat-first and /obj selects the created objective", async () => {
   let composeCount = 0;
-  const { textarea, form, optimistic, status, historyState, locationState, backgroundSource, chatSource, fetchCalls } = await createWorkbenchHarness({
+  let chatBodyRefreshes = 0;
+  const {
+    document,
+    textarea,
+    form,
+    optimistic,
+    status,
+    historyState,
+    locationState,
+    backgroundSource,
+    chatSource,
+    fetchCalls,
+    streaming,
+    streamingShell,
+    streamingLoader,
+    streamingStatus,
+  } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
     fetchImpl: async (url) => {
       const parsed = new URL(url, "http://receipt.test");
@@ -1113,8 +1388,43 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
               location: "/factory?profile=generalist&chat=chat_demo&objective=objective_created&inspectorTab=chat",
               chat: { chatId: "chat_demo" },
               selection: { objectiveId: "objective_created" },
-            }),
+        }),
           text: async () => "",
+        };
+      }
+      if (parsed.pathname === "/factory/island/workbench/chat-body") {
+        chatBodyRefreshes += 1;
+        return {
+          ok: true,
+          headers: { get: () => "text/html" },
+          json: async () => ({}),
+          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
+              <div id="factory-workbench-chat-scroll">
+                <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
+                  profileLabel: "Generalist",
+                  chatId: parsed.searchParams.get("chat") || "chat_demo",
+                  objectiveId: parsed.searchParams.get("objective") || undefined,
+                  activeRunId: chatBodyRefreshes >= 1 ? "run_demo" : undefined,
+                  knownRunIds: chatBodyRefreshes >= 1 ? ["run_demo"] : [],
+                  transcriptSignature: chatBodyRefreshes >= 2 ? "2:assistant_1" : "1:user_1",
+                  lastItemKind: chatBodyRefreshes >= 2 ? "assistant" : "user",
+                })}</div>
+                <div id="factory-chat-live">
+                  <div id="factory-chat-streaming">
+                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
+                      <span id="factory-chat-streaming-label-text">Generalist</span>
+                      <span id="factory-chat-streaming-status">Streaming</span>
+                      <div id="factory-chat-streaming-loader"><span id="factory-chat-streaming-loader-label">Sending</span><span id="factory-chat-streaming-loader-meta"></span></div>
+                      <div id="factory-chat-streaming-content"></div>
+                    </section>
+                  </div>
+                  <div id="factory-chat-stream-reset-listener"></div>
+                  <div id="factory-chat-optimistic"></div>
+                </div>
+              </div>
+            </div>
+          </div>`,
         };
       }
       if (parsed.pathname === "/factory/island/chat") {
@@ -1158,22 +1468,31 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   textarea.selectionStart = textarea.value.length;
   form.dispatchEvent(new MockEvent({ type: "submit", target: form }));
 
-  expect(status.textContent).toBe("Sending in chat...");
-  expect(optimistic.innerHTML).toContain("Sending in chat");
+  expect(status.textContent).toBe("");
+  expect(optimistic.innerHTML).not.toContain("Sending in chat");
+  expect(optimistic.innerHTML).toContain("Just now");
+  expect(streamingShell.getAttribute("data-stream-state")).toBe("pending");
+  expect(streamingShell.classList.contains("hidden")).toBe(false);
+  expect(streamingLoader.classList.contains("hidden")).toBe(false);
+  expect(streamingStatus.textContent).toBe("Sending");
+  expect(streaming.innerHTML).toBe("");
   await flushAsync(140);
 
   expect(historyState.pushed).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&inspectorTab=chat");
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo");
-  expect(optimistic.innerHTML).toContain("Chat run queued. Waiting for the reply to start.");
-  expect(optimistic.innerHTML).toContain("job_demo");
+  expect(optimistic.innerHTML).not.toContain("Queued. Waiting for the reply to start.");
   expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
+  expect(streamingStatus.textContent).toBe("Thinking");
 
   chatSource()?.emit("agent-refresh", "run_demo");
   await flushAsync(220);
-  expect(optimistic.innerHTML).toContain("Reply is arriving. Background work, if any, keeps updating separately.");
+  expect(chatBodyRefreshes).toBeGreaterThan(0);
+  expect(streamingShell.getAttribute("data-stream-state")).toBe("pending");
+  expect(streamingLoader.classList.contains("hidden")).toBe(false);
+  expect(streamingStatus.textContent).toBe("Starting");
 
   textarea.value = "/obj Build the new deployment review objective.";
   textarea.selectionStart = textarea.value.length;
@@ -1188,7 +1507,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_created");
 });
 
-test("factory workbench client: inspector tab changes replace history and refresh only the chat island", async () => {
+test("factory workbench client: inspector tab changes replace history and refresh the full chat pane", async () => {
   const { document, fetchCalls, historyState, locationState } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
   });
@@ -1204,6 +1523,7 @@ test("factory workbench client: inspector tab changes replace history and refres
   expect(fetchCalls.filter((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action")).toHaveLength(1);
   expect(fetchCalls.some((call) => call.url === "/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat")).toBe(false);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action")).toBe(false);
+  expect(document.getElementById("factory-workbench-chat-header")).not.toBeNull();
 });
 
 test("factory workbench client: focus changes replace history and refresh summary plus activity only", async () => {

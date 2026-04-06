@@ -9,14 +9,16 @@ import { Hono } from "hono";
 
 import { fold } from "@receipt/core/chain";
 import { receipt } from "@receipt/core/chain";
-import { jsonBranchStore, jsonlStore } from "../../src/adapters/jsonl";
+import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import type { MemoryEntry, MemoryTools } from "../../src/adapters/memory-tools";
-import { jsonlQueue, type QueueJob } from "../../src/adapters/jsonl-queue";
+import { sqliteQueue, type QueueJob } from "../../src/adapters/sqlite-queue";
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import type { AgentLoaderContext } from "../../src/framework/agent-types";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
-import { syncObjectiveProjectionStream } from "../../src/db/projectors";
+import { syncChatContextProjectionStream, syncObjectiveProjectionStream } from "../../src/db/projectors";
+import { getReceiptDb } from "../../src/db/client";
+import * as dbSchema from "../../src/db/schema";
 import {
   buildFactoryProjection,
   DEFAULT_FACTORY_OBJECTIVE_PROFILE,
@@ -54,6 +56,57 @@ const asChain = (events: ReadonlyArray<FactoryEvent>) => {
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
+
+const writeChatProjection = async (input: {
+  readonly dataDir: string;
+  readonly repoRoot: string;
+  readonly profileId: string;
+  readonly chatId: string;
+  readonly events: ReadonlyArray<AgentEvent>;
+}): Promise<void> => {
+  const sessionStream = factoryChatSessionStream(input.repoRoot, input.profileId, input.chatId);
+  let prev: string | undefined;
+  const receipts = input.events.map((event, index) => {
+    const next = receipt(sessionStream, prev, event, index + 1);
+    prev = next.hash;
+    return next;
+  });
+  const db = getReceiptDb(input.dataDir);
+  db.write(() => {
+    db.orm.insert(dbSchema.streams)
+      .values({
+        name: sessionStream,
+        headHash: receipts.at(-1)?.hash ?? null,
+        receiptCount: receipts.length,
+        updatedAt: receipts.at(-1)?.ts ?? Date.now(),
+        lastTs: receipts.at(-1)?.ts ?? Date.now(),
+      })
+      .onConflictDoUpdate({
+        target: dbSchema.streams.name,
+        set: {
+          headHash: receipts.at(-1)?.hash ?? null,
+          receiptCount: receipts.length,
+          updatedAt: receipts.at(-1)?.ts ?? Date.now(),
+          lastTs: receipts.at(-1)?.ts ?? Date.now(),
+        },
+      })
+      .run();
+    db.orm.insert(dbSchema.receipts)
+      .values(receipts.map((entry, index) => ({
+        stream: entry.stream,
+        streamSeq: index + 1,
+        receiptId: entry.id,
+        ts: entry.ts,
+        prevHash: entry.prevHash ?? null,
+        hash: entry.hash,
+        eventType: entry.body.type,
+        bodyJson: JSON.stringify(entry.body),
+        hintsJson: null,
+      })))
+      .run();
+  });
+  await syncChatContextProjectionStream(input.dataDir, sessionStream);
+};
 
 const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> => {
   const { stdout } = await execFileAsync("git", [...args], {
@@ -116,8 +169,8 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
 
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
-    jsonlStore<JobEvent>(dataDir),
-    jsonBranchStore(dataDir),
+    sqliteReceiptStore<JobEvent>(dataDir),
+    sqliteBranchStore(dataDir),
     decideJob,
     reduceJob,
     initialJob,
@@ -362,6 +415,7 @@ const makeStubObjectiveState = (
 } as FactoryState);
 
 const createRouteTestApp = (overrides?: {
+  readonly dataDir?: string;
   readonly liveOutput?: Record<string, unknown>;
   readonly jobs?: ReadonlyArray<QueueJob>;
   readonly memoryTools?: MemoryTools;
@@ -462,6 +516,7 @@ const createRouteTestApp = (overrides?: {
     waitForJob: async () => undefined,
   };
   const stubService = {
+    dataDir: overrides?.dataDir,
     git: { repoRoot: process.cwd() },
     ensureBootstrap: async () => undefined,
     buildBoardProjection: async (input?: string | { readonly selectedObjectiveId?: string; readonly profileId?: string }) => ({
@@ -563,7 +618,7 @@ const createRouteTestApp = (overrides?: {
     ...(overrides?.service ?? {}),
   };
   const ctx: AgentLoaderContext = {
-    dataDir: "data",
+    dataDir: overrides?.dataDir ?? "data",
     sse: {
       publish: () => {},
       publishData: () => {},
@@ -759,7 +814,7 @@ test("factory service: objective control jobs use a dedicated worker id so /fact
   const dataDir = await createTempDir("receipt-factory-control-worker");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -785,7 +840,7 @@ test("factory service: objective lists refresh after an external projection writ
   const dataDir = await createTempDir("receipt-factory-external-projection");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -837,7 +892,7 @@ test("factory service: getObjective surfaces persisted self-improvement audit me
   const dataDir = await createTempDir("receipt-factory-audit-ui");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -903,7 +958,7 @@ test("factory service: getObjective marks stale self-improvement snapshots inste
   const dataDir = await createTempDir("receipt-factory-audit-stale");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -963,7 +1018,7 @@ test("factory service: task live output marks stale Codex work as stalled and su
   const dataDir = await createTempDir("receipt-factory-live-output-stalled");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1017,7 +1072,7 @@ test("factory service: objective cards reclassify stale execution without waitin
   const dataDir = await createTempDir("receipt-factory-card-stalled");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1075,7 +1130,7 @@ test("factory service: queued execution without a consumer eventually shows as s
   const dataDir = await createTempDir("receipt-factory-queued-stalled");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1120,7 +1175,7 @@ test("factory service: duplicate objective control enqueues steer onto the exist
   const dataDir = await createTempDir("receipt-factory-control-steer");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1167,7 +1222,7 @@ test("factory service: steered objective control jobs are redriven when the queu
   const dataDir = await createTempDir("receipt-factory-control-redrive");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const redrivenJobIds: string[] = [];
   const service = new FactoryService({
     dataDir,
@@ -1203,7 +1258,7 @@ test("factory service: resumeObjectives cancels queued control jobs for blocked 
   const dataDir = await createTempDir("receipt-factory-control-cleanup");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const redrivenJobIds: string[] = [];
   const service = new FactoryService({
     dataDir,
@@ -1288,7 +1343,7 @@ test("factory service: terminal objective transitions enqueue a reconcile contro
   const dataDir = await createTempDir("receipt-factory-terminal-cleanup-enqueue");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1341,7 +1396,7 @@ test("factory service: terminal cleanup retires lingering non-audit jobs without
   const dataDir = await createTempDir("receipt-factory-terminal-cleanup-retire");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1448,7 +1503,7 @@ test("factory service: dirty worktree objectives auto-pin the committed head and
   await fs.writeFile(path.join(repoRoot, "DIRTY_NOTE.txt"), "local-only change\n", "utf-8");
   const expectedBaseHash = await git(repoRoot, ["rev-parse", "HEAD"]);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1478,7 +1533,7 @@ test("factory service: reactObjective redrives active queued task jobs", async (
   const dataDir = await createTempDir("receipt-factory-redrive");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const redrivenJobIds: string[] = [];
   const service = new FactoryService({
     dataDir,
@@ -1516,7 +1571,7 @@ test("factory service: resumeObjectives redrives active queued task jobs before 
   const dataDir = await createTempDir("receipt-factory-resume-redrive");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const redrivenJobIds: string[] = [];
   const service = new FactoryService({
     dataDir,
@@ -1563,7 +1618,7 @@ test("factory service: startup reconciliation cancels stale queued execution and
   const dataDir = await createTempDir("receipt-factory-stale-startup-reconcile");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1625,7 +1680,7 @@ test("factory service: workspace commands use an isolated DATA_DIR while receipt
   const repoRoot = await createSourceRepo();
   const worktreesDir = path.join(dataDir, "hub", "worktrees");
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const queued = await queue.enqueue({
     agentId: "demo",
     lane: "collect",
@@ -1660,7 +1715,7 @@ test("factory service: startup reconciliation applies a persisted stale task res
   const dataDir = await createTempDir("receipt-factory-stale-task-recovery");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1737,7 +1792,7 @@ test("factory service: cancel plus cleanup drains active objective-scoped jobs i
   const dataDir = await createTempDir("receipt-factory-cancel-cleanup-idempotent");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1807,7 +1862,7 @@ test("factory service: getObjective reads task jobs without scanning the full qu
   const dataDir = await createTempDir("receipt-factory-objective-task-job");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1844,7 +1899,7 @@ test("factory service: listObjectives uses the stream manifest instead of scanni
   const dataDir = await createTempDir("receipt-factory-objective-manifest");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1881,7 +1936,7 @@ test("factory service: listObjectives skips receipt-chain reads for non-blocked 
   const dataDir = await createTempDir("receipt-factory-objective-card-fast-path");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1922,7 +1977,7 @@ test("factory service: check runner resolves source-backed workspace packages wi
   const dataDir = await createTempDir("receipt-factory-source-backed-core");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -1985,7 +2040,7 @@ test("factory service: git worktree checks bootstrap repo node_modules and recei
   const repoRoot = await createSourceRepo();
   await seedSourceRepoRuntimeSurface(repoRoot);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -2016,7 +2071,7 @@ test("factory service: bootstrapped worktree node_modules link stays excluded fr
   const repoRoot = await createSourceRepo();
   await seedSourceRepoRuntimeSurface(repoRoot);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -2053,7 +2108,7 @@ test("factory service: software task runs inherit worktree cli and local tool ac
   const repoRoot = await createSourceRepo();
   await seedSourceRepoRuntimeSurface(repoRoot);
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   let capturedStdout = "";
   const service = new FactoryService({
     dataDir,
@@ -3390,6 +3445,11 @@ test("factory route: completed objective still surfaces the terminal summary in 
     status: "completed",
     phase: "completed",
     latestSummary: "No active CloudWatch alarms were present across the 17 queryable regions.",
+    latestDecision: {
+      summary: "No active CloudWatch alarms were present across the 17 queryable regions.",
+      at: 12,
+      source: "runtime",
+    },
     nextAction: "Investigation is complete.",
     activeTaskCount: 0,
     readyTaskCount: 0,
@@ -3427,7 +3487,9 @@ test("factory route: completed objective still surfaces the terminal summary in 
   expect(body).toContain("Selected Objective");
   expect(body).toContain("Latest Outcome");
   expect(body).toContain("Next Operator Action");
+  expect(body).not.toContain("Latest Decision");
   expect(body).toContain("Start follow-up");
+  expect(body).toContain("xl:grid-cols-[minmax(0,1fr)_220px]");
   expect(body).toContain("px-2.5 py-1.5 text-[12px]");
   expect(body).not.toContain("Metrics");
   expect(body).not.toContain("Bottom Line");
@@ -3629,7 +3691,7 @@ test("factory service: active objective cards drop leaked queue positions", asyn
   const dataDir = await createTempDir("receipt-factory-active-queue-position");
   const repoRoot = await createSourceRepo();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,
@@ -4073,6 +4135,19 @@ test("factory route: fresh objective projection versions invalidate cached workb
   expect(secondBody).toContain("The refreshed projection should replace the cached workbench shell.");
 });
 
+test("factory route: workbench fragments expose server timing for render hotspots", async () => {
+  const app = createRouteTestApp();
+
+  const response = await app.request("http://receipt.test/factory/island/workbench/rail?profile=generalist&chat=chat_demo");
+
+  expect(response.status).toBe(200);
+  const timing = response.headers.get("server-timing") ?? "";
+  expect(timing).toContain("request_normalization;dur=");
+  expect(timing).toContain("session_version;dur=");
+  expect(timing).toContain("objective_version;dur=");
+  expect(timing).toContain("workspace_model;dur=");
+});
+
 test("factory route: running task workbench renders above the transcript and auto-focuses the active task", async () => {
   const liveObjective = makeRunningWorkbenchObjectiveDetail("objective_live");
   const app = createRouteTestApp({
@@ -4119,12 +4194,18 @@ test("factory route: running task workbench renders above the transcript and aut
 
   const response = await app.request("http://receipt.test/factory?profile=generalist&objective=objective_live&detailTab=review");
   const body = await response.text();
+  const focusResponse = await app.request("http://receipt.test/factory/island/workbench/focus?profile=generalist&objective=objective_live&detailTab=review");
+  const focusBody = await focusResponse.text();
 
   expect(response.status).toBe(200);
+  expect(focusResponse.status).toBe(200);
   expect(body).toContain("Execution Log");
+  expect(focusBody).toContain("Execution Log");
   expect(body).toContain("Codex Log");
   expect(body).toContain("build ok");
   expect(body).toContain("Worker running");
+  expect(focusBody).not.toContain("Latest Outcome");
+  expect(focusBody).not.toContain("Next Operator Action");
   expect(body).toContain('id="factory-workbench-rail-scroll"');
   expect(body).toContain('id="factory-workbench-focus-scroll"');
   expect(body).toContain('data-preserve-scroll-key="rail"');
@@ -4520,14 +4601,18 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body.match(/data-factory-profile-select="true"/g)?.length ?? 0).toBe(1);
   expect(body).toContain('data-inspector-tab="overview"');
   expect(body).toContain('data-refresh-on=""');
-  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@320,sse:objective-runtime-refresh@320"');
-  expect(body).toContain('data-refresh-on="sse:profile-board-refresh@300,sse:objective-runtime-refresh@300"');
+  expect(body).toContain('data-refresh-on="body:profile-board-refresh,body:objective-runtime-refresh"');
+  expect(body).toContain('hx-trigger="profile-board-refresh from:body, objective-runtime-refresh from:body"');
   expect(body).toContain('data-refresh-path="/factory/island/workbench/header?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
   expect(body).toContain('data-events-path="/factory/chat/events?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live"');
-  expect(body).not.toContain('hx-trigger=');
-  expect(body).not.toContain('hx-get=');
+  expect(body).toContain('hx-get="/factory/island/workbench/focus?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
+  expect(body).toContain('hx-get="/factory/island/workbench/rail?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live');
+  expect(body).toContain('filter=objective.running');
+  expect(body).toContain('hx-get="/factory/island/workbench/chat-shell?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live');
+  expect(body).toContain('hx-target="#factory-workbench-chat-region"');
   expect(body).toContain('data-route-key="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
-  expect(body).toContain('data-factory-href="/factory/new-chat?profile=generalist&amp;inspectorTab=chat&amp;detailTab=action&amp;filter=objective.running"');
+  expect(body).toContain('href="/factory/new-chat?profile=generalist&amp;inspectorTab=chat&amp;detailTab=action&amp;filter=objective.running"');
+  expect(body).toContain('hx-target="#factory-workbench-chat-region"');
   expect(body).not.toContain("objective=objective_done");
 });
 
@@ -4755,11 +4840,34 @@ test("factory workbench shell snapshot: returns a canonical route key for client
     },
   });
 
-  const response = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_live");
+  const response = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_live&page=2");
   const snapshot = await response.json() as { readonly routeKey?: string };
 
   expect(response.status).toBe(200);
-  expect(snapshot.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_live&detailTab=action&focusKind=task&focusId=task_01");
+  expect(snapshot.routeKey).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_live&detailTab=action&page=2&focusKind=task&focusId=task_01");
+});
+
+test("factory route: workbench redirect preserves pagination state in the canonical url", async () => {
+  const app = createRouteTestApp({
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [],
+        sections: {
+          needs_attention: [],
+          active: [],
+          queued: [],
+          completed: [],
+        },
+        selectedObjectiveId: undefined,
+      }),
+      listObjectives: async () => [],
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/workbench?profile=generalist&chat=chat_demo&page=2");
+
+  expect(response.status).toBe(303);
+  expect(response.headers.get("location")).toBe("/factory?profile=generalist&chat=chat_demo&detailTab=queue&page=2");
 });
 
 test("factory workbench shell snapshot: selected objective chat excludes runs from other objectives in the same session", async () => {
@@ -4887,6 +4995,80 @@ test("factory workbench shell snapshot: selected objective chat excludes runs fr
   expect(snapshot.chatHtml).toContain("Objective B reply");
   expect(snapshot.chatHtml).not.toContain("Objective A reply");
   expect(snapshot.chatHtml).toContain('data-objective-id="objective_b"');
+});
+
+test("factory route: selecting an objective reuses the objective's bound chat session", async () => {
+  const dataDir = await createTempDir("receipt-factory-objective-chat-route");
+  await writeChatProjection({
+    dataDir,
+    repoRoot: process.cwd(),
+    profileId: "generalist",
+    chatId: "chat_objective_b",
+    events: [
+      {
+        type: "problem.set",
+        runId: "run_objective_b",
+        problem: "Summarize objective B.",
+        agentId: "factory",
+      },
+      {
+        type: "thread.bound",
+        runId: "run_objective_b",
+        objectiveId: "objective_b",
+        chatId: "chat_objective_b",
+        reason: "startup",
+      },
+      {
+        type: "response.finalized",
+        runId: "run_objective_b",
+        content: "Objective B reply",
+        agentId: "factory",
+      },
+    ],
+  });
+  const objectiveB = {
+    ...makeStubObjectiveDetail("objective_b", "job_b"),
+    title: "Objective B",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const objectiveCardB = { ...objectiveB, section: "active" as const };
+  const app = createRouteTestApp({
+    dataDir,
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [objectiveCardB],
+        sections: {
+          needs_attention: [],
+          active: [objectiveCardB],
+          queued: [],
+          completed: [],
+        },
+        selectedObjectiveId: "objective_b",
+      }),
+      listObjectives: async () => [
+        objectiveB as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => objectiveB,
+    },
+  });
+
+  const shellResponse = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_empty&objective=objective_b&inspectorTab=chat");
+  const shell = await shellResponse.json() as { readonly location?: string; readonly chatHtml?: string };
+
+  expect(shellResponse.status).toBe(200);
+  const shellLocation = new URL(shell.location ?? "", "http://receipt.test");
+  expect(shellLocation.pathname).toBe("/factory");
+  expect(shellLocation.searchParams.get("profile")).toBe("generalist");
+  expect(shellLocation.searchParams.get("chat")).toBe("chat_objective_b");
+  expect(shellLocation.searchParams.get("objective")).toBe("objective_b");
+  expect(shellLocation.searchParams.get("inspectorTab")).toBe("chat");
+  expect(shell.chatHtml).toContain("Objective B reply");
+
+  const queueResponse = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_empty&detailTab=queue");
+  const queueBody = await queueResponse.text();
+
+  expect(queueResponse.status).toBe(200);
+  expect(queueBody).toContain('href="/factory?profile=generalist&amp;chat=chat_objective_b&amp;objective=objective_b&amp;inspectorTab=chat&amp;detailTab=queue"');
+  expect(queueBody).toContain('hx-get="/factory/island/workbench/select?profile=generalist&amp;chat=chat_objective_b&amp;objective=objective_b&amp;inspectorTab=chat&amp;detailTab=queue"');
 });
 
 test("factory route: selected objective chat island excludes runs from other objectives in the same session", async () => {
@@ -5089,7 +5271,7 @@ test("factory workbench: completed filter without an explicit objective keeps Ne
   expect(body).toContain("No objective selected.");
   expect(body).toContain("Completed objective");
   expect(body).toContain("Badge-free completed card");
-  expect(body).toContain('data-factory-href="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_done&amp;inspectorTab=chat&amp;detailTab=queue&amp;filter=objective.completed"');
+  expect(body).toContain('hx-get="/factory/island/workbench/select?profile=generalist&amp;chat=chat_demo&amp;objective=objective_done&amp;inspectorTab=chat&amp;detailTab=queue&amp;filter=objective.completed"');
   expect(body).not.toContain('data-objective-id="objective_done" data-selected="true" aria-current="page"');
   expect(body).not.toContain(">Selected<");
   const badgeFreeCardIndex = body.indexOf("Badge-free completed card");
@@ -5112,6 +5294,8 @@ test("factory workbench route: empty state points operators to New Chat and /obj
   expect(body).toContain("No objective selected.");
   expect(body).toContain("Use chat to create a new objective or select one from the queue below.");
   expect(body).toContain("No objective is selected. Start in New Chat to discuss the work, or select an objective from the queue to reopen its chat.");
+  expect(body).toContain("Profile Brief");
+  expect(body).toContain("Responsibilities");
   expect(body).toContain('data-detail-tab="queue"');
 });
 
@@ -6392,7 +6576,7 @@ test("factory service: objective-scoped factory SSE topic publishes on receipt a
   const repoRoot = await createSourceRepo();
   const hub = new SseHub();
   const jobRuntime = createJobRuntime(dataDir);
-  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
   const service = new FactoryService({
     dataDir,
     queue,

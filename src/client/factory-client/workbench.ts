@@ -9,8 +9,6 @@ import {
   renderStreamingReply,
 } from "./live-updates";
 import {
-  createQueuedRefreshRunner,
-  createReactivePushRouter,
   readReactiveRefreshPath,
 } from "./reactive";
 import {
@@ -37,7 +35,8 @@ import {
 } from "./workbench-state";
 
 type PendingLiveStatus = {
-  readonly statusLabel: "Queued" | "Starting" | "Working";
+  readonly surface?: "chat" | "handoff";
+  readonly statusLabel: "Sending" | "Queued" | "Starting";
   readonly summary: string;
   readonly runId?: string;
   readonly jobId?: string;
@@ -51,15 +50,7 @@ type WorkbenchFragmentKind =
   | "objectives"
   | "history";
 
-type WorkbenchRefreshSource = "chat" | "background";
 type WorkbenchRefreshTargetKey = WorkbenchFragmentKind | "chat" | "workbench";
-
-type WorkbenchRefreshTarget = {
-  readonly key: WorkbenchRefreshTargetKey;
-  readonly source: WorkbenchRefreshSource;
-  readonly element: () => HTMLElement | null;
-  readonly queue: (delayMs: number, routeKeyOverride?: string) => void;
-};
 
 const isAbortError = (error: unknown): boolean =>
   Boolean(error && typeof error === "object" && "name" in error && (error as { readonly name?: string }).name === "AbortError");
@@ -72,15 +63,14 @@ export const initFactoryWorkbenchBrowser = () => {
   let streamingReply: { readonly runId?: string; readonly profileLabel?: string; readonly text: string } | null = null;
   let pendingOverlayHtml = "";
   let pendingLiveStatus: PendingLiveStatus | null = null;
+  let pendingTranscriptSignature: string | null = null;
   let overlayRenderQueued = false;
+  let backgroundEvents: EventSource | null = null;
+  let backgroundEventsUrl: string | null = null;
+  let chatEvents: EventSource | null = null;
+  let chatEventsUrl: string | null = null;
   const islandRefreshControllers = new Map<"chat" | "workbench", AbortController>();
   const fragmentRefreshControllers = new Map<WorkbenchFragmentKind, AbortController>();
-  const islandRefreshQueue = createQueuedRefreshRunner<"chat" | "workbench", string>(
-    (kind, routeKeyOverride) => refreshIslandNow(kind, routeKeyOverride ?? currentRouteKey()),
-  );
-  const fragmentRefreshQueue = createQueuedRefreshRunner<WorkbenchFragmentKind, string>(
-    (kind, routeKeyOverride) => refreshWorkbenchFragmentNow(kind, routeKeyOverride ?? currentRouteKey()),
-  );
 
   const chatInput = () => {
     const input = document.getElementById("factory-prompt");
@@ -119,11 +109,6 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const optimisticTranscript = () => {
     const node = document.getElementById("factory-chat-optimistic");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingTranscript = () => {
-    const node = document.getElementById("factory-chat-streaming");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -167,6 +152,16 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
+  const workbenchRailShell = () => {
+    const node = document.getElementById("factory-workbench-rail-shell");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const workbenchFocusShell = () => {
+    const node = document.getElementById("factory-workbench-focus-shell");
+    return node instanceof HTMLElement ? node : null;
+  };
+
   const workbenchRailScroll = () => {
     const node = document.getElementById("factory-workbench-rail-scroll");
     return node instanceof HTMLElement ? node : null;
@@ -188,6 +183,16 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
+  const chatRegion = () => {
+    const node = document.getElementById("factory-workbench-chat-region");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const chatBody = () => {
+    const node = document.getElementById("factory-workbench-chat-body");
+    return node instanceof HTMLElement ? node : null;
+  };
+
   const streamingLabel = () => {
     const node = document.getElementById("factory-chat-streaming-label-text");
     return node instanceof HTMLElement ? node : null;
@@ -202,6 +207,8 @@ export const initFactoryWorkbenchBrowser = () => {
         activeRunId: undefined,
         knownRunIds: [],
         terminalRunIds: [],
+        transcriptSignature: "0:empty",
+        lastItemKind: undefined,
       };
     }
     const splitDelimited = (value: string | null) =>
@@ -213,6 +220,8 @@ export const initFactoryWorkbenchBrowser = () => {
       activeRunId: root.getAttribute("data-active-run-id") || undefined,
       knownRunIds: splitDelimited(root.getAttribute("data-known-run-ids")),
       terminalRunIds: splitDelimited(root.getAttribute("data-terminal-run-ids")),
+      transcriptSignature: root.getAttribute("data-transcript-signature") || "0:empty",
+      lastItemKind: asString(root.getAttribute("data-last-item-kind")) as "user" | "assistant" | "system" | "work" | "objective_event" | undefined,
     };
   };
 
@@ -231,6 +240,7 @@ export const initFactoryWorkbenchBrowser = () => {
     inspectorTab: asString(url?.searchParams.get("inspectorTab")) ?? bodyRouteValue("data-inspector-tab"),
     detailTab: asString(url?.searchParams.get("detailTab")) ?? bodyRouteValue("data-detail-tab"),
     filter: asString(url?.searchParams.get("filter")) ?? "objective.running",
+    page: asString(url?.searchParams.get("page")) ?? bodyRouteValue("data-page"),
     focusKind: asString(url?.searchParams.get("focusKind")) ?? bodyRouteValue("data-focus-kind"),
     focusId: asString(url?.searchParams.get("focusId")) ?? bodyRouteValue("data-focus-id"),
   });
@@ -269,8 +279,47 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const currentRouteKey = () => workbenchState.desiredRoute.routeKey;
 
+  const processHtmx = (root?: Element | null) => {
+    const scope = root instanceof Element ? root : document.body;
+    const windowWithHtmx = window as unknown as { htmx?: { process?: (node: Element) => void } };
+    const process = typeof window !== "undefined" && typeof windowWithHtmx.htmx?.process === "function"
+      ? windowWithHtmx.htmx.process
+      : undefined;
+    if (scope && process) process(scope);
+  };
+
   const liveShell = () => {
     const node = document.getElementById("factory-chat-live");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingShell = () => {
+    const node = document.getElementById("factory-chat-stream-shell");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingContent = () => {
+    const node = document.getElementById("factory-chat-streaming-content");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingLoader = () => {
+    const node = document.getElementById("factory-chat-streaming-loader");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingStatus = () => {
+    const node = document.getElementById("factory-chat-streaming-status");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingLoaderLabel = () => {
+    const node = document.getElementById("factory-chat-streaming-loader-label");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const streamingLoaderMeta = () => {
+    const node = document.getElementById("factory-chat-streaming-loader-meta");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -304,6 +353,7 @@ export const initFactoryWorkbenchBrowser = () => {
     }
     const target = event.target instanceof Element ? event.target.closest("[data-factory-href],a[href]") : null;
     if (!(target instanceof Element)) return null;
+    if (target.closest("[hx-get]")) return null;
     if (target.getAttribute("download") !== null) return null;
     const linkTarget = (target.getAttribute("target") || "").toLowerCase();
     if (linkTarget && linkTarget !== "_self") return null;
@@ -322,12 +372,17 @@ export const initFactoryWorkbenchBrowser = () => {
     return parseCommands(form) || DEFAULT_COMMANDS;
   };
 
+  const visiblePendingStatusLabel = (status: PendingLiveStatus): string => {
+    if (status.surface === "chat" && status.statusLabel === "Queued") return "Thinking";
+    return status.statusLabel;
+  };
+
   const renderPendingLiveStatus = (status: PendingLiveStatus): string => '<section class=" border border-primary/20 bg-primary/5 px-3 py-2">' +
     '<div class="flex min-w-0 items-start justify-between gap-2">' +
       '<div class="min-w-0 flex-1">' +
         '<div class="flex flex-wrap items-center gap-2">' +
-          '<span class="text-xs font-semibold text-foreground">Background handoff</span>' +
-          '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + escapeHtml(status.statusLabel) + "</span>" +
+          '<span class="text-xs font-semibold text-foreground">' + escapeHtml(status.surface === "chat" ? "Reply in progress" : "Background handoff") + "</span>" +
+          '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + escapeHtml(visiblePendingStatusLabel(status)) + "</span>" +
         "</div>" +
         '<div class="mt-1 text-xs leading-5 text-muted-foreground">' + escapeHtml(status.summary) + "</div>" +
         ((status.jobId || status.runId)
@@ -359,6 +414,7 @@ export const initFactoryWorkbenchBrowser = () => {
       });
       return;
     }
+    pendingTranscriptSignature = null;
     dispatchWorkbenchAction({
       type: "composer.acknowledged",
       runId: acknowledged?.runId,
@@ -374,10 +430,46 @@ export const initFactoryWorkbenchBrowser = () => {
       overlayRenderQueued = false;
       const optimistic = optimisticTranscript();
       if (!optimistic) return;
-      optimistic.innerHTML = pendingOverlayHtml + (pendingLiveStatus ? renderPendingLiveStatus(pendingLiveStatus) : "");
-      const streaming = streamingTranscript();
-      if (streaming) {
-        streaming.innerHTML = streamingReply ? renderStreamingReply(streamingReply) : "";
+      optimistic.innerHTML = pendingOverlayHtml + (pendingLiveStatus && pendingLiveStatus.surface !== "chat" ? renderPendingLiveStatus(pendingLiveStatus) : "");
+      const streamShell = streamingShell();
+      const streamContent = streamingContent();
+      const streamLoader = streamingLoader();
+      const streamStatus = streamingStatus();
+      const streamLoaderText = streamingLoaderLabel();
+      const streamLoaderSubtext = streamingLoaderMeta();
+      const hasStreamingText = Boolean(streamingReply?.text);
+      const hasPendingStream = Boolean(
+        !hasStreamingText
+        && pendingLiveStatus
+        && ["Sending", "Queued", "Starting"].includes(pendingLiveStatus.statusLabel),
+      );
+      const pendingStatusLabel = hasPendingStream && pendingLiveStatus
+        ? visiblePendingStatusLabel(pendingLiveStatus)
+        : "Streaming";
+      const pendingSummary = hasPendingStream && pendingLiveStatus
+        ? pendingLiveStatus.summary
+        : hasStreamingText
+          ? "Reply streaming live."
+          : "";
+      if (streamShell) {
+        const streamState = hasStreamingText ? "active" : hasPendingStream ? "pending" : "idle";
+        streamShell.setAttribute("data-stream-state", streamState);
+      }
+      if (streamLoader) {
+        streamLoader.classList.toggle("hidden", !hasPendingStream);
+        streamLoader.setAttribute("aria-hidden", hasPendingStream ? "false" : "true");
+      }
+      if (streamLoaderText) {
+        streamLoaderText.textContent = pendingStatusLabel;
+      }
+      if (streamLoaderSubtext) {
+        streamLoaderSubtext.textContent = pendingSummary;
+      }
+      if (streamStatus) {
+        streamStatus.textContent = hasStreamingText ? "Streaming" : pendingStatusLabel;
+      }
+      if (streamContent) {
+        streamContent.innerHTML = hasStreamingText && streamingReply ? renderStreamingReply(streamingReply) : "";
       }
       if ((pendingOverlayHtml || pendingLiveStatus || streamingReply) && shouldStickToBottom) {
         window.requestAnimationFrame(() => {
@@ -482,8 +574,23 @@ export const initFactoryWorkbenchBrowser = () => {
   const reconcileLiveTranscript = () => {
     const state = currentChatState();
     const pendingRunId = pendingLiveStatus?.runId;
+    const transcriptAdvanced = Boolean(
+      pendingLiveStatus?.surface === "chat"
+      && pendingTranscriptSignature
+      && state.transcriptSignature !== pendingTranscriptSignature
+      && state.lastItemKind
+      && state.lastItemKind !== "user",
+    );
+    if (transcriptAdvanced) {
+      pendingOverlayHtml = "";
+      updatePendingLiveStatus(null, {
+        runId: pendingLiveStatus?.runId,
+        jobId: pendingLiveStatus?.jobId,
+      });
+    }
     if (
       pendingLiveStatus
+      && pendingLiveStatus.surface !== "chat"
       && (
         (pendingRunId && (
           state.activeRunId === pendingRunId
@@ -650,6 +757,31 @@ export const initFactoryWorkbenchBrowser = () => {
     setHistory(url, "replace");
   };
 
+  type PendingHtmxSwapState = {
+    readonly targetId: string;
+    readonly documentScroll?: { readonly top: number } | null;
+    readonly workbenchPanes?: ReadonlyArray<{
+      readonly key: string;
+      readonly top: number;
+      readonly height: number;
+      readonly bottomOffset: number;
+    }> | null;
+    readonly chat?: { readonly top: number; readonly height: number; readonly bottomOffset: number } | null;
+  };
+
+  const pendingHtmxSwapStates = new Map<string, PendingHtmxSwapState>();
+
+  const syncWorkbenchStateFromLocation = () => {
+    const url = currentUrl();
+    if (!url) return;
+    const nextRoute = routeStateFromLocation(url);
+    dispatchWorkbenchAction({
+      type: "route.applied",
+      route: nextRoute,
+    });
+    applyRouteState(nextRoute, "none");
+  };
+
   const fetchHtml = (url: string, signal?: AbortSignal) =>
     window.fetch(url, {
       method: "GET",
@@ -795,6 +927,14 @@ export const initFactoryWorkbenchBrowser = () => {
     setRefreshPath(currentChatHeader, chatHeaderPathForRoute(route));
     const currentWorkbench = workbenchContainer();
     setRefreshPath(currentWorkbench, workbenchIslandPathForRoute(route));
+    const currentFocusShell = workbenchFocusShell();
+    setRefreshPath(currentFocusShell, `/factory/island/workbench/focus${routeSearch(route)}`);
+    const currentRailShell = workbenchRailShell();
+    setRefreshPath(currentRailShell, `/factory/island/workbench/rail${routeSearch(route)}`);
+    const currentChatRegion = chatRegion();
+    setRefreshPath(currentChatRegion, `/factory/island/workbench/chat-shell${routeSearch(route)}`);
+    const currentChatBody = chatBody();
+    setRefreshPath(currentChatBody, `/factory/island/workbench/chat-body${routeSearch(route)}`);
     const currentChat = chatContainer();
     setRefreshPath(currentChat, chatIslandPathForRoute(route));
     const currentBackgroundRoot = backgroundRoot();
@@ -821,7 +961,7 @@ export const initFactoryWorkbenchBrowser = () => {
     syncRouteBindings(route);
     syncInspectorTabVisibility(route.inspectorTab);
     syncInspectorTabControls(route.inspectorTab);
-    reactiveRefresh.sync();
+    syncWorkbenchEventSources();
     const historyUrl = resolveFactoryUrl(route.routeKey);
     if (historyUrl) setHistory(historyUrl, historyMode);
   };
@@ -876,6 +1016,7 @@ export const initFactoryWorkbenchBrowser = () => {
     return fetchHtml(path, controller?.signal).then((markup) => {
       if (expectedRouteKey !== currentRouteKey()) return;
       target.innerHTML = markup;
+      processHtmx(target);
       window.requestAnimationFrame(() => {
         restoreDocumentScrollState(documentScrollState);
       });
@@ -909,6 +1050,7 @@ export const initFactoryWorkbenchBrowser = () => {
     return fetchHtml(path, controller?.signal).then((markup) => {
       if (expectedRouteKey !== currentRouteKey()) return;
       target.innerHTML = markup;
+      processHtmx(target);
       if (kind === "chat") handleWorkbenchChatSwap(target);
       if (kind === "workbench" && paneScrollState) {
         window.requestAnimationFrame(() => {
@@ -927,18 +1069,6 @@ export const initFactoryWorkbenchBrowser = () => {
       finishRefreshController(islandRefreshControllers, kind, controller);
     });
   }
-
-  const queueWorkbenchFragmentRefresh = (
-    kind: WorkbenchFragmentKind,
-    delayMs: number,
-    routeKeyOverride?: string,
-  ) => {
-    fragmentRefreshQueue.queue(kind, delayMs, routeKeyOverride);
-  };
-
-  const queueIslandRefresh = (kind: "chat" | "workbench", delayMs: number, routeKeyOverride?: string) => {
-    islandRefreshQueue.queue(kind, delayMs, routeKeyOverride);
-  };
 
   const refreshRouteTargetsNow = (
     targets: ReadonlyArray<WorkbenchRefreshTargetKey>,
@@ -981,51 +1111,6 @@ export const initFactoryWorkbenchBrowser = () => {
     return ["header", "chat-header", "workbench", "chat"];
   };
 
-  const workbenchRefreshTargets = (): ReadonlyArray<WorkbenchRefreshTarget> => [
-    {
-      key: "header",
-      source: "background",
-      element: workbenchHeader,
-      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("header", delayMs, routeKeyOverride),
-    },
-    {
-      key: "workbench",
-      source: "background",
-      element: workbenchContainer,
-      queue: (delayMs, routeKeyOverride) => queueIslandRefresh("workbench", delayMs, routeKeyOverride),
-    },
-    {
-      key: "summary",
-      source: "background",
-      element: workbenchSummaryBlock,
-      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("summary", delayMs, routeKeyOverride),
-    },
-    {
-      key: "activity",
-      source: "background",
-      element: workbenchActivityBlock,
-      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("activity", delayMs, routeKeyOverride),
-    },
-    {
-      key: "objectives",
-      source: "background",
-      element: workbenchObjectivesBlock,
-      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("objectives", delayMs, routeKeyOverride),
-    },
-    {
-      key: "history",
-      source: "background",
-      element: workbenchHistoryBlock,
-      queue: (delayMs, routeKeyOverride) => queueWorkbenchFragmentRefresh("history", delayMs, routeKeyOverride),
-    },
-    {
-      key: "chat",
-      source: workbenchState.appliedRoute.inspectorTab === "chat" ? "chat" : "background",
-      element: chatContainer,
-      queue: (delayMs, routeKeyOverride) => queueIslandRefresh("chat", delayMs, routeKeyOverride),
-    },
-  ];
-
   const chatEventsPath = () => {
     const node = chatRoot();
     return node?.getAttribute("data-events-path") || null;
@@ -1035,52 +1120,120 @@ export const initFactoryWorkbenchBrowser = () => {
     const node = backgroundRoot();
     return node?.getAttribute("data-events-path") || null;
   };
-  const reactiveRefresh = createReactivePushRouter<WorkbenchRefreshSource, WorkbenchRefreshTargetKey, string>({
-    sources: ["background", "chat"],
-    targets: workbenchRefreshTargets,
-    eventPath: (source) => source === "chat" ? chatEventsPath() : backgroundEventsPath(),
-    getScopeKey: currentRouteKey,
-    onSseEvent: ({ eventName }) => {
-      if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
-        updatePendingLiveStatus({
-          ...pendingLiveStatus,
-          statusLabel: "Working",
-          summary: "Reply is arriving. Background work, if any, keeps updating separately.",
-        });
+
+  const dispatchWorkbenchBodyEvent = (eventName: string) => {
+    if (document.body && typeof document.body.dispatchEvent === "function") {
+      document.body.dispatchEvent(new Event(eventName, { bubbles: true }));
+      return;
+    }
+    if (typeof document.dispatchEvent === "function") {
+      document.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+
+  const declaredBodyRefreshEvents = (
+    elements: ReadonlyArray<HTMLElement | null>,
+  ): ReadonlyArray<string> => {
+    const events = new Set<string>();
+    for (const element of elements) {
+      const descriptor = element?.getAttribute("data-refresh-on") || "";
+      for (const part of descriptor.split(",")) {
+        const match = part.trim().match(/^body:([^@]+?)(?:@(\d+))?$/i);
+        if (match && match[1]) events.add(match[1]);
       }
-      if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply && pendingLiveStatus.statusLabel === "Queued") {
-        updatePendingLiveStatus({
-          ...pendingLiveStatus,
-          statusLabel: "Starting",
-          summary: "The chat run is starting.",
-        });
-      }
-    },
-    onEventSourceConnected: ({ sourceKey, eventSource }) => {
-      if (sourceKey !== "chat") return;
-      eventSource.addEventListener("agent-token", (event) => {
-        const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
-        if (!payload) return;
-        const state = currentChatState();
-        const runId = payload.runId || state.activeRunId || streamingReply?.runId;
-        if (!acceptsStreamingRun(runId)) return;
-        updatePendingLiveStatus(null, { runId: payload.runId });
-        const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
-        streamingReply = {
-          runId,
-          profileLabel: state.activeProfileLabel || streamingLabel()?.textContent || "Assistant",
-          text: previous + payload.delta,
-        };
-        scheduleOverlayRender();
+    }
+    return Array.from(events);
+  };
+
+  const closeBackgroundEvents = () => {
+    if (backgroundEvents && typeof backgroundEvents.close === "function") backgroundEvents.close();
+    backgroundEvents = null;
+    backgroundEventsUrl = null;
+  };
+
+  const closeChatEvents = () => {
+    if (chatEvents && typeof chatEvents.close === "function") chatEvents.close();
+    chatEvents = null;
+    chatEventsUrl = null;
+  };
+
+  const connectBackgroundEvents = () => {
+    const nextUrl = backgroundEventsPath();
+    if (!nextUrl) {
+      closeBackgroundEvents();
+      return;
+    }
+    if (backgroundEvents && backgroundEventsUrl === nextUrl) return;
+    closeBackgroundEvents();
+    backgroundEvents = new EventSource(nextUrl);
+    backgroundEventsUrl = nextUrl;
+    for (const eventName of declaredBodyRefreshEvents([
+      workbenchRailShell(),
+      workbenchFocusShell(),
+      chatBody(),
+    ])) {
+      backgroundEvents.addEventListener(eventName, () => {
+        dispatchWorkbenchBodyEvent(eventName);
       });
-      eventSource.addEventListener("factory-stream-reset", () => {
-        clearStreamingReply();
+    }
+  };
+
+  const connectChatEvents = () => {
+    const nextUrl = workbenchState.appliedRoute.inspectorTab === "chat" ? chatEventsPath() : null;
+    if (!nextUrl) {
+      closeChatEvents();
+      return;
+    }
+    if (chatEvents && chatEventsUrl === nextUrl) return;
+    closeChatEvents();
+    chatEvents = new EventSource(nextUrl);
+    chatEventsUrl = nextUrl;
+    for (const eventName of declaredBodyRefreshEvents([chatBody()])) {
+      chatEvents.addEventListener(eventName, () => {
+        if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
+          updatePendingLiveStatus({
+            ...pendingLiveStatus,
+            statusLabel: "Starting",
+            summary: "Starting the reply.",
+          });
+        }
+        if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply) {
+          updatePendingLiveStatus({
+            ...pendingLiveStatus,
+            statusLabel: "Starting",
+            summary: "Starting the reply.",
+          });
+        }
+        dispatchWorkbenchBodyEvent(eventName);
       });
-    },
-  });
+    }
+    chatEvents.addEventListener("agent-token", (event) => {
+      const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
+      if (!payload) return;
+      const state = currentChatState();
+      const runId = payload.runId || state.activeRunId || streamingReply?.runId;
+      if (!acceptsStreamingRun(runId)) return;
+      updatePendingLiveStatus(null, { runId: payload.runId });
+      const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
+      streamingReply = {
+        runId,
+        profileLabel: state.activeProfileLabel || streamingLabel()?.textContent || "Assistant",
+        text: previous + payload.delta,
+      };
+      scheduleOverlayRender();
+    });
+    chatEvents.addEventListener("factory-stream-reset", () => {
+      clearStreamingReply();
+    });
+  };
+
+  const syncWorkbenchEventSources = () => {
+    connectBackgroundEvents();
+    connectChatEvents();
+  };
 
   const refreshVisibleWorkbench = () => {
-    reactiveRefresh.sync();
+    syncWorkbenchEventSources();
   };
 
   const navigateWithFeedback = (location: string) => {
@@ -1099,6 +1252,7 @@ export const initFactoryWorkbenchBrowser = () => {
       inspectorTab: asString(url.searchParams.get("inspectorTab")),
       detailTab: asString(url.searchParams.get("detailTab")),
       filter: asString(url.searchParams.get("filter")),
+      page: asString(url.searchParams.get("page")),
       focusKind: asString(url.searchParams.get("focusKind")),
       focusId: asString(url.searchParams.get("focusId")),
     });
@@ -1160,6 +1314,23 @@ export const initFactoryWorkbenchBrowser = () => {
       }
       return true;
     }).catch(() => true);
+  };
+
+  const htmxSwapTarget = (event: Event): HTMLElement | null => {
+    const detail = (event as Event & {
+      readonly detail?: {
+        readonly target?: EventTarget | null;
+        readonly elt?: EventTarget | null;
+      };
+    }).detail;
+    const candidate = detail?.target instanceof HTMLElement
+      ? detail.target
+      : detail?.elt instanceof HTMLElement
+        ? detail.elt
+        : event.target instanceof HTMLElement
+          ? event.target
+          : null;
+    return candidate;
   };
 
   const resetComposerAfterSuccess = () => {
@@ -1265,10 +1436,12 @@ export const initFactoryWorkbenchBrowser = () => {
       setComposerStatus(feedback.status || "");
       clearStreamingReply();
       pendingOverlayHtml = "optimisticHtml" in feedback && feedback.optimisticHtml ? feedback.optimisticHtml : "";
-      updatePendingLiveStatus("optimisticHtml" in feedback && feedback.optimisticHtml
+      pendingTranscriptSignature = currentChatState().transcriptSignature;
+      updatePendingLiveStatus("showPendingStream" in feedback && feedback.showPendingStream
         ? {
-            statusLabel: "Queued",
-            summary: "Chat accepted this turn and is preparing a reply.",
+            surface: "chat",
+            statusLabel: "Sending",
+            summary: "Sending your message.",
           }
         : null);
       scheduleOverlayRender();
@@ -1294,11 +1467,12 @@ export const initFactoryWorkbenchBrowser = () => {
           if (pendingLiveStatus) {
             updatePendingLiveStatus({
               ...pendingLiveStatus,
+              statusLabel: "Queued",
               runId: body.live?.runId || pendingLiveStatus.runId,
               jobId: body.live?.jobId || pendingLiveStatus.jobId,
-              summary: body.live?.jobId
-                ? "Chat run queued. Waiting for the reply to start."
-                : pendingLiveStatus.summary,
+              summary: pendingLiveStatus.surface === "chat"
+                ? "Thinking about the reply."
+                : "Queued. Waiting for the reply to start.",
             });
             scheduleOverlayRender();
           }
@@ -1398,6 +1572,57 @@ export const initFactoryWorkbenchBrowser = () => {
   }
 
   if (typeof document.addEventListener === "function") {
+    document.addEventListener("htmx:beforeRequest", (event) => {
+      const target = htmxSwapTarget(event);
+      if (!target) return;
+      const isWorkbenchShellSwap =
+        target.id === "factory-workbench-rail-shell"
+        || target.id === "factory-workbench-focus-shell"
+        || target.id === "factory-workbench-chat-pane"
+        || target.id === "factory-workbench-chat-region"
+        || target.id === "factory-workbench-chat-shell"
+        || target.id === "factory-workbench-chat-body";
+      pendingHtmxSwapStates.set(target.id, {
+        targetId: target.id,
+        documentScroll: isWorkbenchShellSwap ? null : captureDocumentScrollState(),
+        workbenchPanes: target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell"
+          ? captureWorkbenchPaneScrollState()
+          : null,
+        chat: target.id === "factory-workbench-chat-pane" || target.id === "factory-workbench-chat-region" || target.id === "factory-workbench-chat-shell" || target.id === "factory-workbench-chat-body"
+          ? captureChatScrollState()
+          : null,
+      });
+    });
+    document.addEventListener("htmx:afterSwap", (event) => {
+      const target = htmxSwapTarget(event);
+      if (!target) return;
+      const swapState = pendingHtmxSwapStates.get(target.id) ?? null;
+      pendingHtmxSwapStates.delete(target.id);
+      processHtmx(target);
+      syncWorkbenchStateFromLocation();
+      if (pendingOverlayHtml || pendingLiveStatus || streamingReply) scheduleOverlayRender();
+      if (target.id === "factory-workbench-chat-pane" || target.id === "factory-workbench-chat-region" || target.id === "factory-workbench-chat-shell" || target.id === "factory-workbench-chat-body") {
+        if (swapState?.chat) {
+          window.requestAnimationFrame(() => {
+            restoreChatScrollState(swapState.chat!);
+          });
+        }
+        reconcileLiveTranscript();
+      }
+      if (target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell") {
+        if (swapState?.workbenchPanes) {
+          window.requestAnimationFrame(() => {
+            restoreWorkbenchPaneScrollState(swapState.workbenchPanes!);
+          });
+        }
+      }
+      const documentScroll = swapState?.documentScroll;
+      if (documentScroll) {
+        window.requestAnimationFrame(() => {
+          restoreDocumentScrollState(documentScroll);
+        });
+      }
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
       refreshVisibleWorkbench();
@@ -1424,6 +1649,7 @@ export const initFactoryWorkbenchBrowser = () => {
     preserveExplicitInspectorTab: Boolean(bootUrl?.searchParams.has("inspectorTab")),
     preserveExplicitDetailTab: Boolean(bootUrl?.searchParams.has("detailTab")),
     preserveExplicitFilter: Boolean(bootUrl?.searchParams.has("filter")),
+    preserveExplicitPage: Boolean(bootUrl?.searchParams.has("page")),
     preserveExplicitFocus: Boolean(
       bootUrl?.searchParams.has("focusKind")
       || bootUrl?.searchParams.has("focusId"),
@@ -1447,7 +1673,8 @@ export const initFactoryWorkbenchBrowser = () => {
   } else {
     applyRouteState(workbenchState.appliedRoute, "none");
   }
+  processHtmx(document.body);
   scheduleOverlayRender();
-  reactiveRefresh.sync();
+  syncWorkbenchEventSources();
   consumeComposeCommandFromLocation(String(window.location && window.location.href ? window.location.href : shellPath()));
 };

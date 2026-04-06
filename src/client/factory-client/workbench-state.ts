@@ -25,7 +25,8 @@ export type FactoryWorkbenchRouteState = {
 };
 
 export type FactoryWorkbenchLiveOverlay = {
-  readonly statusLabel: "Queued" | "Starting" | "Working";
+  readonly surface?: "chat" | "handoff";
+  readonly statusLabel: "Sending" | "Queued" | "Starting";
   readonly summary: string;
   readonly runId?: string;
   readonly jobId?: string;
@@ -270,6 +271,7 @@ export const serializeWorkbenchReplay = (
     inspectorTab: state.appliedRoute.inspectorTab,
     detailTab: state.appliedRoute.detailTab,
     filter: state.appliedRoute.filter,
+    page: state.appliedRoute.page,
     focusKind: state.appliedRoute.focusKind,
     focusId: state.appliedRoute.focusId,
   },
@@ -294,6 +296,9 @@ export const parseWorkbenchReplay = (
     const liveOverlay = parsed.liveOverlay && typeof parsed.liveOverlay.savedAt === "number"
       && now - parsed.liveOverlay.savedAt <= LIVE_OVERLAY_TTL_MS
       ? {
+          surface: parsed.liveOverlay.surface === "chat" || parsed.liveOverlay.surface === "handoff"
+            ? parsed.liveOverlay.surface
+            : undefined,
           statusLabel: parsed.liveOverlay.statusLabel,
           summary: parsed.liveOverlay.summary,
           runId: asString(parsed.liveOverlay.runId),
@@ -310,6 +315,7 @@ export const parseWorkbenchReplay = (
         inspectorTab: route.inspectorTab,
         detailTab: route.detailTab,
         filter: route.filter,
+        page: route.page,
         focusKind: route.focusKind,
         focusId: route.focusId,
       },
@@ -327,6 +333,7 @@ export const mergeReplayRoute = (
     readonly preserveExplicitInspectorTab?: boolean;
     readonly preserveExplicitDetailTab?: boolean;
     readonly preserveExplicitFilter?: boolean;
+    readonly preserveExplicitPage?: boolean;
     readonly preserveExplicitFocus?: boolean;
   },
 ): FactoryWorkbenchRouteState => {
@@ -344,6 +351,9 @@ export const mergeReplayRoute = (
     filter: options?.preserveExplicitFilter || route.filter !== DEFAULT_FILTER
       ? route.filter
       : replay.route.filter,
+    page: options?.preserveExplicitPage || route.page > 1
+      ? route.page
+      : replay.route.page,
     focusKind: options?.preserveExplicitFocus
       ? route.focusKind
       : route.focusKind ?? replay.route.focusKind,
