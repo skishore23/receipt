@@ -33,7 +33,7 @@ import { agentRunStream } from "../../src/agents/agent.streams";
 import { projectAgentRun } from "../../src/agents/factory/run-projection";
 import { FactoryService, FactoryServiceError, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import { factoryChatSessionStream, factoryChatStream, repoKeyForRoot } from "../../src/services/factory-chat-profiles";
-import { ensureFactoryWorkspaceCommandEnv } from "../../src/services/factory/check-runner";
+import { ensureFactoryWorkspaceCommandEnv, runFactoryChecks } from "../../src/services/factory/check-runner";
 import { readPersistedObjectiveAuditMetadata } from "../../src/services/factory/objective-audit-artifacts";
 import { buildFactoryWorkbenchShellSnapshot, factoryWorkbenchHeaderIsland } from "../../src/views/factory/workbench/page";
 import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
@@ -1618,6 +1618,119 @@ test("factory service: startup reconciliation cancels stale queued execution and
     })
     : false;
   expect(reconcileQueued || reconcileSteered).toBe(true);
+});
+
+test("factory service: workspace commands use an isolated DATA_DIR while receipt still targets the shared store", async () => {
+  const dataDir = await createTempDir("receipt-factory-command-env");
+  const repoRoot = await createSourceRepo();
+  const worktreesDir = path.join(dataDir, "hub", "worktrees");
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const queued = await queue.enqueue({
+    agentId: "demo",
+    lane: "collect",
+    payload: { kind: "demo.job", note: "shared queue entry" },
+  });
+  const workspaceEnv = await ensureFactoryWorkspaceCommandEnv({
+    workspacePath: repoRoot,
+    dataDir,
+    repoRoot,
+    worktreesDir,
+  });
+
+  const results = await runFactoryChecks({
+    commands: [
+      "node -e \"process.stdout.write(process.env.DATA_DIR || '')\"",
+      "receipt jobs --json",
+    ],
+    workspacePath: repoRoot,
+    dataDir,
+    repoRoot,
+    worktreesDir,
+  });
+
+  expect(results).toHaveLength(2);
+  expect(results[0]?.ok).toBe(true);
+  expect(results[0]?.stdout.trim()).toBe(workspaceEnv.commandDataDir);
+  expect(results[1]?.ok).toBe(true);
+  expect(results[1]?.stdout).toContain(queued.id);
+});
+
+test("factory service: startup reconciliation applies a persisted stale task result instead of canceling the task job", async () => {
+  const dataDir = await createTempDir("receipt-factory-stale-task-recovery");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = jsonlQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Recover stale persisted task result",
+    prompt: "Recover the persisted task result instead of blocking the objective during startup reconciliation.",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const activeQueuedTask = detail.tasks.find((task) =>
+    task.status === "running"
+    && task.jobStatus === "queued"
+    && typeof task.jobId === "string",
+  );
+  expect(activeQueuedTask?.jobId).toBeDefined();
+  const queuedTaskJob = await queue.getJob(activeQueuedTask!.jobId!);
+  expect(queuedTaskJob?.status).toBe("queued");
+
+  const leasedTaskJob = await queue.leaseJob(queuedTaskJob!.id, "worker-stale", 600_000);
+  expect(leasedTaskJob?.status).toBe("leased");
+  const payload = leasedTaskJob?.payload as FactoryTaskJobPayload;
+  await fs.mkdir(path.dirname(payload.resultPath), { recursive: true });
+  await fs.writeFile(payload.resultPath, JSON.stringify({
+    outcome: "approved",
+    summary: "Recovered persisted task result.",
+    handoff: "Apply the persisted task result and keep the objective moving.",
+    scriptsRun: [{
+      command: "git status --short",
+      summary: "Validated the recovered task result.",
+      status: "ok",
+    }],
+    completion: {
+      changed: ["README.md"],
+      proof: ["Recovered from the persisted task result."],
+      remaining: [],
+    },
+    alignment: {
+      verdict: "aligned",
+      satisfied: ["Recovered the persisted task result without widening scope."],
+      missing: [],
+      outOfScope: [],
+      rationale: "Startup recovery used the already-written task result.",
+    },
+  }, null, 2), "utf-8");
+
+  const internals = service as unknown as {
+    reconcileStaleObjectiveExecutionJobs(now: number): Promise<void>;
+  };
+  await internals.reconcileStaleObjectiveExecutionJobs((leasedTaskJob?.updatedAt ?? Date.now()) + 100_000);
+
+  const recoveredJob = await queue.getJob(queuedTaskJob!.id);
+  expect(recoveredJob?.status).toBe("completed");
+  expect((recoveredJob?.result as { readonly recoveredFromPersistedResult?: boolean } | undefined)?.recoveredFromPersistedResult).toBe(true);
+  const reconcileControl = (await queue.listJobs({ limit: 40 }))
+    .find((job) =>
+      job.agentId === "factory-control"
+      && job.payload.kind === "factory.objective.control"
+      && job.payload.objectiveId === created.objectiveId
+      && job.payload.reason === "reconcile");
+  expect(reconcileControl).toBeUndefined();
+  const recoveredDetail = await service.getObjective(created.objectiveId);
+  expect(recoveredDetail.status).not.toBe("blocked");
 });
 
 test("factory service: cancel plus cleanup drains active objective-scoped jobs idempotently", async () => {
