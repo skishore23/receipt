@@ -342,6 +342,32 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     });
   };
 
+  const WORKBENCH_OBJECTIVE_PAGE_SIZE = 8;
+
+  const paginateObjectiveCards = (
+    cards: ReadonlyArray<FactoryChatObjectiveNav>,
+    page: number,
+  ): {
+    readonly count: number;
+    readonly items: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly page: number;
+    readonly pageCount: number;
+    readonly hasPreviousPage: boolean;
+    readonly hasNextPage: boolean;
+  } => {
+    const pageCount = Math.max(1, Math.ceil(cards.length / WORKBENCH_OBJECTIVE_PAGE_SIZE));
+    const normalizedPage = Math.min(Math.max(1, Math.floor(page || 1)), pageCount);
+    const start = (normalizedPage - 1) * WORKBENCH_OBJECTIVE_PAGE_SIZE;
+    return {
+      count: cards.length,
+      items: cards.slice(start, start + WORKBENCH_OBJECTIVE_PAGE_SIZE),
+      page: normalizedPage,
+      pageCount,
+      hasPreviousPage: normalizedPage > 1,
+      hasNextPage: normalizedPage < pageCount,
+    };
+  };
+
   const selectedObjectiveNavCard = (
     objective: FactorySelectedObjectiveCard,
   ): FactoryChatObjectiveNav => ({
@@ -491,10 +517,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   const buildWorkbenchBlocks = (input: {
     readonly board: Awaited<ReturnType<FactoryService["buildBoardProjection"]>>;
     readonly selectedObjective?: FactorySelectedObjectiveCard;
-    readonly blockedObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
-    readonly runningObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
-    readonly queuedObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
-    readonly pastObjectives: ReadonlyArray<FactoryChatObjectiveNav>;
+    readonly blockedPage: ReturnType<typeof paginateObjectiveCards>;
+    readonly runningPage: ReturnType<typeof paginateObjectiveCards>;
+    readonly queuedPage: ReturnType<typeof paginateObjectiveCards>;
+    readonly pastPage: ReturnType<typeof paginateObjectiveCards>;
     readonly activeRun?: FactoryLiveRunCard;
     readonly workbench?: FactoryChatIslandModel["workbench"];
     readonly detailTab: FactoryWorkbenchDetailTab;
@@ -581,31 +607,46 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         key: "blocked",
         title: "Blocked",
         shape: "objective-list" as const,
-        count: input.blockedObjectives.length,
+        count: input.blockedPage.count,
         emptyMessage: input.filter === "objective.needs_attention"
           ? "No blocked objectives match the current filter."
           : "Blocked objectives will appear here when work needs intervention.",
-        items: input.blockedObjectives,
+        items: input.blockedPage.items,
+        page: input.blockedPage.page,
+        pageSize: WORKBENCH_OBJECTIVE_PAGE_SIZE,
+        pageCount: input.blockedPage.pageCount,
+        hasPreviousPage: input.blockedPage.hasPreviousPage,
+        hasNextPage: input.blockedPage.hasNextPage,
       }] : []),
       ...(showRunning ? [{
         key: "running",
         title: "In Progress",
         shape: "objective-list" as const,
-        count: input.runningObjectives.length,
+        count: input.runningPage.count,
         emptyMessage: input.filter === "objective.running"
           ? "No in-progress objectives match the current filter."
           : "Objectives with active execution will appear here.",
-        items: input.runningObjectives,
+        items: input.runningPage.items,
+        page: input.runningPage.page,
+        pageSize: WORKBENCH_OBJECTIVE_PAGE_SIZE,
+        pageCount: input.runningPage.pageCount,
+        hasPreviousPage: input.runningPage.hasPreviousPage,
+        hasNextPage: input.runningPage.hasNextPage,
       }] : []),
       ...(showQueued ? [{
         key: "queued",
         title: "Queued",
         shape: "objective-list" as const,
-        count: input.queuedObjectives.length,
+        count: input.queuedPage.count,
         emptyMessage: input.filter === "objective.queued"
           ? "No queued objectives match the current filter."
           : "Queued objectives waiting for execution will appear here.",
-        items: input.queuedObjectives,
+        items: input.queuedPage.items,
+        page: input.queuedPage.page,
+        pageSize: WORKBENCH_OBJECTIVE_PAGE_SIZE,
+        pageCount: input.queuedPage.pageCount,
+        hasPreviousPage: input.queuedPage.hasPreviousPage,
+        hasNextPage: input.queuedPage.hasNextPage,
       }] : []),
     ];
     const selectedObjectiveSection = selectedObjective && ![
@@ -694,20 +735,25 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     }
 
     if (showCompleted) {
-      blocks.push({
-        key: "history",
-        layout: "full",
-        sections: [{
-          key: "completed",
-          title: "Completed",
-          shape: "objective-list",
-          count: input.pastObjectives.length,
-          emptyMessage: input.filter === "objective.completed"
-            ? "No completed objectives match the current filter."
-            : "Completed objectives and recent history will appear here.",
-          items: input.pastObjectives,
-        }],
-      });
+        blocks.push({
+          key: "history",
+          layout: "full",
+          sections: [{
+            key: "completed",
+            title: "Completed",
+            shape: "objective-list",
+            count: input.pastPage.count,
+            emptyMessage: input.filter === "objective.completed"
+              ? "No completed objectives match the current filter."
+              : "Completed objectives and recent history will appear here.",
+            items: input.pastPage.items,
+            page: input.pastPage.page,
+            pageSize: WORKBENCH_OBJECTIVE_PAGE_SIZE,
+            pageCount: input.pastPage.pageCount,
+            hasPreviousPage: input.pastPage.hasPreviousPage,
+            hasNextPage: input.pastPage.hasNextPage,
+          }],
+        });
     }
 
     return blocks;
@@ -722,6 +768,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
+    readonly page: number;
   }): Promise<FactoryWorkbenchWorkspaceModel> => {
     await service.ensureBootstrap();
     const repoRoot = service.git.repoRoot;
@@ -829,17 +876,20 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       workbenchFilterMatchesSection(input.filter, "needs_attention")
         ? buildObjectiveNavCards(board.sections.needs_attention, resolvedObjectiveId)
         : [],
-    ).slice(0, 10);
+    );
+    const blockedPage = paginateObjectiveCards(blockedObjectives, input.page);
     const runningObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "active")
         ? buildObjectiveNavCards(board.sections.active, resolvedObjectiveId)
         : [],
-    ).slice(0, 10);
+    );
+    const runningPage = paginateObjectiveCards(runningObjectives, input.page);
     const queuedObjectives = dedupeObjectiveCards(
       workbenchFilterMatchesSection(input.filter, "queued")
         ? buildObjectiveNavCards(board.sections.queued, resolvedObjectiveId)
         : [],
-    ).slice(0, 10);
+    );
+    const queuedPage = paginateObjectiveCards(queuedObjectives, input.page);
     const activeObjectives = dedupeObjectiveCards([
       ...blockedObjectives,
       ...runningObjectives,
@@ -849,7 +899,8 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       workbenchFilterMatchesSection(input.filter, "completed")
         ? buildObjectiveNavCards(board.sections.completed, resolvedObjectiveId)
         : [],
-    ).slice(0, 10);
+    );
+    const pastPage = paginateObjectiveCards(pastObjectives, input.page);
     const hasActiveExecution = Boolean(
       activeRun
       ||
@@ -870,6 +921,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       objectiveId: resolvedObjectiveId,
       inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       detailTab,
+      page: input.page,
       focusKind: workbench?.focus?.focusKind,
       focusId: workbench?.focus?.focusId,
       filter: input.filter,
@@ -881,14 +933,14 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       workbench,
       board,
       activeObjectives,
-      pastObjectives,
+      pastObjectives: pastPage.items,
       blocks: buildWorkbenchBlocks({
         board,
         selectedObjective,
-        blockedObjectives,
-        runningObjectives,
-        queuedObjectives,
-        pastObjectives,
+        blockedPage,
+        runningPage,
+        queuedPage,
+        pastPage,
         activeRun,
         workbench,
         detailTab,
@@ -1082,6 +1134,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly filter: FactoryWorkbenchFilterKey;
+    readonly page: number;
   }): Promise<FactoryWorkbenchPageModel> => {
     const workspace = await buildWorkbenchWorkspaceModelCached({
       profileId: input.profileId,
@@ -1092,6 +1145,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       focusKind: input.focusKind,
       focusId: input.focusId,
       filter: input.filter,
+      page: input.page,
     });
     await ensureObjectiveHandoffInSession({
       profileId: workspace.activeProfileId,
@@ -1124,6 +1178,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       objectiveId: workspace.objectiveId,
       inspectorTab: normalizedWorkbenchInspectorTab(input.inspectorTab),
       detailTab: workspace.detailTab,
+      page: workspace.page,
       focusKind: workspace.focusKind,
       focusId: workspace.focusId,
       filter: workspace.filter,
@@ -1236,6 +1291,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
               ? normalizedWorkbenchInspectorTab(request.inspectorTab)
               : undefined,
             detailTab: workspace.detailTab,
+            page: workspace.page,
             focusKind: workspace.selectedObjective?.profileId === profile.id ? workspace.focusKind : undefined,
             focusId: workspace.selectedObjective?.profileId === profile.id ? workspace.focusId : undefined,
             filter: workspace.filter,

@@ -71,6 +71,12 @@ export const requestedWorkbenchFilter = (req: Request): FactoryWorkbenchFilterKe
   return isWorkbenchFilterKey(filter) ? filter : DEFAULT_FACTORY_WORKBENCH_FILTER;
 };
 
+export const requestedWorkbenchPage = (req: Request): number => {
+  const raw = optionalTrimmedString(new URL(req.url).searchParams.get("page"));
+  const page = raw ? Number(raw) : 1;
+  return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
+};
+
 export const requestedWorkbenchDetailTab = (req: Request): FactoryWorkbenchDetailTab | undefined => {
   const detailTab = optionalTrimmedString(new URL(req.url).searchParams.get("detailTab"));
   return detailTab === "review" || detailTab === "queue" || detailTab === "action"

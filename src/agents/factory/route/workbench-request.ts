@@ -17,6 +17,7 @@ import {
   requestedProfileId,
   requestedWorkbenchDetailTab,
   requestedWorkbenchFilter,
+  requestedWorkbenchPage,
 } from "./params";
 
 export type FactoryWorkbenchRequestState = {
@@ -31,6 +32,7 @@ export type FactoryWorkbenchRequestState = {
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter: FactoryWorkbenchFilterKey;
+  readonly page: number;
 };
 
 export const readWorkbenchRequest = (req: Request): FactoryWorkbenchRequestState => {
@@ -50,6 +52,7 @@ export const readWorkbenchRequest = (req: Request): FactoryWorkbenchRequestState
     focusKind: normalizeFocusKind(focusKind),
     focusId,
     filter: requestedWorkbenchFilter(req),
+    page: requestedWorkbenchPage(req),
   };
 };
 
@@ -71,5 +74,6 @@ export const shouldRedirectWorkbenchRequest = (
     || request.inspectorTab !== model.inspectorTab
     || request.detailTab !== model.detailTab
     || request.filter !== model.filter
+    || request.page !== model.page
     || shouldRedirectForFocus;
 };
