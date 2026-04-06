@@ -1,0 +1,7 @@
+{
+  "name": "factory-cli-test",
+  "private": true,
+  "scripts": {
+    "build": "bun -e \"process.exit(0)\""
+  }
+}
