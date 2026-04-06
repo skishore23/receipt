@@ -71,6 +71,7 @@ export const buildWorkbenchLink = (input: {
   readonly objectiveId?: string;
   readonly inspectorTab?: "overview" | "chat";
   readonly detailTab?: "review" | "queue" | "action";
+  readonly page?: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter?: FactoryWorkbenchFilterKey;

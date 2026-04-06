@@ -371,6 +371,7 @@ export type FactoryWorkbenchWorkspaceModel = {
   readonly objectiveId?: string;
   readonly inspectorTab?: FactoryInspectorTab;
   readonly detailTab: FactoryWorkbenchDetailTab;
+  readonly page: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter: FactoryWorkbenchFilterKey;
@@ -393,6 +394,7 @@ export type FactoryWorkbenchPageModel = {
   readonly objectiveId?: string;
   readonly inspectorTab?: FactoryInspectorTab;
   readonly detailTab: FactoryWorkbenchDetailTab;
+  readonly page: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter: FactoryWorkbenchFilterKey;
@@ -465,6 +467,11 @@ export type FactoryWorkbenchObjectiveListSectionModel = {
   readonly count: number;
   readonly emptyMessage: string;
   readonly items: ReadonlyArray<FactoryChatObjectiveNav>;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly pageCount: number;
+  readonly hasPreviousPage: boolean;
+  readonly hasNextPage: boolean;
 };
 
 export type FactoryWorkbenchActivityItemModel = {

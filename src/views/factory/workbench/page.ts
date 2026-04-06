@@ -54,6 +54,7 @@ export type FactoryWorkbenchRouteContext = {
   readonly objectiveId?: string;
   readonly inspectorTab?: FactoryInspectorTab;
   readonly detailTab?: FactoryWorkbenchDetailTab;
+  readonly page?: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter: FactoryWorkbenchFilterKey;
@@ -859,6 +860,14 @@ const renderObjectiveListSection = (
   routeContext: FactoryWorkbenchRouteContext,
 ): string => {
   const pinned = section.key === "selected";
+  const pageHref = (page: number): string => routeHref(routeContext, { page });
+  const pagination = section.pageCount > 1 ? `<div class="flex items-center gap-2 border-t border-border px-4 py-3 text-[12px] text-muted-foreground">
+    <span>Page ${esc(String(section.page))} of ${esc(String(section.pageCount))}</span>
+    <div class="ml-auto flex items-center gap-2">
+      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasPreviousPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.max(1, section.page - 1)))}" ${section.hasPreviousPage ? "" : 'aria-disabled="true" tabindex="-1"'}>Previous</a>
+      <a class="inline-flex items-center border border-border px-2 py-1 ${section.hasNextPage ? "text-foreground hover:border-primary/50" : "pointer-events-none opacity-40"}" href="${esc(pageHref(Math.min(section.pageCount, section.page + 1)))}" ${section.hasNextPage ? "" : 'aria-disabled="true" tabindex="-1"'}>Next</a>
+    </div>
+  </div>` : "";
   return `<section class="border border-border bg-card/70">
   <div class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
     ${pinned ? `<div class="flex min-w-0 flex-1 items-start gap-3">
@@ -879,6 +888,7 @@ const renderObjectiveListSection = (
       ${section.items.map((objective) => renderObjectiveCard(routeContext, objective, section)).join("")}
     </div>`
     : `<div class="px-4 py-4 text-sm leading-6 text-muted-foreground">${esc(section.emptyMessage)}</div>`}
+  ${pagination}
 </section>`;
 };
 
@@ -1325,6 +1335,7 @@ const renderWorkbenchChatHeader = (
     objectiveId: model.objectiveId,
     inspectorTab: model.inspectorTab,
     detailTab: model.detailTab,
+    page: model.page,
     focusKind: model.focusKind,
     focusId: model.focusId,
     filter: model.filter,
@@ -1361,6 +1372,7 @@ export const buildFactoryWorkbenchShellSnapshot = (
     objectiveId: model.objectiveId,
     inspectorTab: model.inspectorTab,
     detailTab: model.detailTab,
+    page: model.page,
     focusKind: model.focusKind,
     focusId: model.focusId,
     filter: model.filter,

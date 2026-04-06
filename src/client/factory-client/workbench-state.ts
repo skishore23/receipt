@@ -18,6 +18,7 @@ export type FactoryWorkbenchRouteState = {
   readonly inspectorTab: FactoryWorkbenchInspectorTab;
   readonly detailTab: FactoryWorkbenchDetailTab;
   readonly filter: FactoryWorkbenchFilterKey;
+  readonly page: number;
   readonly focusKind?: FactoryWorkbenchFocusKind;
   readonly focusId?: string;
   readonly routeKey: string;
@@ -66,6 +67,7 @@ export type FactoryWorkbenchReplaySnapshot = {
     readonly inspectorTab?: FactoryWorkbenchInspectorTab;
     readonly detailTab?: FactoryWorkbenchDetailTab;
     readonly filter?: FactoryWorkbenchFilterKey;
+    readonly page?: number;
     readonly focusKind?: FactoryWorkbenchFocusKind;
     readonly focusId?: string;
   };
@@ -111,6 +113,7 @@ export const workbenchRouteKey = (input: {
   readonly inspectorTab?: FactoryWorkbenchInspectorTab;
   readonly detailTab?: FactoryWorkbenchDetailTab;
   readonly filter?: FactoryWorkbenchFilterKey;
+  readonly page?: number;
   readonly focusKind?: FactoryWorkbenchFocusKind;
   readonly focusId?: string;
 }): string => buildFactoryWorkbenchRouteKey(input);
@@ -122,6 +125,7 @@ export const createWorkbenchRouteState = (input: {
   readonly inspectorTab?: FactoryWorkbenchInspectorTab | string;
   readonly detailTab?: FactoryWorkbenchDetailTab | string;
   readonly filter?: FactoryWorkbenchFilterKey | string;
+  readonly page?: number | string;
   readonly focusKind?: FactoryWorkbenchFocusKind | string;
   readonly focusId?: string;
 }): FactoryWorkbenchRouteState => {
@@ -138,6 +142,7 @@ export const createWorkbenchRouteState = (input: {
       : DEFAULT_INSPECTOR_TAB,
     detailTab: isDetailTab(input.detailTab) ? input.detailTab : DEFAULT_DETAIL_TAB,
     filter: normalizeFilterInput(input.filter),
+    page: typeof input.page === "number" ? input.page : Math.max(1, Number(input.page ?? 1) || 1),
     focusKind: focusKind && focusId ? focusKind : undefined,
     focusId: focusKind && focusId ? focusId : undefined,
   };
@@ -155,6 +160,7 @@ export const routeStateFromUrl = (url: URL): FactoryWorkbenchRouteState =>
     inspectorTab: asString(url.searchParams.get("inspectorTab")),
     detailTab: asString(url.searchParams.get("detailTab")),
     filter: asString(url.searchParams.get("filter")),
+    page: asString(url.searchParams.get("page")),
     focusKind: asString(url.searchParams.get("focusKind")),
     focusId: asString(url.searchParams.get("focusId")),
   });
