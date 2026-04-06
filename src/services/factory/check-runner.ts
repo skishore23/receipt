@@ -64,6 +64,17 @@ const isPathWithinRoot = (targetPath: string, rootPath: string): boolean => {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 };
 
+const factoryWorkspaceCommandDataDir = (input: {
+  readonly dataDir: string;
+  readonly workspacePath: string;
+}): string =>
+  path.join(
+    input.dataDir,
+    "factory",
+    "workspace-command-data",
+    createHash("sha1").update(path.resolve(input.workspacePath)).digest("hex").slice(0, 16),
+  );
+
 type FactoryWorkspaceGit = Pick<HubGit, "repoRoot" | "worktreesDir" | "worktreeStatus" | "restoreWorkspace" | "removeWorkspace">;
 
 export type FactoryBaselineCheckCache = Map<string, Promise<{
@@ -92,11 +103,6 @@ const ensureWorkspaceReceiptCli = async (input: {
   readonly repoRoot: string;
   readonly worktreesDir: string;
 }): Promise<string> => {
-  const repoReceiptBinDir = path.join(input.workspacePath, ".receipt", "bin");
-  const repoShimPath = path.join(repoReceiptBinDir, process.platform === "win32" ? "receipt.cmd" : "receipt");
-  if (input.workspacePath === input.repoRoot && await pathExists(repoShimPath)) {
-    return repoReceiptBinDir;
-  }
   const shimRoot = input.workspacePath === input.repoRoot
     ? path.join(
         input.dataDir,
@@ -108,14 +114,6 @@ const ensureWorkspaceReceiptCli = async (input: {
   const binDir = path.join(shimRoot, ".receipt", "bin");
   const shimPath = path.join(binDir, process.platform === "win32" ? "receipt.cmd" : "receipt");
   await fs.mkdir(binDir, { recursive: true });
-  if (process.platform !== "win32" && input.workspacePath !== input.repoRoot) {
-    const sourceShimPath = path.join(input.repoRoot, ".receipt", "bin", "receipt");
-    if (await pathExists(sourceShimPath)) {
-      await fs.copyFile(sourceShimPath, shimPath);
-      await fs.chmod(shimPath, 0o755);
-      return binDir;
-    }
-  }
   const { command, args, entryPath } = resolveCliInvocation(import.meta.url);
   const body = process.platform === "win32"
     ? [
@@ -161,11 +159,14 @@ export const ensureFactoryWorkspaceCommandEnv = async (input: {
   readonly repoRoot: string;
   readonly worktreesDir: string;
 }): Promise<{
+  readonly commandDataDir: string;
   readonly receiptBinDir: string;
   readonly path: string;
 }> => {
   await ensureWorkspaceDependencyLinks(input);
   const receiptBinDir = await ensureWorkspaceReceiptCli(input);
+  const commandDataDir = factoryWorkspaceCommandDataDir(input);
+  await fs.mkdir(commandDataDir, { recursive: true });
   const workspaceNodeModulesBin = await pathExists(path.join(input.workspacePath, "node_modules", ".bin"))
     ? path.join(input.workspacePath, "node_modules", ".bin")
     : undefined;
@@ -176,6 +177,7 @@ export const ensureFactoryWorkspaceCommandEnv = async (input: {
     ? path.join(input.repoRoot, ".receipt", "bin")
     : undefined;
   return {
+    commandDataDir,
     receiptBinDir,
     path: prependPaths(
       [
@@ -210,8 +212,8 @@ export const runFactoryChecks = async (input: {
         encoding: "utf-8",
         env: {
           ...process.env,
-          DATA_DIR: input.dataDir,
-          RECEIPT_DATA_DIR: input.dataDir,
+          DATA_DIR: workspaceCommandEnv.commandDataDir,
+          RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
           PATH: workspaceCommandEnv.path,
         },
         maxBuffer: 16 * 1024 * 1024,

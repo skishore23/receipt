@@ -1948,6 +1948,34 @@ export class FactoryService {
     }
   }
 
+  private async recoverPersistedStaleTaskResult(job: QueueJob): Promise<boolean> {
+    if (!isRecord(job.payload) || job.payload.kind !== "factory.task.run") return false;
+    let parsed: FactoryTaskJobPayload;
+    try {
+      parsed = this.parseTaskPayload(job.payload);
+    } catch {
+      return false;
+    }
+    let rawResult: Record<string, unknown>;
+    try {
+      const raw = await fs.readFile(parsed.resultPath, "utf-8");
+      const parsedResult = JSON.parse(raw);
+      if (!isRecord(parsedResult)) return false;
+      rawResult = parsedResult;
+    } catch {
+      return false;
+    }
+    await this.applyTaskWorkerResult(parsed, rawResult);
+    const completed = await this.queue.complete(job.id, job.leaseOwner ?? "factory.resume", {
+      objectiveId: parsed.objectiveId,
+      taskId: parsed.taskId,
+      candidateId: parsed.candidateId,
+      status: "completed",
+      recoveredFromPersistedResult: true,
+    });
+    return Boolean(completed);
+  }
+
   private async reconcileStaleObjectiveExecutionJobs(now = Date.now()): Promise<void> {
     const jobs = await this.queue.listJobs({ limit: 2000 });
     const summaries = await this.listObjectiveProjectionSummaries();
@@ -1971,6 +1999,9 @@ export class FactoryService {
       if (typeof staleAt !== "number" || staleAt > now) continue;
       if (job.status === "queued" && this.redriveQueuedJob) {
         await this.redriveQueuedJob(job);
+        continue;
+      }
+      if (await this.recoverPersistedStaleTaskResult(job)) {
         continue;
       }
       await this.queue.cancel(job.id, "stale active objective job reconciled during startup recovery", "factory.resume");
@@ -3090,8 +3121,8 @@ export class FactoryService {
           skillBundlePaths: parsed.skillBundlePaths,
           repoSkillPaths: parsed.repoSkillPaths,
           env: {
-            DATA_DIR: this.dataDir,
-            RECEIPT_DATA_DIR: this.dataDir,
+            DATA_DIR: workspaceCommandEnv.commandDataDir,
+            RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
             PATH: workspaceCommandEnv.path,
           },
         }, control);
@@ -4372,8 +4403,8 @@ export class FactoryService {
         skillBundlePaths: parsed.skillBundlePaths,
         repoSkillPaths: [],
         env: {
-          DATA_DIR: this.dataDir,
-          RECEIPT_DATA_DIR: this.dataDir,
+          DATA_DIR: workspaceCommandEnv.commandDataDir,
+          RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
           PATH: workspaceCommandEnv.path,
         },
       };
@@ -5530,8 +5561,8 @@ export class FactoryService {
       renderedPrompt,
       readOnly,
       env: {
-        DATA_DIR: this.dataDir,
-        RECEIPT_DATA_DIR: this.dataDir,
+        DATA_DIR: workspaceCommandEnv.commandDataDir,
+        RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
         PATH: workspaceCommandEnv.path,
       },
     };
