@@ -156,6 +156,7 @@ export type FactoryTaskPacketPaths = {
   readonly skillBundlePath: string;
   readonly memoryScriptPath: string;
   readonly memoryConfigPath: string;
+  readonly receiptCliPath: string;
 };
 
 export type FactoryIntegrationPacketPaths = {
@@ -243,7 +244,58 @@ export const buildTaskFilePaths = (
     skillBundlePath: path.join(root, `${taskId}.skill-bundle.json`),
     memoryScriptPath: path.join(root, `${taskId}.memory.cjs`),
     memoryConfigPath: path.join(root, `${taskId}.memory-scopes.json`),
+    receiptCliPath: path.join(root, `${taskId}.receipt-cli.md`),
   };
+};
+
+export const renderFactoryReceiptCliSurface = (input: {
+  readonly objectiveId: string;
+  readonly taskId: string;
+  readonly candidateId: string;
+  readonly memoryScriptPath: string;
+  readonly receiptCliPath: string;
+  readonly factoryCliPrefix: string;
+}): string => {
+  const objectiveScope = `factory/objectives/${input.objectiveId}`;
+  const taskScope = `${objectiveScope}/tasks/${input.taskId}`;
+  const candidateScope = `${objectiveScope}/candidates/${input.candidateId}`;
+  const integrationScope = `${objectiveScope}/integration`;
+  return [
+    "# Factory Receipt CLI Surface",
+    "",
+    "Use this bounded Receipt CLI surface before broader `receipt ...` exploration.",
+    "Start with the packet and memory script. Use direct `receipt` commands only when those packet surfaces are still insufficient.",
+    "",
+    "## Read First",
+    `1. Manifest and context pack in ${path.dirname(input.receiptCliPath)}`,
+    `2. Memory script: bun ${input.memoryScriptPath} context 2800`,
+    `3. Objective summary: bun ${input.memoryScriptPath} objective 1800`,
+    "",
+    "## Task-Worktree Safe Receipt Commands",
+    `- ${input.factoryCliPrefix} inspect ${objectiveScope}`,
+    `- ${input.factoryCliPrefix} trace ${objectiveScope}`,
+    `- ${input.factoryCliPrefix} replay ${objectiveScope}`,
+    `- ${input.factoryCliPrefix} memory read ${taskScope} --limit 6`,
+    `- ${input.factoryCliPrefix} memory summarize ${taskScope} --query "<term>" --limit 6 --max-chars 1200`,
+    `- ${input.factoryCliPrefix} memory summarize ${candidateScope} --query "<term>" --limit 6 --max-chars 1200`,
+    `- ${input.factoryCliPrefix} memory summarize ${integrationScope} --query "<term>" --limit 6 --max-chars 1200`,
+    "",
+    "## Controller-Side Only",
+    "Run these from the repo root or mounted controller workspace when live objective state or course correction is required:",
+    `- ${input.factoryCliPrefix} factory investigate ${input.objectiveId}`,
+    `- ${input.factoryCliPrefix} factory investigate ${input.taskId}`,
+    `- ${input.factoryCliPrefix} factory investigate ${input.candidateId} --json`,
+    "",
+    "## Do Not Run From This Task Worktree",
+    `- ${input.factoryCliPrefix} factory inspect`,
+    `- ${input.factoryCliPrefix} factory promote`,
+    `- ${input.factoryCliPrefix} factory steer`,
+    `- ${input.factoryCliPrefix} factory follow-up`,
+    `- ${input.factoryCliPrefix} factory abort-job`,
+    "",
+    "## Working Rule",
+    "If the packet, memory script, and bounded commands above still do not answer the question, record the missing evidence in the handoff instead of broadening the receipt search surface ad hoc.",
+  ].join("\n");
 };
 
 export const buildIntegrationFilePaths = (
@@ -277,6 +329,7 @@ export const listTaskArtifactActivity = async (
     path.basename(files.skillBundlePath),
     path.basename(files.memoryScriptPath),
     path.basename(files.memoryConfigPath),
+    path.basename(files.receiptCliPath),
     path.basename(taskResultSchemaPathFor(files.resultPath)),
   ]);
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);

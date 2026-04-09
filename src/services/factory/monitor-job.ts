@@ -3,6 +3,7 @@ import {
   buildMonitorCheckpointPrompt,
   type MonitorCheckpointResult,
 } from "./monitor-checkpoint";
+import type { FactoryObjectiveMode, FactoryObjectiveSeverity } from "../../modules/factory";
 
 const LOG_TAIL_CHARS = 2_000;
 
@@ -16,12 +17,36 @@ const readTail = async (filePath: string, maxChars: number): Promise<string> => 
   }
 };
 
+const INVESTIGATION_CHECKPOINT_MS = 2 * 60 * 1_000;
+const DELIVERY_CHECKPOINT_MS = 10 * 60 * 1_000;
+const HIGH_SEVERITY_CHECKPOINT_MS = 90 * 1_000;
+
+export const monitorCheckpointIntervalMs = (
+  objectiveMode: FactoryObjectiveMode,
+  severity: FactoryObjectiveSeverity,
+): number => {
+  if (severity <= 1) return HIGH_SEVERITY_CHECKPOINT_MS;
+  if (objectiveMode === "investigation") return INVESTIGATION_CHECKPOINT_MS;
+  return DELIVERY_CHECKPOINT_MS;
+};
+
+export const monitorDetectEvidence = async (evidenceDir: string): Promise<boolean> => {
+  try {
+    const entries = await fsp.readdir(evidenceDir);
+    return entries.some((entry) => entry.endsWith(".json") || entry.endsWith(".md"));
+  } catch {
+    return false;
+  }
+};
+
 export type MonitorJobContext = {
   readonly stdoutPath: string;
   readonly stderrPath: string;
   readonly taskPrompt: string;
   readonly elapsedMs: number;
   readonly checkpoint: number;
+  readonly evidencePresent?: boolean;
+  readonly objectiveMode?: FactoryObjectiveMode;
   readonly evaluateLlm: (prompt: { system: string; user: string }) => Promise<MonitorCheckpointResult>;
 };
 
@@ -37,6 +62,8 @@ export const runMonitorCheckpoint = async (
     stderrTail,
     elapsedMs: ctx.elapsedMs,
     checkpoint: ctx.checkpoint,
+    evidencePresent: ctx.evidencePresent,
+    objectiveMode: ctx.objectiveMode,
   });
 
   return ctx.evaluateLlm(prompt);

@@ -30,6 +30,21 @@ RESOURCE_SPECS: dict[tuple[str, str], dict[str, Any]] = {
         "region_scoped": True,
         "extract": lambda data: data.get("Volumes", []),
     },
+    ("ecs", "clusters"): {
+        "command": ["ecs", "list-clusters"],
+        "region_scoped": True,
+        "extract": lambda data: data.get("clusterArns", []),
+    },
+    ("ecs", "tasks"): {
+        "command": ["ecs", "list-tasks"],
+        "region_scoped": True,
+        "extract": lambda data: data.get("taskArns", []),
+    },
+    ("ecs", "services"): {
+        "command": ["ecs", "list-services"],
+        "region_scoped": True,
+        "extract": lambda data: data.get("serviceArns", []),
+    },
     ("s3", "buckets"): {
         "command": ["s3api", "list-buckets"],
         "region_scoped": False,
@@ -44,6 +59,11 @@ RESOURCE_SPECS: dict[tuple[str, str], dict[str, Any]] = {
         "command": ["lambda", "list-functions"],
         "region_scoped": True,
         "extract": lambda data: data.get("Functions", []),
+    },
+    ("eks", "clusters"): {
+        "command": ["eks", "list-clusters"],
+        "region_scoped": True,
+        "extract": lambda data: data.get("clusters", []),
     },
 }
 

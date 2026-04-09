@@ -147,7 +147,33 @@ test("factory scheduling: queued objectives preserve FIFO order without invoking
     jobRuntime: createJobRuntime(dataDir),
     sse: new SseHub(),
     codexExecutor: {
-      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+      run: async () => {
+        const result = JSON.stringify({
+          outcome: "approved",
+          summary: "Verified the worker receipt cli surface.",
+          handoff: "Packet includes the bounded receipt cli surface.",
+          artifacts: [],
+          scriptsRun: [{
+            command: "receipt inspect factory/objectives/objective_01",
+            summary: "Observed the bounded receipt CLI surface in the packet.",
+            status: "ok",
+          }],
+          completion: {
+            changed: [],
+            proof: ["receipt cli surface generated"],
+            remaining: [],
+          },
+          alignment: {
+            verdict: "aligned",
+            satisfied: ["worker packet exposes bounded receipt commands"],
+            missing: [],
+            outOfScope: [],
+            rationale: "The generated packet surfaces the bounded receipt CLI contract.",
+          },
+          nextAction: null,
+        });
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", lastMessage: result };
+      },
     },
     repoRoot,
   });
@@ -221,7 +247,29 @@ test("factory scheduling: archiving an active objective cancels queued task jobs
     jobRuntime: createJobRuntime(dataDir),
     sse: new SseHub(),
     codexExecutor: {
-      run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }),
+      run: async () => {
+        const result = JSON.stringify({
+          outcome: "approved",
+          summary: "Verified the worker receipt cli surface.",
+          handoff: "Packet includes the bounded receipt cli surface.",
+          artifacts: [],
+          scriptsRun: [],
+          completion: {
+            changed: [],
+            proof: ["receipt cli surface generated"],
+            remaining: [],
+          },
+          alignment: {
+            verdict: "aligned",
+            satisfied: ["worker packet exposes bounded receipt commands"],
+            missing: [],
+            outOfScope: [],
+            rationale: "The generated packet surfaces the bounded receipt CLI contract.",
+          },
+          nextAction: null,
+        });
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", lastMessage: result };
+      },
     },
     repoRoot,
   });
@@ -768,6 +816,62 @@ test("factory profile policy: non-worktree specialist workers are normalized to 
   expect(taskJob.workerType).toBe("codex");
   const queuedJob = await findLatestObjectiveJob(queue, created.objectiveId, "factory.task.run");
   expect(queuedJob?.agentId).toBe("codex");
+}, 120_000);
+
+test("factory task packets: dispatch writes a bounded receipt cli surface and exposes it in the prompt payload", async () => {
+  const dataDir = await createTempDir("receipt-factory-worker-cli-surface");
+  const repoRoot = await createSourceRepo();
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async () => {
+        const result = JSON.stringify({
+          outcome: "approved",
+          summary: "Verified the worker receipt cli surface.",
+          handoff: "Packet includes the bounded receipt cli surface.",
+          artifacts: [],
+          scriptsRun: [],
+          completion: {
+            changed: [],
+            proof: ["receipt cli surface generated"],
+            remaining: [],
+          },
+          alignment: {
+            verdict: "aligned",
+            satisfied: ["worker packet exposes bounded receipt commands"],
+            missing: [],
+            outOfScope: [],
+            rationale: "The generated packet surfaces the bounded receipt CLI contract.",
+          },
+          nextAction: null,
+        });
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", lastMessage: result };
+      },
+    },
+    memoryTools: createMemoryToolsForTest(dataDir),
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Worker receipt cli surface",
+    prompt: "Make the worker packet explicit about allowed receipt commands.",
+    checks: ["git status --short"],
+  });
+
+  await runObjectiveStartup(service, created.objectiveId);
+  const taskJob = await findLatestFactoryJob(queue, created.objectiveId);
+  const receiptCliText = await fs.readFile(taskJob.receiptCliPath, "utf-8");
+
+  expect(taskJob.receiptCliPath).toContain(".receipt/factory/task_01.receipt-cli.md");
+  expect(taskJob.promptPath).toContain(".receipt/factory/task_01.prompt.md");
+  expect(receiptCliText).toContain("# Factory Receipt CLI Surface");
+  expect(receiptCliText).toContain("Task-Worktree Safe Receipt Commands");
+  expect(receiptCliText).toContain("Controller-Side Only");
+  expect(receiptCliText).toContain("Do Not Run From This Task Worktree");
 }, 120_000);
 
 test("factory no-diff discovery tasks integrate as no-op passes and unlock dependent work", async () => {

@@ -9,6 +9,7 @@ export type FactoryTaskPacketArchivePaths = {
   readonly promptPath: string;
   readonly memoryConfigPath: string;
   readonly memoryScriptPath: string;
+  readonly receiptCliPath: string;
 };
 
 export const factoryTaskPacketArchivePaths = (
@@ -24,6 +25,7 @@ export const factoryTaskPacketArchivePaths = (
     promptPath: path.join(root, "prompt.md"),
     memoryConfigPath: path.join(root, "memory-scopes.json"),
     memoryScriptPath: path.join(root, "memory.cjs"),
+    receiptCliPath: path.join(root, "receipt-cli.md"),
   };
 };
 
@@ -50,6 +52,7 @@ export const archiveFactoryTaskPacketArtifacts = async (input: {
   readonly contextPackPath: string;
   readonly memoryConfigPath: string;
   readonly memoryScriptPath: string;
+  readonly receiptCliPath: string;
 }): Promise<FactoryTaskPacketArchivePaths> => {
   const archive = factoryTaskPacketArchivePaths(input.dataDir, input.jobId);
   await fs.mkdir(archive.root, { recursive: true });
@@ -59,6 +62,7 @@ export const archiveFactoryTaskPacketArtifacts = async (input: {
     copyIfExists(input.contextPackPath, archive.contextPackPath),
     copyIfExists(input.memoryConfigPath, archive.memoryConfigPath),
     copyIfExists(input.memoryScriptPath, archive.memoryScriptPath),
+    copyIfExists(input.receiptCliPath, archive.receiptCliPath),
   ]);
   return archive;
 };

@@ -805,18 +805,18 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("## Helper-First Execution");
   expect(prompt).toContain("Profile Cloud Provider: aws");
   expect(prompt).toContain("prefer a checked-in helper over ad hoc one-off commands or a task-local script");
-  expect(prompt).toContain("If the task prompt is broad, first narrow it to one concrete investigation question, one primary evidence path, and one stop condition");
+  expect(prompt).toContain("### Proportionality Ladder (follow in strict order)");
+  expect(prompt).toContain("Run a matching checked-in helper if one exists");
+  expect(prompt).toContain("run the raw CLI commands directly");
+  expect(prompt).toContain("Never build a new helper just to answer a one-off question");
+  expect(prompt).toContain("### Investigation Budget");
+  expect(prompt).toContain("Reserve at least 30% for your final structured JSON result");
   expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command");
   expect(prompt).toContain("stop bootstrap and run the best matching checked-in helper");
-  expect(prompt).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json <helper-id> -- ...");
   expect(prompt).toContain("Helper manifests list required args, required context, and example invocations");
-  expect(prompt).toContain("Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.");
-  expect(prompt).toContain("If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result");
-  expect(prompt).toContain("Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue.");
-  expect(prompt).toContain("Treat successful helper JSON output as sufficient machine-readable evidence");
+  expect(prompt).toContain("### Escalation order (follow strictly)");
+  expect(prompt).toContain("check whether an existing helper can be extended with a small RESOURCE_SPECS addition");
   expect(prompt).toContain("Record the helper runner command in report.scriptsRun");
-  expect(prompt).toContain("create or extend a checked-in helper in the repo");
-  expect(prompt).toContain("use the mounted helper authoring skill to add or extend a checked-in helper");
   expect(prompt).toContain("prefer the checked-in `aws_account_scope` and `aws_region_scope` helpers");
   expect(prompt).toContain("Make a short internal plan before the first tool");
   expect(prompt).toContain("Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call.");
@@ -939,7 +939,7 @@ test("factory investigation: infrastructure task packets mount selected checked-
 
   await service.runTask(secondPayload);
   const prompt = await fs.readFile(secondPayload.promptPath, "utf-8");
-  expect(prompt).toContain("Use the checked-in helper runner");
+  expect(prompt).toContain("Helper runner:");
   expect(prompt).toContain("Selected helpers for this scope:");
   expect(prompt).toContain("aws_resource_inventory");
 }, 120_000);

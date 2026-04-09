@@ -393,6 +393,42 @@ const writeProfile = async (root: string, input: {
   );
 };
 
+const TURN_ANALYSIS_RESPONSE = { responseStyle: "work" as const, includeBoundObjectiveContext: false };
+
+const scriptedLlm = (actions: Array<Record<string, unknown>>) =>
+  async ({ schema, schemaName }: { readonly schema: { parse: (v: unknown) => unknown }; readonly schemaName?: string; readonly [key: string]: unknown }) => {
+    if (schemaName === "FactoryChatTurnAnalysis") {
+      return { parsed: schema.parse(TURN_ANALYSIS_RESPONSE), raw: JSON.stringify(TURN_ANALYSIS_RESPONSE) };
+    }
+    const next = actions.shift();
+    if (!next) throw new Error("no scripted action left");
+    return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+  };
+
+const scriptedLlmAsync = (actions: Array<() => Promise<Record<string, unknown>> | Record<string, unknown>>) =>
+  async ({ schema, schemaName }: { readonly schema: { parse: (v: unknown) => unknown }; readonly schemaName?: string; readonly [key: string]: unknown }) => {
+    if (schemaName === "FactoryChatTurnAnalysis") {
+      return { parsed: schema.parse(TURN_ANALYSIS_RESPONSE), raw: JSON.stringify(TURN_ANALYSIS_RESPONSE) };
+    }
+    const nextFactory = actions.shift();
+    if (!nextFactory) throw new Error("no scripted action left");
+    const next = await nextFactory();
+    return { parsed: schema.parse(next), raw: JSON.stringify(next) };
+  };
+
+const withTurnAnalysis = (
+  fn: (opts: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>,
+  overrides?: Partial<typeof TURN_ANALYSIS_RESPONSE>,
+) =>
+  async (opts: Record<string, unknown>) => {
+    if ((opts as { readonly schemaName?: string }).schemaName === "FactoryChatTurnAnalysis") {
+      const schema = opts.schema as { parse: (v: unknown) => unknown };
+      const response = overrides ? { ...TURN_ANALYSIS_RESPONSE, ...overrides } : TURN_ANALYSIS_RESPONSE;
+      return { parsed: schema.parse(response), raw: JSON.stringify(response) };
+    }
+    return fn(opts);
+  };
+
 test("factory chat runner: codex.run queues work asynchronously and returns immediately", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-codex");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -436,11 +472,7 @@ test("factory chat runner: codex.run queues work asynchronously and returns imme
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -530,11 +562,7 @@ test("factory chat runner: codex.run reuses the active codex probe for the same 
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -615,11 +643,7 @@ test("factory chat runner: codex.status reports live codex work for the current 
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -722,11 +746,7 @@ test("factory chat runner: status.read tools expose codex logs, objective status
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -857,11 +877,7 @@ test("factory chat runner: default live objective policy preserves the operator 
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -951,11 +967,7 @@ test("factory chat runner: live objective waiting-message policy rewrites premat
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1069,11 +1081,7 @@ test("factory chat runner: active supervisor only monitors healthy objective-bac
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1198,11 +1206,7 @@ test("factory chat runner: active supervisor steers a stalled objective-backed c
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1344,11 +1348,7 @@ test("factory chat runner: active supervisor follows up on historical infrastruc
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1486,11 +1486,7 @@ test("factory chat runner: active supervisor aborts a repeatedly stalled child a
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1573,12 +1569,7 @@ test("factory chat runner: agent.delegate queues work and agent.status sees the 
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const nextFactory = actions.shift();
-      if (!nextFactory) throw new Error("no scripted action left");
-      const next = await nextFactory();
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlmAsync(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1664,11 +1655,7 @@ test("factory chat runner: profile.handoff queues continuation work on the targe
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1741,10 +1728,11 @@ test("factory chat runner: profile.handoff finalizes the current run after queue
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
+    llmStructured: withTurnAnalysis(async ({ schema }: Record<string, unknown>) => {
       llmCalls += 1;
+      const s = schema as { parse: (v: unknown) => unknown };
       return {
-        parsed: schema.parse({
+        parsed: s.parse({
           thought: "handoff to infrastructure",
           action: {
             type: "tool",
@@ -1761,7 +1749,7 @@ test("factory chat runner: profile.handoff finalizes the current run after queue
         }),
         raw: "",
       };
-    },
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1817,7 +1805,8 @@ test("factory chat runner: profile.handoff accepts common profile id aliases", a
       config: FACTORY_CHAT_DEFAULT_CONFIG,
       runtime: agentRuntime,
       llmText: async () => "",
-      llmStructured: async ({ schema }) => {
+      llmStructured: withTurnAnalysis(async ({ schema: s }: Record<string, unknown>) => {
+        const schema = s as { parse: (v: unknown) => unknown };
         const aliasInput: Record<string, string> = {
           reason: "Infra owns the runtime path check.",
           goal: "Verify the live server/session wiring.",
@@ -1837,7 +1826,7 @@ test("factory chat runner: profile.handoff accepts common profile id aliases", a
           }),
           raw: "",
         };
-      },
+      }),
       model: "test-model",
       apiReady: true,
       memoryTools,
@@ -1910,11 +1899,7 @@ test("factory chat runner: profile.handoff requires a structured engineer handof
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -1980,11 +1965,7 @@ test("factory chat runner: agent.status rejects the current factory job id", asy
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2081,11 +2062,7 @@ test("factory chat runner: software profile rejects a third discovery step befor
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2178,11 +2155,7 @@ test("factory chat runner: blocking monitor polls do not consume discovery budge
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2267,11 +2240,7 @@ test("factory chat runner: first factory.output wait is short before later waits
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2380,12 +2349,13 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
     },
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
+    llmStructured: withTurnAnalysis(async ({ schema }: Record<string, unknown>) => {
       const next = actions.shift();
       if (!next) throw new Error("no scripted action left");
-      llmCalls.push(next.action.type === "tool" ? next.action.name ?? "tool" : "final");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+      const s = schema as { parse: (v: unknown) => unknown };
+      llmCalls.push((next as { action: { type: string; name?: string } }).action.type === "tool" ? (next as { action: { name?: string } }).action.name ?? "tool" : "final");
+      return { parsed: s.parse(next), raw: JSON.stringify(next) };
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2518,11 +2488,7 @@ test("factory chat runner: terminal-objective reads do not consume discovery bud
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2632,11 +2598,7 @@ test("factory chat runner: factory.output infers the single task from objectiveI
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2764,12 +2726,7 @@ test("factory chat runner: software profile rejects follow-up polling while a co
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const nextFactory = actions.shift();
-      if (!nextFactory) throw new Error("no scripted action left");
-      const next = await nextFactory();
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlmAsync(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2841,11 +2798,7 @@ test("factory chat runner: finalizer rewrites premature software success text wh
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2922,11 +2875,7 @@ test("factory chat runner: active-monitor software policy keeps polling and pres
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -2994,11 +2943,7 @@ test("factory chat runner: accepts valid JSON-object strings for tool input", as
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3066,11 +3011,7 @@ test("factory chat runner: retries once when the model emits malformed tool-inpu
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3108,17 +3049,20 @@ test("factory chat runner: startup binds the current objective to the chat sessi
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => ({
-      parsed: schema.parse({
-        thought: "reply",
-        action: {
-          type: "final",
-          name: null,
-          input: "{}",
-          text: "Thread stays bound.",
-        },
-      }),
-      raw: "{\"thought\":\"reply\",\"action\":{\"type\":\"final\",\"name\":null,\"input\":\"{}\",\"text\":\"Thread stays bound.\"}}",
+    llmStructured: withTurnAnalysis(async ({ schema: s }: Record<string, unknown>) => {
+      const schema = s as { parse: (v: unknown) => unknown };
+      return {
+        parsed: schema.parse({
+          thought: "reply",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "Thread stays bound.",
+          },
+        }),
+        raw: "{\"thought\":\"reply\",\"action\":{\"type\":\"final\",\"name\":null,\"input\":\"{}\",\"text\":\"Thread stays bound.\"}}",
+      };
     }),
     model: "test-model",
     apiReady: true,
@@ -3198,8 +3142,9 @@ test("factory chat runner: prompt keeps profile memory separate from explicit ob
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema, user }) => {
-      capturedUserPrompt = user;
+    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
+      capturedUserPrompt = user as string;
+      const schema = s as { parse: (v: unknown) => unknown };
       const reply = {
         thought: "answer from layered memory",
         action: {
@@ -3210,7 +3155,7 @@ test("factory chat runner: prompt keeps profile memory separate from explicit ob
         },
       };
       return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    },
+    }, { includeBoundObjectiveContext: true }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3299,8 +3244,9 @@ test("factory chat runner: remembers durable chat presentation preferences and r
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema, user }) => {
-      firstPrompt = user;
+    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
+      firstPrompt = user as string;
+      const schema = s as { parse: (v: unknown) => unknown };
       const reply = {
         thought: "apply table preference",
         action: {
@@ -3314,7 +3260,7 @@ test("factory chat runner: remembers durable chat presentation preferences and r
         },
       };
       return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    },
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3347,8 +3293,9 @@ test("factory chat runner: remembers durable chat presentation preferences and r
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema, user }) => {
-      secondPrompt = user;
+    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
+      secondPrompt = user as string;
+      const schema = s as { parse: (v: unknown) => unknown };
       const reply = {
         thought: "reuse remembered preference",
         action: {
@@ -3359,7 +3306,7 @@ test("factory chat runner: remembers durable chat presentation preferences and r
         },
       };
       return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    },
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3414,8 +3361,9 @@ test("factory chat runner: injects session recall from older transcript messages
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema, user }) => {
-      capturedUserPrompt = user;
+    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
+      capturedUserPrompt = user as string;
+      const schema = s as { parse: (v: unknown) => unknown };
       const reply = {
         thought: "reuse the recalled transcript fact",
         action: {
@@ -3426,7 +3374,7 @@ test("factory chat runner: injects session recall from older transcript messages
         },
       };
       return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    },
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3489,8 +3437,9 @@ test("factory chat runner: lightweight conversational turns skip bound objective
       responseStyle: "conversational",
       includeBoundObjectiveContext: false,
     }),
-    llmStructured: async ({ schema, user }) => {
-      capturedUserPrompt = user;
+    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
+      capturedUserPrompt = user as string;
+      const schema = s as { parse: (v: unknown) => unknown };
       const reply = {
         thought: "introduce the chat controller briefly",
         action: {
@@ -3501,7 +3450,7 @@ test("factory chat runner: lightweight conversational turns skip bound objective
         },
       };
       return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    },
+    }),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3593,11 +3542,7 @@ test("factory chat runner: factory.dispatch create starts a new objective instea
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3715,11 +3660,7 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3799,11 +3740,7 @@ test("factory chat runner: Tech Lead cannot promote objectives through factory.d
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3885,11 +3822,7 @@ test("factory chat runner: Software Engineer can promote objectives through fact
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -3953,11 +3886,7 @@ test("factory chat runner: Infrastructure Engineer cannot create delivery object
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4022,11 +3951,7 @@ test("factory chat runner: QA Engineer cannot create investigation objectives", 
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4091,11 +4016,7 @@ test("factory chat runner: factory.dispatch rejects profileId reassignment", asy
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4201,11 +4122,7 @@ test("factory chat runner: terminal bound objectives create a follow-up objectiv
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4295,11 +4212,7 @@ test("factory chat runner: canonical follow-up note reacts the active bound obje
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4397,11 +4310,7 @@ test("factory chat runner: canonical completed-objective follow-up fields create
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4518,11 +4427,7 @@ test("factory chat runner: compatibility aliases and single-string checks no lon
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4586,11 +4491,7 @@ test("factory chat runner: exhausted slices queue an automatic continuation on t
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4686,11 +4587,7 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
     config: FACTORY_CHAT_DEFAULT_CONFIG,
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = actions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(actions),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4839,11 +4736,7 @@ test("factory chat runner: historical infrastructure loop continues on the lates
     },
     runtime: agentRuntime,
     llmText: async () => "",
-    llmStructured: async ({ schema }) => {
-      const next = scriptedActions.shift();
-      if (!next) throw new Error("no scripted action left");
-      return { parsed: schema.parse(next), raw: JSON.stringify(next) };
-    },
+    llmStructured: scriptedLlm(scriptedActions),
     model: "test-model",
     apiReady: true,
     memoryTools,

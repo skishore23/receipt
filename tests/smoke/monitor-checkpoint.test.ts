@@ -14,6 +14,50 @@ test("buildMonitorCheckpointPrompt returns a system and user prompt", () => {
   expect(result.user).toContain("30.0 minutes");
 });
 
+test("buildMonitorCheckpointPrompt includes proportionality rules for investigation mode", () => {
+  const result = buildMonitorCheckpointPrompt({
+    taskPrompt: "List EC2 containers",
+    stdoutTail: "Creating helper script...",
+    stderrTail: "",
+    elapsedMs: 120_000,
+    checkpoint: 1,
+    objectiveMode: "investigation",
+  });
+  expect(result.system).toContain("Investigation-Mode Rules");
+  expect(result.system).toContain("Proportionality");
+  expect(result.system).toContain("building new scripts");
+  expect(result.system).toContain("off_track");
+  expect(result.user).toContain("mode: investigation");
+});
+
+test("buildMonitorCheckpointPrompt includes evidence steering when evidence is present", () => {
+  const result = buildMonitorCheckpointPrompt({
+    taskPrompt: "List EC2 containers",
+    stdoutTail: "Running git status...",
+    stderrTail: "",
+    elapsedMs: 180_000,
+    checkpoint: 2,
+    objectiveMode: "investigation",
+    evidencePresent: true,
+  });
+  expect(result.user).toContain("Evidence Status");
+  expect(result.user).toContain("Evidence artifacts are PRESENT");
+  expect(result.user).toContain("Produce your final structured JSON result immediately");
+});
+
+test("buildMonitorCheckpointPrompt omits investigation rules for delivery mode", () => {
+  const result = buildMonitorCheckpointPrompt({
+    taskPrompt: "Implement feature X",
+    stdoutTail: "Editing files...",
+    stderrTail: "",
+    elapsedMs: 600_000,
+    checkpoint: 1,
+    objectiveMode: "delivery",
+  });
+  expect(result.system).not.toContain("Investigation-Mode Rules");
+  expect(result.user).toContain("mode: delivery");
+});
+
 test("MonitorCheckpointResultSchema validates continue action", () => {
   const input = {
     assessment: "progressing",

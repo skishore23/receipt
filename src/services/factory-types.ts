@@ -442,6 +442,7 @@ export type FactoryTaskJobPayload = {
   readonly contextPackPath: string;
   readonly memoryScriptPath: string;
   readonly memoryConfigPath: string;
+  readonly receiptCliPath: string;
   readonly repoSkillPaths: ReadonlyArray<string>;
   readonly skillBundlePaths: ReadonlyArray<string>;
   readonly profile: FactoryObjectiveProfileSnapshot;
@@ -520,4 +521,7 @@ export type FactoryMonitorJobPayload = {
   readonly stderrPath: string;
   readonly taskPrompt: string;
   readonly splitDepth: number;
+  readonly objectiveMode: FactoryObjectiveMode;
+  readonly severity: FactoryObjectiveSeverity;
+  readonly evidenceDir: string;
 };

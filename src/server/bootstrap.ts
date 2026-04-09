@@ -2,7 +2,6 @@
 // Server - Hono transport + manifest-based routing
 // ============================================================================
 
-import fs from "node:fs";
 import path from "node:path";
 
 import { Hono } from "hono";
@@ -1634,20 +1633,17 @@ app.get("/assets/:file", async (c) => {
   if (fileName.includes("..") || fileName.includes("/"))
     return text(400, "invalid asset path");
   const filePath = path.join(ASSET_DIR, fileName);
-  try {
-    const body = fs.readFileSync(filePath);
-    const ext = path.extname(fileName).toLowerCase();
-    const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
-    return new Response(body, {
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control":
-          ext === ".css" || ext === ".js" ? "no-cache" : "public, max-age=3600",
-      },
-    });
-  } catch {
-    return text(404, "asset not found");
-  }
+  const file = Bun.file(filePath);
+  if (!(await file.exists())) return text(404, "asset not found");
+  const ext = path.extname(fileName).toLowerCase();
+  const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+  return new Response(file, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control":
+        ext === ".css" || ext === ".js" ? "no-cache" : "public, max-age=3600",
+    },
+  });
 });
 
 app.notFound(() => text(404, "Not found"));

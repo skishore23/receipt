@@ -43,6 +43,7 @@ export type ReceiptDstContextRunReport = {
     readonly prompt: boolean;
     readonly memoryConfig: boolean;
     readonly memoryScript: boolean;
+    readonly receiptCli: boolean;
   };
   readonly summary: {
     readonly profileId?: string;
@@ -182,6 +183,7 @@ const normalizedTaskRunSnapshot = (
   prompt: taskRun.prompt.text ?? null,
   memoryConfig: taskRun.memoryConfig.json ?? null,
   memoryScript: taskRun.memoryScript.text ?? null,
+  receiptCli: taskRun.receiptCli.text ?? null,
 });
 
 const buildContextRunReport = (
@@ -195,6 +197,7 @@ const buildContextRunReport = (
   const manifestTask = asRecord(manifest?.task);
   const manifestCandidate = asRecord(manifest?.candidate);
   const manifestMemory = asRecord(manifest?.memory);
+  const manifestReceiptCli = asRecord(manifest?.receiptCli);
   const manifestContext = asRecord(manifest?.context);
   const contextPack = asRecord(taskRun.contextPack.json);
   const contextProfile = asRecord(contextPack?.profile);
@@ -232,6 +235,7 @@ const buildContextRunReport = (
   pushMismatch(issues, "manifest profile promptPath", asString(manifestProfile?.promptPath), asString(payloadProfile?.promptPath));
   pushMismatch(issues, "manifest memory scriptPath", asString(manifestMemory?.scriptPath), asString(payload.memoryScriptPath));
   pushMismatch(issues, "manifest memory configPath", asString(manifestMemory?.configPath), asString(payload.memoryConfigPath));
+  pushMismatch(issues, "manifest receipt cli surfacePath", asString(manifestReceiptCli?.surfacePath), asString(payload.receiptCliPath));
   pushMismatch(issues, "manifest context packPath", asString(manifestContext?.packPath), asString(payload.contextPackPath));
   if (asString(payload.contextSummaryPath)) {
     pushMismatch(issues, "manifest context summaryPath", asString(manifestContext?.summaryPath), asString(payload.contextSummaryPath));
@@ -270,6 +274,7 @@ const buildContextRunReport = (
   pushTextExpectation(issues, "prompt", promptText, asString(payload.manifestPath) ?? "");
   pushTextExpectation(issues, "prompt", promptText, asString(payload.contextPackPath) ?? "");
   pushTextExpectation(issues, "prompt", promptText, asString(payload.memoryScriptPath) ?? "");
+  pushTextExpectation(issues, "prompt", promptText, asString(payload.receiptCliPath) ?? "");
   if (asString(payload.contextSummaryPath)) {
     pushTextExpectation(issues, "prompt", promptText, asString(payload.contextSummaryPath) ?? "");
   }
@@ -320,6 +325,7 @@ const buildContextRunReport = (
       prompt: taskRun.prompt.exists,
       memoryConfig: taskRun.memoryConfig.exists,
       memoryScript: taskRun.memoryScript.exists,
+      receiptCli: taskRun.receiptCli.exists,
     },
     summary: {
       profileId: asString(contextProfile?.rootProfileId) ?? asString(manifestProfile?.rootProfileId) ?? asString(payloadProfile?.rootProfileId),

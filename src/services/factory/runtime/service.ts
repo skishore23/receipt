@@ -111,7 +111,7 @@ import {
   buildFactoryPlanningReceipt,
   planningReceiptFingerprint,
 } from "../planning";
-import { runMonitorCheckpoint } from "../monitor-job";
+import { monitorCheckpointIntervalMs, monitorDetectEvidence, runMonitorCheckpoint } from "../monitor-job";
 import { MonitorCheckpointResultSchema } from "../monitor-checkpoint";
 import { llmStructured } from "../../../adapters/openai";
 import {
@@ -155,6 +155,7 @@ import {
   buildTaskFilePaths,
   buildTaskMemoryScopes,
   listTaskArtifactActivity,
+  renderFactoryReceiptCliSurface,
   renderTaskContextSummary,
   summarizeTaskArtifactActivity,
   type FactoryContextPack,
@@ -1314,18 +1315,21 @@ export class FactoryService {
     payload: Record<string, unknown>,
     control: { shouldAbort: () => Promise<boolean> },
   ): Promise<Record<string, unknown>> {
-    const CHECKPOINT_INTERVAL_MS = 30 * 60 * 1_000;
-    const POLL_INTERVAL_MS = 15_000;
+    const POLL_INTERVAL_MS = 10_000;
     const monitorPayload = payload as unknown as FactoryMonitorJobPayload;
     let checkpoint = 0;
     const startedAt = Date.now();
-    let lastCheckpointAt = Date.now();
+    let lastCheckpointAt = startedAt;
+    let evidenceDetectedAt: number | undefined;
+
+    const checkpointIntervalMs = monitorCheckpointIntervalMs(
+      monitorPayload.objectiveMode,
+      monitorPayload.severity,
+    );
 
     while (true) {
-      // Poll frequently for codex job completion, only checkpoint every 30 min
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 
-      // Check if codex job is still running
       const codexJob = await this.queue.getJob(monitorPayload.codexJobId);
       if (!codexJob || isTerminalQueueJobStatus(codexJob.status)) {
         return { status: "codex_job_completed", checkpoints: checkpoint };
@@ -1335,14 +1339,24 @@ export class FactoryService {
         return { status: "monitor_aborted", checkpoints: checkpoint };
       }
 
-      // Only run LLM evaluation at checkpoint intervals
-      if (Date.now() - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) {
-        continue;
-      }
+      const elapsedMs = Date.now() - startedAt;
+      const hasEvidence = await monitorDetectEvidence(monitorPayload.evidenceDir);
+      if (hasEvidence && !evidenceDetectedAt) evidenceDetectedAt = Date.now();
+
+      await this.queue.progress(
+        monitorPayload.codexJobId.replace("job_factory_objective", "job_factory_monitor_objective"),
+        "factory-monitor",
+        { phase: "polling", elapsedMs, evidencePresent: hasEvidence, checkpoints: checkpoint },
+      ).catch(() => undefined);
+
+      const sinceLastCheckpoint = Date.now() - lastCheckpointAt;
+      const evidenceStale = evidenceDetectedAt !== undefined
+        && Date.now() - evidenceDetectedAt > checkpointIntervalMs;
+      const shouldCheckpoint = sinceLastCheckpoint >= checkpointIntervalMs || evidenceStale;
+      if (!shouldCheckpoint) continue;
 
       checkpoint += 1;
       lastCheckpointAt = Date.now();
-      const elapsedMs = Date.now() - startedAt;
 
       const result = await runMonitorCheckpoint({
         stdoutPath: monitorPayload.stdoutPath,
@@ -1350,6 +1364,8 @@ export class FactoryService {
         taskPrompt: monitorPayload.taskPrompt,
         elapsedMs,
         checkpoint,
+        evidencePresent: hasEvidence,
+        objectiveMode: monitorPayload.objectiveMode,
         evaluateLlm: async (prompt) => {
           const llmResult = await llmStructured({
             system: prompt.system,
@@ -1361,7 +1377,6 @@ export class FactoryService {
         },
       });
 
-      // Emit checkpoint receipt
       await this.emitObjective(monitorPayload.objectiveId, {
         type: "monitor.checkpoint",
         objectiveId: monitorPayload.objectiveId,
@@ -1374,7 +1389,6 @@ export class FactoryService {
         evaluatedAt: Date.now(),
       });
 
-      // Act on result
       if (result.action.kind === "continue") {
         continue;
       }
@@ -3071,6 +3085,7 @@ export class FactoryService {
         contextPackPath: packet.contextPackPath,
         memoryConfigPath: packet.memoryConfigPath,
         memoryScriptPath: packet.memoryScriptPath,
+        receiptCliPath: packet.receiptCliPath,
       });
     }
     const workspaceCommandEnv = await ensureFactoryWorkspaceCommandEnv({
@@ -4057,6 +4072,7 @@ export class FactoryService {
       contextPackPath: manifest.contextPackPath,
       memoryConfigPath: manifest.memoryConfigPath,
       memoryScriptPath: manifest.memoryScriptPath,
+      receiptCliPath: manifest.receiptCliPath,
     });
     await this.emitObjectiveBatch(state.objectiveId, [
       ...(opts?.prefixEvents ?? []),
@@ -4099,6 +4115,7 @@ export class FactoryService {
       contextPackPath: manifest.contextPackPath,
       memoryScriptPath: manifest.memoryScriptPath,
       memoryConfigPath: manifest.memoryConfigPath,
+      receiptCliPath: manifest.receiptCliPath,
       repoSkillPaths: manifest.repoSkillPaths,
       skillBundlePaths: manifest.skillBundlePaths,
       profile: workerProfile,
@@ -4137,6 +4154,9 @@ export class FactoryService {
       stderrPath: manifest.stderrPath,
       taskPrompt: task.prompt,
       splitDepth: task.splitDepth ?? 0,
+      objectiveMode: state.objectiveMode,
+      severity: state.severity,
+      evidenceDir: path.join(path.dirname(manifest.stdoutPath), "evidence"),
     };
     await this.queue.enqueue({
       jobId: monitorJobId,
@@ -5163,6 +5183,7 @@ export class FactoryService {
     readonly evidencePath: string;
     readonly memoryScriptPath: string;
     readonly memoryConfigPath: string;
+      readonly receiptCliPath: string;
     readonly repoSkillPaths: ReadonlyArray<string>;
     readonly skillBundlePaths: ReadonlyArray<string>;
     readonly sharedArtifactRefs: ReadonlyArray<GraphRef>;
@@ -5248,6 +5269,10 @@ export class FactoryService {
         configPath: files.memoryConfigPath,
         scopes: memoryScopes,
       },
+      receiptCli: {
+        surfacePath: files.receiptCliPath,
+        factoryCliPrefix: FACTORY_CLI_PREFIX,
+      },
       context: {
         summaryPath: files.contextSummaryPath,
         packPath: files.contextPackPath,
@@ -5277,6 +5302,14 @@ export class FactoryService {
     await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
     await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
     await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
+    await fs.writeFile(files.receiptCliPath, renderFactoryReceiptCliSurface({
+      objectiveId: state.objectiveId,
+      taskId: task.taskId,
+      candidateId,
+      memoryScriptPath: files.memoryScriptPath,
+      receiptCliPath: files.receiptCliPath,
+      factoryCliPrefix: FACTORY_CLI_PREFIX,
+    }), "utf-8");
     await fs.writeFile(files.memoryScriptPath, buildFactoryMemoryScriptSource(files.memoryConfigPath), "utf-8");
     if (process.platform !== "win32") await fs.chmod(files.memoryScriptPath, 0o755);
     return {
@@ -5291,6 +5324,7 @@ export class FactoryService {
       evidencePath: files.evidencePath,
       memoryScriptPath: files.memoryScriptPath,
       memoryConfigPath: files.memoryConfigPath,
+      receiptCliPath: files.receiptCliPath,
       repoSkillPaths: dedupeStrings(repoSkillPaths),
       skillBundlePaths: [files.skillBundlePath],
       sharedArtifactRefs,
@@ -5627,6 +5661,7 @@ export class FactoryService {
       : undefined;
     const contextPackPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.contextPackPath);
     const memoryScriptPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.memoryScriptPath);
+    const receiptCliPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.receiptCliPath);
     const resultPathForPrompt = payload.resultPath;
     const liveGuidanceSection = renderLiveOperatorGuidanceSection(guidanceHistory);
     return renderFactoryTaskPrompt({
@@ -5647,6 +5682,7 @@ export class FactoryService {
       contextSummaryPathForPrompt,
       contextPackPathForPrompt,
       memoryScriptPathForPrompt,
+      receiptCliPathForPrompt,
       resultPathForPrompt,
       liveGuidanceSection,
       factoryCliPrefix: FACTORY_CLI_PREFIX,
@@ -5678,6 +5714,7 @@ export class FactoryService {
       contextPackPath: requireNonEmpty(payload.contextPackPath, "contextPackPath required"),
       memoryScriptPath: requireNonEmpty(payload.memoryScriptPath, "memoryScriptPath required"),
       memoryConfigPath: requireNonEmpty(payload.memoryConfigPath, "memoryConfigPath required"),
+      receiptCliPath: requireNonEmpty(payload.receiptCliPath, "receiptCliPath required"),
       repoSkillPaths: Array.isArray(payload.repoSkillPaths) ? payload.repoSkillPaths.filter((item): item is string => typeof item === "string") : [],
       skillBundlePaths: Array.isArray(payload.skillBundlePaths) ? payload.skillBundlePaths.filter((item): item is string => typeof item === "string") : [],
       profile: normalizeFactoryObjectiveProfileSnapshot(payload.profile),
@@ -5718,7 +5755,7 @@ export class FactoryService {
   private async taskPacketPresent(
     payload: Pick<
       FactoryTaskJobPayload,
-      "manifestPath" | "contextSummaryPath" | "contextPackPath" | "memoryScriptPath" | "memoryConfigPath" | "skillBundlePaths"
+      "manifestPath" | "contextSummaryPath" | "contextPackPath" | "memoryScriptPath" | "memoryConfigPath" | "receiptCliPath" | "skillBundlePaths"
     >,
   ): Promise<boolean> {
     const requiredPaths = [
@@ -5727,6 +5764,7 @@ export class FactoryService {
       payload.contextPackPath,
       payload.memoryScriptPath,
       payload.memoryConfigPath,
+      payload.receiptCliPath,
       ...payload.skillBundlePaths,
     ];
     for (const targetPath of requiredPaths) {

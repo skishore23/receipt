@@ -30,6 +30,7 @@ const renderTaskPromptBody = (input: {
   readonly contextSummaryPathForPrompt?: string;
   readonly contextPackPathForPrompt: string;
   readonly memoryScriptPathForPrompt: string;
+  readonly receiptCliPathForPrompt: string;
   readonly resultPathForPrompt: string;
   readonly liveGuidanceSection?: string;
   readonly factoryCliPrefix: string;
@@ -39,6 +40,7 @@ const renderTaskPromptBody = (input: {
     `Manifest: ${input.manifestPathForPrompt}`,
     `Context Pack: ${input.contextPackPathForPrompt}`,
     `Memory Script: ${input.memoryScriptPathForPrompt}`,
+    `Receipt CLI Surface: ${input.receiptCliPathForPrompt}`,
     ...(input.contextSummaryPathForPrompt
       ? [`Task Context Summary (quick overview derived from the packet): ${input.contextSummaryPathForPrompt}`]
       : []),
@@ -97,20 +99,36 @@ const renderTaskPromptBody = (input: {
     ``,
     `## Investigation Contract`,
     input.state.objectiveMode === "investigation"
-      ? `This objective is investigation-first. Plan before you run commands. If the task prompt is broad, first narrow it to one concrete investigation question, one primary evidence path, and one stop condition. Use checked-in helpers first instead of writing a task-local script.`
+      ? `This objective is investigation-first. Answer the question as fast as possible with the least tooling.`
       : `This objective is delivery-oriented. Prefer tracked repo changes and keep investigation folded into the implementation task.`,
-    input.state.objectiveMode === "investigation"
-      ? `A tracked diff is optional when an existing helper answers the task. If no checked-in helper matches and the missing behavior is clear, create or extend a checked-in helper in the repo, run it, and keep the helper in the task diff. Only stop when the helper contract is too ambiguous or repo edits are explicitly out of scope.`
-      : `A non-validation task is expected to leave a tracked repo diff unless you are hard blocked.`,
-    input.state.objectiveMode === "investigation"
-      ? `Interpret command and script outputs in plain language. Do not just paste logs.`
-      : `Capture implementation and validation results precisely in the handoff.`,
-    input.state.objectiveMode === "investigation"
-      ? `Do not convert a failed query, denied API, or helper error into "zero results". If a primary evidence path errors or stays incomplete, record that command as warning/error and use outcome "partial" or "blocked" instead of "approved".`
-      : `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
+    ...(input.state.objectiveMode === "investigation"
+      ? [
+          ``,
+          `### Proportionality Ladder (follow in strict order)`,
+          `1. Run a matching checked-in helper if one exists. A single helper run that answers the question is the ideal outcome.`,
+          `2. If no helper matches, run the raw CLI commands directly (e.g. \`aws ecs list-clusters\`, \`kubectl get pods\`). Two or three CLI calls that answer the question is fine. Produce your result JSON immediately after.`,
+          `3. Only extend or create a checked-in helper when the task prompt explicitly asks for reusable tooling or when the same query pattern has failed before. Never build a new helper just to answer a one-off question.`,
+          `4. If you have evidence (helper output, CLI output, or artifacts), stop gathering and synthesize your final JSON. Do not refine, re-run, or polish.`,
+          ``,
+          `### Investigation Budget`,
+          `You have a limited output budget. Reserve at least 30% for your final structured JSON result.`,
+          `If you have run more than 5 commands without producing evidence, you are over-engineering. Stop and answer with what you have.`,
+          `If evidence artifacts exist in the evidence directory, your only remaining job is to synthesize the final JSON.`,
+          ``,
+          `### Investigation Quality`,
+          `Interpret command and script outputs in plain language. Do not just paste logs.`,
+          `Do not convert a failed query, denied API, or helper error into "zero results". If a primary evidence path errors or stays incomplete, record that command as warning/error and use outcome "partial" or "blocked" instead of "approved".`,
+          `Make a short internal plan before the first tool: name the concrete question, the primary evidence path, the stop condition, and the one follow-up check that would change your answer.`,
+        ]
+      : [
+          `A non-validation task is expected to leave a tracked repo diff unless you are hard blocked.`,
+          `Capture implementation and validation results precisely in the handoff.`,
+          `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
+        ]),
+    ``,
+    `## Execution Discipline`,
     `Do not run \`${input.factoryCliPrefix} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
     `The controller handles integration and PR publication after an approved candidate. If the objective prompt mentions publishing, satisfy it here by leaving a clean candidate diff plus proof for the controller handoff.`,
-    `Make a short internal plan before the first tool: name the concrete question, the primary evidence path, the stop condition, and the one follow-up check that would change your answer.`,
     `Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
     `Use Codex subagents only for bounded sidecar work such as parsing a captured artifact, checking one secondary evidence path, or verifying a concrete claim.`,
     `Keep this task session as the single owner of the final JSON result. Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.`,
@@ -118,8 +136,7 @@ const renderTaskPromptBody = (input: {
     input.cloudExecutionContext?.preferredProvider
       ? `Local execution context already indicates ${input.cloudExecutionContext.preferredProvider}. Use that provider and its mounted scope by default unless the objective explicitly contradicts it.`
       : `If the local execution context clearly indicates one provider/profile/account, use it instead of asking the user to restate it.`,
-    `If the helper catalog misses the required behavior and this run may edit the repo, use the mounted helper authoring skill to add or extend a checked-in helper instead of stopping at a no-helper report.`,
-    `Do not emit commentary-style progress updates in this child session. Prefer the checked-in helper catalog when repeated CLI steps or evidence collection would otherwise be lossy.`,
+    `Do not emit commentary-style progress updates in this child session.`,
     `Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.`,
     ``,
     ...(input.infrastructureTaskGuidance.length > 0 ? [...input.infrastructureTaskGuidance, ``] : []),
@@ -136,6 +153,7 @@ const renderTaskPromptBody = (input: {
     `Mounted profile skills for this task:`,
     input.payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
     `Use only the checked-in repo skills named in this packet. Do not load unrelated global skills from ~/.codex or other home-directory skill folders unless this packet explicitly names them.`,
+    `Use the generated Receipt CLI surface at ${input.receiptCliPathForPrompt} before ad-hoc \`${input.factoryCliPrefix} ...\` commands.`,
     `Read any mounted infrastructure or cloud profile skill before provider-sensitive commands.`,
     input.payload.executionMode === "worktree"
       ? `Do not call \`${input.factoryCliPrefix} factory inspect\` from inside this task worktree. The packet already mounts recent objective receipts and state, and worktree-side inspect can fail on receipt lock files outside the workspace.`
@@ -195,6 +213,7 @@ export const renderFactoryTaskPrompt = (input: {
   readonly contextSummaryPathForPrompt?: string;
   readonly contextPackPathForPrompt: string;
   readonly memoryScriptPathForPrompt: string;
+  readonly receiptCliPathForPrompt: string;
   readonly resultPathForPrompt: string;
   readonly liveGuidanceSection?: string;
   readonly factoryCliPrefix: string;

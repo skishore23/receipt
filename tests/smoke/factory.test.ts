@@ -4590,9 +4590,9 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body).not.toContain("Employee Profile");
   expect(body).not.toContain("PROFILE.md");
   expect(body).not.toContain("SOUL.md");
-  expect(body).not.toContain("Responsibilities");
-  expect(body).not.toContain("Operating Style");
-  expect(body).not.toContain("Decision Rules");
+  expect(body).toContain("Responsibilities");
+  expect(body).toContain("Operating Style");
+  expect(body).toContain("Decision Rules");
   expect(body).toContain('id="factory-workbench-rail-scroll"');
   expect(body).toContain('id="factory-workbench-focus-scroll"');
   expect(body).toContain('data-preserve-scroll-key="rail"');

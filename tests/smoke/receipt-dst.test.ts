@@ -12,13 +12,24 @@ import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 import {
   DEFAULT_FACTORY_OBJECTIVE_POLICY,
   DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+  type FactoryObjectiveContractRecord,
+  type FactoryPlanningReceiptRecord,
+  type FactoryState,
+  type FactoryTaskRecord,
 } from "../../src/modules/factory";
 import { decide as decideJob, initial as initialJobState, reduce as reduceJob, type JobCmd, type JobEvent } from "../../src/modules/job";
 import { buildFactoryMemoryScriptSource } from "../../src/services/factory-codex-artifacts";
+import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
+import type { FactoryHelperContext } from "../../src/services/factory-helper-catalog";
 import {
   archiveFactoryTaskPacketArtifacts,
   archiveFactoryTaskPrompt,
 } from "../../src/services/factory-task-packet-archive";
+import type { FactoryTaskJobPayload } from "../../src/services/factory-types";
+import {
+  renderFactoryTaskPrompt,
+  renderFactoryTaskValidationSection,
+} from "../../src/services/factory/prompt-rendering";
 import { buildTaskFilePaths } from "../../src/services/factory/task-packets";
 
 type GenericEvent = Record<string, unknown> & {
@@ -154,6 +165,7 @@ const createFactoryTaskPacketFixture = async (opts: {
     contextPackPath: files.contextPackPath,
     memoryScriptPath: files.memoryScriptPath,
     memoryConfigPath: files.memoryConfigPath,
+    receiptCliPath: files.receiptCliPath,
     repoSkillPaths: ["skills/factory-receipt-worker/SKILL.md"],
     skillBundlePaths: [files.skillBundlePath],
     profile,
@@ -210,6 +222,10 @@ const createFactoryTaskPacketFixture = async (opts: {
       scriptPath: files.memoryScriptPath,
       configPath: files.memoryConfigPath,
       scopes: memoryScopes,
+    },
+    receiptCli: {
+      surfacePath: files.receiptCliPath,
+      factoryCliPrefix: "receipt",
     },
     context: {
       summaryPath: files.contextSummaryPath,
@@ -342,7 +358,9 @@ const createFactoryTaskPacketFixture = async (opts: {
     ...(opts.promptOverrides?.omitManifestPath ? [] : [`2. Manifest: ${files.manifestPath}`]),
     ...(opts.promptOverrides?.omitContextPackPath ? [] : [`3. Context Pack: ${files.contextPackPath}`]),
     ...(opts.promptOverrides?.omitMemoryScriptPath ? [] : [`4. Memory Script: ${files.memoryScriptPath}`]),
-    `5. Task Context Summary (quick overview derived from the packet): ${files.contextSummaryPath}`,
+    `5. Receipt CLI Surface: ${files.receiptCliPath}`,
+    `6. Task Context Summary (quick overview derived from the packet): ${files.contextSummaryPath}`,
+    `Use the generated Receipt CLI surface at ${files.receiptCliPath} before ad-hoc \`receipt ...\` commands.`,
     "Do not call `receipt factory inspect` from inside this task worktree.",
     ...(opts.guidanceMessage && !opts.promptOverrides?.omitGuidanceSection
       ? ["", "## Live Operator Guidance", "", `1. ${opts.guidanceMessage}`]
@@ -356,6 +374,11 @@ const createFactoryTaskPacketFixture = async (opts: {
     "",
     "## Packet Usage",
     "Use the packet before broader exploration.",
+  ].join("\n"), "utf-8");
+  await fs.writeFile(files.receiptCliPath, [
+    "# Factory Receipt CLI Surface",
+    "",
+    "Use this bounded CLI surface before broader receipt exploration.",
   ].join("\n"), "utf-8");
   await fs.writeFile(files.promptPath, promptLines.join("\n"), "utf-8");
   await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
@@ -714,6 +737,7 @@ test("receipt dst context audit falls back to archived task packets after worksp
       contextPackPath: String(payload.contextPackPath),
       memoryConfigPath: String(payload.memoryConfigPath),
       memoryScriptPath: String(payload.memoryScriptPath),
+      receiptCliPath: String(payload.receiptCliPath),
     });
     await archiveFactoryTaskPrompt({
       dataDir,
@@ -820,6 +844,371 @@ test("receipt dst --context --strict exits non-zero when packet context is out o
     expect(parsed.context?.integrityFailures).toBe(1);
     expect(parsed.context?.runs[0]?.integrity.ok).toBe(false);
     expect(parsed.context?.runs[0]?.integrity.error).toContain("missing memory script");
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst context audit: investigation-mode AWS ECS question renders with proportionality ladder and passes integrity", async () => {
+  const dataDir = await createTempDir("receipt-dst-investigation-ecs");
+  const objectiveId = "objective_ecs_investigation";
+  const taskId = "task_01";
+  const candidateId = "task_01_candidate_01";
+  const jobId = "job_ecs_investigation";
+  const workspacePath = await createTempDir("receipt-dst-investigation-ecs-ws");
+  const files = buildTaskFilePaths(workspacePath, taskId);
+  await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
+  await fs.writeFile(files.skillBundlePath, JSON.stringify({ skills: [] }, null, 2), "utf-8");
+
+  const objectivePrompt =
+    "User wants a table of 'ec2 containers'. Interpret as ECS containers running on EC2 (not Fargate). " +
+    "Query all regions for ECS clusters -> list-tasks RUNNING -> describe-tasks; filter launchType=EC2. " +
+    "Output a markdown table and top-line counts.";
+
+  const profile = {
+    ...DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+    rootProfileId: "infrastructure",
+    rootProfileLabel: "Infrastructure",
+    promptPath: "profiles/infrastructure/PROFILE.md",
+    selectedSkills: ["skills/factory-receipt-worker/SKILL.md", "skills/factory-infrastructure-aws/SKILL.md"],
+    objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+    cloudProvider: "aws",
+  };
+
+  const state = {
+    objectiveId,
+    title: "List EC2 containers (ECS on EC2) as table",
+    prompt: objectivePrompt,
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  } as FactoryState;
+
+  const task = {
+    taskId,
+    title: "List EC2 containers (ECS on EC2) as table",
+    prompt: objectivePrompt,
+    workerType: "codex",
+  } as FactoryTaskRecord;
+
+  const taskPayload = {
+    executionMode: "worktree",
+    baseCommit: "abc123",
+    candidateId,
+    profile,
+  } as FactoryTaskJobPayload;
+
+  const planningReceipt = {
+    goal: "List EC2 containers (ECS on EC2) as table.",
+    constraints: [],
+    taskGraph: [{
+      taskId,
+      title: "List EC2 containers (ECS on EC2) as table",
+      dependsOn: [],
+      workerType: "codex",
+      executionMode: "worktree",
+      status: "running",
+    }],
+    acceptanceCriteria: [
+      "Answer the stated investigation goal: List EC2 containers (ECS on EC2) as table.",
+      "Return a clear conclusion with supporting evidence and scripts run.",
+      "Call out any disagreement, gap, or uncertainty that affects operator confidence.",
+    ],
+    validationPlan: [],
+    plannedAt: 1,
+  } satisfies FactoryPlanningReceiptRecord;
+
+  const objectiveContract = {
+    acceptanceCriteria: [
+      "Answer the stated investigation goal: List EC2 containers (ECS on EC2) as table.",
+      "Return a clear conclusion with supporting evidence and scripts run.",
+      "Call out any disagreement, gap, or uncertainty that affects operator confidence.",
+    ],
+    allowedScope: ["ECS investigation across all AWS regions"],
+    disallowedScope: [],
+    requiredChecks: [],
+    proofExpectation: "Return concrete evidence and a clear conclusion with any uncertainty called out.",
+  } satisfies FactoryObjectiveContractRecord;
+
+  const cloudExecutionContext: FactoryCloudExecutionContext = {
+    summary: "AWS credentials are mounted for this profile.",
+    guidance: ["Use the detected AWS context by default."],
+    availableProviders: ["aws"],
+    activeProviders: ["aws"],
+    preferredProvider: "aws",
+  };
+
+  const helperCatalog: FactoryHelperContext = {
+    runnerPath: "skills/factory-helper-runtime/runner.py",
+    guidance: ["Prefer checked-in helpers when repeated CLI steps would be lossy."],
+    selectedHelpers: [{
+      id: "aws_resource_inventory",
+      version: "1.1.0",
+      provider: "aws",
+      tags: ["inventory", "count", "list", "resource", "ecs", "clusters", "tasks", "services"],
+      description: "List or count common AWS resources by service and resource type.",
+      manifestPath: "skills/factory-helper-runtime/catalog/infrastructure/aws_resource_inventory/manifest.json",
+      entrypointPath: "skills/factory-helper-runtime/catalog/infrastructure/aws_resource_inventory/run.py",
+      requiredArgs: ["--service", "--resource"],
+      requiredContext: ["Requires an explicit service/resource pair such as ecs/clusters, ecs/tasks, ecs/services."],
+      examples: ["--service ecs --resource clusters --all-regions", "--service ecs --resource tasks --region us-east-1"],
+      score: 12,
+    }],
+  };
+
+  const prompt = renderFactoryTaskPrompt({
+    state,
+    task,
+    payload: taskPayload,
+    taskPrompt: objectivePrompt,
+    planningReceipt,
+    objectiveContract,
+    cloudExecutionContext,
+    helperCatalog,
+    infrastructureTaskGuidance: [],
+    dependencySummaries: "- none",
+    downstreamSummaries: "- none",
+    validationSection: renderFactoryTaskValidationSection(state, task),
+    manifestPathForPrompt: files.manifestPath,
+    contextSummaryPathForPrompt: files.contextSummaryPath,
+    contextPackPathForPrompt: files.contextPackPath,
+    memoryScriptPathForPrompt: files.memoryScriptPath,
+    receiptCliPathForPrompt: files.receiptCliPath,
+    resultPathForPrompt: files.resultPath,
+    factoryCliPrefix: "receipt",
+  });
+
+  expect(prompt).toContain("Proportionality Ladder");
+  expect(prompt).toContain("Investigation Budget");
+  expect(prompt).toContain("## Helper-First Execution");
+  expect(prompt).toContain("Helper runner: skills/factory-helper-runtime/runner.py");
+  expect(prompt).toContain("aws_resource_inventory");
+  expect(prompt).toContain("Escalation order");
+  expect(prompt).toContain("investigation-first");
+
+  const memoryScopes = [
+    { key: "agent", scope: "factory/agents/codex", label: "Agent memory", defaultQuery: "context", readOnly: true },
+    { key: "repo", scope: "factory/repo/shared", label: "Repo shared memory", defaultQuery: "context", readOnly: true },
+    { key: "objective", scope: `factory/objectives/${objectiveId}`, label: "Objective memory", defaultQuery: objectiveId },
+    { key: "task", scope: `factory/objectives/${objectiveId}/tasks/${taskId}`, label: "Task memory", defaultQuery: taskId },
+    { key: "candidate", scope: `factory/objectives/${objectiveId}/candidates/${candidateId}`, label: "Candidate memory", defaultQuery: candidateId },
+    { key: "integration", scope: `factory/objectives/${objectiveId}/integration`, label: "Integration memory", defaultQuery: "integration" },
+  ];
+  const sharedArtifactRefs = [{ kind: "artifact", ref: "README.md", label: "readme" }];
+  const contextRefs = [{ kind: "artifact", ref: files.contextPackPath, label: "context pack" }];
+  const contextSources = {
+    repoSharedMemoryScope: "factory/repo/shared",
+    objectiveMemoryScope: `factory/objectives/${objectiveId}`,
+    integrationMemoryScope: `factory/objectives/${objectiveId}/integration`,
+    profileSkillRefs: profile.selectedSkills,
+    repoSkillPaths: profile.selectedSkills,
+    sharedArtifactRefs,
+  };
+  const manifest = {
+    objective: {
+      objectiveId,
+      title: "List EC2 containers (ECS on EC2) as table",
+      prompt: objectivePrompt,
+      baseHash: "abc123",
+      objectiveMode: "investigation",
+      severity: 1,
+      checks: [],
+    },
+    profile,
+    task: {
+      taskId,
+      title: "List EC2 containers (ECS on EC2) as table",
+      prompt: objectivePrompt,
+      workerType: "codex",
+      executionMode: "worktree",
+      baseCommit: "abc123",
+      dependsOn: [],
+    },
+    candidate: { candidateId, taskId },
+    integration: { status: "idle" },
+    contract: objectiveContract,
+    memory: {
+      scriptPath: files.memoryScriptPath,
+      configPath: files.memoryConfigPath,
+      scopes: memoryScopes,
+    },
+    receiptCli: { surfacePath: files.receiptCliPath, factoryCliPrefix: "receipt" },
+    context: { summaryPath: files.contextSummaryPath, packPath: files.contextPackPath },
+    contextSources,
+    contextRefs,
+    sharedArtifactRefs,
+    repoSkillPaths: profile.selectedSkills,
+    skillBundlePaths: [files.skillBundlePath],
+    traceRefs: [],
+  };
+  const contextPack = {
+    objectiveId,
+    title: "List EC2 containers (ECS on EC2) as table",
+    prompt: objectivePrompt,
+    objectiveMode: "investigation",
+    severity: 1,
+    contract: objectiveContract,
+    profile,
+    task: {
+      taskId,
+      title: "List EC2 containers (ECS on EC2) as table",
+      prompt: objectivePrompt,
+      workerType: "codex",
+      executionMode: "worktree",
+      status: "running",
+      candidateId,
+    },
+    integration: { status: "idle" },
+    dependencyTree: [],
+    relatedTasks: [{ taskId, taskKind: "planned", title: "List EC2 containers (ECS on EC2) as table", status: "running", workerType: "codex", relations: ["focus"] }],
+    candidateLineage: [{ candidateId, status: "running", summary: "First pass" }],
+    recentReceipts: [{ type: "task.dispatched", at: 1, taskId, candidateId, summary: "Task dispatched for execution." }],
+    objectiveSlice: {
+      frontierTasks: [{ taskId, taskKind: "planned", title: "List EC2 containers (ECS on EC2) as table", status: "running", workerType: "codex", relations: ["focus"] }],
+      recentCompletedTasks: [],
+      integrationTasks: [],
+      recentObjectiveReceipts: [{ type: "objective.created", at: 1, summary: "Objective created." }],
+      objectiveMemorySummary: "Investigation objective for ECS on EC2.",
+      integrationMemorySummary: "No integration yet.",
+    },
+    memory: {
+      overview: "Use the packet before broader memory.",
+      objective: "Investigation objective for ECS on EC2.",
+      integration: "No integration yet.",
+      repoAudit: "No known repo-wide audit issue.",
+    },
+    investigation: { reports: [] },
+    helperCatalog: {
+      runnerPath: helperCatalog.runnerPath,
+      guidance: helperCatalog.guidance,
+      selectedHelpers: helperCatalog.selectedHelpers.map((h) => ({
+        id: h.id,
+        description: h.description,
+        tags: [...h.tags],
+        manifestPath: h.manifestPath,
+        entrypointPath: h.entrypointPath,
+        requiredArgs: [...h.requiredArgs],
+        requiredContext: [...h.requiredContext],
+        examples: [...h.examples],
+      })),
+    },
+    contextSources,
+    cloudExecutionContext,
+  };
+  const memoryConfig = {
+    objectiveId,
+    taskId,
+    candidateId,
+    contextSummaryPath: path.basename(files.contextSummaryPath),
+    contextPackPath: path.basename(files.contextPackPath),
+    defaultQuery: `${objectivePrompt}\n${task.title}`,
+    defaultLimit: 6,
+    defaultMaxChars: 2400,
+    scopes: memoryScopes,
+  };
+
+  const jobPayload = {
+    kind: "factory.task.run",
+    objectiveId,
+    taskId,
+    workerType: "codex",
+    objectiveMode: "investigation",
+    severity: 1,
+    candidateId,
+    baseCommit: "abc123",
+    executionMode: "worktree",
+    workspaceId: "workspace_01",
+    workspacePath,
+    promptPath: files.promptPath,
+    resultPath: files.resultPath,
+    stdoutPath: files.stdoutPath,
+    stderrPath: files.stderrPath,
+    lastMessagePath: files.lastMessagePath,
+    evidencePath: files.evidencePath,
+    manifestPath: files.manifestPath,
+    contextSummaryPath: files.contextSummaryPath,
+    contextPackPath: files.contextPackPath,
+    memoryScriptPath: files.memoryScriptPath,
+    memoryConfigPath: files.memoryConfigPath,
+    receiptCliPath: files.receiptCliPath,
+    repoSkillPaths: profile.selectedSkills,
+    skillBundlePaths: [files.skillBundlePath],
+    profile,
+    profilePromptHash: "prompt_hash_ecs",
+    profileSkillRefs: profile.selectedSkills,
+    sharedArtifactRefs,
+    contextRefs,
+    problem: objectivePrompt,
+    config: {},
+  } satisfies Record<string, unknown>;
+
+  await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
+  await fs.writeFile(files.contextSummaryPath, [
+    "# Factory Task Context Summary",
+    "",
+    "## Packet Usage",
+    "Use the packet before broader exploration.",
+  ].join("\n"), "utf-8");
+  await fs.writeFile(files.receiptCliPath, [
+    "# Factory Receipt CLI Surface",
+    "",
+    "Use this bounded CLI surface before broader receipt exploration.",
+  ].join("\n"), "utf-8");
+  await fs.writeFile(files.promptPath, prompt, "utf-8");
+  await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
+  await fs.writeFile(files.memoryScriptPath, buildFactoryMemoryScriptSource(files.memoryConfigPath), "utf-8");
+  await fs.writeFile(files.lastMessagePath, "Structured result pending.", "utf-8");
+
+  try {
+    await seedJobEvents(dataDir, `jobs/${jobId}`, [
+      {
+        type: "job.enqueued",
+        jobId,
+        agentId: "codex",
+        lane: "collect",
+        payload: jobPayload,
+        maxAttempts: 2,
+        sessionKey: `factory:${objectiveId}:${taskId}`,
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+      {
+        type: "job.leased",
+        jobId,
+        workerId: "worker_1",
+        leaseMs: 300_000,
+        attempt: 1,
+      },
+      {
+        type: "job.completed",
+        jobId,
+        workerId: "worker_1",
+        result: { ok: true },
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      includeContext: true,
+      repoRoot: ROOT,
+    });
+
+    expect(report.context?.runCount).toBe(1);
+    expect(report.context?.integrityFailures).toBe(0);
+    expect(report.context?.replayFailures).toBe(0);
+    expect(report.context?.deterministicFailures).toBe(0);
+
+    const run = report.context?.runs[0];
+    expect(run?.artifacts.prompt).toBe(true);
+    expect(run?.artifacts.manifest).toBe(true);
+    expect(run?.artifacts.contextPack).toBe(true);
+    expect(run?.artifacts.memoryScript).toBe(true);
+    expect(run?.summary.profileId).toBe("infrastructure");
+    expect(run?.summary.cloudProvider).toBe("aws");
+    expect(run?.summary.helperCount).toBe(1);
+    expect(run?.integrity.ok).toBe(true);
+    expect(run?.issues).toEqual([]);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
     await fs.rm(workspacePath, { recursive: true, force: true });

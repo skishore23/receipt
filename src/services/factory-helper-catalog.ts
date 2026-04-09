@@ -310,8 +310,9 @@ export const loadFactoryHelperContext = async (input: {
   return {
     runnerPath: path.join(input.profileRoot, FACTORY_HELPER_RUNNER_RELATIVE_PATH),
     guidance: [
-      "Use checked-in helpers first for AWS investigations instead of generating a task-local script.",
-      "If no helper matches the ask closely enough, author or extend a checked-in helper when the missing behavior is clear instead of stopping at a no-helper report.",
+      "Run a matching checked-in helper first. If it answers the question, produce your result immediately.",
+      "If no helper matches, run the equivalent raw CLI commands directly. Do not build a new helper just to answer a one-off question.",
+      "Only create or extend a checked-in helper when the task prompt explicitly requests reusable tooling or the same query pattern has been asked before.",
       "For live cloud/account/runtime questions, rerun the matching helper and treat stored helper metadata as a starting point, not as fresh evidence.",
       "Helper manifests list required args, required context, and example invocations so the current packet can expose what each helper needs before you decide whether to use it.",
     ],
@@ -325,26 +326,33 @@ export const renderFactoryHelperPromptSection = (
   if (!context) return [];
   const lines = [
     "## Helper-First Execution",
-    `Use the checked-in helper runner at ${context.runnerPath}.`,
+    `Helper runner: ${context.runnerPath}`,
     ...context.guidance.map((item) => `- ${item}`),
+    "",
+    "### Escalation order (follow strictly)",
+    "1. Run a selected helper below if one matches. A single helper run that answers the question is the ideal outcome.",
+    "2. If no helper matches, check whether an existing helper can be extended with a small RESOURCE_SPECS addition (a few lines). Extend it, run it, and answer.",
+    "3. If extending is not viable, run the equivalent raw CLI commands directly (e.g. `aws ecs list-clusters`, `kubectl get pods`). Answer from the CLI output.",
+    "4. Only create a new helper from scratch when the task prompt explicitly asks for reusable tooling.",
+    "5. Never spend more than 2 tool calls deciding which path to take. Pick one and execute.",
   ];
   if (context.selectedHelpers.length === 0) {
-    lines.push("- No checked-in helper matched this task. Do not invent a runtime-local `.receipt/factory/*.sh` script.");
-    lines.push("- If the missing behavior is clear and the current run may edit the repo, author or extend a checked-in helper under `skills/factory-helper-runtime/catalog/` and use it.");
-    lines.push("- If repo edits are out of scope for this run, return the missing helper name plus the missing scope or arguments instead of pretending the helper exists.");
+    lines.push("");
+    lines.push("No checked-in helper matched this task. Follow steps 2-4 above.");
+    lines.push("Do not invent a runtime-local `.receipt/factory/*.sh` script.");
   } else {
+    lines.push("");
     lines.push("Selected helpers for this scope:");
     for (const helper of context.selectedHelpers) {
       lines.push(`- helper: ${helper.id} | ${helper.description} | tags ${helper.tags.join(", ")}`);
-      lines.push(`- manifest: ${helper.manifestPath}`);
-      lines.push(`- entrypoint: ${helper.entrypointPath}`);
-      if (helper.requiredArgs.length > 0) lines.push(`- required args: ${helper.requiredArgs.join(", ")}`);
-      lines.push(...helper.requiredContext.map((item) => `- context requirement: ${item}`));
+      lines.push(`  manifest: ${helper.manifestPath}`);
+      lines.push(`  entrypoint: ${helper.entrypointPath}`);
+      if (helper.requiredArgs.length > 0) lines.push(`  required args: ${helper.requiredArgs.join(", ")}`);
+      lines.push(...helper.requiredContext.map((item) => `  context: ${item}`));
       lines.push(...helper.examples.slice(0, 2).map((item) =>
-        `- example: python3 ${context.runnerPath} run --provider ${helper.provider} --json ${helper.id} -- ${item}`));
+        `  example: python3 ${context.runnerPath} run --provider ${helper.provider} --json ${helper.id} -- ${item}`));
     }
-    lines.push("- Combine only a small number of helpers. Stop once one or two helper runs produce enough evidence to answer.");
-    lines.push("- Record helper runner commands in report.scriptsRun so operators can rerun the exact path.");
+    lines.push("- Stop once one or two helper runs produce enough evidence to answer. Record commands in report.scriptsRun.");
   }
   lines.push("");
   return lines;

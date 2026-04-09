@@ -246,6 +246,7 @@ type ParsedTaskRun = {
   readonly prompt: ParsedFileArtifact;
   readonly memoryConfig: ParsedFileArtifact;
   readonly memoryScript: ParsedFileArtifact;
+  readonly receiptCli: ParsedFileArtifact;
   readonly resultFile: ParsedFileArtifact;
   readonly lastMessage: ParsedFileArtifact;
   readonly stdout: ParsedTaskLog;
@@ -1168,6 +1169,7 @@ const readJob = async (
     pathRootHint(asString(payload.manifestPath)),
     pathRootHint(asString(payload.contextPackPath)),
     pathRootHint(asString(payload.memoryScriptPath)),
+    pathRootHint(asString(payload.receiptCliPath)),
     asString(asRecord(asRecord(payload.profile)?.objectivePolicy)?.repoRoot),
     `/workspace/${path.basename(repoRoot)}`,
   ]);
@@ -1190,6 +1192,7 @@ const readJob = async (
     promptPath,
     memoryConfigPath,
     memoryScriptPath,
+    receiptCliPath,
     resultPath,
     lastMessagePath,
     stdoutPath,
@@ -1201,6 +1204,7 @@ const readJob = async (
     resolvePath(asString(payload.promptPath)),
     resolvePath(asString(payload.memoryConfigPath)),
     resolvePath(asString(payload.memoryScriptPath)),
+    resolvePath(asString(payload.receiptCliPath)),
     resolvePath(asString(payload.resultPath)),
     resolvePath(asString(payload.lastMessagePath)),
     resolvePath(asString(payload.stdoutPath)),
@@ -1216,6 +1220,7 @@ const readJob = async (
     effectivePromptPath,
     effectiveMemoryConfigPath,
     effectiveMemoryScriptPath,
+    effectiveReceiptCliPath,
   ] = await Promise.all([
     preferExistingPath(manifestPath, taskArchive?.manifestPath),
     preferExistingPath(contextPackPath, taskArchive?.contextPackPath),
@@ -1223,6 +1228,7 @@ const readJob = async (
     preferExistingPath(promptPath, taskArchive?.promptPath),
     preferExistingPath(memoryConfigPath, taskArchive?.memoryConfigPath),
     preferExistingPath(memoryScriptPath, taskArchive?.memoryScriptPath),
+    preferExistingPath(receiptCliPath, taskArchive?.receiptCliPath),
   ]);
 
   const effectiveStatus = projectionOverride?.status ?? job.status;
@@ -1254,6 +1260,7 @@ const readJob = async (
         prompt: await readFileArtifact(effectivePromptPath.originalPath, effectivePromptPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
         memoryConfig: await readFileArtifact(effectiveMemoryConfigPath.originalPath, effectiveMemoryConfigPath.resolvedPath, { parseJson: true, previewChars: 2_400 }),
         memoryScript: await readFileArtifact(effectiveMemoryScriptPath.originalPath, effectiveMemoryScriptPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
+        receiptCli: await readFileArtifact(effectiveReceiptCliPath.originalPath, effectiveReceiptCliPath.resolvedPath, { parseJson: false, previewChars: 2_400 }),
         resultFile: await readFileArtifact(resultPath.originalPath, resultPath.resolvedPath, { parseJson: true }),
         lastMessage: await readFileArtifact(lastMessagePath.originalPath, lastMessagePath.resolvedPath, { parseJson: false }),
         stdout: await parseStructuredLog(stdoutPath.originalPath, stdoutPath.resolvedPath),
