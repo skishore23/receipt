@@ -19,7 +19,6 @@ import {
 } from "../../ui";
 import {
   describeTranscriptState,
-  renderFactoryStreamingShell,
   renderFactoryTranscriptSection,
 } from "../transcript";
 import { renderFactoryRunSteps } from "../../factory-live-steps";
@@ -1605,10 +1604,7 @@ export const factoryWorkbenchChatBody = (
       <div id="factory-workbench-chat" ${passiveRefreshAttrs(chatIslandPath(routeContext))}>
         ${factoryWorkbenchChatIsland(chat, routeContext)}
       </div>
-      <div id="factory-chat-live" class="mt-4 space-y-3">
-        ${renderFactoryStreamingShell(chat.activeProfileLabel, { liveMode: "js" })}
-        <div id="factory-chat-optimistic" class="space-y-2" aria-live="polite"></div>
-      </div>
+      <div id="factory-chat-ephemeral" class="mt-4 space-y-3" aria-live="polite"></div>
     </section>
   </div>
 </div>`;

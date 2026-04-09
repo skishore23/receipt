@@ -62,7 +62,7 @@ test("factory workbench state: reducer applies inspector, focus, and scope chang
   expect(applied.desiredRoute.objectiveId).toBe("objective_next");
 });
 
-test("factory workbench state: replay merges only missing view state and preserves live overlay ttl", () => {
+test("factory workbench state: replay merges only missing view state and preserves ephemeral turn ttl", () => {
   const route = createWorkbenchRouteState({
     profileId: "generalist",
     chatId: "chat_demo",
@@ -81,7 +81,8 @@ test("factory workbench state: replay merges only missing view state and preserv
       focusKind: "job",
       focusId: "job_42",
     },
-    liveOverlay: {
+    ephemeralTurn: {
+      phase: "pending",
       statusLabel: "Queued",
       summary: "Queued for replay",
       runId: "run_1",
@@ -99,7 +100,8 @@ test("factory workbench state: replay merges only missing view state and preserv
 
   const serialized = serializeWorkbenchReplay({
     ...createWorkbenchUiState(replayed),
-    liveOverlay: {
+    ephemeralTurn: {
+      phase: "pending",
       statusLabel: "Queued",
       summary: "Queued for replay",
       runId: "run_1",
@@ -111,7 +113,7 @@ test("factory workbench state: replay merges only missing view state and preserv
   expect(parsed?.route.detailTab).toBe("queue");
   expect(parsed?.route.filter).toBe("objective.completed");
   expect(parsed?.route.page).toBe(3);
-  expect(parsed?.liveOverlay?.runId).toBe("run_1");
+  expect(parsed?.ephemeralTurn?.runId).toBe("run_1");
 });
 
 test("factory workbench state: explicit page selection wins over replayed page", () => {

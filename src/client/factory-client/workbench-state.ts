@@ -24,19 +24,23 @@ export type FactoryWorkbenchRouteState = {
   readonly routeKey: string;
 };
 
-export type FactoryWorkbenchLiveOverlay = {
+export type FactoryWorkbenchEphemeralTurn = {
   readonly surface?: "chat" | "handoff";
+  readonly phase: "pending" | "streaming";
   readonly statusLabel: "Sending" | "Queued" | "Starting";
   readonly summary: string;
+  readonly userText?: string;
+  readonly assistantText?: string;
   readonly runId?: string;
   readonly jobId?: string;
+  readonly transcriptSignature?: string;
   readonly savedAt: number;
 };
 
 export type FactoryWorkbenchUiState = {
   readonly desiredRoute: FactoryWorkbenchRouteState;
   readonly appliedRoute: FactoryWorkbenchRouteState;
-  readonly liveOverlay?: FactoryWorkbenchLiveOverlay;
+  readonly ephemeralTurn?: FactoryWorkbenchEphemeralTurn;
 };
 
 export type FactoryWorkbenchAction =
@@ -44,14 +48,14 @@ export type FactoryWorkbenchAction =
   | {
       readonly type: "session.replayed";
       readonly route: FactoryWorkbenchRouteState;
-      readonly liveOverlay?: FactoryWorkbenchLiveOverlay;
+      readonly ephemeralTurn?: FactoryWorkbenchEphemeralTurn;
     }
   | { readonly type: "route.requested"; readonly route: FactoryWorkbenchRouteState }
   | { readonly type: "route.applied"; readonly route: FactoryWorkbenchRouteState }
   | { readonly type: "inspector.changed"; readonly route: FactoryWorkbenchRouteState }
   | { readonly type: "filter.changed"; readonly route: FactoryWorkbenchRouteState }
   | { readonly type: "focus.changed"; readonly route: FactoryWorkbenchRouteState }
-  | { readonly type: "composer.queued"; readonly liveOverlay: FactoryWorkbenchLiveOverlay }
+  | { readonly type: "composer.queued"; readonly ephemeralTurn: FactoryWorkbenchEphemeralTurn }
   | {
       readonly type: "composer.acknowledged";
       readonly runId?: string;
@@ -72,7 +76,7 @@ export type FactoryWorkbenchReplaySnapshot = {
     readonly focusKind?: FactoryWorkbenchFocusKind;
     readonly focusId?: string;
   };
-  readonly liveOverlay?: FactoryWorkbenchLiveOverlay;
+  readonly ephemeralTurn?: FactoryWorkbenchEphemeralTurn;
 };
 
 const DEFAULT_PROFILE = "generalist";
@@ -208,7 +212,7 @@ export const workbenchReducer = (
         ...state,
         desiredRoute: action.route,
         appliedRoute: action.route,
-        liveOverlay: action.liveOverlay,
+        ephemeralTurn: action.ephemeralTurn,
       };
     case "route.requested":
       return {
@@ -232,23 +236,23 @@ export const workbenchReducer = (
     case "composer.queued":
       return {
         ...state,
-        liveOverlay: action.liveOverlay,
+        ephemeralTurn: action.ephemeralTurn,
       };
     case "composer.acknowledged": {
-      if (!state.liveOverlay) return state;
+      if (!state.ephemeralTurn) return state;
       if (action.terminal) {
         return {
           ...state,
-          liveOverlay: undefined,
+          ephemeralTurn: undefined,
         };
       }
-      const runMatches = state.liveOverlay.runId && action.runId && state.liveOverlay.runId === action.runId;
-      const jobMatches = state.liveOverlay.jobId && action.jobId && state.liveOverlay.jobId === action.jobId;
-      const unlabeledAck = !state.liveOverlay.runId && !state.liveOverlay.jobId && (action.runId || action.jobId);
+      const runMatches = state.ephemeralTurn.runId && action.runId && state.ephemeralTurn.runId === action.runId;
+      const jobMatches = state.ephemeralTurn.jobId && action.jobId && state.ephemeralTurn.jobId === action.jobId;
+      const unlabeledAck = !state.ephemeralTurn.runId && !state.ephemeralTurn.jobId && (action.runId || action.jobId);
       if (!runMatches && !jobMatches && !unlabeledAck) return state;
       return {
         ...state,
-        liveOverlay: undefined,
+        ephemeralTurn: undefined,
       };
     }
     default:
@@ -275,10 +279,10 @@ export const serializeWorkbenchReplay = (
     focusKind: state.appliedRoute.focusKind,
     focusId: state.appliedRoute.focusId,
   },
-  liveOverlay: state.liveOverlay
+  ephemeralTurn: state.ephemeralTurn
     ? {
-        ...state.liveOverlay,
-        savedAt: state.liveOverlay.savedAt || now,
+        ...state.ephemeralTurn,
+        savedAt: state.ephemeralTurn.savedAt || now,
       }
     : undefined,
 });
@@ -293,18 +297,22 @@ export const parseWorkbenchReplay = (
     if (!parsed || typeof parsed !== "object") return undefined;
     if (typeof parsed.savedAt !== "number" || now - parsed.savedAt > REPLAY_TTL_MS) return undefined;
     const route = createWorkbenchRouteState(parsed.route ?? {});
-    const liveOverlay = parsed.liveOverlay && typeof parsed.liveOverlay.savedAt === "number"
-      && now - parsed.liveOverlay.savedAt <= LIVE_OVERLAY_TTL_MS
+    const ephemeralTurn = parsed.ephemeralTurn && typeof parsed.ephemeralTurn.savedAt === "number"
+      && now - parsed.ephemeralTurn.savedAt <= LIVE_OVERLAY_TTL_MS
       ? {
-          surface: parsed.liveOverlay.surface === "chat" || parsed.liveOverlay.surface === "handoff"
-            ? parsed.liveOverlay.surface
+          surface: parsed.ephemeralTurn.surface === "chat" || parsed.ephemeralTurn.surface === "handoff"
+            ? parsed.ephemeralTurn.surface
             : undefined,
-          statusLabel: parsed.liveOverlay.statusLabel,
-          summary: parsed.liveOverlay.summary,
-          runId: asString(parsed.liveOverlay.runId),
-          jobId: asString(parsed.liveOverlay.jobId),
-          savedAt: parsed.liveOverlay.savedAt,
-        } satisfies FactoryWorkbenchLiveOverlay
+          phase: parsed.ephemeralTurn.phase === "streaming" ? "streaming" : "pending",
+          statusLabel: parsed.ephemeralTurn.statusLabel,
+          summary: parsed.ephemeralTurn.summary,
+          userText: asString(parsed.ephemeralTurn.userText),
+          assistantText: asString(parsed.ephemeralTurn.assistantText),
+          runId: asString(parsed.ephemeralTurn.runId),
+          jobId: asString(parsed.ephemeralTurn.jobId),
+          transcriptSignature: asString(parsed.ephemeralTurn.transcriptSignature),
+          savedAt: parsed.ephemeralTurn.savedAt,
+        } satisfies FactoryWorkbenchEphemeralTurn
       : undefined;
     return {
       savedAt: parsed.savedAt,
@@ -319,7 +327,7 @@ export const parseWorkbenchReplay = (
         focusKind: route.focusKind,
         focusId: route.focusId,
       },
-      liveOverlay,
+      ephemeralTurn,
     };
   } catch {
     return undefined;

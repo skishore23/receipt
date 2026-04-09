@@ -299,18 +299,7 @@ const workbenchShellMarkup = (input: {
         <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
           <div id="factory-workbench-chat-scroll">
             <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${search}">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
-            <div id="factory-chat-live">
-              <div id="factory-chat-streaming">
-                <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
-                  <span id="factory-chat-streaming-label-text">${profileLabel}</span>
-                  <span id="factory-chat-streaming-status">Streaming</span>
-                  <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
-                  <div id="factory-chat-streaming-content"></div>
-                </section>
-              </div>
-              <div id="factory-chat-stream-reset-listener"></div>
-              <div id="factory-chat-optimistic"></div>
-            </div>
+            <div id="factory-chat-ephemeral"></div>
           </div>
         </div>
       </div>
@@ -404,10 +393,6 @@ const buildParsedDocument = (markup: string) => {
     "factory-composer",
     "factory-composer-current-job",
     "factory-chat",
-    "factory-chat-streaming",
-    "factory-chat-streaming-label-text",
-    "factory-chat-streaming-content",
-    "factory-chat-stream-reset-listener",
     "factory-workbench-background-root",
     "factory-workbench-header",
     "factory-workbench-panel",
@@ -421,7 +406,7 @@ const buildParsedDocument = (markup: string) => {
     "factory-workbench-chat-root",
     "factory-workbench-chat-scroll",
     "factory-workbench-chat",
-    "factory-chat-live",
+    "factory-chat-ephemeral",
   ];
   for (const id of ids) {
     const extracted = extractElementMarkup(markup, id);
@@ -562,45 +547,8 @@ const createWorkbenchHarness = async (options: {
   chat.id = "factory-workbench-chat";
   chat.innerHTML = chatMarkup({ chatId: "chat_demo" });
 
-  const chatLive = new MockElement("DIV");
-  chatLive.id = "factory-chat-live";
-
-  const streamingShell = new MockElement("DIV");
-  streamingShell.id = "factory-chat-streaming";
-
-  const streamingCard = new MockElement("SECTION");
-  streamingCard.id = "factory-chat-stream-shell";
-  streamingCard.setAttribute("data-factory-stream-shell", "true");
-  streamingCard.setAttribute("data-stream-state", "idle");
-
-  const streamingLabel = new MockElement("SPAN");
-  streamingLabel.id = "factory-chat-streaming-label-text";
-  streamingLabel.textContent = "Generalist";
-
-  const streamingStatus = new MockElement("SPAN");
-  streamingStatus.id = "factory-chat-streaming-status";
-  streamingStatus.textContent = "Streaming";
-
-  const streamingLoader = new MockElement("DIV");
-  streamingLoader.id = "factory-chat-streaming-loader";
-  streamingLoader.classList.add("hidden");
-
-  const streamingLoaderLabel = new MockElement("SPAN");
-  streamingLoaderLabel.id = "factory-chat-streaming-loader-label";
-  streamingLoaderLabel.textContent = "Sending";
-
-  const streaming = new MockElement("DIV");
-  streaming.id = "factory-chat-streaming-content";
-  streaming.setAttribute("sse-swap", "factory-stream-token");
-  streaming.setAttribute("hx-swap", "beforeend");
-
-  const streamingReset = new MockElement("DIV");
-  streamingReset.id = "factory-chat-stream-reset-listener";
-  streamingReset.setAttribute("sse-swap", "factory-stream-reset");
-  streamingReset.setAttribute("hx-swap", "none");
-
-  const optimistic = new MockElement("DIV");
-  optimistic.id = "factory-chat-optimistic";
+  const ephemeral = new MockElement("DIV");
+  ephemeral.id = "factory-chat-ephemeral";
 
   const popup = new MockElement("DIV");
   popup.id = "factory-composer-completions";
@@ -640,16 +588,7 @@ const createWorkbenchHarness = async (options: {
     [chatRoot.id, chatRoot],
     [scroll.id, scroll],
     [chat.id, chat],
-    [chatLive.id, chatLive],
-    [streamingShell.id, streamingShell],
-    [streamingCard.id, streamingCard],
-    [streamingLabel.id, streamingLabel],
-    [streamingStatus.id, streamingStatus],
-    [streamingLoader.id, streamingLoader],
-    [streamingLoaderLabel.id, streamingLoaderLabel],
-    [streaming.id, streaming],
-    [streamingReset.id, streamingReset],
-    [optimistic.id, optimistic],
+    [ephemeral.id, ephemeral],
     [textarea.id, textarea],
     [popup.id, popup],
     [status.id, status],
@@ -955,18 +894,7 @@ const createWorkbenchHarness = async (options: {
               <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
-                  <div id="factory-chat-live">
-                    <div id="factory-chat-streaming">
-                      <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
-                        <span id="factory-chat-streaming-label-text">${profileLabel}</span>
-                        <span id="factory-chat-streaming-status">Streaming</span>
-                        <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
-                        <div id="factory-chat-streaming-content"></div>
-                      </section>
-                    </div>
-                    <div id="factory-chat-stream-reset-listener"></div>
-                    <div id="factory-chat-optimistic"></div>
-                  </div>
+                  <div id="factory-chat-ephemeral"></div>
                 </div>
               </div>
             </div>
@@ -990,18 +918,7 @@ const createWorkbenchHarness = async (options: {
             <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
-                <div id="factory-chat-live">
-                  <div id="factory-chat-streaming">
-                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
-                      <span id="factory-chat-streaming-label-text">${profileLabel}</span>
-                      <span id="factory-chat-streaming-status">Streaming</span>
-                      <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
-                      <div id="factory-chat-streaming-content"></div>
-                    </section>
-                  </div>
-                  <div id="factory-chat-stream-reset-listener"></div>
-                  <div id="factory-chat-optimistic"></div>
-                </div>
+                <div id="factory-chat-ephemeral"></div>
               </div>
             </div>
           </div>`,
@@ -1071,7 +988,7 @@ const createWorkbenchHarness = async (options: {
   return {
     document,
     textarea,
-    optimistic,
+    ephemeral,
     status,
     submit,
     form,
@@ -1080,10 +997,6 @@ const createWorkbenchHarness = async (options: {
     workbenchRailScroll,
     workbenchFocusScroll,
     chat,
-    streaming,
-    streamingShell: streamingCard,
-    streamingLoader,
-    streamingStatus,
     fetchCalls,
     locationState,
     historyState,
@@ -1218,7 +1131,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
 
 test("factory workbench client: chat events stream tokens and refresh the transcript", async () => {
   let chatRefreshes = 0;
-  const { chatSource, streaming, fetchCalls } = await createWorkbenchHarness({
+  const { chatSource, ephemeral, fetchCalls } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
     fetchImpl: async (url) => {
       const parsed = new URL(url, "http://receipt.test");
@@ -1238,18 +1151,7 @@ test("factory workbench client: chat events stream tokens and refresh the transc
                   knownRunIds: chatRefreshes === 1 ? ["run_demo"] : [],
                   terminalRunIds: chatRefreshes > 1 ? ["run_demo"] : [],
                 })}</div>
-                <div id="factory-chat-live">
-                  <div id="factory-chat-streaming">
-                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
-                      <span id="factory-chat-streaming-label-text">Generalist</span>
-                      <span id="factory-chat-streaming-status">Streaming</span>
-                      <div id="factory-chat-streaming-loader" class="hidden"><span id="factory-chat-streaming-loader-label">Sending</span></div>
-                      <div id="factory-chat-streaming-content"></div>
-                    </section>
-                  </div>
-                  <div id="factory-chat-stream-reset-listener"></div>
-                  <div id="factory-chat-optimistic"></div>
-                </div>
+              <div id="factory-chat-ephemeral"></div>
               </div>
             </div>
           </div>`,
@@ -1276,7 +1178,8 @@ test("factory workbench client: chat events stream tokens and refresh the transc
 
   chatSource()?.emit("agent-token", JSON.stringify({ runId: "run_demo", delta: "Hello from Factory." }));
   await flushAsync();
-  expect(stripHtml(streaming.innerHTML)).toContain("Hello from Factory.");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Hello from Factory.");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Streaming");
 
   chatSource()?.emit("job-refresh", "job_demo");
   await flushAsync(260);
@@ -1318,7 +1221,7 @@ test("factory workbench client: pressing Enter submits while Shift+Enter does no
 });
 
 test("factory workbench client: selected objectives ignore token streams from unrelated runs", async () => {
-  const { chatSource, streaming } = await createWorkbenchHarness({
+  const { chatSource, ephemeral } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat",
     beforeBoot: ({ chat }) => {
       chat.innerHTML = chatMarkup({
@@ -1333,11 +1236,11 @@ test("factory workbench client: selected objectives ignore token streams from un
 
   chatSource()?.emit("agent-token", JSON.stringify({ runId: "run_other_objective", delta: "Wrong objective token" }));
   await flushAsync();
-  expect(stripHtml(streaming.innerHTML)).not.toContain("Wrong objective token");
+  expect(stripHtml(ephemeral.innerHTML)).not.toContain("Wrong objective token");
 
   chatSource()?.emit("agent-token", JSON.stringify({ runId: "run_demo", delta: "Current objective token" }));
   await flushAsync();
-  expect(stripHtml(streaming.innerHTML)).toContain("Current objective token");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Current objective token");
 });
 
 test("factory workbench client: plain prompts stay chat-first and /obj selects the created objective", async () => {
@@ -1347,17 +1250,13 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
     document,
     textarea,
     form,
-    optimistic,
+    ephemeral,
     status,
     historyState,
     locationState,
     backgroundSource,
     chatSource,
     fetchCalls,
-    streaming,
-    streamingShell,
-    streamingLoader,
-    streamingStatus,
   } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
     fetchImpl: async (url) => {
@@ -1410,18 +1309,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
                   transcriptSignature: chatBodyRefreshes >= 2 ? "2:assistant_1" : "1:user_1",
                   lastItemKind: chatBodyRefreshes >= 2 ? "assistant" : "user",
                 })}</div>
-                <div id="factory-chat-live">
-                  <div id="factory-chat-streaming">
-                    <section id="factory-chat-stream-shell" data-factory-stream-shell data-stream-state="idle">
-                      <span id="factory-chat-streaming-label-text">Generalist</span>
-                      <span id="factory-chat-streaming-status">Streaming</span>
-                      <div id="factory-chat-streaming-loader"><span id="factory-chat-streaming-loader-label">Sending</span><span id="factory-chat-streaming-loader-meta"></span></div>
-                      <div id="factory-chat-streaming-content"></div>
-                    </section>
-                  </div>
-                  <div id="factory-chat-stream-reset-listener"></div>
-                  <div id="factory-chat-optimistic"></div>
-                </div>
+                <div id="factory-chat-ephemeral"></div>
               </div>
             </div>
           </div>`,
@@ -1469,30 +1357,24 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   form.dispatchEvent(new MockEvent({ type: "submit", target: form }));
 
   expect(status.textContent).toBe("");
-  expect(optimistic.innerHTML).not.toContain("Sending in chat");
-  expect(optimistic.innerHTML).toContain("Just now");
-  expect(streamingShell.getAttribute("data-stream-state")).toBe("pending");
-  expect(streamingShell.classList.contains("hidden")).toBe(false);
-  expect(streamingLoader.classList.contains("hidden")).toBe(false);
-  expect(streamingStatus.textContent).toBe("Sending");
-  expect(streaming.innerHTML).toBe("");
+  expect(ephemeral.innerHTML).toContain("Just now");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Keep the operator chat separate from objective tracking.");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Sending");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Sending your message.");
   await flushAsync(140);
 
   expect(historyState.pushed).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&inspectorTab=chat");
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo");
-  expect(optimistic.innerHTML).not.toContain("Queued. Waiting for the reply to start.");
   expect(fetchCalls.some((call) => call.url === "/factory/island/chat?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
-  expect(streamingStatus.textContent).toBe("Thinking");
+  expect(stripHtml(ephemeral.innerHTML)).toContain("Thinking");
 
   chatSource()?.emit("agent-refresh", "run_demo");
   await flushAsync(220);
   expect(chatBodyRefreshes).toBeGreaterThan(0);
-  expect(streamingShell.getAttribute("data-stream-state")).toBe("pending");
-  expect(streamingLoader.classList.contains("hidden")).toBe(false);
-  expect(streamingStatus.textContent).toBe("Starting");
+  expect(ephemeral.innerHTML).toBe("");
 
   textarea.value = "/obj Build the new deployment review objective.";
   textarea.selectionStart = textarea.value.length;
@@ -1643,7 +1525,7 @@ test("factory workbench client: full shell refresh preserves pane and document s
 test("factory workbench client: session replay restores local view state and pending live overlay", async () => {
   const replayKey = "receipt.factory.workbench.v1:generalist:chat_demo";
   const now = Date.now();
-  const { document, optimistic, historyState, locationState } = await createWorkbenchHarness({
+  const { document, ephemeral, historyState, locationState } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
     sessionStorageState: {
       [replayKey]: JSON.stringify({
@@ -1657,7 +1539,8 @@ test("factory workbench client: session replay restores local view state and pen
           focusKind: "job",
           focusId: "job_42",
         },
-        liveOverlay: {
+        ephemeralTurn: {
+          phase: "pending",
           statusLabel: "Queued",
           summary: "Queued for replay",
           runId: "run_1",
@@ -1672,7 +1555,7 @@ test("factory workbench client: session replay restores local view state and pen
   expect(document.body.getAttribute("data-inspector-tab")).toBe("overview");
   expect(document.body.getAttribute("data-focus-kind")).toBe("job");
   expect(document.body.getAttribute("data-focus-id")).toBe("job_42");
-  expect(optimistic.innerHTML).toContain("Queued for replay");
+  expect(ephemeral.innerHTML).toContain("Queued for replay");
 });
 
 test("factory workbench client: superseded scope refreshes abort stale scope fetches", async () => {

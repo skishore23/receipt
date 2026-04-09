@@ -6,7 +6,7 @@ import {
 } from "./compose-navigation";
 import {
   parseTokenEventPayload,
-  renderStreamingReply,
+  renderEphemeralTurn,
 } from "./live-updates";
 import {
   readReactiveRefreshPath,
@@ -30,17 +30,10 @@ import {
   serializeWorkbenchReplay,
   workbenchReducer,
   type FactoryWorkbenchAction,
+  type FactoryWorkbenchEphemeralTurn,
   type FactoryWorkbenchRouteState,
   type FactoryWorkbenchUiState,
 } from "./workbench-state";
-
-type PendingLiveStatus = {
-  readonly surface?: "chat" | "handoff";
-  readonly statusLabel: "Sending" | "Queued" | "Starting";
-  readonly summary: string;
-  readonly runId?: string;
-  readonly jobId?: string;
-};
 
 type WorkbenchFragmentKind =
   | "header"
@@ -60,10 +53,7 @@ export const initFactoryWorkbenchBrowser = () => {
   let isComposing = false;
   let activeCommandIndex = 0;
   let defaultSubmitLabel = "Send";
-  let streamingReply: { readonly runId?: string; readonly profileLabel?: string; readonly text: string } | null = null;
-  let pendingOverlayHtml = "";
-  let pendingLiveStatus: PendingLiveStatus | null = null;
-  let pendingTranscriptSignature: string | null = null;
+  let ephemeralTurn: FactoryWorkbenchEphemeralTurn | null = null;
   let overlayRenderQueued = false;
   let backgroundEvents: EventSource | null = null;
   let backgroundEventsUrl: string | null = null;
@@ -107,8 +97,8 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
-  const optimisticTranscript = () => {
-    const node = document.getElementById("factory-chat-optimistic");
+  const ephemeralTranscript = () => {
+    const node = document.getElementById("factory-chat-ephemeral");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -190,11 +180,6 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const chatBody = () => {
     const node = document.getElementById("factory-workbench-chat-body");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingLabel = () => {
-    const node = document.getElementById("factory-chat-streaming-label-text");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -288,41 +273,6 @@ export const initFactoryWorkbenchBrowser = () => {
     if (scope && process) process(scope);
   };
 
-  const liveShell = () => {
-    const node = document.getElementById("factory-chat-live");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingShell = () => {
-    const node = document.getElementById("factory-chat-stream-shell");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingContent = () => {
-    const node = document.getElementById("factory-chat-streaming-content");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingLoader = () => {
-    const node = document.getElementById("factory-chat-streaming-loader");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingStatus = () => {
-    const node = document.getElementById("factory-chat-streaming-status");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingLoaderLabel = () => {
-    const node = document.getElementById("factory-chat-streaming-loader-label");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const streamingLoaderMeta = () => {
-    const node = document.getElementById("factory-chat-streaming-loader-meta");
-    return node instanceof HTMLElement ? node : null;
-  };
-
   const isInlineWorkbenchLocation = (location: string): boolean => {
     const url = resolveFactoryUrl(location);
     if (!url) return false;
@@ -372,55 +322,9 @@ export const initFactoryWorkbenchBrowser = () => {
     return parseCommands(form) || DEFAULT_COMMANDS;
   };
 
-  const visiblePendingStatusLabel = (status: PendingLiveStatus): string => {
-    if (status.surface === "chat" && status.statusLabel === "Queued") return "Thinking";
-    return status.statusLabel;
-  };
-
-  const renderPendingLiveStatus = (status: PendingLiveStatus): string => '<section class=" border border-primary/20 bg-primary/5 px-3 py-2">' +
-    '<div class="flex min-w-0 items-start justify-between gap-2">' +
-      '<div class="min-w-0 flex-1">' +
-        '<div class="flex flex-wrap items-center gap-2">' +
-          '<span class="text-xs font-semibold text-foreground">' + escapeHtml(status.surface === "chat" ? "Reply in progress" : "Background handoff") + "</span>" +
-          '<span class="inline-flex shrink-0 items-center  border border-primary/20 bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">' + escapeHtml(visiblePendingStatusLabel(status)) + "</span>" +
-        "</div>" +
-        '<div class="mt-1 text-xs leading-5 text-muted-foreground">' + escapeHtml(status.summary) + "</div>" +
-        ((status.jobId || status.runId)
-          ? '<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">' +
-              (status.jobId ? '<span>Job ' + escapeHtml(status.jobId) + "</span>" : "") +
-              (status.runId ? '<span>Run ' + escapeHtml(status.runId) + "</span>" : "") +
-            "</div>"
-          : "") +
-      "</div>" +
-    "</div>" +
-  "</section>";
-
-  const updatePendingLiveStatus = (
-    status: PendingLiveStatus | null,
-    acknowledged?: {
-      readonly runId?: string;
-      readonly jobId?: string;
-      readonly terminal?: boolean;
-    },
-  ) => {
-    pendingLiveStatus = status;
-    if (status) {
-      dispatchWorkbenchAction({
-        type: "composer.queued",
-        liveOverlay: {
-          ...status,
-          savedAt: Date.now(),
-        },
-      });
-      return;
-    }
-    pendingTranscriptSignature = null;
-    dispatchWorkbenchAction({
-      type: "composer.acknowledged",
-      runId: acknowledged?.runId,
-      jobId: acknowledged?.jobId,
-      terminal: acknowledged?.terminal ?? true,
-    });
+  const visiblePendingStatusLabel = (turn: FactoryWorkbenchEphemeralTurn): string => {
+    if (turn.surface === "chat" && turn.statusLabel === "Queued") return "Thinking";
+    return turn.phase === "streaming" ? "Streaming" : turn.statusLabel;
   };
 
   const scheduleOverlayRender = () => {
@@ -428,50 +332,22 @@ export const initFactoryWorkbenchBrowser = () => {
     overlayRenderQueued = true;
     window.requestAnimationFrame(() => {
       overlayRenderQueued = false;
-      const optimistic = optimisticTranscript();
-      if (!optimistic) return;
-      optimistic.innerHTML = pendingOverlayHtml + (pendingLiveStatus && pendingLiveStatus.surface !== "chat" ? renderPendingLiveStatus(pendingLiveStatus) : "");
-      const streamShell = streamingShell();
-      const streamContent = streamingContent();
-      const streamLoader = streamingLoader();
-      const streamStatus = streamingStatus();
-      const streamLoaderText = streamingLoaderLabel();
-      const streamLoaderSubtext = streamingLoaderMeta();
-      const hasStreamingText = Boolean(streamingReply?.text);
-      const hasPendingStream = Boolean(
-        !hasStreamingText
-        && pendingLiveStatus
-        && ["Sending", "Queued", "Starting"].includes(pendingLiveStatus.statusLabel),
-      );
-      const pendingStatusLabel = hasPendingStream && pendingLiveStatus
-        ? visiblePendingStatusLabel(pendingLiveStatus)
-        : "Streaming";
-      const pendingSummary = hasPendingStream && pendingLiveStatus
-        ? pendingLiveStatus.summary
-        : hasStreamingText
-          ? "Reply streaming live."
-          : "";
-      if (streamShell) {
-        const streamState = hasStreamingText ? "active" : hasPendingStream ? "pending" : "idle";
-        streamShell.setAttribute("data-stream-state", streamState);
-      }
-      if (streamLoader) {
-        streamLoader.classList.toggle("hidden", !hasPendingStream);
-        streamLoader.setAttribute("aria-hidden", hasPendingStream ? "false" : "true");
-      }
-      if (streamLoaderText) {
-        streamLoaderText.textContent = pendingStatusLabel;
-      }
-      if (streamLoaderSubtext) {
-        streamLoaderSubtext.textContent = pendingSummary;
-      }
-      if (streamStatus) {
-        streamStatus.textContent = hasStreamingText ? "Streaming" : pendingStatusLabel;
-      }
-      if (streamContent) {
-        streamContent.innerHTML = hasStreamingText && streamingReply ? renderStreamingReply(streamingReply) : "";
-      }
-      if ((pendingOverlayHtml || pendingLiveStatus || streamingReply) && shouldStickToBottom) {
+      const tail = ephemeralTranscript();
+      if (!tail) return;
+      tail.innerHTML = ephemeralTurn
+        ? renderEphemeralTurn({
+            profileLabel: currentChatState().activeProfileLabel || "Assistant",
+            surface: ephemeralTurn.surface,
+            phase: ephemeralTurn.phase,
+            statusLabel: visiblePendingStatusLabel(ephemeralTurn),
+            summary: ephemeralTurn.summary,
+            userText: ephemeralTurn.userText,
+            assistantText: ephemeralTurn.assistantText,
+            runId: ephemeralTurn.runId,
+            jobId: ephemeralTurn.jobId,
+          })
+        : "";
+      if (ephemeralTurn && shouldStickToBottom) {
         window.requestAnimationFrame(() => {
           const scroll = chatScroll();
           if (!scroll) return;
@@ -485,9 +361,109 @@ export const initFactoryWorkbenchBrowser = () => {
     });
   };
 
-  const clearStreamingReply = () => {
-    streamingReply = null;
+  const updateEphemeralTurn = (
+    nextTurn: FactoryWorkbenchEphemeralTurn | null,
+    acknowledged?: {
+      readonly runId?: string;
+      readonly jobId?: string;
+      readonly terminal?: boolean;
+    },
+  ) => {
+    ephemeralTurn = nextTurn;
+    if (nextTurn) {
+      dispatchWorkbenchAction({
+        type: "composer.queued",
+        ephemeralTurn: {
+          ...nextTurn,
+          savedAt: Date.now(),
+        },
+      });
+      scheduleOverlayRender();
+      return;
+    }
+    dispatchWorkbenchAction({
+      type: "composer.acknowledged",
+      runId: acknowledged?.runId,
+      jobId: acknowledged?.jobId,
+      terminal: acknowledged?.terminal ?? true,
+    });
     scheduleOverlayRender();
+  };
+
+  const reduceEphemeralTurnOnSubmit = (
+    payload: string,
+    feedback: ReturnType<typeof composerFeedback>,
+  ): FactoryWorkbenchEphemeralTurn | null => {
+    if (!("showPendingStream" in feedback) || !feedback.showPendingStream) return null;
+    return {
+      surface: "chat",
+      phase: "pending",
+      statusLabel: "Sending",
+      summary: "Sending your message.",
+      userText: "optimisticText" in feedback ? feedback.optimisticText : payload,
+      transcriptSignature: currentChatState().transcriptSignature,
+      savedAt: Date.now(),
+    };
+  };
+
+  const reduceEphemeralTurnOnComposeResponse = (
+    turn: FactoryWorkbenchEphemeralTurn | null,
+    payload: string,
+    body: ReturnType<typeof parseComposeResponse>,
+  ): FactoryWorkbenchEphemeralTurn | null => {
+    if (!turn) return null;
+    if (body.selection?.objectiveId && /^\/(?:obj|new)\b/i.test(payload)) {
+      return {
+        ...turn,
+        surface: "handoff",
+        statusLabel: "Queued",
+        summary: `Objective ${body.selection.objectiveId} is now running. You can ask the next question while it updates on the left.`,
+        runId: body.live?.runId || turn.runId,
+        jobId: body.live?.jobId || turn.jobId,
+      };
+    }
+    return {
+      ...turn,
+      surface: "chat",
+      phase: "pending",
+      statusLabel: "Queued",
+      summary: "Thinking about the reply.",
+      runId: body.live?.runId || turn.runId,
+      jobId: body.live?.jobId || turn.jobId,
+    };
+  };
+
+  const reduceEphemeralTurnOnComposeRefresh = (
+    turn: FactoryWorkbenchEphemeralTurn | null,
+    eventName: string,
+  ): FactoryWorkbenchEphemeralTurn | null => {
+    if (!turn || turn.surface !== "chat" || turn.phase === "streaming") return turn;
+    if (eventName !== "agent-refresh" && eventName !== "job-refresh") return turn;
+    return {
+      ...turn,
+      statusLabel: "Starting",
+      summary: "Starting the reply.",
+    };
+  };
+
+  const reduceEphemeralTurnOnToken = (
+    turn: FactoryWorkbenchEphemeralTurn | null,
+    payload: { readonly runId?: string; readonly delta: string },
+  ): FactoryWorkbenchEphemeralTurn => {
+    const state = currentChatState();
+    const runId = payload.runId || state.activeRunId || turn?.runId;
+    return {
+      surface: "chat",
+      phase: "streaming",
+      statusLabel: turn?.statusLabel ?? "Starting",
+      summary: "Reply streaming live.",
+      userText: turn?.userText,
+      assistantText: `${turn?.runId === runId ? (turn.assistantText ?? "") : ""}${payload.delta}`,
+      runId,
+      jobId: turn?.jobId,
+      transcriptSignature: turn?.transcriptSignature ?? state.transcriptSignature,
+      savedAt: Date.now(),
+    };
   };
 
   const captureChatScrollState = () => {
@@ -571,59 +547,65 @@ export const initFactoryWorkbenchBrowser = () => {
     }
   };
 
-  const reconcileLiveTranscript = () => {
+  const reconcileEphemeralTurn = () => {
     const state = currentChatState();
-    const pendingRunId = pendingLiveStatus?.runId;
-    const transcriptAdvanced = Boolean(
-      pendingLiveStatus?.surface === "chat"
-      && pendingTranscriptSignature
-      && state.transcriptSignature !== pendingTranscriptSignature
-      && state.lastItemKind
-      && state.lastItemKind !== "user",
-    );
-    if (transcriptAdvanced) {
-      pendingOverlayHtml = "";
-      updatePendingLiveStatus(null, {
-        runId: pendingLiveStatus?.runId,
-        jobId: pendingLiveStatus?.jobId,
-      });
+    if (!ephemeralTurn) return;
+    let nextTurn = ephemeralTurn;
+    if (
+      nextTurn.userText
+      && nextTurn.transcriptSignature
+      && state.transcriptSignature !== nextTurn.transcriptSignature
+    ) {
+      nextTurn = {
+        ...nextTurn,
+        userText: undefined,
+        transcriptSignature: state.transcriptSignature,
+      };
     }
     if (
-      pendingLiveStatus
-      && pendingLiveStatus.surface !== "chat"
+      nextTurn.surface !== "chat"
       && (
-        (pendingRunId && (
-          state.activeRunId === pendingRunId
-          || state.knownRunIds.indexOf(pendingRunId) >= 0
-          || state.terminalRunIds.indexOf(pendingRunId) >= 0
+        (nextTurn.runId && (
+          state.activeRunId === nextTurn.runId
+          || state.knownRunIds.indexOf(nextTurn.runId) >= 0
+          || state.terminalRunIds.indexOf(nextTurn.runId) >= 0
         ))
-        || (!pendingRunId && Boolean(state.activeRunId))
+        || (!nextTurn.runId && Boolean(state.activeRunId))
       )
     ) {
-      updatePendingLiveStatus(null, {
-        runId: pendingLiveStatus.runId,
-        jobId: pendingLiveStatus.jobId,
+      updateEphemeralTurn(null, {
+        runId: nextTurn.runId,
+        jobId: nextTurn.jobId,
       });
+      return;
     }
-    const runId = streamingReply?.runId;
-    if (runId && state.terminalRunIds.indexOf(runId) >= 0) {
-      streamingReply = null;
-    } else if (
-      runId
-      && pendingRunId !== runId
-      && state.activeRunId !== runId
-      && state.knownRunIds.indexOf(runId) < 0
-      && state.terminalRunIds.indexOf(runId) < 0
+    if (nextTurn.runId && state.terminalRunIds.indexOf(nextTurn.runId) >= 0) {
+      updateEphemeralTurn(null, {
+        runId: nextTurn.runId,
+        jobId: nextTurn.jobId,
+      });
+      return;
+    }
+    if (
+      nextTurn.runId
+      && state.activeRunId !== nextTurn.runId
+      && state.knownRunIds.indexOf(nextTurn.runId) < 0
+      && state.terminalRunIds.indexOf(nextTurn.runId) < 0
     ) {
-      streamingReply = null;
+      updateEphemeralTurn(null, {
+        runId: nextTurn.runId,
+        jobId: nextTurn.jobId,
+      });
+      return;
     }
+    ephemeralTurn = nextTurn;
     scheduleOverlayRender();
   };
 
   const acceptsStreamingRun = (runId: string | undefined): boolean => {
     if (!workbenchState.appliedRoute.objectiveId) return true;
     if (!runId) return false;
-    if (pendingLiveStatus?.runId === runId) return true;
+    if (ephemeralTurn?.runId === runId) return true;
     const state = currentChatState();
     return state.activeRunId === runId
       || state.knownRunIds.indexOf(runId) >= 0
@@ -884,8 +866,8 @@ export const initFactoryWorkbenchBrowser = () => {
     const isChatTab = inspectorTab === "chat";
     const composer = composerShell();
     if (composer) composer.classList.toggle("hidden", !isChatTab);
-    const live = liveShell();
-    if (live) live.classList.toggle("hidden", !isChatTab);
+    const tail = ephemeralTranscript();
+    if (tail) tail.classList.toggle("hidden", !isChatTab);
   };
 
   const syncInspectorTabControls = (inspectorTab?: string) => {
@@ -968,11 +950,7 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const handleWorkbenchChatSwap = (_target: HTMLElement) => {
     const scrollState = captureChatScrollState();
-    if (pendingOverlayHtml) {
-      pendingOverlayHtml = "";
-      scheduleOverlayRender();
-    }
-    reconcileLiveTranscript();
+    reconcileEphemeralTurn();
     if (!scrollState) return;
     window.requestAnimationFrame(() => {
       restoreChatScrollState(scrollState);
@@ -1190,40 +1168,21 @@ export const initFactoryWorkbenchBrowser = () => {
     chatEventsUrl = nextUrl;
     for (const eventName of declaredBodyRefreshEvents([chatBody()])) {
       chatEvents.addEventListener(eventName, () => {
-        if (eventName === "agent-refresh" && pendingLiveStatus && !streamingReply) {
-          updatePendingLiveStatus({
-            ...pendingLiveStatus,
-            statusLabel: "Starting",
-            summary: "Starting the reply.",
-          });
-        }
-        if (eventName === "job-refresh" && pendingLiveStatus && !streamingReply) {
-          updatePendingLiveStatus({
-            ...pendingLiveStatus,
-            statusLabel: "Starting",
-            summary: "Starting the reply.",
-          });
-        }
+        const nextTurn = reduceEphemeralTurnOnComposeRefresh(ephemeralTurn, eventName);
+        if (nextTurn !== ephemeralTurn) updateEphemeralTurn(nextTurn);
         dispatchWorkbenchBodyEvent(eventName);
       });
     }
     chatEvents.addEventListener("agent-token", (event) => {
       const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
       if (!payload) return;
-      const state = currentChatState();
-      const runId = payload.runId || state.activeRunId || streamingReply?.runId;
+      const runId = payload.runId || currentChatState().activeRunId || ephemeralTurn?.runId;
       if (!acceptsStreamingRun(runId)) return;
-      updatePendingLiveStatus(null, { runId: payload.runId });
-      const previous = streamingReply && streamingReply.runId === runId ? streamingReply.text : "";
-      streamingReply = {
-        runId,
-        profileLabel: state.activeProfileLabel || streamingLabel()?.textContent || "Assistant",
-        text: previous + payload.delta,
-      };
+      ephemeralTurn = reduceEphemeralTurnOnToken(ephemeralTurn, payload);
       scheduleOverlayRender();
     });
     chatEvents.addEventListener("factory-stream-reset", () => {
-      clearStreamingReply();
+      reconcileEphemeralTurn();
     });
   };
 
@@ -1434,17 +1393,7 @@ export const initFactoryWorkbenchBrowser = () => {
       let keepBusyForNavigation = false;
       setComposerBusy(true, feedback.buttonLabel);
       setComposerStatus(feedback.status || "");
-      clearStreamingReply();
-      pendingOverlayHtml = "optimisticHtml" in feedback && feedback.optimisticHtml ? feedback.optimisticHtml : "";
-      pendingTranscriptSignature = currentChatState().transcriptSignature;
-      updatePendingLiveStatus("showPendingStream" in feedback && feedback.showPendingStream
-        ? {
-            surface: "chat",
-            statusLabel: "Sending",
-            summary: "Sending your message.",
-          }
-        : null);
-      scheduleOverlayRender();
+      updateEphemeralTurn(reduceEphemeralTurnOnSubmit(payload, feedback));
       window.fetch(activeForm.action, {
         method: activeForm.method || "POST",
         body: formData,
@@ -1458,31 +1407,11 @@ export const initFactoryWorkbenchBrowser = () => {
         return bodyPromise.then((payloadBody) => {
           const body = parseComposeResponse(payloadBody);
           if (!response.ok) {
-            pendingOverlayHtml = "";
-            updatePendingLiveStatus(null);
-            scheduleOverlayRender();
+            updateEphemeralTurn(null);
             setComposerStatus(body.error || "Request failed.");
             return;
           }
-          if (pendingLiveStatus) {
-            updatePendingLiveStatus({
-              ...pendingLiveStatus,
-              statusLabel: "Queued",
-              runId: body.live?.runId || pendingLiveStatus.runId,
-              jobId: body.live?.jobId || pendingLiveStatus.jobId,
-              summary: pendingLiveStatus.surface === "chat"
-                ? "Thinking about the reply."
-                : "Queued. Waiting for the reply to start.",
-            });
-            scheduleOverlayRender();
-          }
-          if (body.selection?.objectiveId && /^\/(?:obj|new)\b/i.test(payload)) {
-            pendingOverlayHtml = `<section class=" border border-primary/30 bg-primary/10 px-3 py-2">
-              <div class="text-xs font-semibold text-primary">Background handoff acknowledged</div>
-              <div class="mt-1 text-xs text-foreground">Objective ${escapeHtml(body.selection.objectiveId)} is now running. You can ask the next question while it updates on the left.</div>
-            </section>`;
-            scheduleOverlayRender();
-          }
+          updateEphemeralTurn(reduceEphemeralTurnOnComposeResponse(ephemeralTurn, payload, body));
           if (body.location) {
             keepBusyForNavigation = true;
             return applyInlineLocation(body.location, "push").then((handledInline) => {
@@ -1499,9 +1428,7 @@ export const initFactoryWorkbenchBrowser = () => {
           throw new Error("Request failed.");
         });
       }).catch((error: unknown) => {
-        pendingOverlayHtml = "";
-        updatePendingLiveStatus(null);
-        scheduleOverlayRender();
+        updateEphemeralTurn(null);
         setComposerStatus(error instanceof Error ? error.message : "Request failed.");
       }).finally(() => {
         if (!keepBusyForNavigation) setComposerBusy(false);
@@ -1600,14 +1527,14 @@ export const initFactoryWorkbenchBrowser = () => {
       pendingHtmxSwapStates.delete(target.id);
       processHtmx(target);
       syncWorkbenchStateFromLocation();
-      if (pendingOverlayHtml || pendingLiveStatus || streamingReply) scheduleOverlayRender();
+      if (ephemeralTurn) scheduleOverlayRender();
       if (target.id === "factory-workbench-chat-pane" || target.id === "factory-workbench-chat-region" || target.id === "factory-workbench-chat-shell" || target.id === "factory-workbench-chat-body") {
         if (swapState?.chat) {
           window.requestAnimationFrame(() => {
             restoreChatScrollState(swapState.chat!);
           });
         }
-        reconcileLiveTranscript();
+        reconcileEphemeralTurn();
       }
       if (target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell") {
         if (swapState?.workbenchPanes) {
@@ -1655,20 +1582,13 @@ export const initFactoryWorkbenchBrowser = () => {
       || bootUrl?.searchParams.has("focusId"),
     ),
   });
-  if (replay && (replayRoute.routeKey !== workbenchState.appliedRoute.routeKey || replay.liveOverlay)) {
+  if (replay && (replayRoute.routeKey !== workbenchState.appliedRoute.routeKey || replay.ephemeralTurn)) {
     dispatchWorkbenchAction({
       type: "session.replayed",
       route: replayRoute,
-      liveOverlay: replay.liveOverlay,
+      ephemeralTurn: replay.ephemeralTurn,
     });
-    pendingLiveStatus = replay.liveOverlay
-      ? {
-          statusLabel: replay.liveOverlay.statusLabel,
-          summary: replay.liveOverlay.summary,
-          runId: replay.liveOverlay.runId,
-          jobId: replay.liveOverlay.jobId,
-        }
-      : null;
+    ephemeralTurn = replay.ephemeralTurn ?? null;
     applyRouteState(replayRoute, replayRoute.routeKey === bootRoute.routeKey ? "none" : "replace");
   } else {
     applyRouteState(workbenchState.appliedRoute, "none");

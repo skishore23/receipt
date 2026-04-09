@@ -94,6 +94,8 @@ const renderOptimisticPrompt = (payload: string, mode: "thread" | "chat" | "work
   "</section>";
 };
 
+const workbenchOptimisticText = (payload: string) => payload;
+
 export const composerFeedback = (
   payload: string,
   formAction?: string,
@@ -119,7 +121,9 @@ export const composerFeedback = (
         return {
           buttonLabel: "Analyzing...",
           status: isWorkbenchSurface ? "Analyzing objective..." : "Analyzing thread...",
-          optimisticHtml: renderOptimisticPrompt(payload, isWorkbenchSurface ? "workbench-chat" : (hasThread ? "thread" : "chat")),
+          ...(isWorkbenchSurface
+            ? { optimisticText: workbenchOptimisticText(payload) }
+            : { optimisticHtml: renderOptimisticPrompt(payload, hasThread ? "thread" : "chat") }),
           showPendingStream: true,
         };
       case "help":
@@ -149,7 +153,7 @@ export const composerFeedback = (
   if (isWorkbenchSurface) {
     return {
       buttonLabel: "Sending...",
-      optimisticHtml: renderOptimisticPrompt(payload, "workbench-chat"),
+      optimisticText: workbenchOptimisticText(payload),
       status: "",
       showPendingStream: true,
     };
