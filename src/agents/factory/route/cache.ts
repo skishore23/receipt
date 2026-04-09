@@ -33,6 +33,14 @@ export const createFactoryRouteCache = (input: {
     readonly expiresAt: number;
     readonly value: Promise<ReadonlyArray<FactoryChatProfile>>;
   }>();
+  const objectiveProjectionVersionCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<number>;
+  }>();
+  const sessionVersionCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<string | undefined>;
+  }>();
 
   const withProjectionCache = async <T>(
     cache: Map<string, { readonly expiresAt: number; readonly value: Promise<T> }>,
@@ -107,10 +115,24 @@ export const createFactoryRouteCache = (input: {
   const resolveSessionStreamVersionCached = async (inputStream: {
     readonly profileId?: string;
     readonly chatId?: string;
-  }): Promise<string | undefined> => resolveSessionStreamVersion(inputStream);
+  }): Promise<string | undefined> => withProjectionCache(
+    sessionVersionCache,
+    JSON.stringify({
+      profileId: inputStream.profileId ?? "",
+      chatId: inputStream.chatId ?? "",
+      objectiveProjectionVersion: typeof input.service.projectionVersion === "function"
+        ? input.service.projectionVersion()
+        : undefined,
+    }),
+    () => resolveSessionStreamVersion(inputStream),
+  );
 
   const resolveObjectiveProjectionVersionCached = async (): Promise<number> =>
-    resolveObjectiveProjectionVersion();
+    withProjectionCache(
+      objectiveProjectionVersionCache,
+      "objective_projection_version",
+      () => resolveObjectiveProjectionVersion(),
+    );
 
   const fallbackChatContextFromChain = (inputChain: {
     readonly sessionStream: string;

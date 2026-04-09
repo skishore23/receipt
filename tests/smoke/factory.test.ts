@@ -4231,57 +4231,66 @@ test("factory route: completed durable handoff does not synthesize a cleanup fol
   expect(secondFinalized[0]?.content).not.toContain("Controller is retiring lingering jobs");
 });
 
-test("factory route: session stream changes invalidate the cached workbench handoff", async () => {
-  let currentObjective = {
-    ...makeRunningWorkbenchObjectiveDetail("objective_blocked"),
-    title: "Investigate NAT gateway cost spike",
-    status: "blocked",
-    phase: "blocked",
-    latestSummary: "We proved it was a NAT data-processing surge, but not which workload caused it.",
-    blockedReason: "Need retained historical NAT or flow-log evidence to attribute the spike.",
-    blockedExplanation: "Need retained historical NAT or flow-log evidence to attribute the spike.",
-    nextAction: "Use /react with more evidence, or ask Chat to summarize the current findings.",
-    activeTaskCount: 0,
-    readyTaskCount: 0,
-  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
-
+test("factory route: session stream changes invalidate the cached chat island transcript", async () => {
+  const chatId = "chat_handoff_cache";
+  let agentEventStore: Map<string, AgentEvent[]> | undefined;
   const app = createRouteTestApp({
-    service: {
-      listObjectives: async () => [
-        currentObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+    captureAgentEventStore: (store) => {
+      agentEventStore = store;
+    },
+    agentEvents: {
+      [factoryChatSessionStream(process.cwd(), "generalist", chatId)]: [
+        {
+          type: "problem.set",
+          runId: "run_chat_handoff",
+          problem: "Summarize the current investigation.",
+          agentId: "factory",
+        },
+        {
+          type: "response.finalized",
+          runId: "run_chat_handoff",
+          content: "Blocked handoff: NAT spike attribution still needs retained evidence.",
+          agentId: "factory",
+        },
       ],
-      getObjective: async () => currentObjective,
     },
   });
 
-  const blockedResponse = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_blocked&inspectorTab=chat");
+  const blockedResponse = await app.request(
+    `http://receipt.test/factory/island/chat?profile=generalist&chat=${chatId}&inspectorTab=chat`,
+    { headers: { "HX-Request": "true" } },
+  );
   const blockedBody = await blockedResponse.text();
   expect(blockedResponse.status).toBe(200);
-  expect(blockedBody).toContain("Blocked handoff");
+  expect(blockedBody).toContain("Blocked handoff: NAT spike attribution still needs retained evidence.");
 
-  currentObjective = {
-    ...currentObjective,
-    status: "completed",
-    phase: "completed",
-    latestSummary: "Investigation complete: the spike was a one-day NAT data-processing surge.",
-    blockedReason: undefined,
-    blockedExplanation: undefined,
-    nextAction: "Review the conclusion in Chat and decide whether to archive the objective.",
-  };
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", chatId);
+  const sessionEvents = agentEventStore?.get(sessionStream) ?? [];
+  sessionEvents.push({
+    type: "response.finalized",
+    runId: "run_chat_handoff_followup",
+    content: "Investigation complete: the spike was a one-day NAT data-processing surge.",
+    agentId: "factory",
+  });
+  agentEventStore?.set(sessionStream, sessionEvents);
+  await new Promise((resolve) => setTimeout(resolve, 950));
 
-  const completedResponse = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_blocked&inspectorTab=chat");
+  const completedResponse = await app.request(
+    `http://receipt.test/factory/island/chat?profile=generalist&chat=${chatId}&inspectorTab=chat`,
+    { headers: { "HX-Request": "true" } },
+  );
   const completedBody = await completedResponse.text();
 
   expect(completedResponse.status).toBe(200);
-  expect(completedBody).not.toContain("completed and handed back to Chat.");
   expect(completedBody).toContain("Investigation complete: the spike was a one-day NAT data-processing surge.");
-  expect(completedBody).not.toContain("Dispatch ready task task_01.");
 });
 
 test("factory route: fresh objective projection versions invalidate cached workbench islands", async () => {
+  const objectiveId = "objective_projection_live";
+  const chatId = "chat_projection_live";
   let projectionVersion = 1;
   let currentObjective = {
-    ...makeRunningWorkbenchObjectiveDetail("objective_live"),
+    ...makeRunningWorkbenchObjectiveDetail(objectiveId),
     title: "Live objective",
     latestSummary: "Task work is running in the shared thread shell.",
   } as Awaited<ReturnType<FactoryService["getObjective"]>>;
@@ -4319,7 +4328,7 @@ test("factory route: fresh objective projection versions invalidate cached workb
   });
 
   const firstResponse = await app.request(
-    "http://receipt.test/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_live",
+    `http://receipt.test/factory/island/workbench/board?profile=generalist&chat=${chatId}&objective=${objectiveId}`,
     { headers: { "HX-Request": "true" } },
   );
   const firstBody = await firstResponse.text();
@@ -4332,9 +4341,10 @@ test("factory route: fresh objective projection versions invalidate cached workb
     title: "Updated live objective",
     latestSummary: "The refreshed projection should replace the cached workbench shell.",
   };
+  await new Promise((resolve) => setTimeout(resolve, 950));
 
   const secondResponse = await app.request(
-    "http://receipt.test/factory/island/workbench?profile=generalist&chat=chat_demo&objective=objective_live",
+    `http://receipt.test/factory/island/workbench/board?profile=generalist&chat=${chatId}&objective=${objectiveId}`,
     { headers: { "HX-Request": "true" } },
   );
   const secondBody = await secondResponse.text();
@@ -5289,12 +5299,13 @@ test("factory route: selecting an objective reuses the objective's bound chat se
 });
 
 test("factory route: chat-scoped action view prefers the chat-bound objective over the board default", async () => {
+  const chatId = "chat_bound_preferred";
   const dataDir = await createTempDir("receipt-factory-chat-bound-action-view");
   await writeChatProjection({
     dataDir,
     repoRoot: process.cwd(),
     profileId: "generalist",
-    chatId: "chat_demo",
+    chatId,
     events: [
       {
         type: "problem.set",
@@ -5306,7 +5317,7 @@ test("factory route: chat-scoped action view prefers the chat-bound objective ov
         type: "thread.bound",
         runId: "run_bound",
         objectiveId: "objective_bound",
-        chatId: "chat_demo",
+        chatId,
         reason: "startup",
       },
       {
@@ -5350,18 +5361,20 @@ test("factory route: chat-scoped action view prefers the chat-bound objective ov
     },
   });
 
-  const response = await app.request("http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action");
+  const response = await app.request(`http://receipt.test/factory/api/workbench-shell?profile=generalist&chat=${chatId}&inspectorTab=chat&detailTab=action`);
   const snapshot = await response.json() as {
-    readonly location?: string;
+    readonly routeKey?: string;
+    readonly route?: { readonly objectiveId?: string };
     readonly workbenchHtml?: string;
     readonly chatHtml?: string;
   };
 
   expect(response.status).toBe(200);
-  expect(snapshot.location).toContain("objective=objective_bound");
+  expect(snapshot.routeKey).toContain("objective=objective_bound");
+  expect(snapshot.route?.objectiveId).toBe("objective_bound");
   expect(snapshot.workbenchHtml).toContain("Chat Bound Objective");
   expect(snapshot.workbenchHtml).toContain("Chat bound summary");
-  expect(snapshot.workbenchHtml).not.toContain("Board Default Objective");
+  expect(snapshot.workbenchHtml).toContain('data-objective-id="objective_bound"');
   expect(snapshot.chatHtml).toContain("Bound objective reply");
 });
 

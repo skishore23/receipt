@@ -5494,35 +5494,6 @@ export class FactoryService {
     };
   }
 
-  private buildInvestigationOutput(state: FactoryState): string | undefined {
-    const report = state.investigation.synthesized?.report
-      ?? this.buildFinalInvestigationReport(state);
-    const details = report.evidence
-      .map((e) => e.detail ?? e.summary)
-      .filter(Boolean);
-    return details.length > 0 ? details.join("\n\n") : undefined;
-  }
-
-  private buildDeliveryOutput(state: FactoryState): string | undefined {
-    for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
-      const candidateId = state.candidateOrder[index]!;
-      const candidate = state.candidates[candidateId];
-      if (!candidate) continue;
-      if (candidate.status !== "approved" && candidate.status !== "integrated") continue;
-      const text = candidate.handoff ?? candidate.summary;
-      if (text) return text;
-    }
-    const tasks = Object.values(state.workflow.tasksById);
-    const approvedTask = tasks
-      .filter((t) => t.status === "approved" || t.status === "integrated")
-      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
-    if (!approvedTask?.candidateId) {
-      return approvedTask?.latestSummary;
-    }
-    const fallback = state.candidates[approvedTask.candidateId];
-    return fallback?.handoff ?? fallback?.summary ?? approvedTask.latestSummary;
-  }
-
   private buildInvestigationSynthesis(
     state: FactoryState,
   ): FactoryInvestigationSynthesisRecord | undefined {

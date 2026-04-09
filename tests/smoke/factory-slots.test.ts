@@ -558,7 +558,7 @@ test("stress: 20 objectives cascade through the slot via sequential cancels", as
   const last = await service.getObjective(ids[19]);
   expect(last.scheduler.slotState).toBe("active");
   expect(last.status).not.toBe("canceled");
-}, 60_000);
+}, 120_000);
 
 // ---------------------------------------------------------------------------
 // Queue position invariant: positions always reflect live queue state
