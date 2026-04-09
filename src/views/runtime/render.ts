@@ -547,6 +547,63 @@ const runtimeDelegationSteps = (model: RuntimeDashboardModel): ReadonlyArray<Run
   },
 ];
 
+const renderRuntimeLiveContent = (
+  model: RuntimeDashboardModel,
+): string => {
+  const sideEffects = runtimeSideEffects(model);
+  const delegationSteps = runtimeDelegationSteps(model);
+  const objectiveSnapshots = renderObjectiveSnapshots(model.objectives);
+  const jobSnapshots = renderJobSnapshots(model.jobs);
+  const runSnapshots = renderRunSnapshots(model.runs);
+  const activitySnapshots = renderActivitySnapshots(model.activity);
+
+  return `<div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div class="border ${planeBg("control")} p-4 space-y-3">
+      ${objectiveSnapshots}
+    </div>
+
+    <div class="border ${planeBg("execution")} p-4 space-y-3">
+      ${jobSnapshots}
+      ${runSnapshots}
+    </div>
+
+    <div class="border ${planeBg("side-effects")} p-4 space-y-3">
+      <div class="space-y-2">
+        <div class="text-[10px] font-bold tracking-widest text-warning/70 uppercase">Subsystems</div>
+        ${sideEffects.map(renderSideEffectCard).join("")}
+      </div>
+      ${activitySnapshots}
+    </div>
+  </div>
+
+  ${renderConcurrencyCallout(model)}
+
+  ${renderDelegationLoop(delegationSteps)}
+
+  <div class="space-y-2">
+    <div class="text-[11px] font-bold tracking-widest text-muted-foreground uppercase px-1">Data Stores</div>
+    <div class="flex flex-wrap gap-3">
+      ${model.stores.map(renderStoreCard).join("")}
+    </div>
+  </div>
+
+  ${renderFlowSummary(model)}`;
+};
+
+export const runtimeDashboardLiveIsland = (
+  model: RuntimeDashboardModel,
+  islandPath = "/runtime/island",
+): string => {
+  return `<div id="runtime-dashboard-live" class="space-y-5"
+    ${liveIslandAttrs({
+      path: islandPath,
+      refreshOn: runtimeRefreshOn,
+      swap: "outerHTML",
+    })}>
+    ${renderRuntimeLiveContent(model)}
+  </div>`;
+};
+
 export const runtimeDashboardIsland = (
   model: RuntimeDashboardModel,
   islandPath = "/runtime/island",
@@ -556,19 +613,8 @@ export const runtimeDashboardIsland = (
   const pollLoopActors = actors.filter((actor) => actor.plane === "control" && actor.group === "poll-loop");
   const executionActors = actors.filter((actor) => actor.plane === "execution");
   const sideEffectActors = actors.filter((actor) => actor.plane === "side-effects");
-  const sideEffects = runtimeSideEffects(model);
-  const delegationSteps = runtimeDelegationSteps(model);
-  const objectiveSnapshots = renderObjectiveSnapshots(model.objectives);
-  const jobSnapshots = renderJobSnapshots(model.jobs);
-  const runSnapshots = renderRunSnapshots(model.runs);
-  const activitySnapshots = renderActivitySnapshots(model.activity);
 
-  return `<div id="runtime-dashboard" class="space-y-5"
-    ${liveIslandAttrs({
-      path: islandPath,
-      refreshOn: runtimeRefreshOn,
-      swap: "outerHTML",
-    })}>
+  return `<div id="runtime-dashboard" class="space-y-5">
     ${renderLegend()}
 
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -576,38 +622,19 @@ export const runtimeDashboardIsland = (
         ${renderPlaneHeader("Control Plane", "control")}
         ${controlStandalone.map(renderActorCard).join("")}
         ${pollLoopActors.length ? renderPollLoopGroup(pollLoopActors) : ""}
-        ${objectiveSnapshots}
       </div>
 
       <div class="border ${planeBg("execution")} p-4 space-y-3">
         ${renderPlaneHeader("Execution Plane", "execution")}
         ${executionActors.map(renderActorCard).join("")}
-        ${jobSnapshots}
-        ${runSnapshots}
       </div>
 
       <div class="border ${planeBg("side-effects")} p-4 space-y-3">
         ${renderPlaneHeader("Side Effects", "side-effects")}
         ${sideEffectActors.map(renderActorCard).join("")}
-        <div class="space-y-2 mt-2">
-          <div class="text-[10px] font-bold tracking-widest text-warning/70 uppercase">Subsystems</div>
-          ${sideEffects.map(renderSideEffectCard).join("")}
-        </div>
-        ${activitySnapshots}
       </div>
     </div>
 
-    ${renderConcurrencyCallout(model)}
-
-    ${renderDelegationLoop(delegationSteps)}
-
-    <div class="space-y-2">
-      <div class="text-[11px] font-bold tracking-widest text-muted-foreground uppercase px-1">Data Stores</div>
-      <div class="flex flex-wrap gap-3">
-        ${model.stores.map(renderStoreCard).join("")}
-      </div>
-    </div>
-
-    ${renderFlowSummary(model)}
+    ${runtimeDashboardLiveIsland(model, islandPath)}
   </div>`;
 };

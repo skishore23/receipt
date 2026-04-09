@@ -100,6 +100,7 @@ export const planTaskResult = (
     headCommit: input.candidate.headCommit,
     summary: input.candidate.summary,
     handoff: input.candidate.handoff,
+    presentation: input.candidate.presentation,
     completion: input.candidate.completion,
     alignment: input.candidate.alignment,
     checkResults: input.candidate.checkResults,
@@ -118,6 +119,7 @@ export const planTaskResult = (
     status: input.review.status,
     summary: input.review.summary,
     handoff: input.review.handoff,
+    presentation: input.candidate.presentation,
     reviewedAt: input.review.reviewedAt,
   }];
 

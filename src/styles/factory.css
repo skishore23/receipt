@@ -5,6 +5,7 @@
 @source "../views/factory/shared/index.ts";
 @source "../views/factory/transcript/index.ts";
 @source "../views/factory/workbench/page.ts";
+@source "../views/factory/workbench/page-linear.ts";
 @source "../views/receipt.ts";
 @source "../views/runtime/data.ts";
 @source "../views/runtime/render.ts";
@@ -51,9 +52,9 @@
   --warning-foreground: hsl(0 0% 100%);
   --info: hsl(199 89% 48%);
   --info-foreground: hsl(0 0% 100%);
-  --font-sans: Montserrat, sans-serif;
+  --font-sans: Inter, "Segoe UI", system-ui, sans-serif;
   --font-serif: Georgia, serif;
-  --font-mono: Fira Code, monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
   --radius: 0.35rem;
   --shadow-x: 0px;
   --shadow-y: 2px;
@@ -112,7 +113,7 @@
   --warning-foreground: hsl(38 92% 90%);
   --info: hsl(214 100% 71%);
   --info-foreground: hsl(214 100% 95%);
-  --font-sans: "JetBrains Mono", "Fira Code", monospace;
+  --font-sans: Inter, "Segoe UI", system-ui, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
   --radius: 0.12rem;
@@ -296,6 +297,49 @@
     animation: factory-stream-cursor 1s steps(1, end) infinite;
   }
 
+  .factory-running-card {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .factory-running-activity {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.7rem;
+  }
+
+  .factory-running-activity-orb {
+    width: 0.55rem;
+    height: 0.55rem;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background:
+      radial-gradient(circle at 35% 35%, hsl(var(--accent)) 0%, hsl(var(--primary)) 68%, transparent 100%);
+    box-shadow: 0 0 0 1px color-mix(in srgb, hsl(var(--primary)) 24%, transparent);
+    animation: factory-stream-orb 1.4s ease-in-out infinite;
+  }
+
+  .factory-running-activity-rail {
+    position: relative;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 4rem;
+    height: 0.42rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background:
+      linear-gradient(
+        90deg,
+        color-mix(in srgb, hsl(var(--muted)) 90%, transparent) 0%,
+        color-mix(in srgb, hsl(var(--primary)) 18%, hsl(var(--accent)) 22%) 45%,
+        color-mix(in srgb, hsl(var(--muted)) 90%, transparent) 100%
+      );
+    background-size: 220% 100%;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, hsl(var(--border)) 72%, transparent);
+    animation: factory-stream-rail 2.2s linear infinite;
+  }
+
   .factory-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
@@ -331,6 +375,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .factory-ephemeral-placeholder-line,
+    .factory-running-activity-orb,
+    .factory-running-activity-rail,
     .factory-stream-cursor,
     .factory-stream-text {
       animation: none !important;
@@ -509,6 +555,14 @@
 
   .factory-workbench-chat-shell {
     background: var(--card);
+  }
+
+  .factory-workbench-linear-shell .factory-workbench-chat-shell {
+    background: transparent;
+  }
+
+  .factory-workbench-linear-shell #factory-workbench-background-root {
+    display: contents;
   }
 
   .sr-only {

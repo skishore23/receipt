@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -41,6 +42,7 @@ import {
   type FactoryTaskAlignmentRecord,
   type FactoryTaskCompletionRecord,
   type FactoryTaskExecutionMode,
+  type FactoryTaskPresentationRecord,
   type FactoryTaskResultOutcome,
   type FactoryTaskRecord,
   type FactoryWorkerHandoffOutcome,
@@ -112,8 +114,8 @@ import {
   planningReceiptFingerprint,
 } from "../planning";
 import { monitorCheckpointIntervalMs, monitorDetectEvidence, runMonitorCheckpoint } from "../monitor-job";
-import { MonitorCheckpointResultSchema } from "../monitor-checkpoint";
-import { llmStructured } from "../../../adapters/openai";
+import { MonitorCheckpointResultSchema, parseMonitorCheckpointAction } from "../monitor-checkpoint";
+import { llmStructured, llmText } from "../../../adapters/openai";
 import {
   factoryPromotionGateBlockedReason,
   factoryTaskCompletionForTask,
@@ -125,6 +127,7 @@ import {
   FACTORY_TASK_RESULT_SCHEMA,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
+  normalizeTaskPresentationRecord,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
   renderDeliveryResultText,
@@ -155,6 +158,7 @@ import {
   buildTaskFilePaths,
   buildTaskMemoryScopes,
   listTaskArtifactActivity,
+  readTaskEvidenceContents,
   renderFactoryReceiptCliSurface,
   renderTaskContextSummary,
   summarizeTaskArtifactActivity,
@@ -304,6 +308,17 @@ const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref,
 const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
+const TERMINAL_RENDER_MAX_FILE_BYTES = 32_768;
+const TERMINAL_RENDER_MAX_ARTIFACTS = 6;
+const TERMINAL_RENDER_TEXT_FILE_RE = /\.(?:md|markdown|txt|json|log|csv)$/i;
+const artifactKeyFromLabel = (label: string, index: number): string => {
+  const normalized = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized ? `workerArtifact_${normalized}_${index}` : `workerArtifact_${index}`;
+};
 const dedupeGraphRefs = (refs: ReadonlyArray<GraphRef>): ReadonlyArray<GraphRef> => {
   const seen = new Set<string>();
   return refs.filter((ref) => {
@@ -408,6 +423,16 @@ const dedupeStrings = (values: ReadonlyArray<string>): ReadonlyArray<string> =>
   [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 const isDisplayActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "running";
+
+const resolveHandoffPhase = (
+  active: boolean,
+  evidenceContents: ReadonlyArray<FactoryEvidenceContent> | undefined,
+): FactoryLiveOutputHandoffPhase => {
+  if (active) return "active";
+  if (evidenceContents && evidenceContents.length > 0) return "evidence_ready";
+  return "terminal_no_evidence";
+};
+
 const boardSectionForObjective = (
   objective: Pick<FactoryObjectiveCard, "displayState">,
 ): FactoryBoardSection => {
@@ -485,6 +510,9 @@ import {
   type FactoryContextSources,
   type FactoryArtifactActivity,
   type FactoryTaskView,
+  type FactoryTerminalRenderArtifact,
+  type FactoryTerminalRenderInput,
+  type FactoryTerminalRenderer,
   type FactoryObjectiveAlignmentSummary,
   type FactoryObjectiveCard,
   type FactoryObjectiveDetail,
@@ -494,6 +522,8 @@ import {
   type FactoryLiveProjection,
   type FactoryLiveOutputTargetKind,
   type FactoryLiveOutputSnapshot,
+  type FactoryLiveOutputHandoffPhase,
+  type FactoryEvidenceContent,
   type FactoryDebugProjection,
   type FactoryTaskJobPayload,
   type FactoryIntegrationJobPayload,
@@ -527,6 +557,8 @@ export type {
   FactoryLiveProjection,
   FactoryLiveOutputTargetKind,
   FactoryLiveOutputSnapshot,
+  FactoryLiveOutputHandoffPhase,
+  FactoryEvidenceContent,
   FactoryDebugProjection,
   FactoryTaskJobPayload,
   FactoryIntegrationJobPayload,
@@ -572,6 +604,8 @@ export class FactoryService {
   private readonly repoSlotConcurrency: number;
   private readonly cloudExecutionContextProvider?: FactoryServiceOptions["cloudExecutionContextProvider"];
   private readonly redriveQueuedJob?: FactoryServiceOptions["redriveQueuedJob"];
+  private readonly onObjectiveHandoff?: FactoryServiceOptions["onObjectiveHandoff"];
+  private readonly terminalRenderer?: FactoryTerminalRenderer;
   private readonly baselineCheckCache = new Map<string, Promise<{
     readonly digest: string;
     readonly excerpt: string;
@@ -608,6 +642,8 @@ export class FactoryService {
     this.memoryTools = opts.memoryTools;
     this.cloudExecutionContextProvider = opts.cloudExecutionContextProvider;
     this.redriveQueuedJob = opts.redriveQueuedJob;
+    this.onObjectiveHandoff = opts.onObjectiveHandoff;
+    this.terminalRenderer = opts.terminalRenderer;
     this.git = new HubGit({
       dataDir: opts.dataDir,
       repoRoot: resolveRepoRoot(opts.repoRoot),
@@ -1373,7 +1409,12 @@ export class FactoryService {
             schema: MonitorCheckpointResultSchema,
             schemaName: "MonitorCheckpointResult",
           });
-          return llmResult.parsed;
+          const parsed = llmResult.parsed;
+          return {
+            assessment: parsed.assessment,
+            reasoning: parsed.reasoning,
+            action: parseMonitorCheckpointAction(parsed.action),
+          };
         },
       });
 
@@ -1594,13 +1635,20 @@ export class FactoryService {
       const task = detail.tasks.find((item) => item.taskId === focusId);
       if (!task) throw new FactoryServiceError(404, "factory task not found");
       const displayStatus = displayLiveJobStatus(task.job) ?? task.jobStatus ?? task.status;
+      const active = isDisplayActiveJobStatus(displayStatus);
+      const artifactActivity = task.artifactActivity && task.artifactActivity.length > 0 ? task.artifactActivity : undefined;
+      const evidenceContents = !active && task.workspacePath
+        ? await readTaskEvidenceContents(task.workspacePath, artifactActivity ?? [])
+        : undefined;
+      const handoffPhase = resolveHandoffPhase(active, evidenceContents);
       return {
         objectiveId,
         focusKind,
         focusId,
         title: task.title,
         status: displayStatus,
-        active: isDisplayActiveJobStatus(displayStatus),
+        active,
+        handoffPhase,
         summary: task.latestSummary ?? task.candidate?.summary ?? task.lastMessage ?? task.stderrTail ?? task.stdoutTail ?? task.artifactSummary,
         taskId: task.taskId,
         candidateId: task.candidateId,
@@ -1609,7 +1657,8 @@ export class FactoryService {
         stdoutTail: task.stdoutTail,
         stderrTail: task.stderrTail,
         artifactSummary: task.artifactSummary,
-        artifactActivity: task.artifactActivity && task.artifactActivity.length > 0 ? task.artifactActivity : undefined,
+        artifactActivity,
+        evidenceContents: evidenceContents && evidenceContents.length > 0 ? evidenceContents : undefined,
       };
     }
 
@@ -1658,6 +1707,12 @@ export class FactoryService {
       stderrTail = await this.readTextTail(optionalTrimmedString(payload.stderrPath), 600);
     }
     const displayStatus = displayLiveJobStatus(job) ?? job.status;
+    const active = isDisplayActiveJobStatus(displayStatus);
+    const workspacePath = optionalTrimmedString(payload.workspacePath);
+    const evidenceContents = !active && workspacePath
+      ? await readTaskEvidenceContents(workspacePath, artifactActivity ?? [])
+      : undefined;
+    const handoffPhase = resolveHandoffPhase(active, evidenceContents);
 
     return {
       objectiveId,
@@ -1665,7 +1720,8 @@ export class FactoryService {
       focusId,
       title,
       status: displayStatus,
-      active: isDisplayActiveJobStatus(displayStatus),
+      active,
+      handoffPhase,
       summary: artifactSummary ?? lastMessage ?? stderrTail ?? stdoutTail ?? summary,
       taskId,
       candidateId,
@@ -1675,6 +1731,7 @@ export class FactoryService {
       stderrTail,
       artifactSummary,
       artifactActivity: artifactActivity && artifactActivity.length > 0 ? artifactActivity : undefined,
+      evidenceContents: evidenceContents && evidenceContents.length > 0 ? evidenceContents : undefined,
     };
   }
 
@@ -1746,7 +1803,7 @@ export class FactoryService {
         canceledAt,
         reason,
       },
-      this.buildObjectiveHandoffEvent({
+      await this.buildRenderedObjectiveHandoffEvent({
         state,
         status: "canceled",
         summary,
@@ -2322,7 +2379,7 @@ export class FactoryService {
           { basedOn, frontierTaskIds: [askTask.taskId] },
         ),
         blockedEvent,
-        this.buildObjectiveHandoffEvent({
+        await this.buildRenderedObjectiveHandoffEvent({
           state,
           status: "blocked",
           summary: blockedEvent.summary,
@@ -2727,10 +2784,10 @@ export class FactoryService {
     };
   }
 
-  private buildObjectiveBlockedEvents(
+  private async buildObjectiveBlockedEvents(
     state: FactoryState,
     reason: string,
-  ): ReadonlyArray<FactoryEvent> {
+  ): Promise<ReadonlyArray<FactoryEvent>> {
     const blockedAt = Date.now();
     return [
       {
@@ -2740,7 +2797,7 @@ export class FactoryService {
         summary: reason,
         blockedAt,
       },
-      this.buildObjectiveHandoffEvent({
+      await this.buildRenderedObjectiveHandoffEvent({
         state,
         status: "blocked",
         summary: reason,
@@ -2945,9 +3002,6 @@ export class FactoryService {
       case "objective.complete":
         {
           const completedAt = Date.now();
-          const output = state.objectiveMode === "investigation"
-            ? this.buildInvestigationOutput(state)
-            : undefined;
           const completedEvent = {
             type: "objective.completed" as const,
             objectiveId: state.objectiveId,
@@ -2956,11 +3010,10 @@ export class FactoryService {
           };
           await this.emitObjectiveBatch(state.objectiveId, [
             completedEvent,
-            this.buildObjectiveHandoffEvent({
+            await this.buildRenderedObjectiveHandoffEvent({
               state,
               status: "completed",
               summary: effect.summary,
-              output,
               sourceUpdatedAt: completedAt,
             }),
           ]);
@@ -2983,7 +3036,7 @@ export class FactoryService {
           };
           await this.emitObjectiveBatch(state.objectiveId, [
             blockedEvent,
-            this.buildObjectiveHandoffEvent({
+            await this.buildRenderedObjectiveHandoffEvent({
               state,
               status: "blocked",
               summary: effect.summary,
@@ -3227,6 +3280,7 @@ export class FactoryService {
             headCommit: effect.headCommit,
             summary: effect.summary,
             handoff: effect.handoff,
+            presentation: effect.presentation,
             completion: effect.completion,
             alignment: effect.alignment,
             checkResults: effect.checkResults,
@@ -3251,6 +3305,7 @@ export class FactoryService {
             status: effect.status,
             summary: effect.summary,
             handoff: effect.handoff,
+            presentation: effect.presentation,
             reviewedAt: effect.reviewedAt,
           }];
         case "task.noop_complete":
@@ -3300,12 +3355,277 @@ export class FactoryService {
     readonly state: FactoryState;
     readonly status: FactoryObjectiveHandoffStatus;
     readonly summary: string;
+    readonly renderedBody?: string;
+    readonly renderSourceHash?: string;
+    readonly renderedAt?: number;
+    readonly renderedBy?: "orchestrator_llm" | "fallback";
     readonly output?: string;
     readonly sourceUpdatedAt: number;
     readonly blocker?: string;
     readonly nextAction?: string;
   }): Extract<FactoryEvent, { readonly type: "objective.handoff" }> {
     return buildTaskRunnerObjectiveHandoffEvent(input);
+  }
+
+  private mergeArtifactRefs(
+    records: ReadonlyArray<Readonly<Record<string, GraphRef>> | undefined>,
+  ): Readonly<Record<string, GraphRef>> {
+    return Object.fromEntries(
+      records.flatMap((record) => Object.entries(record ?? {})),
+    );
+  }
+
+  private latestRenderableCandidate(
+    state: FactoryState,
+    status: FactoryObjectiveHandoffStatus,
+  ): FactoryCandidateRecord | undefined {
+    for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
+      const candidateId = state.candidateOrder[index]!;
+      const candidate = state.candidates[candidateId];
+      if (!candidate) continue;
+      if (status === "completed") {
+        if (candidate.status === "approved" || candidate.status === "integrated") return candidate;
+        continue;
+      }
+      if (candidate.status === "planned") continue;
+      return candidate;
+    }
+    return undefined;
+  }
+
+  private buildObjectiveHandoffFallbackBody(input: {
+    readonly status: FactoryObjectiveHandoffStatus;
+    readonly summary: string;
+    readonly blocker?: string;
+    readonly nextAction?: string;
+    readonly candidate?: FactoryCandidateRecord;
+    readonly presentation?: FactoryTaskPresentationRecord;
+    readonly report?: FactoryInvestigationReport;
+    readonly artifacts: ReadonlyArray<FactoryTerminalRenderArtifact>;
+  }): string {
+    const lines: string[] = [];
+    const inlineBody = optionalTrimmedString(input.presentation?.inlineBody)
+      ?? optionalTrimmedString(input.candidate?.handoff);
+    const normalizedInline = inlineBody?.trim();
+    if (normalizedInline && normalizedInline !== input.summary.trim()) {
+      lines.push(normalizedInline);
+    } else {
+      lines.push(input.summary);
+    }
+    const reportConclusion = optionalTrimmedString(input.report?.conclusion);
+    if (reportConclusion && reportConclusion !== input.summary.trim() && reportConclusion !== normalizedInline) {
+      lines.push(reportConclusion);
+    }
+    if (input.artifacts.length > 0) {
+      lines.push([
+        "Artifacts:",
+        ...input.artifacts.map((artifact) => `- ${artifact.label}: ${artifact.ref.ref}`),
+      ].join("\n"));
+    }
+    if (input.status === "blocked" && input.blocker) {
+      lines.push(`Blocker: ${input.blocker}`);
+    }
+    if (input.nextAction) {
+      lines.push(`Next action: ${input.nextAction}`);
+    }
+    return lines.filter(Boolean).join("\n\n").trim() || input.summary;
+  }
+
+  private async loadTerminalRenderArtifacts(input: {
+    readonly artifactRefs: Readonly<Record<string, GraphRef>>;
+    readonly presentation?: FactoryTaskPresentationRecord;
+  }): Promise<ReadonlyArray<FactoryTerminalRenderArtifact>> {
+    const preferredLabels = new Set(input.presentation?.primaryArtifactLabels ?? []);
+    const refs = Object.values(input.artifactRefs)
+      .filter((ref) => ref.kind === "artifact" || ref.kind === "file");
+    const ordered = refs
+      .sort((a, b) => {
+        const aPreferred = preferredLabels.has(a.label ?? "") ? 0 : 1;
+        const bPreferred = preferredLabels.has(b.label ?? "") ? 0 : 1;
+        if (aPreferred !== bPreferred) return aPreferred - bPreferred;
+        return (a.label ?? a.ref).localeCompare(b.label ?? b.ref);
+      })
+      .slice(0, TERMINAL_RENDER_MAX_ARTIFACTS);
+    const artifacts = await Promise.all(ordered.map(async (ref) => {
+      if (!TERMINAL_RENDER_TEXT_FILE_RE.test(ref.ref)) {
+        return {
+          label: ref.label ?? path.basename(ref.ref),
+          ref,
+        } satisfies FactoryTerminalRenderArtifact;
+      }
+      try {
+        const content = await fs.readFile(ref.ref, "utf-8");
+        const trimmed = content.trim();
+        const truncated = Buffer.byteLength(trimmed, "utf-8") > TERMINAL_RENDER_MAX_FILE_BYTES;
+        const contentPreview = truncated
+          ? trimmed.slice(0, TERMINAL_RENDER_MAX_FILE_BYTES)
+          : trimmed;
+        return {
+          label: ref.label ?? path.basename(ref.ref),
+          ref,
+          ...(contentPreview ? { contentPreview } : {}),
+          ...(truncated ? { contentTruncated: true } : {}),
+        } satisfies FactoryTerminalRenderArtifact;
+      } catch {
+        return {
+          label: ref.label ?? path.basename(ref.ref),
+          ref,
+        } satisfies FactoryTerminalRenderArtifact;
+      }
+    }));
+    return artifacts;
+  }
+
+  private async defaultTerminalRenderer(input: FactoryTerminalRenderInput): Promise<string> {
+    const system = [
+      input.profile.promptBody?.trim(),
+      input.profile.soulBody?.trim(),
+      "Render the final user-facing factory objective handoff.",
+      "Use the task presentation, report, and artifact previews as source of truth.",
+      "Keep summary metadata terse and focus on the actual returned result.",
+      "If an artifact preview already contains a markdown table or report that directly answers the objective, preserve it rather than rephrasing it.",
+      "Do not mention internal controller/runtime mechanics unless they materially affect the outcome.",
+      "Return markdown only. Do not wrap the response in code fences.",
+    ].filter((part): part is string => Boolean(part && part.trim())).join("\n\n");
+    const user = JSON.stringify({
+      objectiveId: input.objectiveId,
+      title: input.title,
+      objectiveMode: input.objectiveMode,
+      status: input.status,
+      summary: input.summary,
+      blocker: input.blocker,
+      nextAction: input.nextAction,
+      task: input.task,
+      report: input.report,
+      artifacts: input.artifacts,
+    }, null, 2);
+    return llmText({
+      system,
+      user,
+    });
+  }
+
+  private async buildRenderedObjectiveHandoffEvent(input: {
+    readonly state: FactoryState;
+    readonly status: FactoryObjectiveHandoffStatus;
+    readonly summary: string;
+    readonly sourceUpdatedAt: number;
+    readonly blocker?: string;
+    readonly nextAction?: string;
+  }): Promise<Extract<FactoryEvent, { readonly type: "objective.handoff" }>> {
+    const resolvedProfile = await resolveFactoryChatProfile({
+      requestedId: input.state.profile.rootProfileId,
+      repoRoot: this.git.repoRoot,
+      profileRoot: this.profileRoot,
+    }).catch(() => undefined);
+    const candidate = this.latestRenderableCandidate(input.state, input.status);
+    const investigationReport = input.state.objectiveMode === "investigation"
+      ? (
+          input.state.investigation.synthesized?.report
+          ?? this.finalInvestigationReports(input.state).at(-1)?.report
+          ?? this.investigationReports(input.state).at(-1)?.report
+        )
+      : undefined;
+    const investigationTask = input.state.objectiveMode === "investigation"
+      ? (
+          this.finalInvestigationReports(input.state).at(-1)
+          ?? this.investigationReports(input.state).at(-1)
+        )
+      : undefined;
+    const presentation = candidate?.presentation
+      ?? investigationTask?.presentation;
+    const artifactRefs = input.state.objectiveMode === "investigation"
+      ? this.mergeArtifactRefs(
+        input.status === "completed"
+          ? this.finalInvestigationReports(input.state).map((report) => report.artifactRefs)
+          : [investigationTask?.artifactRefs],
+      )
+      : candidate?.artifactRefs ?? {};
+    const artifacts = await this.loadTerminalRenderArtifacts({
+      artifactRefs,
+      presentation,
+    });
+    const fallbackBody = this.buildObjectiveHandoffFallbackBody({
+      status: input.status,
+      summary: input.summary,
+      blocker: input.blocker,
+      nextAction: input.nextAction,
+      candidate,
+      presentation,
+      report: investigationReport,
+      artifacts,
+    });
+    const renderInput: FactoryTerminalRenderInput = {
+      objectiveId: input.state.objectiveId,
+      title: input.state.title,
+      objectiveMode: input.state.objectiveMode,
+      status: input.status,
+      summary: input.summary,
+      blocker: input.blocker,
+      nextAction: input.nextAction,
+      sourceUpdatedAt: input.sourceUpdatedAt,
+      profile: {
+        id: input.state.profile.rootProfileId,
+        label: input.state.profile.rootProfileLabel,
+        promptPath: resolvedProfile?.promptPath,
+        promptBody: resolvedProfile?.root.mdBody,
+        soulPath: resolvedProfile?.root.soulPath,
+        soulBody: resolvedProfile?.root.soulBody,
+        resolvedHash: resolvedProfile?.resolvedHash ?? input.state.profile.resolvedProfileHash,
+      },
+      ...(candidate || investigationTask
+        ? {
+            task: {
+              taskId: candidate?.taskId ?? investigationTask?.taskId ?? "task",
+              candidateId: candidate?.candidateId ?? investigationTask?.candidateId,
+              summary: candidate?.summary ?? investigationTask?.summary,
+              handoff: candidate?.handoff ?? investigationTask?.handoff,
+              presentation,
+            },
+          }
+        : {}),
+      ...(investigationReport ? { report: investigationReport } : {}),
+      artifacts,
+      fallbackBody,
+    };
+    const renderSourceHash = createHash("sha1")
+      .update(JSON.stringify(renderInput))
+      .digest("hex")
+      .slice(0, 16);
+    if (
+      input.state.latestHandoff?.renderSourceHash === renderSourceHash
+      && input.state.latestHandoff.renderedBody
+    ) {
+      return this.buildObjectiveHandoffEvent({
+        ...input,
+        renderedBody: input.state.latestHandoff.renderedBody,
+        renderSourceHash,
+        renderedAt: input.state.latestHandoff.renderedAt ?? input.sourceUpdatedAt,
+        renderedBy: input.state.latestHandoff.renderedBy ?? "fallback",
+        output: input.state.latestHandoff.renderedBody,
+      });
+    }
+    let renderedBody = fallbackBody;
+    let renderedBy: "orchestrator_llm" | "fallback" = "fallback";
+    try {
+      const renderer = this.terminalRenderer ?? ((terminalInput: FactoryTerminalRenderInput) => this.defaultTerminalRenderer(terminalInput));
+      const rendered = trimmedString(await renderer(renderInput));
+      if (rendered) {
+        renderedBody = rendered;
+        renderedBy = "orchestrator_llm";
+      }
+    } catch {
+      renderedBody = fallbackBody;
+      renderedBy = "fallback";
+    }
+    return this.buildObjectiveHandoffEvent({
+      ...input,
+      renderedBody,
+      renderSourceHash,
+      renderedAt: Date.now(),
+      renderedBy,
+      output: renderedBody,
+    });
   }
 
   async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
@@ -3370,6 +3690,13 @@ export class FactoryService {
       ? `${summary}${summary.endsWith(".") ? "" : "."} Captured evidence artifacts recorded command errors, so this investigation remains partial.`
       : summary;
     const explicitHandoff = optionalTrimmedString(rawResult.handoff) ?? nextAction ?? effectiveSummary;
+    const presentation = normalizeTaskPresentationRecord({
+      value: rawResult.presentation,
+      handoff: explicitHandoff,
+      summary: effectiveSummary,
+      workerArtifacts,
+      report: normalizedStructuredInvestigationReport,
+    });
     const handoff = [explicitHandoff, workerArtifactSummary, artifactIssueSummary]
       .filter(Boolean)
       .join("\n\n") || effectiveSummary;
@@ -3446,6 +3773,7 @@ export class FactoryService {
           headCommit: payload.baseCommit,
           summary: effectiveSummary,
           handoff,
+          presentation,
           completion: initialCompletion,
           alignment: initialAlignment,
           checkResults: [],
@@ -3508,6 +3836,7 @@ export class FactoryService {
           headCommit: payload.baseCommit,
           summary: effectiveSummary,
           handoff,
+          presentation,
           completion: initialCompletion,
           alignment: initialAlignment,
           checkResults,
@@ -3548,6 +3877,16 @@ export class FactoryService {
       memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
       memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
     } satisfies Readonly<Record<string, GraphRef>>;
+    const workerArtifactRefs = Object.fromEntries(
+      workerArtifacts.flatMap((item, index) => {
+        const rawPath = optionalTrimmedString(item.path);
+        if (!rawPath) return [];
+        const resolvedPath = path.isAbsolute(rawPath)
+          ? rawPath
+          : path.resolve(payload.workspacePath, rawPath);
+        return [[artifactKeyFromLabel(item.label, index), artifactRef(resolvedPath, item.label)] as const];
+      }),
+    ) satisfies Readonly<Record<string, GraphRef>>;
 
     if (isInvestigation) {
       const report = normalizedStructuredInvestigationReport
@@ -3626,6 +3965,7 @@ export class FactoryService {
       );
       const resultRefs = {
         ...baseResultRefs,
+        ...workerArtifactRefs,
         ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
       } satisfies Readonly<Record<string, GraphRef>>;
       await this.emitObjectiveBatch(payload.objectiveId, [
@@ -3638,6 +3978,7 @@ export class FactoryService {
           outcome,
           summary: effectiveSummary,
           handoff,
+          presentation,
           completion: investigationCompletion,
           report: reportWithChecks,
           artifactRefs: resultRefs,
@@ -3699,6 +4040,7 @@ export class FactoryService {
 
     const resultRefs = {
       ...baseResultRefs,
+      ...workerArtifactRefs,
       ...(committed ? { commit: commitRef(committed.hash, "candidate commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
 
@@ -3778,6 +4120,15 @@ export class FactoryService {
               )
         )
       : undefined;
+    const finalCandidatePresentation: FactoryTaskPresentationRecord = (
+      presentation.kind === "inline"
+      || presentation.kind === "generic"
+    )
+      ? {
+          ...presentation,
+          inlineBody: candidateHandoff,
+        }
+      : presentation;
 
     const plannerInput: FactoryTaskResultPlannerInput = {
       taskId: payload.taskId,
@@ -3790,6 +4141,7 @@ export class FactoryService {
         headCommit: committed?.hash ?? payload.baseCommit,
         summary: candidateSummary,
         handoff: candidateHandoff,
+        presentation: finalCandidatePresentation,
         completion: effectiveDeliveryCompletion,
         alignment: deliveryAlignment,
         checkResults,
@@ -3929,7 +4281,7 @@ export class FactoryService {
           conflictedAt,
         },
         blockedEvent,
-        this.buildObjectiveHandoffEvent({
+        await this.buildRenderedObjectiveHandoffEvent({
           state,
           status: "blocked",
           summary: blockedSummary,
@@ -4261,7 +4613,7 @@ export class FactoryService {
           conflictedAt: blockedAt,
         },
         blockedEvent,
-        this.buildObjectiveHandoffEvent({
+        await this.buildRenderedObjectiveHandoffEvent({
           state,
           status: "blocked",
           summary: blockedEvent.summary,
@@ -4489,7 +4841,7 @@ export class FactoryService {
           summary,
           completedAt: promotedAt,
         },
-        this.buildObjectiveHandoffEvent({
+        await this.buildRenderedObjectiveHandoffEvent({
           state,
           status: "completed",
           summary,
@@ -4539,7 +4891,7 @@ export class FactoryService {
           conflictedAt: blockedAt,
         },
         blockedEvent,
-        this.buildObjectiveHandoffEvent({
+        await this.buildRenderedObjectiveHandoffEvent({
           state,
           status: "blocked",
           summary: reason,
@@ -4925,16 +5277,32 @@ export class FactoryService {
       await this.rebalanceObjectiveSlots();
       await this.enqueueObjectiveControl(objectiveId, "reconcile");
     }
-    await this.publishObjectiveProjectionRefresh(objectiveId);
+    await this.publishObjectiveProjectionRefresh(objectiveId, events);
   }
 
-  private async publishObjectiveProjectionRefresh(objectiveId: string): Promise<void> {
+  private async publishObjectiveProjectionRefresh(
+    objectiveId: string,
+    events?: ReadonlyArray<FactoryEvent>,
+  ): Promise<void> {
     this.sse.publish("factory", objectiveId);
     this.sse.publish("objective-runtime", objectiveId);
     const detail = await this.getObjective(objectiveId).catch(() => undefined);
     const profileId = detail?.profile.rootProfileId?.trim();
     if (profileId) this.sse.publish("profile-board", profileId);
     this.sse.publish("receipt");
+    if (this.onObjectiveHandoff && detail && events?.some((e) => e.type === "objective.handoff")) {
+      const handoff = detail.latestHandoff;
+      if (handoff && profileId) {
+        this.onObjectiveHandoff({
+          objectiveId,
+          profileId,
+          handoff,
+          title: detail.title,
+          status: detail.status,
+          phase: detail.phase ?? detail.status,
+        }).catch(() => undefined);
+      }
+    }
   }
 
   private async emitObjective(objectiveId: string, event: FactoryEvent): Promise<void> {
@@ -5133,6 +5501,26 @@ export class FactoryService {
       .map((e) => e.detail ?? e.summary)
       .filter(Boolean);
     return details.length > 0 ? details.join("\n\n") : undefined;
+  }
+
+  private buildDeliveryOutput(state: FactoryState): string | undefined {
+    for (let index = state.candidateOrder.length - 1; index >= 0; index -= 1) {
+      const candidateId = state.candidateOrder[index]!;
+      const candidate = state.candidates[candidateId];
+      if (!candidate) continue;
+      if (candidate.status !== "approved" && candidate.status !== "integrated") continue;
+      const text = candidate.handoff ?? candidate.summary;
+      if (text) return text;
+    }
+    const tasks = Object.values(state.workflow.tasksById);
+    const approvedTask = tasks
+      .filter((t) => t.status === "approved" || t.status === "integrated")
+      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
+    if (!approvedTask?.candidateId) {
+      return approvedTask?.latestSummary;
+    }
+    const fallback = state.candidates[approvedTask.candidateId];
+    return fallback?.handoff ?? fallback?.summary ?? approvedTask.latestSummary;
   }
 
   private buildInvestigationSynthesis(

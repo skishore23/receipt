@@ -20,11 +20,33 @@ export const parseTokenEventPayload = (value: string): TokenEventPayload | null 
   }
 };
 
+export type AgentPhasePayload = {
+  readonly runId?: string;
+  readonly phase: string;
+  readonly summary: string;
+};
+
+export const parseAgentPhasePayload = (value: string): AgentPhasePayload | null => {
+  if (!value) return null;
+  try {
+    const record = asRecord(JSON.parse(value));
+    const phase = asString(record?.phase);
+    if (!phase) return null;
+    return {
+      runId: asString(record?.runId),
+      phase,
+      summary: asString(record?.summary) ?? "",
+    };
+  } catch {
+    return null;
+  }
+};
+
 type RenderEphemeralTurnInput = {
   readonly profileLabel: string;
   readonly surface?: "chat" | "handoff";
   readonly phase: "pending" | "streaming";
-  readonly statusLabel: "Sending" | "Queued" | "Starting";
+  readonly statusLabel: string;
   readonly summary: string;
   readonly userText?: string;
   readonly assistantText?: string;
@@ -83,21 +105,7 @@ const renderEphemeralAssistantTurn = (input: RenderEphemeralTurnInput): string =
   "</section>";
 };
 
-const renderEphemeralHandoffTurn = (input: RenderEphemeralTurnInput): string =>
-  '<section class="border border-primary/20 bg-primary/5 px-3 py-2">' +
-    '<div class="flex min-w-0 items-start justify-between gap-2">' +
-      '<div class="min-w-0 flex-1">' +
-        '<div class="text-xs font-semibold text-foreground">Background handoff</div>' +
-        '<div class="mt-1 text-xs leading-5 text-muted-foreground">' + escapeHtml(input.summary) + "</div>" +
-        renderEphemeralStatusMeta(input) +
-      "</div>" +
-    "</div>" +
-  "</section>";
-
 export const renderEphemeralTurn = (input: RenderEphemeralTurnInput): string => {
   const user = input.userText ? renderEphemeralUserTurn(input.userText) : "";
-  const assistant = input.surface === "handoff"
-    ? renderEphemeralHandoffTurn(input)
-    : renderEphemeralAssistantTurn(input);
-  return user + assistant;
+  return user + renderEphemeralAssistantTurn(input);
 };

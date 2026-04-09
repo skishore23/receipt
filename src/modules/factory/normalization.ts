@@ -10,6 +10,7 @@ import type {
   FactoryIntegrationRecord,
   FactoryInvestigationSynthesisRecord,
   FactoryInvestigationTaskReport,
+  FactoryObjectiveHandoffRecord,
   FactoryObjectiveMode,
   FactoryProfileDispatchAction,
   FactoryObjectivePolicy,
@@ -18,6 +19,7 @@ import type {
   FactoryProfileCloudProvider,
   FactorySchedulerRecord,
   FactoryState,
+  FactoryTaskPresentationRecord,
   FactoryTaskExecutionMode,
   FactoryTaskRecord,
   FactoryTaskStatus,
@@ -130,6 +132,79 @@ const normalizeIntegration = (value: unknown, updatedAt: number): FactoryIntegra
 const normalizeScheduler = (value: unknown): FactorySchedulerRecord =>
   isRecord(value) ? value as FactorySchedulerRecord : {};
 
+const normalizeTaskPresentation = (value: unknown): FactoryTaskPresentationRecord | undefined => {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind === "inline"
+    || value.kind === "artifacts"
+    || value.kind === "investigation_report"
+    || value.kind === "generic"
+    ? value.kind
+    : undefined;
+  if (!kind) return undefined;
+  const renderHint = value.renderHint === "table"
+    || value.renderHint === "report"
+    || value.renderHint === "list"
+    || value.renderHint === "generic"
+    ? value.renderHint
+    : "generic";
+  const inlineBody = typeof value.inlineBody === "string" && value.inlineBody.trim().length > 0
+    ? value.inlineBody.trim()
+    : undefined;
+  const primaryArtifactLabels = Array.isArray(value.primaryArtifactLabels)
+    ? uniqueStrings(value.primaryArtifactLabels.filter((item): item is string => typeof item === "string" && item.trim().length > 0))
+    : undefined;
+  return {
+    kind,
+    renderHint,
+    ...(inlineBody ? { inlineBody } : {}),
+    ...(primaryArtifactLabels?.length ? { primaryArtifactLabels } : {}),
+  };
+};
+
+const normalizeObjectiveHandoff = (value: unknown): FactoryObjectiveHandoffRecord | undefined => {
+  if (!isRecord(value)) return undefined;
+  const status = value.status === "blocked"
+    || value.status === "completed"
+    || value.status === "failed"
+    || value.status === "canceled"
+    ? value.status
+    : undefined;
+  const summary = typeof value.summary === "string" && value.summary.trim().length > 0
+    ? value.summary.trim()
+    : undefined;
+  const handoffKey = typeof value.handoffKey === "string" && value.handoffKey.trim().length > 0
+    ? value.handoffKey.trim()
+    : undefined;
+  const sourceUpdatedAt = typeof value.sourceUpdatedAt === "number" && Number.isFinite(value.sourceUpdatedAt)
+    ? value.sourceUpdatedAt
+    : undefined;
+  if (!status || !summary || !handoffKey || sourceUpdatedAt === undefined) return undefined;
+  const renderedBody = typeof value.renderedBody === "string" && value.renderedBody.trim().length > 0
+    ? value.renderedBody.trim()
+    : typeof value.output === "string" && value.output.trim().length > 0
+      ? value.output.trim()
+      : summary;
+  return {
+    status,
+    summary,
+    renderedBody,
+    renderSourceHash: typeof value.renderSourceHash === "string" && value.renderSourceHash.trim().length > 0
+      ? value.renderSourceHash.trim()
+      : undefined,
+    renderedAt: typeof value.renderedAt === "number" && Number.isFinite(value.renderedAt)
+      ? value.renderedAt
+      : sourceUpdatedAt,
+    renderedBy: value.renderedBy === "orchestrator_llm" || value.renderedBy === "fallback"
+      ? value.renderedBy
+      : renderedBody === summary ? "fallback" : undefined,
+    output: typeof value.output === "string" && value.output.trim().length > 0 ? value.output.trim() : undefined,
+    blocker: typeof value.blocker === "string" && value.blocker.trim().length > 0 ? value.blocker.trim() : undefined,
+    nextAction: typeof value.nextAction === "string" && value.nextAction.trim().length > 0 ? value.nextAction.trim() : undefined,
+    handoffKey,
+    sourceUpdatedAt,
+  };
+};
+
 const normalizeInvestigation = (value: unknown): FactoryState["investigation"] => {
   if (!isRecord(value)) {
     return {
@@ -140,7 +215,11 @@ const normalizeInvestigation = (value: unknown): FactoryState["investigation"] =
   const reports = isRecord(value.reports)
     ? Object.fromEntries(
         Object.entries(value.reports)
-          .filter(([, report]) => isRecord(report) && typeof report.taskId === "string"),
+          .filter(([, report]) => isRecord(report) && typeof report.taskId === "string")
+          .map(([taskId, report]) => [taskId, {
+            ...(report as FactoryInvestigationTaskReport),
+            presentation: normalizeTaskPresentation((report as Record<string, unknown>).presentation),
+          } satisfies FactoryInvestigationTaskReport]),
       ) as Readonly<Record<string, FactoryInvestigationTaskReport>>
     : {};
   const reportOrder = Array.isArray(value.reportOrder)
@@ -303,7 +382,11 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
   const candidates = isRecord(state.candidates)
     ? Object.fromEntries(
         Object.entries(state.candidates)
-          .filter(([, candidate]) => isRecord(candidate) && typeof candidate.candidateId === "string"),
+          .filter(([, candidate]) => isRecord(candidate) && typeof candidate.candidateId === "string")
+          .map(([candidateId, candidate]) => [candidateId, {
+            ...(candidate as FactoryCandidateRecord),
+            presentation: normalizeTaskPresentation((candidate as Record<string, unknown>).presentation),
+          } satisfies FactoryCandidateRecord]),
       ) as Readonly<Record<string, FactoryCandidateRecord>>
     : {};
   const candidateOrder = normalizeCandidateOrder(state.candidateOrder, candidates);
@@ -347,6 +430,7 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
     integration: normalizeIntegration(state.integration, state.updatedAt),
     scheduler: normalizeScheduler(state.scheduler),
     investigation: normalizeInvestigation(state.investigation),
+    latestHandoff: normalizeObjectiveHandoff(state.latestHandoff),
     candidatePassesByTask: isRecord(state.candidatePassesByTask) ? state.candidatePassesByTask : {},
     consecutiveFailuresByTask: isRecord(state.consecutiveFailuresByTask) ? state.consecutiveFailuresByTask : {},
     checks: Array.isArray(state.checks) ? state.checks.filter((check): check is string => typeof check === "string") : [],

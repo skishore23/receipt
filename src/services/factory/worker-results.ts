@@ -104,11 +104,12 @@ export const resolveFactoryTaskWorkerResult = async (
   payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
   execution: { readonly lastMessage?: string; readonly tokensUsed?: number },
 ): Promise<Record<string, unknown>> => {
+  const persistedResult = parseJsonObjectCandidate(await readTextIfPresent(payload.resultPath) ?? "");
   const rawLastMessage = execution.lastMessage?.trim()
     ? execution.lastMessage
     : await readTextIfPresent(payload.lastMessagePath) ?? "";
-  const result = parseJsonObjectCandidate(rawLastMessage)
-    ?? parseJsonObjectCandidate(await readTextIfPresent(payload.resultPath) ?? "");
+  const result = persistedResult
+    ?? parseJsonObjectCandidate(rawLastMessage);
   if (!result) {
     throw new FactoryServiceError(500, "missing structured factory task result from codex");
   }

@@ -834,9 +834,16 @@ const createFactoryOutputTool = (input: FactoryChatToolsInput): AgentToolExecuto
     }
     const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
+    const handoffPhase = asString(payload.handoffPhase);
+    const evidenceCount = Array.isArray(payload.evidenceContents) ? payload.evidenceContents.length : 0;
+    const handoffSuffix = handoffPhase === "evidence_ready"
+      ? ` — evidence ready (${evidenceCount} file${evidenceCount === 1 ? "" : "s"} inlined), synthesize and finalize`
+      : handoffPhase === "terminal_no_evidence"
+        ? " — terminal, no evidence files"
+        : "";
     return {
       output: JSON.stringify(payload, null, 2),
-      summary: `${String(payload.summary ?? `${focusKind} ${focusId}: ${String(payload.status ?? "unknown")}`)}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
+      summary: `${String(payload.summary ?? `${focusKind} ${focusId}: ${String(payload.status ?? "unknown")}`)}${handoffSuffix}${waited.waitedMs > 0 ? ` after waiting ${waited.waitedMs}ms` : ""}`,
       pauseBudget,
     };
   };

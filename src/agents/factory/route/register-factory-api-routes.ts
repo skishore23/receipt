@@ -1,7 +1,10 @@
 import type { Hono } from "hono";
 
+import type { Runtime } from "@receipt/core/runtime";
+
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import { optionalTrimmedString, readRecordBody, json } from "../../../framework/http";
+import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
 import {
   factoryChatSessionStream,
   repoKeyForRoot,
@@ -9,6 +12,7 @@ import {
   type FactoryChatProfile,
   type FactoryChatProfileObjectiveMode,
 } from "../../../services/factory-chat-profiles";
+import { writeObjectiveDispatchToSession } from "../session-handoff";
 import { readSessionHistory, searchSessionHistory } from "../../../services/session-history";
 import { listUserPreferenceEntries, summarizeUserPreferences } from "../../../services/conversation-memory";
 import {
@@ -53,16 +57,27 @@ type WorkbenchRequestWorkspaceModel = {
   readonly model: FactoryWorkbenchPageModel["workspace"];
 };
 
+type ObjectiveChatBinding = {
+  readonly objectiveId: string;
+  readonly chatId: string;
+  readonly profileId: string;
+};
+
 type ResolvedFactoryChatProfile = Awaited<ReturnType<typeof resolveFactoryChatProfile>>;
 
 export const registerFactoryApiRoutes = (input: {
   readonly app: Hono;
+  readonly basePath?: "/factory" | "/factory-new";
   readonly wrap: RouteWrap;
   readonly ctx: AgentLoaderContext;
   readonly service: FactoryService;
   readonly profileRoot: string;
   readonly loadFactoryProfiles: () => Promise<ReadonlyArray<FactoryChatProfile>>;
   readonly loadWorkbenchRequestWorkspaceModel: (req: Request) => Promise<WorkbenchRequestWorkspaceModel>;
+  readonly resolveObjectiveChatBinding: (
+    objectiveId: string,
+    profileId?: string,
+  ) => Promise<ObjectiveChatBinding | undefined>;
   readonly resolveWatchedObjectiveId: (value: string | undefined) => Promise<string | undefined>;
   readonly resolveComposerJob: (objectiveId: string | undefined, preferredJobId: string | undefined) => Promise<QueueJob>;
   readonly assertComposeDispatchActionAllowed: (
@@ -94,17 +109,20 @@ export const registerFactoryApiRoutes = (input: {
     },
     signal: AbortSignal,
   ) => Response;
+  readonly agentRuntime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly memoryTools?: MemoryTools;
   readonly dataDir?: string;
 }) => {
   const {
     app,
+    basePath = "/factory",
     wrap,
     ctx,
     service,
     profileRoot,
     loadFactoryProfiles,
     loadWorkbenchRequestWorkspaceModel,
+    resolveObjectiveChatBinding,
     resolveWatchedObjectiveId,
     resolveComposerJob,
     assertComposeDispatchActionAllowed,
@@ -116,7 +134,7 @@ export const registerFactoryApiRoutes = (input: {
   } = input;
   const repoKey = repoKeyForRoot(service.git.repoRoot);
 
-  app.post("/factory/compose", async (c) => {
+  app.post(`${basePath}/compose`, async (c) => {
     const req = c.req.raw;
     try {
       const body = await readRecordBody(req, (message) => new FactoryServiceError(400, message));
@@ -124,6 +142,11 @@ export const registerFactoryApiRoutes = (input: {
       if (!prompt) return navigationError(req, 400, "Enter a chat message or slash command.");
 
       const request = readWorkbenchRequest(req);
+      const workbenchLink = (input: Parameters<typeof buildWorkbenchLink>[0]): string =>
+        buildWorkbenchLink({
+          ...input,
+          basePath: request.shellBase,
+        });
       const resolved = await resolveFactoryChatProfile({
         repoRoot: service.git.repoRoot,
         profileRoot,
@@ -136,7 +159,7 @@ export const registerFactoryApiRoutes = (input: {
         const command = parsed.command;
         switch (command.type) {
           case "help":
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: request.objectiveId,
@@ -159,7 +182,7 @@ export const registerFactoryApiRoutes = (input: {
                 ? `Objective '${command.objectiveId}' was not found.`
                 : "Select an objective or provide one to /watch.");
             }
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: nextObjectiveId,
@@ -198,18 +221,35 @@ export const registerFactoryApiRoutes = (input: {
               profileId: targetProfileId,
               startImmediately: true,
             });
-            ctx.sse.publish("factory", created.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            const dispatchRunId = await writeObjectiveDispatchToSession({
+              agentRuntime: input.agentRuntime,
+              repoRoot: service.git.repoRoot,
               profileId: targetProfileId,
               chatId: request.chatId,
+              objectiveId: created.objectiveId,
+              title: command.title ?? "Factory objective",
+              prompt: command.prompt,
+            });
+            const binding = await resolveObjectiveChatBinding(created.objectiveId, targetProfileId);
+            const canonicalChatId = binding?.chatId ?? request.chatId;
+            ctx.sse.publish("factory", created.objectiveId);
+            return workbenchNavigationResponse(req, workbenchLink({
+              profileId: targetProfileId,
+              chatId: canonicalChatId,
               objectiveId: created.objectiveId,
               inspectorTab: request.inspectorTab,
               detailTab: "action",
               page: request.page,
               filter: request.filter,
             }), {
-              chatId: request.chatId,
+              chatId: canonicalChatId,
               objectiveId: created.objectiveId,
+              live: {
+                profileId: targetProfileId,
+                chatId: canonicalChatId,
+                objectiveId: created.objectiveId,
+                runId: dispatchRunId,
+              },
             });
           }
           case "react": {
@@ -217,7 +257,7 @@ export const registerFactoryApiRoutes = (input: {
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before reacting to it.");
             const detail = await service.reactObjectiveWithNote(request.objectiveId, command.message);
             ctx.sse.publish("factory", detail.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: detail.objectiveId,
@@ -235,7 +275,7 @@ export const registerFactoryApiRoutes = (input: {
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before promoting it.");
             const detail = await service.promoteObjective(request.objectiveId);
             ctx.sse.publish("factory", detail.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: detail.objectiveId,
@@ -253,7 +293,7 @@ export const registerFactoryApiRoutes = (input: {
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before canceling it.");
             const detail = await service.cancelObjective(request.objectiveId, command.reason ?? "canceled from workbench");
             ctx.sse.publish("factory", detail.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: detail.objectiveId,
@@ -271,7 +311,7 @@ export const registerFactoryApiRoutes = (input: {
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before cleaning workspaces.");
             const detail = await service.cleanupObjectiveWorkspaces(request.objectiveId);
             ctx.sse.publish("factory", detail.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: detail.objectiveId,
@@ -289,7 +329,7 @@ export const registerFactoryApiRoutes = (input: {
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before archiving it.");
             const detail = await service.archiveObjective(request.objectiveId);
             ctx.sse.publish("factory", detail.objectiveId);
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: detail.objectiveId,
@@ -309,7 +349,7 @@ export const registerFactoryApiRoutes = (input: {
               command.reason ?? "abort requested from workbench",
               "factory.workbench",
             );
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
@@ -329,7 +369,7 @@ export const registerFactoryApiRoutes = (input: {
           case "steer": {
             const job = await resolveComposerJob(request.objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
             const queued = await service.queueJobSteer(job.id, command.message ?? "", "factory.workbench");
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
@@ -349,7 +389,7 @@ export const registerFactoryApiRoutes = (input: {
           case "follow-up": {
             const job = await resolveComposerJob(request.objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
             const queued = await service.queueJobFollowUp(job.id, command.message ?? "", "factory.workbench");
-            return workbenchNavigationResponse(req, buildWorkbenchLink({
+            return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
               chatId: request.chatId,
               objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
@@ -388,7 +428,7 @@ export const registerFactoryApiRoutes = (input: {
         },
       });
       ctx.sse.publish("jobs", created.id);
-      return workbenchNavigationResponse(req, buildWorkbenchLink({
+      return workbenchNavigationResponse(req, workbenchLink({
         profileId: request.profileId,
         chatId: request.chatId,
         objectiveId: request.objectiveId,
@@ -419,7 +459,7 @@ export const registerFactoryApiRoutes = (input: {
     }
   });
 
-  app.get("/factory/events", async (c) => wrap(
+  app.get(`${basePath}/events`, async (c) => wrap(
     async () => resolveChatEventSubscriptions({
       profileId: requestedProfileId(c.req.raw) ?? "generalist",
       chatId: requestedChatId(c.req.raw),
@@ -430,7 +470,7 @@ export const registerFactoryApiRoutes = (input: {
     (body) => subscribeChatEventStream(body, c.req.raw.signal),
   ));
 
-  app.get("/factory/chat/events", async (c) => wrap(
+  app.get(`${basePath}/chat/events`, async (c) => wrap(
     async () => resolveChatEventSubscriptions({
       profileId: requestedProfileId(c.req.raw) ?? "generalist",
       chatId: requestedChatId(c.req.raw),
@@ -441,7 +481,7 @@ export const registerFactoryApiRoutes = (input: {
     (body) => subscribeChatEventStream(body, c.req.raw.signal),
   ));
 
-  app.get("/factory/background/events", async (c) => wrap(
+  app.get(`${basePath}/background/events`, async (c) => wrap(
     async () => {
       const { model } = await loadWorkbenchRequestWorkspaceModel(c.req.raw);
       return {
@@ -455,7 +495,7 @@ export const registerFactoryApiRoutes = (input: {
     ], c.req.raw.signal),
   ));
 
-  app.get("/factory/api/live-output", async (c) => wrap(
+  app.get(`${basePath}/api/live-output`, async (c) => wrap(
     async () => {
       const objectiveId = requestedObjectiveId(c.req.raw);
       const focusKind = requestedFocusKind(c.req.raw);
@@ -469,7 +509,7 @@ export const registerFactoryApiRoutes = (input: {
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/user-preferences", async (c) => wrap(
+  app.get(`${basePath}/api/user-preferences`, async (c) => wrap(
     async () => {
       if (!memoryTools) throw new FactoryServiceError(503, "User preference memory is not configured.");
       const requestedScope = optionalTrimmedString(c.req.query("scope"))?.toLowerCase();
@@ -497,7 +537,7 @@ export const registerFactoryApiRoutes = (input: {
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/session-history", async (c) => wrap(
+  app.get(`${basePath}/api/session-history`, async (c) => wrap(
     async () => {
       if (!dataDir) throw new FactoryServiceError(503, "Session history is not configured.");
       const requestedProfile = requestedProfileId(c.req.raw) ?? "generalist";
@@ -539,7 +579,7 @@ export const registerFactoryApiRoutes = (input: {
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/objectives", async (c) => wrap(
+  app.get(`${basePath}/api/objectives`, async (c) => wrap(
     async () => ({
       objectives: await service.listObjectives(),
       board: await service.buildBoardProjection(optionalTrimmedString(c.req.query("objective"))),
@@ -547,17 +587,17 @@ export const registerFactoryApiRoutes = (input: {
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/objectives/:id", async (c) => wrap(
+  app.get(`${basePath}/api/objectives/:id`, async (c) => wrap(
     async () => ({ objective: await service.getObjective(c.req.param("id")) }),
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/objectives/:id/debug", async (c) => wrap(
+  app.get(`${basePath}/api/objectives/:id/debug`, async (c) => wrap(
     async () => ({ debug: await service.getObjectiveDebug(c.req.param("id")) }),
     (body) => json(200, body),
   ));
 
-  app.get("/factory/api/objectives/:id/receipts", async (c) => wrap(
+  app.get(`${basePath}/api/objectives/:id/receipts`, async (c) => wrap(
     async () => ({
       receipts: await service.listObjectiveReceipts(
         c.req.param("id"),

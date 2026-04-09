@@ -25,7 +25,7 @@ import type { JobHandler } from "../engine/runtime/job-worker";
 import type { SseHub } from "../framework/sse-hub";
 import type { JobCmd, JobEvent, JobState } from "../modules/job";
 import { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory-service";
-import type { FactoryObjectiveAuditJobPayload } from "./factory-types";
+import type { FactoryObjectiveAuditJobPayload, FactoryServiceOptions } from "./factory-types";
 import { runFactoryCodexJob } from "../agents/factory-chat";
 import {
   readFactoryReceiptInvestigation,
@@ -55,6 +55,7 @@ type FactoryServiceRuntimeOptions = {
   readonly memoryTools?: MemoryTools;
   readonly redriveQueuedJob?: (job: QueueJob) => Promise<void>;
   readonly auditAutoFixEnabled?: boolean;
+  readonly onObjectiveHandoff?: FactoryServiceOptions["onObjectiveHandoff"];
 };
 
 const isNoRetryError = (err: unknown): boolean => {
@@ -244,6 +245,7 @@ const deriveRecommendationPatternsFromReport = (
   report: FactoryReceiptInvestigation,
 ): ReadonlyArray<string> => {
   const patterns = new Set<string>();
+  const isDelivery = report.objectiveMode === "delivery";
   for (const anomaly of report.anomalies) {
     if (anomaly.kind) patterns.add(normalizeAuditPattern(anomaly.kind));
     const summarized = categorizeAuditSummary(anomaly.summary);
@@ -259,10 +261,10 @@ const deriveRecommendationPatternsFromReport = (
     )
       patterns.add("missing_scripts_run");
     if (normalized.includes("proof items")) patterns.add("missing_proof");
-    if (normalized.includes("alignment report"))
+    if (isDelivery && normalized.includes("alignment report"))
       patterns.add("alignment_not_reported");
   }
-  if (report.assessment.alignmentVerdict === "not_reported")
+  if (isDelivery && report.assessment.alignmentVerdict === "not_reported")
     patterns.add("alignment_not_reported");
   return [...patterns];
 };
@@ -758,6 +760,7 @@ export const createFactoryServiceRuntime = (
     repoRoot: opts.repoRoot,
     repoSlotConcurrency: opts.repoSlotConcurrency,
     redriveQueuedJob: opts.redriveQueuedJob,
+    onObjectiveHandoff: opts.onObjectiveHandoff,
   });
 
   return {

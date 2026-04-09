@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { buildMonitorCheckpointPrompt, MonitorCheckpointResultSchema } from "../../src/services/factory/monitor-checkpoint";
+import { buildMonitorCheckpointPrompt, MonitorCheckpointResultSchema, parseMonitorCheckpointAction } from "../../src/services/factory/monitor-checkpoint";
 
 test("buildMonitorCheckpointPrompt returns a system and user prompt", () => {
   const result = buildMonitorCheckpointPrompt({
@@ -62,11 +62,12 @@ test("MonitorCheckpointResultSchema validates continue action", () => {
   const input = {
     assessment: "progressing",
     reasoning: "Worker is making steady progress on the refactoring task.",
-    action: { kind: "continue" },
+    action: { kind: "continue", guidance: null, subtasks: null, reason: null },
   };
   const parsed = MonitorCheckpointResultSchema.parse(input);
   expect(parsed.assessment).toBe("progressing");
-  expect(parsed.action.kind).toBe("continue");
+  const action = parseMonitorCheckpointAction(parsed.action);
+  expect(action.kind).toBe("continue");
 });
 
 test("MonitorCheckpointResultSchema validates split action with subtasks", () => {
@@ -76,16 +77,19 @@ test("MonitorCheckpointResultSchema validates split action with subtasks", () =>
     action: {
       kind: "split",
       subtasks: [
-        { title: "Refactor auth types", prompt: "Extract JWT types into src/auth/types.ts" },
+        { title: "Refactor auth types", prompt: "Extract JWT types into src/auth/types.ts", dependsOn: null },
         { title: "Refactor auth middleware", prompt: "Update middleware to use new types", dependsOn: ["0"] },
       ],
+      guidance: null,
+      reason: null,
     },
   };
   const parsed = MonitorCheckpointResultSchema.parse(input);
-  expect(parsed.action.kind).toBe("split");
-  if (parsed.action.kind === "split") {
-    expect(parsed.action.subtasks).toHaveLength(2);
-    expect(parsed.action.subtasks[1].dependsOn).toEqual(["0"]);
+  const action = parseMonitorCheckpointAction(parsed.action);
+  expect(action.kind).toBe("split");
+  if (action.kind === "split") {
+    expect(action.subtasks).toHaveLength(2);
+    expect(action.subtasks[1].dependsOn).toEqual(["0"]);
   }
 });
 
@@ -93,18 +97,47 @@ test("MonitorCheckpointResultSchema validates steer action", () => {
   const input = {
     assessment: "off_track",
     reasoning: "Worker started refactoring unrelated code.",
-    action: { kind: "steer", guidance: "Focus only on the auth module, do not touch the user module." },
+    action: {
+      kind: "steer",
+      guidance: "Focus only on the auth module, do not touch the user module.",
+      subtasks: null,
+      reason: null,
+    },
   };
   const parsed = MonitorCheckpointResultSchema.parse(input);
-  expect(parsed.action.kind).toBe("steer");
+  const action = parseMonitorCheckpointAction(parsed.action);
+  expect(action.kind).toBe("steer");
 });
 
 test("MonitorCheckpointResultSchema validates abort action", () => {
   const input = {
     assessment: "failing",
     reasoning: "Worker is in an error loop with no progress.",
-    action: { kind: "abort", reason: "Persistent compilation errors with no recovery attempts." },
+    action: {
+      kind: "abort",
+      guidance: null,
+      subtasks: null,
+      reason: "Persistent compilation errors with no recovery attempts.",
+    },
   };
   const parsed = MonitorCheckpointResultSchema.parse(input);
-  expect(parsed.action.kind).toBe("abort");
+  const action = parseMonitorCheckpointAction(parsed.action);
+  expect(action.kind).toBe("abort");
+});
+
+test("MonitorCheckpointResultSchema accepts nullable non-applicable fields for Responses API compatibility", () => {
+  const input = {
+    assessment: "off_track",
+    reasoning: "Worker gathered enough evidence but did not finalize.",
+    action: {
+      kind: "steer",
+      guidance: "Stop collecting more evidence and write the final result now.",
+      subtasks: null,
+      reason: null,
+    },
+  };
+  const parsed = MonitorCheckpointResultSchema.parse(input);
+  expect(parsed.action.guidance).toBe("Stop collecting more evidence and write the final result now.");
+  expect(parsed.action.subtasks).toBeNull();
+  expect(parsed.action.reason).toBeNull();
 });

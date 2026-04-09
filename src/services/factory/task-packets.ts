@@ -19,7 +19,7 @@ import type {
 } from "../../modules/factory";
 import type { FactoryCloudExecutionContext } from "../factory-cloud-context";
 import type { FactoryHelperContext } from "../factory-helper-catalog";
-import type { FactoryArtifactActivity, FactoryContextSources } from "../factory-types";
+import type { FactoryArtifactActivity, FactoryContextSources, FactoryEvidenceContent } from "../factory-types";
 
 export const FACTORY_TASK_PACKET_DIR = ".receipt/factory";
 
@@ -363,6 +363,89 @@ export const summarizeTaskArtifactActivity = (
   const listed = activity.slice(0, 2).map((artifact) => artifact.label).join(", ");
   const extra = activity.length > 2 ? ` +${activity.length - 2} more` : "";
   return `Recent task artifacts: ${listed}${extra}.`;
+};
+
+const EVIDENCE_MAX_FILE_BYTES = 32_768;
+const EVIDENCE_MAX_TOTAL_BYTES = 65_536;
+
+const isReadableEvidenceFile = (name: string): boolean =>
+  name.endsWith(".md") || name.endsWith(".json") || name.endsWith(".txt") || name.endsWith(".csv");
+
+const readEvidenceFile = async (
+  filePath: string,
+  label: string,
+  maxBytes: number,
+): Promise<FactoryEvidenceContent | undefined> => {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size === 0) return undefined;
+    const effectiveMax = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(effectiveMax);
+    const handle = await fs.open(filePath, "r");
+    try {
+      await handle.read(buffer, 0, effectiveMax, 0);
+    } finally {
+      await handle.close();
+    }
+    return {
+      path: filePath,
+      label,
+      content: buffer.toString("utf-8"),
+      bytes: stat.size,
+      truncated: stat.size > maxBytes,
+    };
+  } catch {
+    return undefined;
+  }
+};
+
+const listEvidenceDirEntries = async (
+  evidenceDir: string,
+): Promise<ReadonlyArray<{ readonly path: string; readonly label: string; readonly bytes: number }>> => {
+  try {
+    const entries = await fs.readdir(evidenceDir, { withFileTypes: true });
+    const results = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && isReadableEvidenceFile(entry.name))
+        .map(async (entry) => {
+          const filePath = path.join(evidenceDir, entry.name);
+          const stat = await fs.stat(filePath).catch(() => undefined);
+          if (!stat?.isFile()) return undefined;
+          return { path: filePath, label: entry.name, bytes: stat.size };
+        }),
+    );
+    return results
+      .filter((entry): entry is { readonly path: string; readonly label: string; readonly bytes: number } => Boolean(entry))
+      .sort((left, right) => right.bytes - left.bytes || left.label.localeCompare(right.label));
+  } catch {
+    return [];
+  }
+};
+
+export const readTaskEvidenceContents = async (
+  workspacePath: string,
+  artifactActivity: ReadonlyArray<FactoryArtifactActivity>,
+): Promise<ReadonlyArray<FactoryEvidenceContent>> => {
+  const evidenceDir = path.join(workspacePath, FACTORY_TASK_PACKET_DIR, "evidence");
+  const evidenceDirEntries = await listEvidenceDirEntries(evidenceDir);
+  const artifactEntries = artifactActivity
+    .filter((entry) => isReadableEvidenceFile(entry.label))
+    .map((entry) => ({ path: entry.path, label: entry.label, bytes: entry.bytes }));
+  const allEntries = [...evidenceDirEntries, ...artifactEntries];
+  if (allEntries.length === 0) return [];
+
+  const contents: FactoryEvidenceContent[] = [];
+  let totalBytes = 0;
+  for (const entry of allEntries) {
+    const remaining = EVIDENCE_MAX_TOTAL_BYTES - totalBytes;
+    if (remaining <= 0) break;
+    const maxForFile = Math.min(EVIDENCE_MAX_FILE_BYTES, remaining);
+    const content = await readEvidenceFile(entry.path, entry.label, maxForFile);
+    if (!content) continue;
+    contents.push(content);
+    totalBytes += content.content.length;
+  }
+  return contents;
 };
 
 export const renderTaskContextSummary = (pack: FactoryContextPack): string => {

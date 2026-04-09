@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 
 import {
+  FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_INVESTIGATION_REPORT_SCHEMA,
+  FACTORY_TASK_RESULT_SCHEMA,
   normalizeInvestigationReport,
+  normalizeTaskPresentationRecord,
 } from "../../src/services/factory/result-contracts";
 
 test("factory result contracts: investigation evidence records use strict map entries for structured output", () => {
@@ -26,6 +29,11 @@ test("factory result contracts: investigation evidence records use strict map en
       additionalProperties: false,
     },
   });
+});
+
+test("factory result contracts: codex output schemas require handoff when the property is declared", () => {
+  expect(FACTORY_TASK_RESULT_SCHEMA.required).toContain("handoff");
+  expect(FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA.required).toContain("handoff");
 });
 
 test("factory result contracts: investigation report normalizes evidence record maps from strict entries", () => {
@@ -99,5 +107,38 @@ test("factory result contracts: investigation report still accepts legacy object
   expect(report.evidenceRecords?.[0]?.summary_metrics).toEqual({
     regions_scanned: 1,
     instance_inventory: 0,
+  });
+});
+
+test("factory result contracts: normalizeTaskPresentationRecord accepts the new presentation payload", () => {
+  const presentation = normalizeTaskPresentationRecord({
+    value: {
+      kind: "artifacts",
+      renderHint: "table",
+      inlineBody: null,
+      primaryArtifactLabels: ["inventory-md", "inventory-json"],
+    },
+    summary: "Listed instances.",
+    handoff: undefined,
+    workerArtifacts: [],
+  });
+  expect(presentation).toEqual({
+    kind: "artifacts",
+    renderHint: "table",
+    primaryArtifactLabels: ["inventory-md", "inventory-json"],
+  });
+});
+
+test("factory result contracts: normalizeTaskPresentationRecord falls back to legacy handoff during migration", () => {
+  const presentation = normalizeTaskPresentationRecord({
+    value: undefined,
+    summary: "Listed instances.",
+    handoff: "| InstanceId | Name |\n|---|---|\n| i-123 | demo |",
+    workerArtifacts: [],
+  });
+  expect(presentation).toEqual({
+    kind: "inline",
+    renderHint: "generic",
+    inlineBody: "| InstanceId | Name |\n|---|---|\n| i-123 | demo |",
   });
 });

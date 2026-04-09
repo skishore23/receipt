@@ -89,6 +89,7 @@ export type FactoryReceiptInvestigation = {
   readonly summary: FactoryParsedRun["summary"] & {
     readonly whatHappened: ReadonlyArray<string>;
   };
+  readonly objectiveMode: string;
   readonly window: FactoryParsedRun["window"];
   readonly inputs: FactoryParsedRun["inputs"];
   readonly outputs: FactoryParsedRun["outputs"];
@@ -685,6 +686,7 @@ export const readFactoryReceiptInvestigation = async (
       ...parsed.summary,
       whatHappened: buildWhatHappened(parsed, packetContext, interventionSignals),
     },
+    objectiveMode: analysis?.objectiveMode ?? "unknown",
     window: parsed.window,
     inputs: parsed.inputs,
     outputs: parsed.outputs,

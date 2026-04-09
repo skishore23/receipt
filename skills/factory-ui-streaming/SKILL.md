@@ -21,12 +21,13 @@ Inspect these first:
 8. `src/views/factory/workbench/index.ts`
 9. `src/views/factory/sidebar/index.ts`
 10. `src/views/factory/workbench/page.ts`
-11. `src/agents/factory/route/events.ts`
-12. `src/agents/factory/route/handlers.ts`
-13. `src/agents/factory/route/navigation.ts`
-14. `src/agents/factory/chat/`
-15. `tests/smoke/factory-client.test.ts`
-16. `tests/smoke/factory.test.ts`
+11. `src/views/runtime/render.ts`
+12. `src/agents/factory/route/events.ts`
+13. `src/agents/factory/route/handlers.ts`
+14. `src/agents/factory/route/navigation.ts`
+15. `src/agents/factory/chat/`
+16. `tests/smoke/factory-client.test.ts`
+17. `tests/smoke/factory.test.ts`
 
 ## Live Contract
 
@@ -43,6 +44,7 @@ Inspect these first:
   - `objective-runtime-refresh` for selected objective detail and runtime surfaces
   - `factory:scope-changed from:body` only for local route rebinding
 - Workbench is explicitly islandized. Treat the header, whole-background fallback, chat pane, and each block (`summary`, `objectives`, `activity`, `history`) as separate server-rendered refresh targets.
+- Runtime architecture pages should follow the same rule: keep explanatory/structural sections static and isolate only the volatile snapshots/metrics into a live island.
 - `factory-refresh` remains a compatibility fallback, not the primary contract for new work.
 
 ## Projection Rules
@@ -55,6 +57,7 @@ Inspect these first:
 - Publish projection refreshes only after the related server-side projection/cache has been synced and invalidated.
 - Do not bind new sidebar/workbench list/count surfaces directly to broad `factory-refresh` or global `job-refresh` topics when a narrower projection topic exists.
 - Prefer smaller islands over refreshing an entire pane when only one projection-backed section changed.
+- If a page mixes static architecture/explanation with live runtime state, split it into a static shell plus a narrow live region instead of re-rendering the whole page on each receipt.
 - Prefer declaring refresh behavior in view code first, then let `reactive.ts` discover it from `data-refresh-on`. Do not add new hardcoded event-to-target maps when a declarative island binding is sufficient.
 
 ## SSE Events
@@ -63,6 +66,7 @@ Inspect these first:
 - `factory-stream-reset` still clears the streaming shell when emitted.
 - `factory-stream-token` and `sse-swap` markup are the legacy compatibility path used only when `renderFactoryStreamingShell(..., { liveMode: "sse" })` is requested. Current Factory shell and workbench render `liveMode: "js"`.
 - Final formatted assistant output still comes from the normal chat island refresh, not the token stream.
+- For running chat/task/job updates, prefer a lightweight in-place activity affordance such as shimmer rails, pulsing dots, or existing skeleton treatment on the active card. Do not simulate progress by re-rendering unrelated transcript sections.
 
 ## Change Rules
 
@@ -71,6 +75,7 @@ Inspect these first:
 - In `src/client/factory-client/workbench.ts`, keep the full-pane refresh path only as a fallback for navigation or recovery. Projection events should target the smallest matching island set first.
 - When shell navigation changes route scope, update route/body attributes, `hx-get` values, and any `data-events-path` values before reprocessing markup or resyncing subscriptions.
 - Keep the optimistic pending transcript separate from the streaming token surface.
+- Keep running-state affordances local to the active chat/work card. Avoid making the whole transcript or pane look live when only one card is still executing.
 - Preserve mission-control keyboard behavior and bottom-stick scrolling.
 - When adding a new live section, add a route-scoped island endpoint plus a declarative `refreshOn` contract instead of teaching the browser how to recompute server projections.
 
@@ -88,6 +93,7 @@ Check these before declaring the change done:
 - `tests/smoke/factory.test.ts`
   - `/factory/events`, `/factory/chat/events`, and `/factory/background/events` scoping
   - projection-scoped workbench block and shell bindings
+  - runtime shell vs live-island splits when `/runtime` surfaces change
   - runner reset emission
   - shell markup omits Factory `hx-ext="sse"` and `sse-connect`
 - `tests/smoke/build.test.ts`

@@ -215,7 +215,7 @@ export const buildFactoryWorkbench = (input: {
     const taskLooksActive = effectiveJobStatus === "stalled"
       ? false
       : task.status === "running" || task.status === "reviewing" || isDisplayActiveJobStatus(effectiveJobStatus);
-    const stoppedMidTask = objectiveStopsLiveExecution && taskLooksActive && !isDisplayActiveJobStatus(effectiveJobStatus);
+    const stoppedMidTask = objectiveStopsLiveExecution && taskLooksActive;
     const effectiveStatus = stoppedMidTask ? stoppedTaskStatus : (effectiveJobStatus ?? task.status);
     const effectiveBlockedReason = stoppedMidTask
       ? detail.blockedReason ?? task.blockedReason ?? detail.latestSummary
@@ -297,21 +297,33 @@ export const buildFactoryWorkbench = (input: {
     focusedTask = taskById.get(input.liveOutput.taskId);
   }
   const output = input.liveOutput;
+  const preferTaskTerminalState = objectiveStopsLiveExecution && Boolean(focusedTask);
   const focusedTaskStatus = focusedTask
-    ? output?.status
-      ?? focusedTask.status
+    ? preferTaskTerminalState
+      ? (focusedTask.status ?? focusedTask.jobStatus ?? output?.status)
+      : output?.status
+        ?? focusedTask.status
       ?? focusedTask.jobStatus
     : undefined;
   const focusedTaskSummary = focusedTask
-    ? output?.summary
-      ?? (
+    ? preferTaskTerminalState
+      ? (
         focusedTaskStatus === "blocked"
         || focusedTaskStatus === "failed"
         || focusedTaskStatus === "canceled"
         || focusedTaskStatus === "completed"
-          ? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary
-          : focusedTask.latestSummary ?? focusedTask.candidateSummary
+          ? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary ?? output?.summary
+          : focusedTask.latestSummary ?? focusedTask.candidateSummary ?? output?.summary
       )
+      : output?.summary
+        ?? (
+          focusedTaskStatus === "blocked"
+          || focusedTaskStatus === "failed"
+          || focusedTaskStatus === "canceled"
+          || focusedTaskStatus === "completed"
+            ? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary
+            : focusedTask.latestSummary ?? focusedTask.candidateSummary
+        )
     : undefined;
   const focus = focusedTask
     ? {

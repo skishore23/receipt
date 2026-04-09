@@ -13,6 +13,7 @@ export type FactoryWorkbenchRouteInput = {
   readonly page?: number;
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
+  readonly basePath?: string;
 };
 
 type SearchParamsWriter = {
@@ -66,6 +67,14 @@ export const buildFactoryWorkbenchSearch = (
   return query ? `?${query}` : "";
 };
 
+export const normalizeFactoryWorkbenchBasePath = (
+  value?: string,
+): "/factory" | "/factory-new" => value === "/factory-new" ? "/factory-new" : "/factory";
+
+export const inferFactoryWorkbenchBasePath = (
+  pathname?: string,
+): "/factory" | "/factory-new" => pathname?.startsWith("/factory-new") ? "/factory-new" : "/factory";
+
 export const buildFactoryWorkbenchRouteKey = (
   input: FactoryWorkbenchRouteInput,
-): string => `/factory${buildFactoryWorkbenchSearch(input)}`;
+): string => `${normalizeFactoryWorkbenchBasePath(input.basePath)}${buildFactoryWorkbenchSearch(input)}`;

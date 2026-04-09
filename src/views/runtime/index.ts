@@ -1,7 +1,7 @@
 import { CSS_VERSION, iconFactory, iconReceipt, sseConnectAttrs } from "../ui";
 
 export type { RuntimeDashboardModel } from "./data";
-export { runtimeDashboardIsland } from "./render";
+export { runtimeDashboardIsland, runtimeDashboardLiveIsland } from "./render";
 
 export const runtimeShell = (input: {
   readonly dashboardHtml: string;

@@ -22,6 +22,7 @@ import type {
   FactoryTaskAlignmentRecord,
   FactoryTaskExecutionMode,
   FactoryTaskCompletionRecord,
+  FactoryTaskPresentationRecord,
   FactoryTaskRecord,
   FactoryWorkerType,
 } from "../modules/factory";
@@ -40,6 +41,57 @@ export class FactoryServiceError extends Error {
   }
 }
 
+export type FactoryObjectiveHandoffCallback = (input: {
+  readonly objectiveId: string;
+  readonly profileId: string;
+  readonly handoff: FactoryObjectiveHandoffRecord;
+  readonly title: string;
+  readonly status: FactoryObjectiveStatus;
+  readonly phase: string;
+}) => Promise<void>;
+
+export type FactoryTerminalRenderArtifact = {
+  readonly label: string;
+  readonly ref: GraphRef;
+  readonly summary?: string;
+  readonly contentPreview?: string;
+  readonly contentTruncated?: boolean;
+};
+
+export type FactoryTerminalRenderInput = {
+  readonly objectiveId: string;
+  readonly title: string;
+  readonly objectiveMode: FactoryObjectiveMode;
+  readonly status: FactoryObjectiveHandoffRecord["status"];
+  readonly summary: string;
+  readonly blocker?: string;
+  readonly nextAction?: string;
+  readonly sourceUpdatedAt: number;
+  readonly profile: {
+    readonly id: string;
+    readonly label: string;
+    readonly promptPath?: string;
+    readonly promptBody?: string;
+    readonly soulPath?: string;
+    readonly soulBody?: string;
+    readonly resolvedHash?: string;
+  };
+  readonly task?: {
+    readonly taskId: string;
+    readonly candidateId?: string;
+    readonly summary?: string;
+    readonly handoff?: string;
+    readonly presentation?: FactoryTaskPresentationRecord;
+  };
+  readonly report?: FactoryInvestigationReport;
+  readonly artifacts: ReadonlyArray<FactoryTerminalRenderArtifact>;
+  readonly fallbackBody: string;
+};
+
+export type FactoryTerminalRenderer = (
+  input: FactoryTerminalRenderInput,
+) => Promise<string>;
+
 export type FactoryServiceOptions = {
   readonly dataDir: string;
   readonly queue: import("../adapters/sqlite-queue").SqliteQueue;
@@ -56,6 +108,8 @@ export type FactoryServiceOptions = {
   readonly repoSlotConcurrency?: number;
   readonly cloudExecutionContextProvider?: () => Promise<FactoryCloudExecutionContext>;
   readonly redriveQueuedJob?: (job: QueueJob) => Promise<void>;
+  readonly onObjectiveHandoff?: FactoryObjectiveHandoffCallback;
+  readonly terminalRenderer?: FactoryTerminalRenderer;
 };
 
 export type FactoryObjectiveInput = {
@@ -343,6 +397,19 @@ export type FactoryLiveProjection = {
 
 export type FactoryLiveOutputTargetKind = "task" | "job";
 
+export type FactoryEvidenceContent = {
+  readonly path: string;
+  readonly label: string;
+  readonly content: string;
+  readonly bytes: number;
+  readonly truncated: boolean;
+};
+
+export type FactoryLiveOutputHandoffPhase =
+  | "active"
+  | "evidence_ready"
+  | "terminal_no_evidence";
+
 export type FactoryLiveOutputSnapshot = {
   readonly objectiveId: string;
   readonly focusKind: FactoryLiveOutputTargetKind;
@@ -350,6 +417,7 @@ export type FactoryLiveOutputSnapshot = {
   readonly title: string;
   readonly status: string;
   readonly active: boolean;
+  readonly handoffPhase: FactoryLiveOutputHandoffPhase;
   readonly summary?: string;
   readonly taskId?: string;
   readonly candidateId?: string;
@@ -359,6 +427,7 @@ export type FactoryLiveOutputSnapshot = {
   readonly stderrTail?: string;
   readonly artifactSummary?: string;
   readonly artifactActivity?: ReadonlyArray<FactoryArtifactActivity>;
+  readonly evidenceContents?: ReadonlyArray<FactoryEvidenceContent>;
 };
 
 export type FactoryDebugProjection = {

@@ -225,6 +225,7 @@ test("factory presenters: selected objective card keeps detail-only fields intac
   expect(card.phaseDetail).toBe("executing");
   expect(card.statusAuthority).toBe("objective");
   expect(card.hasAuthoritativeLiveJob).toBe(false);
+  expect(card.renderedBody).toBeUndefined();
   expect(card.selfImprovement).toEqual({
     auditedAt: 7,
     auditStatus: "ready",

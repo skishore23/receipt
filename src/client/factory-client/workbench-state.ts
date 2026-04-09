@@ -2,7 +2,11 @@ import {
   DEFAULT_FACTORY_WORKBENCH_FILTER,
   type FactoryWorkbenchFilterKey,
 } from "../../views/factory-models";
-import { buildFactoryWorkbenchRouteKey } from "../../views/factory/workbench/route";
+import {
+  buildFactoryWorkbenchRouteKey,
+  inferFactoryWorkbenchBasePath,
+  normalizeFactoryWorkbenchBasePath,
+} from "../../views/factory/workbench/route";
 
 export type { FactoryWorkbenchFilterKey };
 
@@ -25,9 +29,9 @@ export type FactoryWorkbenchRouteState = {
 };
 
 export type FactoryWorkbenchEphemeralTurn = {
-  readonly surface?: "chat" | "handoff";
+  readonly surface?: "chat";
   readonly phase: "pending" | "streaming";
-  readonly statusLabel: "Sending" | "Queued" | "Starting";
+  readonly statusLabel: "Sending" | "Queued" | "Starting" | "Processing" | "Generating";
   readonly summary: string;
   readonly userText?: string;
   readonly assistantText?: string;
@@ -121,6 +125,7 @@ export const workbenchRouteKey = (input: {
   readonly page?: number;
   readonly focusKind?: FactoryWorkbenchFocusKind;
   readonly focusId?: string;
+  readonly basePath?: string;
 }): string => buildFactoryWorkbenchRouteKey(input);
 
 export const createWorkbenchRouteState = (input: {
@@ -133,6 +138,7 @@ export const createWorkbenchRouteState = (input: {
   readonly page?: number | string;
   readonly focusKind?: FactoryWorkbenchFocusKind | string;
   readonly focusId?: string;
+  readonly basePath?: string;
 }): FactoryWorkbenchRouteState => {
   const focusKind = input.focusKind === "task" || input.focusKind === "job"
     ? input.focusKind
@@ -153,7 +159,10 @@ export const createWorkbenchRouteState = (input: {
   };
   return {
     ...routeInput,
-    routeKey: workbenchRouteKey(routeInput),
+    routeKey: workbenchRouteKey({
+      ...routeInput,
+      basePath: normalizeFactoryWorkbenchBasePath(input.basePath),
+    }),
   };
 };
 
@@ -168,6 +177,7 @@ export const routeStateFromUrl = (url: URL): FactoryWorkbenchRouteState =>
     page: asString(url.searchParams.get("page")),
     focusKind: asString(url.searchParams.get("focusKind")),
     focusId: asString(url.searchParams.get("focusId")),
+    basePath: inferFactoryWorkbenchBasePath(url.pathname),
   });
 
 export const routeSearch = (route: FactoryWorkbenchRouteState): string => {
@@ -290,19 +300,21 @@ export const serializeWorkbenchReplay = (
 export const parseWorkbenchReplay = (
   raw: string | null | undefined,
   now = Date.now(),
+  basePath?: string,
 ): FactoryWorkbenchReplaySnapshot | undefined => {
   if (!raw) return undefined;
   try {
     const parsed = JSON.parse(raw) as FactoryWorkbenchReplaySnapshot;
     if (!parsed || typeof parsed !== "object") return undefined;
     if (typeof parsed.savedAt !== "number" || now - parsed.savedAt > REPLAY_TTL_MS) return undefined;
-    const route = createWorkbenchRouteState(parsed.route ?? {});
+    const route = createWorkbenchRouteState({
+      ...(parsed.route ?? {}),
+      basePath,
+    });
     const ephemeralTurn = parsed.ephemeralTurn && typeof parsed.ephemeralTurn.savedAt === "number"
       && now - parsed.ephemeralTurn.savedAt <= LIVE_OVERLAY_TTL_MS
       ? {
-          surface: parsed.ephemeralTurn.surface === "chat" || parsed.ephemeralTurn.surface === "handoff"
-            ? parsed.ephemeralTurn.surface
-            : undefined,
+          surface: parsed.ephemeralTurn.surface === "chat" ? "chat" : undefined,
           phase: parsed.ephemeralTurn.phase === "streaming" ? "streaming" : "pending",
           statusLabel: parsed.ephemeralTurn.statusLabel,
           summary: parsed.ephemeralTurn.summary,
@@ -368,5 +380,6 @@ export const mergeReplayRoute = (
     focusId: options?.preserveExplicitFocus
       ? route.focusId
       : route.focusId ?? replay.route.focusId,
+    basePath: route.routeKey,
   });
 };

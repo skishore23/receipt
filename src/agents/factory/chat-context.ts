@@ -17,6 +17,11 @@ export type FactoryChatContextMessage = {
   readonly runId: string;
   readonly ts: number;
   readonly refs: ReadonlyArray<FactoryChatContextSourceRef>;
+  /** When this assistant line came from `response.finalized` for an objective handoff run, mirrors `objective.handoff` for transcript styling. */
+  readonly objectiveHandoff?: {
+    readonly status: Extract<AgentEvent, { readonly type: "objective.handoff" }>["status"];
+    readonly title: string;
+  };
 };
 
 export type FactoryChatContextRun = {
@@ -218,6 +223,16 @@ export const projectFactoryChatContextFromReceipts = (input: {
       .map((receipt) => receipt.body.runId),
   );
 
+  const objectiveHandoffByRunId = new Map<
+    string,
+    Extract<AgentEvent, { readonly type: "objective.handoff" }>
+  >();
+  for (const receipt of candidateConversationReceipts) {
+    if (receipt.body.type === "objective.handoff") {
+      objectiveHandoffByRunId.set(receipt.body.runId, receipt.body);
+    }
+  }
+
   const messages = new Map<string, {
     role: "user" | "assistant";
     text: string;
@@ -225,6 +240,10 @@ export const projectFactoryChatContextFromReceipts = (input: {
     ts: number;
     refs: ReadonlyArray<FactoryChatContextSourceRef>;
     orderKey: number;
+    objectiveHandoff?: {
+      readonly status: Extract<AgentEvent, { readonly type: "objective.handoff" }>["status"];
+      readonly title: string;
+    };
   }>();
   const runs = new Map<string, {
     runId: string;
@@ -265,12 +284,18 @@ export const projectFactoryChatContextFromReceipts = (input: {
       : body.type === "response.finalized"
         ? asString(body.content)
         : body.type === "objective.handoff"
-          ? asString(body.output ?? body.summary)
+          ? asString(body.renderedBody ?? body.output ?? body.summary)
           : undefined;
     if (body.type === "objective.handoff" && finalizedRunIds.has(body.runId)) continue;
     if (!role || !text) continue;
     const key = `${role}:${body.runId}:${normalizeForGrouping(text)}`;
     const ref = toSourceRef(receipt);
+    const ho = body.type === "response.finalized"
+      ? objectiveHandoffByRunId.get(body.runId)
+      : undefined;
+    const objectiveHandoff = ho
+      ? { status: ho.status, title: ho.title } as const
+      : undefined;
     const existing = messages.get(key);
     if (!existing) {
       messages.set(key, {
@@ -280,6 +305,7 @@ export const projectFactoryChatContextFromReceipts = (input: {
         ts: receipt.ts,
         refs: [ref],
         orderKey: receipt.globalSeq ?? receipt.ts,
+        objectiveHandoff,
       });
       continue;
     }
@@ -288,6 +314,7 @@ export const projectFactoryChatContextFromReceipts = (input: {
       refs: mergeSourceRefs(existing.refs, ref),
       ts: Math.min(existing.ts, receipt.ts),
       orderKey: Math.min(existing.orderKey, receipt.globalSeq ?? receipt.ts),
+      objectiveHandoff: existing.objectiveHandoff ?? objectiveHandoff,
     });
   }
 
@@ -302,6 +329,7 @@ export const projectFactoryChatContextFromReceipts = (input: {
         (left.globalSeq ?? Number.MAX_SAFE_INTEGER) - (right.globalSeq ?? Number.MAX_SAFE_INTEGER)
         || left.ts - right.ts
         || left.receiptHash.localeCompare(right.receiptHash)),
+      ...(message.objectiveHandoff ? { objectiveHandoff: message.objectiveHandoff } : {}),
     }) satisfies FactoryChatContextMessage);
   const projectedRuns = [...runs.values()]
     .sort((left, right) => left.firstTs - right.firstTs || left.runId.localeCompare(right.runId))

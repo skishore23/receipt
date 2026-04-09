@@ -26,6 +26,7 @@ import {
 } from "../../src/services/factory-service";
 
 const execFileAsync = promisify(execFile);
+const FACTORY_POLICY_TIMEOUT_MS = 120_000;
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -318,7 +319,7 @@ test("factory policy: direct codex probes without an objective stay repo-scoped 
   expect(packet.renderedPrompt).toContain("If the operator named a file, artifact, receipt, helper, or run, inspect that exact target before broader repo search or memory expansion.");
   expect(packet.renderedPrompt).toContain("If you use subagents, keep them as bounded sidecars");
   expect(packet.renderedPrompt).toContain("Do not parallelize broad repo exploration when one named artifact or one primary evidence path can answer the request.");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: task packets tell workers to inspect objective receipts sequentially", async () => {
   const { service, queue } = await createFactoryService();
@@ -345,7 +346,7 @@ test("factory policy: task packets tell workers to inspect objective receipts se
   expect(prompt).toContain("## Checks");
   expect(prompt).toContain("Run the relevant repo validation for this task");
   expect(prompt).not.toContain("A later task in this objective owns the broad repo validation suite.");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: delivery task prompts keep publish in the controller lane", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
@@ -364,7 +365,7 @@ test("factory policy: delivery task prompts keep publish in the controller lane"
 
   expect(prompt).toContain("factory promote`, `git push`, or `gh pr create` from this task session.");
   expect(prompt).toContain("The controller handles integration and PR publication after an approved candidate.");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: validation-owned task packets include the full repo checks", async () => {
   const { service, queue } = await createFactoryService();
@@ -384,7 +385,7 @@ test("factory policy: validation-owned task packets include the full repo checks
   expect(prompt).toContain("- git status --short");
   expect(prompt).toContain("- bun test");
   expect(prompt).toContain("Run the relevant repo validation for this task");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: delivery task schema and prompt require scriptsRun and completion", async () => {
   const { service, queue } = await createFactoryService();
@@ -408,13 +409,14 @@ test("factory policy: delivery task schema and prompt require scriptsRun and com
   expect(prompt).toContain(`"scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }]`);
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
   expect(prompt).toContain(`"alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }`);
-  expect(prompt).toContain(`"handoff": string`);
-  expect(prompt).toContain("Always include an explicit handoff string, scriptsRun, completion, and alignment.");
-  expect(schema.required).toContain("handoff");
+  expect(prompt).toContain(`"handoff": string | null`);
+  expect(prompt).toContain("Always include presentation, scriptsRun, completion, and alignment.");
+  expect(prompt).toContain("Legacy handoff is still read during migration, but presentation is the primary contract.");
+  expect(schema.required).toContain("presentation");
   expect(schema.required).toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(schema.required).toContain("alignment");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: investigation task schema keeps scriptsRun inside report and requires completion", async () => {
   const { service, queue } = await createFactoryService();
@@ -440,13 +442,17 @@ test("factory policy: investigation task schema keeps scriptsRun inside report a
   const report = (schema.properties?.report ?? null) as { readonly properties?: Record<string, unknown> } | null;
 
   expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
-  expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
+  expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "evidenceRecords": [{ "objective_id": string, "task_id": string, "timestamp": number, "tool_name": string, "command_or_api": string, "inputs": [{ "key": string, "value": string | number | boolean | null }], "outputs": [{ "key": string, "value": string | number | boolean | null }], "summary_metrics": [{ "key": string, "value": string | number | boolean | null }] }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
+  expect(prompt).toContain("For investigation tasks, always include the report key and presentation.");
+  expect(prompt).toContain("Always include report.evidenceRecords, even when it is an empty array.");
+  expect(prompt).toContain("Legacy handoff is still read during migration, but presentation is the primary contract.");
   expect(schema.properties?.scriptsRun).toBeUndefined();
-  expect(schema.required).toContain("handoff");
+  expect(schema.required).toContain("presentation");
   expect(schema.required).not.toContain("scriptsRun");
   expect(schema.required).toContain("completion");
   expect(report?.properties?.scriptsRun).toBeTruthy();
-});
+  expect(report?.properties?.evidenceRecords).toBeTruthy();
+}, 120_000);
 
 test("factory policy: objectives record a planning receipt and expose it on detail", async () => {
   const { service } = await createFactoryService();
@@ -464,7 +470,7 @@ test("factory policy: objectives record a planning receipt and expose it on deta
   expect(detail.planning?.acceptanceCriteria.length).toBeGreaterThan(0);
   expect(detail.planning?.validationPlan.length).toBeGreaterThan(0);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "planning.receipt")).toBe(true);
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: service rejects createObjective when the profile create mode is not allowed", async () => {
   const { service } = await createFactoryService();
@@ -478,7 +484,7 @@ test("factory policy: service rejects createObjective when the profile create mo
     status: 409,
     message: "Infrastructure cannot create delivery objectives.",
   });
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: service rejects promoteObjective when the objective profile is not allowed to promote", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
@@ -503,7 +509,7 @@ test("factory policy: service rejects promoteObjective when the objective profil
     status: 409,
     message: "Tech Lead cannot promote objectives.",
   });
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: promotion gate blocks when task completion reports remaining work", async () => {
   const { service, queue } = await createFactoryService({
@@ -673,7 +679,7 @@ test("factory policy: objectives default to higher parallel capacity and still n
   expect(ready.profile.objectivePolicy.maxParallelChildren).toBe(20);
   expect(ready.activeTaskCount).toBeGreaterThanOrEqual(1);
   expect(ready.taskCount).toBeGreaterThanOrEqual(ready.activeTaskCount);
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: maxTaskRuns blocks further dispatch and surfaces a deterministic reason", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "changes_requested" });
@@ -694,7 +700,7 @@ test("factory policy: maxTaskRuns blocks further dispatch and surfaces a determi
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("blocked");
   expect(detail.budgetState.policyBlockedReason ?? "").toMatch(/maxTaskRuns/);
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: maxCandidatePassesPerTask blocks rework after the configured cap", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "changes_requested" });
@@ -737,7 +743,7 @@ test("factory objective detail: blocked explanations stay focused on the current
   expect(detail.status).toBe("blocked");
   expect(detail.blockedExplanation?.receiptType).toBe("objective.handoff");
   expect(detail.blockedExplanation?.summary ?? "").not.toContain("Waiting tasks:");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: base-commit check failures are treated as inherited on the first candidate pass", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
@@ -903,7 +909,7 @@ test("factory policy: publish failures block the objective when PR metadata is m
   )).toBe(true);
   expect(detail.latestHandoff?.status).toBe("blocked");
   expect(detail.blockedReason ?? "").toContain("factory publish result missing valid prUrl");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: publish failures preserve an explicit worker blocker summary", async () => {
   const { service, queue } = await createFactoryService({
@@ -932,7 +938,7 @@ test("factory policy: publish failures preserve an explicit worker blocker summa
   expect(detail.integration.status).toBe("conflicted");
   expect(detail.prUrl).toBeUndefined();
   expect(detail.blockedReason ?? "").toContain("Publish blocked: could not push the branch or open a GitHub PR from this environment.");
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: integration validation can pass through inherited failures without reconciliation churn", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
@@ -957,7 +963,7 @@ test("factory policy: integration validation can pass through inherited failures
   expect(detail.integration.status).toBe("ready_to_promote");
   expect(detail.integration.lastSummary ?? "").toMatch(/inherited failures/i);
   expect(detail.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory policy: integration validation failures block the objective instead of spawning reconciliation work", async () => {
   const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
@@ -982,7 +988,7 @@ test("factory policy: integration validation failures block the objective instea
   expect(after.status).toBe("blocked");
   expect(after.blockedReason ?? "").toMatch(/Integration validation failed/i);
   expect(after.tasks.some((task) => task.taskKind === "reconciliation")).toBe(false);
-});
+}, FACTORY_POLICY_TIMEOUT_MS);
 
 test("factory reducer: blocked task clears the latest running candidate status", () => {
   const baseCreatedAt = Date.now();

@@ -1,5 +1,5 @@
 import type { ObjectiveAnalysis } from "../factory-cli/analyze";
-import type { FactoryState } from "../modules/factory";
+import type { FactoryObjectiveHandoffRecord, FactoryState } from "../modules/factory";
 import type {
   FactoryBoardProjection,
   FactoryObjectiveDisplayState,
@@ -109,6 +109,8 @@ export type FactorySelectedObjectiveCard = {
   readonly hasAuthoritativeLiveJob?: boolean;
   readonly summary?: string;
   readonly bottomLine?: string;
+  readonly renderedBody?: string;
+  readonly latestHandoff?: FactoryObjectiveHandoffRecord;
   readonly debugLink: string;
   readonly receiptsLink: string;
   readonly nextAction?: string;
@@ -404,6 +406,16 @@ export type FactoryWorkbenchPageModel = {
   readonly workspace: FactoryWorkbenchWorkspaceModel;
   readonly chat: FactoryChatIslandModel;
   readonly inspector?: FactoryInspectorModel;
+};
+
+export type WorkbenchVersionEnvelope = {
+  readonly routeKey: string;
+  readonly profileId: string;
+  readonly chatId: string;
+  readonly objectiveId?: string;
+  readonly boardVersion: string;
+  readonly focusVersion: string;
+  readonly chatVersion: string;
 };
 
 export type FactoryWorkbenchFilterKey =

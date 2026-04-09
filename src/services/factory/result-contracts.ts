@@ -7,6 +7,7 @@ import type {
   FactoryInvestigationReport,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskPresentationRecord,
 } from "../../modules/factory";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -105,6 +106,21 @@ export const FACTORY_TASK_SCRIPT_RUN_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_TASK_PRESENTATION_SCHEMA = {
+  type: "object",
+  properties: {
+    kind: { type: "string", enum: ["inline", "artifacts", "investigation_report", "generic"] },
+    inlineBody: { type: ["string", "null"] },
+    primaryArtifactLabels: {
+      type: ["array", "null"],
+      items: { type: "string" },
+    },
+    renderHint: { type: "string", enum: ["table", "report", "list", "generic"] },
+  },
+  required: ["kind", "inlineBody", "primaryArtifactLabels", "renderHint"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_TASK_COMPLETION_SCHEMA = {
   type: "object",
   properties: {
@@ -171,7 +187,8 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
   properties: {
     outcome: { type: "string", enum: ["approved", "changes_requested", "blocked", "partial"] },
     summary: { type: "string" },
-    handoff: { type: "string" },
+    handoff: { type: ["string", "null"] },
+    presentation: FACTORY_TASK_PRESENTATION_SCHEMA,
     artifacts: {
       type: "array",
       items: FACTORY_TASK_ARTIFACT_SCHEMA,
@@ -184,7 +201,7 @@ export const FACTORY_TASK_RESULT_SCHEMA = {
     alignment: FACTORY_TASK_ALIGNMENT_SCHEMA,
     nextAction: { type: ["string", "null"] },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
+  required: ["outcome", "summary", "handoff", "presentation", "artifacts", "scriptsRun", "completion", "alignment", "nextAction"],
   additionalProperties: false,
 } as const;
 
@@ -260,6 +277,7 @@ export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
     outcome: FACTORY_TASK_RESULT_SCHEMA.properties.outcome,
     summary: FACTORY_TASK_RESULT_SCHEMA.properties.summary,
     handoff: FACTORY_TASK_RESULT_SCHEMA.properties.handoff,
+    presentation: FACTORY_TASK_RESULT_SCHEMA.properties.presentation,
     artifacts: FACTORY_TASK_RESULT_SCHEMA.properties.artifacts,
     completion: FACTORY_TASK_RESULT_SCHEMA.properties.completion,
     nextAction: FACTORY_TASK_RESULT_SCHEMA.properties.nextAction,
@@ -268,9 +286,79 @@ export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
       type: ["object", "null"],
     },
   },
-  required: ["outcome", "summary", "handoff", "artifacts", "completion", "nextAction", "report"],
+  required: ["outcome", "summary", "handoff", "presentation", "artifacts", "completion", "nextAction", "report"],
   additionalProperties: false,
 } as const;
+
+const normalizeArtifactLabels = (value: unknown): ReadonlyArray<string> => asReadonlyStringArray(value);
+
+export const normalizeTaskPresentationRecord = (input: {
+  readonly value: unknown;
+  readonly handoff?: string;
+  readonly summary: string;
+  readonly workerArtifacts?: ReadonlyArray<{
+    readonly label: string;
+    readonly path: string | null | undefined;
+    readonly summary: string | null | undefined;
+  }>;
+  readonly report?: FactoryInvestigationReport;
+}): FactoryTaskPresentationRecord => {
+  const record = isRecord(input.value) ? input.value : undefined;
+  if (record) {
+    const kind = record.kind === "inline"
+      || record.kind === "artifacts"
+      || record.kind === "investigation_report"
+      || record.kind === "generic"
+      ? record.kind
+      : undefined;
+    if (kind) {
+      const renderHint = record.renderHint === "table"
+        || record.renderHint === "report"
+        || record.renderHint === "list"
+        || record.renderHint === "generic"
+        ? record.renderHint
+        : "generic";
+      const inlineBody = clipText(typeof record.inlineBody === "string" ? record.inlineBody : undefined, 4000);
+      const primaryArtifactLabels = normalizeArtifactLabels(record.primaryArtifactLabels);
+      return {
+        kind,
+        renderHint,
+        ...(inlineBody ? { inlineBody } : {}),
+        ...(primaryArtifactLabels.length > 0 ? { primaryArtifactLabels } : {}),
+      };
+    }
+  }
+  const handoff = clipText(input.handoff, 4000);
+  if (input.report) {
+    return {
+      kind: "investigation_report",
+      renderHint: "report",
+      ...(handoff ? { inlineBody: handoff } : {}),
+      ...(input.workerArtifacts?.length
+        ? { primaryArtifactLabels: input.workerArtifacts.map((item) => item.label) }
+        : {}),
+    };
+  }
+  if (handoff) {
+    return {
+      kind: "inline",
+      renderHint: "generic",
+      inlineBody: handoff,
+    };
+  }
+  if ((input.workerArtifacts?.length ?? 0) > 0) {
+    return {
+      kind: "artifacts",
+      renderHint: "generic",
+      primaryArtifactLabels: input.workerArtifacts!.map((item) => item.label),
+    };
+  }
+  return {
+    kind: "generic",
+    renderHint: "generic",
+    inlineBody: input.summary,
+  };
+};
 
 export const normalizeExecutionScriptsRun = (
   value: unknown,

@@ -1,7 +1,12 @@
 import type { Hono } from "hono";
 
 import { html } from "../../../framework/http";
-import { runtimeDashboardIsland, runtimeShell, type RuntimeDashboardModel } from "../../../views/runtime";
+import {
+  runtimeDashboardIsland,
+  runtimeDashboardLiveIsland,
+  runtimeShell,
+  type RuntimeDashboardModel,
+} from "../../../views/runtime";
 
 type RouteWrap = <T>(
   fn: () => Promise<T>,
@@ -24,6 +29,6 @@ export const registerRuntimeRoutes = (input: {
 
   app.get("/runtime/island", async () => wrap(
     () => loadRuntimeDashboard(),
-    (model) => html(runtimeDashboardIsland(model)),
+    (model) => html(runtimeDashboardLiveIsland(model)),
   ));
 };

@@ -120,7 +120,7 @@ test("factory investigation: no-diff reports complete without integration and sy
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
       const schema = JSON.parse(await fs.readFile(input.outputSchemaPath!, "utf-8")) as Record<string, unknown>;
-      expect(schema.required).toEqual(["outcome", "summary", "handoff", "artifacts", "completion", "nextAction", "report"]);
+      expect(schema.required).toEqual(["outcome", "summary", "presentation", "artifacts", "completion", "nextAction", "report"]);
       const report = (schema.properties as Record<string, Record<string, unknown>>).report;
       expect(report.type).toEqual(["object", "null"]);
       expect(report.required).toEqual(["conclusion", "evidence", "evidenceRecords", "scriptsRun", "disagreements", "nextSteps"]);

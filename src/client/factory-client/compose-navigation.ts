@@ -41,6 +41,7 @@ export const parseComposeResponse = (value: unknown): FactoryComposeResponseBody
           focusId: asString(selection.focusId),
         }
       : undefined,
+    queueDepth: typeof record.queueDepth === "number" ? record.queueDepth : undefined,
   };
 };
 
@@ -53,7 +54,17 @@ export const resolveFactoryUrl = (value: string | undefined): URL | null => {
   }
 };
 
-export const shellPath = () => "/factory";
+export const currentWorkbenchShellPath = (): "/factory" | "/factory-new" => {
+  const bodyBase = typeof document !== "undefined"
+    ? document.body?.getAttribute("data-shell-base")
+    : null;
+  if (bodyBase === "/factory-new") return "/factory-new";
+  const pathname = typeof window !== "undefined" && window.location
+    ? window.location.pathname
+    : "";
+  return pathname.startsWith("/factory-new") ? "/factory-new" : "/factory";
+};
+export const shellPath = () => currentWorkbenchShellPath();
 
 export const isInlineFactoryLocation = (location: string): boolean => {
   const url = resolveFactoryUrl(location);
@@ -107,7 +118,9 @@ export const composerFeedback = (
     formAction
     && (
       formAction.indexOf("/factory/compose") >= 0
+      || formAction.indexOf("/factory-new/compose") >= 0
       || formAction.indexOf("/factory/workbench") >= 0
+      || formAction.indexOf("/factory-new/workbench") >= 0
     ),
   );
   const hasThread = Boolean(

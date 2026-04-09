@@ -17,6 +17,7 @@ export type FactoryComposeResponseBody = {
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
   };
+  readonly queueDepth?: number;
   readonly error?: string;
 };
 

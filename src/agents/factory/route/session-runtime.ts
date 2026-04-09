@@ -1,12 +1,9 @@
-import { createHash } from "node:crypto";
-
 import type { Receipt } from "@receipt/core/types";
 import type { Runtime } from "@receipt/core/runtime";
 
-import { makeEventId, optionalTrimmedString } from "../../../framework/http";
-import { agentRunStream } from "../../agent.streams";
 import type { AgentCmd, AgentEvent, AgentState } from "../../../modules/agent";
 import type { JobRecord } from "../../../modules/job";
+import { agentRunStream } from "../../agent.streams";
 import {
   factoryChatSessionStream,
   type FactoryChatProfile,
@@ -26,7 +23,6 @@ import type {
   FactorySelectedObjectiveCard,
 } from "../../../views/factory-models";
 import type { QueueJob } from "../../../adapters/sqlite-queue";
-import { renderObjectiveHandoffMessage } from "../chat-items";
 import {
   buildActiveCodexCard,
   buildLiveChildCards,
@@ -42,140 +38,14 @@ import {
   isRelevantShellJob,
   type AgentRunChain,
 } from "../shared";
+import {
+  writeObjectiveHandoffToSession,
+  type ObjectiveHandoffView,
+} from "../session-handoff";
 
 type FactoryObjectiveListItem = Awaited<ReturnType<FactoryService["listObjectives"]>>[number];
 type FactoryObjectiveDetailRecord = Awaited<ReturnType<FactoryService["getObjective"]>>;
 type FactoryObjectiveStateRecord = Awaited<ReturnType<FactoryService["getObjectiveState"]>>;
-
-type ObjectiveHandoffPresence = {
-  readonly problem: boolean;
-  readonly binding: boolean;
-  readonly handoff: boolean;
-  readonly finalized: boolean;
-  readonly status: boolean;
-};
-
-const hasCompleteObjectiveHandoff = (presence: ObjectiveHandoffPresence): boolean =>
-  presence.problem
-  && presence.binding
-  && presence.handoff
-  && presence.finalized
-  && presence.status;
-
-type ObjectiveHandoffView = {
-  readonly objectiveId: string;
-  readonly title: string;
-  readonly status: string;
-  readonly phase: string;
-  readonly updatedAt?: number;
-  readonly summary?: string;
-  readonly latestSummary?: string;
-  readonly blockedReason?: string;
-  readonly blockedExplanation?: string | { readonly summary: string };
-  readonly nextAction?: string;
-  readonly latestDecision?: {
-    readonly summary: string;
-    readonly at: number;
-  };
-  readonly latestDecisionSummary?: string;
-  readonly latestDecisionAt?: number;
-  readonly latestHandoff?: {
-    readonly status: "blocked" | "completed" | "failed" | "canceled";
-    readonly summary: string;
-    readonly output?: string;
-    readonly blocker?: string;
-    readonly nextAction?: string;
-    readonly handoffKey: string;
-    readonly sourceUpdatedAt: number;
-  };
-};
-
-const objectiveHandoffStatus = (
-  objective: Pick<ObjectiveHandoffView, "status" | "phase">,
-): "blocked" | "completed" | "failed" | "canceled" | undefined => {
-  const phase = optionalTrimmedString(objective.phase)?.toLowerCase();
-  if (phase === "blocked" || phase === "completed" || phase === "failed" || phase === "canceled") return phase;
-  const status = optionalTrimmedString(objective.status)?.toLowerCase();
-  if (status === "blocked" || status === "completed" || status === "failed" || status === "canceled") return status;
-  return undefined;
-};
-
-const objectiveBlockedExplanation = (
-  objective: Pick<ObjectiveHandoffView, "blockedExplanation" | "blockedReason">,
-): string | undefined => {
-  const structured = objective.blockedExplanation;
-  if (typeof structured === "string") return optionalTrimmedString(structured);
-  return optionalTrimmedString(structured?.summary) ?? optionalTrimmedString(objective.blockedReason);
-};
-
-const isGenericCompletedNextAction = (value?: string): boolean => {
-  const normalized = optionalTrimmedString(value)?.toLowerCase();
-  return normalized === "investigation is complete." || normalized === "objective is complete.";
-};
-
-const buildObjectiveHandoffPayload = (
-  objective: ObjectiveHandoffView,
-): Extract<AgentEvent, { readonly type: "objective.handoff" }> | undefined => {
-  if (objective.latestHandoff) {
-    return {
-      type: "objective.handoff",
-      runId: `run_objective_handoff_${objective.objectiveId}_${objective.latestHandoff.handoffKey}`,
-      agentId: "orchestrator",
-      objectiveId: objective.objectiveId,
-      title: objective.title,
-      status: objective.latestHandoff.status,
-      summary: objective.latestHandoff.summary,
-      ...(objective.latestHandoff.output ? { output: objective.latestHandoff.output } : {}),
-      ...(objective.latestHandoff.blocker ? { blocker: objective.latestHandoff.blocker } : {}),
-      ...(objective.latestHandoff.nextAction ? { nextAction: objective.latestHandoff.nextAction } : {}),
-      handoffKey: objective.latestHandoff.handoffKey,
-      sourceUpdatedAt: objective.latestHandoff.sourceUpdatedAt,
-    };
-  }
-  const status = objectiveHandoffStatus(objective);
-  if (!status) return undefined;
-  const summary = optionalTrimmedString(
-    objective.summary
-    ?? objective.latestSummary
-    ?? objectiveBlockedExplanation(objective)
-    ?? objective.latestDecision?.summary
-    ?? objective.latestDecisionSummary
-    ?? `${objective.title} is ${status}.`,
-  ) ?? `${objective.title} is ${status}.`;
-  const blocker = status === "blocked" ? objectiveBlockedExplanation(objective) : undefined;
-  const nextAction = optionalTrimmedString(objective.nextAction);
-  const effectiveNextAction = status === "completed" && isGenericCompletedNextAction(nextAction)
-    ? undefined
-    : nextAction;
-  const sourceUpdatedAt = objective.latestDecision?.at
-    ?? objective.latestDecisionAt
-    ?? objective.updatedAt
-    ?? 0;
-  const handoffKey = createHash("sha1")
-    .update(JSON.stringify({
-      objectiveId: objective.objectiveId,
-      status,
-      summary,
-      blocker,
-      nextAction: effectiveNextAction,
-      sourceUpdatedAt,
-    }))
-    .digest("hex")
-    .slice(0, 16);
-  return {
-    type: "objective.handoff",
-    runId: `run_objective_handoff_${objective.objectiveId}_${handoffKey}`,
-    agentId: "orchestrator",
-    objectiveId: objective.objectiveId,
-    title: objective.title,
-    status,
-    summary,
-    ...(blocker ? { blocker } : {}),
-    ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),
-    handoffKey,
-    sourceUpdatedAt,
-  };
-};
 
 export const createFactoryRouteSessionRuntime = (input: {
   readonly service: FactoryService;
@@ -213,103 +83,13 @@ export const createFactoryRouteSessionRuntime = (input: {
     readonly objective?: ObjectiveHandoffView;
   }): Promise<void> => {
     if (!handoffInput.chatId || !handoffInput.objective) return;
-    const handoff = buildObjectiveHandoffPayload(handoffInput.objective);
-    if (!handoff) return;
-    const renderedHandoff = renderObjectiveHandoffMessage(handoff);
-    const sessionStream = factoryChatSessionStream(input.service.git.repoRoot, handoffInput.profileId, handoffInput.chatId);
-    const sessionChain = await input.agentRuntime.chain(sessionStream);
-    const latestSessionHandoff = [...sessionChain].reverse().find((receipt) =>
-      receipt.body.type === "objective.handoff"
-      && receipt.body.objectiveId === handoff.objectiveId,
-    )?.body;
-    const runStream = agentRunStream(sessionStream, handoff.runId);
-    const runChain = await input.agentRuntime.chain(runStream);
-    const collectPresence = (
-      chain: ReadonlyArray<Receipt<AgentEvent>>,
-      streamType: "session" | "run",
-    ): ObjectiveHandoffPresence => ({
-      problem: chain.some((receipt) =>
-        receipt.body.type === "problem.set"
-        && receipt.body.runId === handoff.runId,
-      ),
-      binding: chain.some((receipt) =>
-        receipt.body.type === "thread.bound"
-        && receipt.body.runId === handoff.runId
-        && receipt.body.objectiveId === handoff.objectiveId
-        && receipt.body.chatId === handoffInput.chatId,
-      ),
-      handoff: streamType === "session"
-        ? latestSessionHandoff?.type === "objective.handoff"
-          && latestSessionHandoff.handoffKey === handoff.handoffKey
-        : chain.some((receipt) =>
-          receipt.body.type === "objective.handoff"
-          && receipt.body.handoffKey === handoff.handoffKey
-        ),
-      finalized: chain.some((receipt) =>
-        receipt.body.type === "response.finalized"
-        && receipt.body.runId === handoff.runId,
-      ),
-      status: chain.some((receipt) =>
-        receipt.body.type === "run.status"
-        && receipt.body.runId === handoff.runId
-        && receipt.body.status === "completed",
-      ),
-    });
-    const runPresence = collectPresence(runChain, "run");
-    const sessionPresence = collectPresence(sessionChain, "session");
-    if (hasCompleteObjectiveHandoff(sessionPresence) && hasCompleteObjectiveHandoff(runPresence)) {
-      return;
-    }
-    const problemEvent: Extract<AgentEvent, { readonly type: "problem.set" }> = {
-      type: "problem.set",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      problem: `Objective handoff for ${handoff.title}`,
-    };
-    const threadBoundEvent: Extract<AgentEvent, { readonly type: "thread.bound" }> = {
-      type: "thread.bound",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      objectiveId: handoff.objectiveId,
+    await writeObjectiveHandoffToSession({
+      agentRuntime: input.agentRuntime,
+      repoRoot: input.service.git.repoRoot,
+      profileId: handoffInput.profileId,
       chatId: handoffInput.chatId,
-      reason: "dispatch_update",
-    };
-    const finalEvent: Extract<AgentEvent, { readonly type: "response.finalized" }> = {
-      type: "response.finalized",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      content: renderedHandoff.body,
-    };
-    const statusEvent: Extract<AgentEvent, { readonly type: "run.status" }> = {
-      type: "run.status",
-      runId: handoff.runId,
-      agentId: "orchestrator",
-      status: "completed",
-      note: `objective ${handoff.status} handoff`,
-    };
-    const buildMissingEvents = (presence: ObjectiveHandoffPresence): AgentEvent[] => [
-      ...(!presence.problem ? [problemEvent] : []),
-      ...(!presence.binding ? [threadBoundEvent] : []),
-      ...(!presence.handoff ? [handoff] : []),
-      ...(!presence.finalized ? [finalEvent] : []),
-      ...(!presence.status ? [statusEvent] : []),
-    ];
-    const emitMissingEvents = async (
-      stream: string,
-      events: ReadonlyArray<AgentEvent>,
-    ): Promise<void> => {
-      for (const event of events) {
-        await input.agentRuntime.execute(stream, {
-          type: "emit",
-          eventId: makeEventId(stream),
-          event,
-        });
-      }
-    };
-    const runEvents = buildMissingEvents(runPresence);
-    const sessionEvents = buildMissingEvents(sessionPresence);
-    if (runEvents.length > 0) await emitMissingEvents(runStream, runEvents);
-    if (sessionEvents.length > 0) await emitMissingEvents(sessionStream, sessionEvents);
+      objective: handoffInput.objective,
+    });
   };
 
   const queueJobFromRecord = (job: JobRecord): QueueJob => ({

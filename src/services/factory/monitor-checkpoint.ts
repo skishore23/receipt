@@ -1,24 +1,47 @@
 import { z } from "zod";
 import type { FactoryObjectiveMode } from "../../modules/factory";
+import type { MonitorCheckpointAction } from "../../modules/factory/events";
 
 const MonitorSubtaskSchema = z.object({
   title: z.string(),
   prompt: z.string(),
-  dependsOn: z.array(z.string()).optional(),
+  dependsOn: z.array(z.string()).nullable(),
 });
 
 export const MonitorCheckpointResultSchema = z.object({
   assessment: z.enum(["progressing", "stalled", "off_track", "failing"]),
   reasoning: z.string(),
-  action: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("continue") }),
-    z.object({ kind: z.literal("steer"), guidance: z.string() }),
-    z.object({ kind: z.literal("split"), subtasks: z.array(MonitorSubtaskSchema).min(2).max(5) }),
-    z.object({ kind: z.literal("abort"), reason: z.string() }),
-  ]),
+  action: z.object({
+    kind: z.enum(["continue", "steer", "split", "abort"]),
+    guidance: z.string().nullable(),
+    subtasks: z.array(MonitorSubtaskSchema).min(2).max(5).nullable(),
+    reason: z.string().nullable(),
+  }),
 });
 
-export type MonitorCheckpointResult = z.infer<typeof MonitorCheckpointResultSchema>;
+export type MonitorCheckpointResult = {
+  readonly assessment: "progressing" | "stalled" | "off_track" | "failing";
+  readonly reasoning: string;
+  readonly action: MonitorCheckpointAction;
+};
+
+export const parseMonitorCheckpointAction = (
+  flat: z.infer<typeof MonitorCheckpointResultSchema>["action"],
+): MonitorCheckpointAction => {
+  switch (flat.kind) {
+    case "continue": return { kind: "continue" };
+    case "steer": return { kind: "steer", guidance: flat.guidance ?? "" };
+    case "split": return {
+      kind: "split",
+      subtasks: (flat.subtasks ?? []).map((subtask) => ({
+        title: subtask.title,
+        prompt: subtask.prompt,
+        ...(subtask.dependsOn ? { dependsOn: subtask.dependsOn } : {}),
+      })),
+    };
+    case "abort": return { kind: "abort", reason: flat.reason ?? "" };
+  }
+};
 
 const PROPORTIONALITY_RULES = [
   "Proportionality: for investigation tasks, the worker should answer the question as fast as possible.",

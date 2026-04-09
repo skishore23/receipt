@@ -104,6 +104,10 @@ export const buildObjectiveHandoffEvent = (input: {
   readonly state: FactoryState;
   readonly status: FactoryObjectiveHandoffStatus;
   readonly summary: string;
+  readonly renderedBody?: string;
+  readonly renderSourceHash?: string;
+  readonly renderedAt?: number;
+  readonly renderedBy?: "orchestrator_llm" | "fallback";
   readonly output?: string;
   readonly sourceUpdatedAt: number;
   readonly blocker?: string;
@@ -116,6 +120,10 @@ export const buildObjectiveHandoffEvent = (input: {
       objectiveId: input.state.objectiveId,
       status: input.status,
       summary: input.summary,
+      renderedBody: input.renderedBody ?? input.output ?? input.summary,
+      renderSourceHash: input.renderSourceHash,
+      renderedAt: input.renderedAt ?? input.sourceUpdatedAt,
+      renderedBy: input.renderedBy,
       blocker: input.blocker,
       nextAction: effectiveNextAction,
       sourceUpdatedAt: input.sourceUpdatedAt,
@@ -128,6 +136,10 @@ export const buildObjectiveHandoffEvent = (input: {
     title: input.state.title,
     status: input.status,
     summary: input.summary,
+    renderedBody: input.renderedBody ?? input.output ?? input.summary,
+    ...(input.renderSourceHash ? { renderSourceHash: input.renderSourceHash } : {}),
+    ...(input.renderedAt ? { renderedAt: input.renderedAt } : {}),
+    ...(input.renderedBy ? { renderedBy: input.renderedBy } : {}),
     ...(input.output ? { output: input.output } : {}),
     ...(input.blocker ? { blocker: input.blocker } : {}),
     ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),

@@ -7,6 +7,7 @@ import type {
   FactoryState,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskPresentationRecord,
   FactoryTaskResultOutcome,
 } from "../../modules/factory";
 
@@ -39,6 +40,7 @@ export type FactoryTaskResultPlannerInput = {
     readonly headCommit: string;
     readonly summary: string;
     readonly handoff: string;
+    readonly presentation?: FactoryTaskPresentationRecord;
     readonly completion: FactoryTaskCompletionRecord;
     readonly alignment?: FactoryTaskAlignmentRecord;
     readonly checkResults: ReadonlyArray<FactoryCheckResult>;
@@ -100,6 +102,7 @@ export type FactoryPlannerEffect =
       readonly headCommit: string;
       readonly summary: string;
       readonly handoff: string;
+      readonly presentation?: FactoryTaskPresentationRecord;
       readonly completion: FactoryTaskCompletionRecord;
       readonly alignment?: FactoryTaskAlignmentRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
@@ -115,6 +118,7 @@ export type FactoryPlannerEffect =
       readonly status: FactoryCandidateReviewStatus;
       readonly summary: string;
       readonly handoff: string;
+      readonly presentation?: FactoryTaskPresentationRecord;
       readonly reviewedAt: number;
     }
   | {

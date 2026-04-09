@@ -737,6 +737,24 @@ export const syncChangedChatContextProjections = async (
   return streams;
 };
 
+export const resolveObjectiveChatBinding = async (
+  dataDir: string,
+  objectiveId: string,
+  profileId: string,
+): Promise<{ readonly chatId: string; readonly profileId: string } | undefined> => {
+  await syncChangedChatContextProjections(dataDir).catch(() => undefined);
+  const db = getReceiptDb(dataDir);
+  const row = db.read(() => db.sqlite.query(`
+    SELECT chat_id AS chatId, profile_id AS profileId
+    FROM chat_context_projection
+    WHERE bound_objective_id = ? AND profile_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(objectiveId, profileId) as { readonly chatId?: string; readonly profileId?: string } | undefined);
+  const chatId = row?.chatId?.trim();
+  return chatId ? { chatId, profileId } : undefined;
+};
+
 export const readChatContextProjection = (
   dataDir: string,
   sessionStream: string,

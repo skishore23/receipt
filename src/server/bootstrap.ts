@@ -81,6 +81,8 @@ import {
   listChangesAfter,
   pollLatestChangeSeq,
 } from "../db/client";
+import { resolveObjectiveChatBinding } from "../db/projectors";
+import { writeObjectiveHandoffToSession } from "../agents/factory/session-handoff";
 
 // ============================================================================
 // Config
@@ -449,8 +451,18 @@ const createAgentRunner =
           continuationDepth: parseContinuationDepth(payload.continuationDepth),
         })
       : undefined;
+    const publishPhase = (phase: string, summary: string) => {
+      sse.publishData(
+        spec.sseTopic,
+        stream,
+        "agent-phase",
+        JSON.stringify({ runId, phase, summary }),
+      );
+    };
     publishStreamingReset();
+    publishPhase("processing", "Preparing context and tools.");
     try {
+      let firstLlmCall = true;
       const runnerResult = await spec.runFn({
         ...payloadWithSession,
         stream,
@@ -460,8 +472,12 @@ const createAgentRunner =
         config,
         runtime: spec.runtime,
         prompts: spec.prompts,
-        llmText: (opts: Record<string, unknown>) =>
-          llmText({
+        llmText: (opts: Record<string, unknown>) => {
+          if (firstLlmCall) {
+            firstLlmCall = false;
+            publishPhase("generating", "Generating a response.");
+          }
+          return llmText({
             ...(opts as { system?: string; user: string }),
             onDelta: async (delta) => {
               if (!delta) return;
@@ -480,7 +496,8 @@ const createAgentRunner =
                 );
               }
             },
-          }),
+          });
+        },
         model: spec.model,
         promptHash: spec.promptHash,
         promptPath: spec.promptPath,
@@ -561,6 +578,23 @@ const { service: factoryService } = createFactoryServiceRuntime({
         await redriveQueuedJobRef.current?.(job);
       }
     : undefined,
+  onObjectiveHandoff: async (input) => {
+    const binding = await resolveObjectiveChatBinding(DATA_DIR, input.objectiveId, input.profileId);
+    if (!binding) return;
+    await writeObjectiveHandoffToSession({
+      agentRuntime,
+      repoRoot: WORKSPACE_ROOT,
+      profileId: binding.profileId,
+      chatId: binding.chatId,
+      objective: {
+        objectiveId: input.objectiveId,
+        title: input.title,
+        status: input.status,
+        phase: input.phase,
+        latestHandoff: input.handoff,
+      },
+    });
+  },
 });
 factoryServiceRef = factoryService;
 const factoryWorkerHandlers = createFactoryWorkerHandlers(factoryService, {

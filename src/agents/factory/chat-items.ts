@@ -476,32 +476,27 @@ export const renderObjectiveHandoffMessage = (
   readonly body: string;
   readonly meta: string;
 } => {
-  const title = event.title.trim();
+  const terminalBody = event.renderedBody ?? event.output ?? event.summary;
   if (event.status === "blocked") {
     const lines = [
-      `${title} is blocked and handed back to Chat.`,
-      event.summary ? `What we know: ${event.summary}` : "",
-      event.blocker && event.blocker !== event.summary ? `Still missing: ${event.blocker}` : "",
-      event.nextAction ? `Tracked next step: ${event.nextAction}` : "",
-      "Chat can explain the current evidence or inspect the repo with a read-only Codex probe. Use `/react <guidance>` to continue the tracked objective.",
+      terminalBody,
+      event.blocker && event.blocker !== event.summary ? `Blocked on: ${event.blocker}` : "",
+      event.nextAction ? `Next: ${event.nextAction}` : "",
     ].filter(Boolean);
     return { body: lines.join("\n\n"), meta: "Blocked handoff" };
   }
   if (event.status === "completed") {
     const nextAction = event.nextAction?.trim();
     const lines = [
-      `${title} finished and is back with Chat.`,
-      event.output ?? event.summary,
+      terminalBody,
       nextAction && nextAction !== event.summary && !isGenericCompletedNextAction(nextAction)
         ? `Next: ${nextAction}`
         : "",
-      "Ask a new question in chat, or reopen the objective if you want to keep working from this result.",
     ].filter(Boolean);
     return { body: lines.join("\n\n"), meta: "Completed handoff" };
   }
   const lines = [
-    `${title} ended ${event.status} and handed back to Chat.`,
-    event.summary,
+    terminalBody,
     event.nextAction ? `Next: ${event.nextAction}` : "",
   ].filter(Boolean);
   return {
@@ -510,15 +505,29 @@ export const renderObjectiveHandoffMessage = (
   };
 };
 
+const terminalObjectiveHandoffStatus = (
+  status: Extract<AgentEvent, { readonly type: "objective.handoff" }>["status"],
+): boolean => status === "blocked" || status === "completed" || status === "failed" || status === "canceled";
+
 const objectiveHandoffItem = (
   runId: string,
   hash: string,
   event: Extract<AgentEvent, { readonly type: "objective.handoff" }>,
 ): FactoryChatItem => {
   const rendered = renderObjectiveHandoffMessage(event);
+  const key = `${runId}-objective-handoff-${hash}`;
+  if (terminalObjectiveHandoffStatus(event.status)) {
+    return {
+      key,
+      kind: "assistant",
+      body: rendered.body,
+      meta: rendered.meta,
+    };
+  }
   return {
-    key: `${runId}-objective-handoff-${hash}`,
-    kind: "assistant",
+    key,
+    kind: "system",
+    title: `Objective handoff for ${event.title.trim()}`,
     body: rendered.body,
     meta: rendered.meta,
   };
@@ -791,12 +800,29 @@ export const buildChatItemsFromConversation = (
   const scopedConversation = selectedRunIds
     ? conversation.filter((message) => selectedRunIds.has(message.runId))
     : conversation;
-  return scopedConversation.map((message, index) => {
+  return scopedConversation.map((message, index): FactoryChatItem => {
     const parsed = message.role === "assistant" ? tryParseJson(message.text) : undefined;
+    const body = parsed ? (jsonRecordToMarkdown(parsed) ?? message.text) : message.text;
+    const ho = message.objectiveHandoff;
+    if (message.role === "assistant" && ho) {
+      const terminal = ho.status === "completed" || ho.status === "failed" || ho.status === "canceled";
+      if (!terminal) {
+        const meta = ho.status === "blocked"
+          ? "Blocked handoff"
+          : displayLabel(ho.status) || ho.status;
+        return {
+          key: `${message.runId}-${message.role}-${index}`,
+          kind: "system",
+          title: `Objective handoff for ${ho.title.trim()}`,
+          body,
+          meta,
+        };
+      }
+    }
     return {
       key: `${message.runId}-${message.role}-${index}`,
       kind: message.role,
-      body: parsed ? (jsonRecordToMarkdown(parsed) ?? message.text) : message.text,
-    } satisfies FactoryChatItem;
+      body,
+    };
   });
 };

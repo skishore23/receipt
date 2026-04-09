@@ -25,6 +25,7 @@ import { renderFactoryRunSteps } from "../../factory-live-steps";
 import {
   displayStateTone,
 } from "../supervision";
+import { renderMarkdown } from "../shared/markdown";
 import { COMPOSER_COMMANDS } from "../../../factory-cli/composer";
 import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "../../factory-models";
 import {
@@ -46,9 +47,11 @@ import type {
   FactoryWorkbenchPageModel,
   FactoryWorkbenchSummarySectionModel,
   FactoryWorkbenchWorkspaceModel,
+  WorkbenchVersionEnvelope,
 } from "../../factory-models";
 
 export type FactoryWorkbenchRouteContext = {
+  readonly shellBase: "/factory" | "/factory-new";
   readonly profileId: string;
   readonly chatId: string;
   readonly objectiveId?: string;
@@ -64,11 +67,11 @@ export type FactoryWorkbenchShellSnapshot = {
   readonly pageTitle: string;
   readonly routeKey: string;
   readonly route: FactoryWorkbenchRouteContext;
+  readonly envelope?: WorkbenchVersionEnvelope;
   readonly location?: string;
   readonly backgroundEventsPath: string;
   readonly chatEventsPath: string;
-  readonly workbenchHeaderPath: string;
-  readonly chatHeaderPath: string;
+  readonly backgroundRootPath: string;
   readonly workbenchIslandPath: string;
   readonly chatIslandPath: string;
   readonly workbenchHeaderHtml: string;
@@ -97,17 +100,30 @@ export type FactoryWorkbenchChatHeaderModel = {
 
 type WorkbenchProjection = "profile-board" | "objective-runtime";
 
+const workbenchBackgroundRefreshOn = [
+  { event: "profile-board-refresh", throttleMs: 320 },
+  { event: "objective-runtime-refresh", throttleMs: 320 },
+] as const;
+
+const workbenchBoardRefreshOn = [
+  { event: "profile-board-refresh", throttleMs: 220 },
+  { event: "objective-runtime-refresh", throttleMs: 220 },
+] as const;
+
+const workbenchFocusRefreshOn = [
+  { event: "profile-board-refresh", throttleMs: 180 },
+  { event: "objective-runtime-refresh", throttleMs: 180 },
+] as const;
+
 const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspectorTab" | "objectiveId">) => input.inspectorTab === "chat"
   ? [
-      { kind: "body", event: "agent-refresh", throttleMs: 180 },
-      { kind: "body", event: "job-refresh", throttleMs: 180 },
+      { event: "agent-refresh", throttleMs: 180 },
+      { event: "job-refresh", throttleMs: 180 },
     ] as const
   : [
-      { kind: "body", event: "profile-board-refresh", throttleMs: 300 },
-      ...(input.objectiveId ? [{ kind: "body" as const, event: "objective-runtime-refresh", throttleMs: 300 }] : []),
+      { event: "profile-board-refresh", throttleMs: 300 },
+      ...(input.objectiveId ? [{ event: "objective-runtime-refresh", throttleMs: 300 }] : []),
     ] as const;
-const workbenchBackgroundRefreshOn = [] as const;
-const workbenchHeaderRefreshOn = [] as const;
 
 const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map((command) => ({
   name: command.name,
@@ -117,7 +133,9 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
   aliases: command.aliases ?? [],
 })));
 
-const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "profileId" | "chatId" | "objectiveId" | "focusKind" | "focusId">): string => {
+const routeBase = (input: Pick<FactoryWorkbenchRouteContext, "shellBase">): string => input.shellBase;
+
+const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "shellBase" | "profileId" | "chatId" | "objectiveId" | "focusKind" | "focusId">): string => {
   const params = buildFactoryWorkbenchSearchParams({
     profileId: input.profileId,
     chatId: input.chatId,
@@ -126,17 +144,14 @@ const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "profileId" | 
   });
   if (input.focusKind === "job" && input.focusId) params.set("job", input.focusId);
   const query = params.toString();
-  return `/factory/chat/events${query ? `?${query}` : ""}`;
+  return `${routeBase(input)}/chat/events${query ? `?${query}` : ""}`;
 };
 
 const backgroundEventsPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/background/events${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/background/events${buildFactoryWorkbenchSearch(input)}`;
 
-const workbenchHeaderPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/header${buildFactoryWorkbenchSearch(input)}`;
-
-const chatHeaderPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/chat/header${buildFactoryWorkbenchSearch(input)}`;
+const workbenchBackgroundRootPath = (input: FactoryWorkbenchRouteContext): string =>
+  `${routeBase(input)}/island/workbench/background-root${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchBlockPath = (
   input: FactoryWorkbenchRouteContext,
@@ -145,29 +160,35 @@ const workbenchBlockPath = (
   const params = buildFactoryWorkbenchSearchParams(input);
   params.set("block", blockKey);
   const query = params.toString();
-  return `/factory/island/workbench/block${query ? `?${query}` : ""}`;
+  return `${routeBase(input)}/island/workbench/block${query ? `?${query}` : ""}`;
 };
 
 const workbenchIslandPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchBoardPath = (input: FactoryWorkbenchRouteContext): string =>
+  `${routeBase(input)}/island/workbench/board${buildFactoryWorkbenchSearch(input)}`;
 
 const chatIslandPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/chat${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/chat${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchFocusPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/focus${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench/focus${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchRailPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/rail${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench/rail${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchChatShellPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/chat-shell${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench/chat-shell${buildFactoryWorkbenchSearch(input)}`;
+
+const workbenchChatPanePath = (input: FactoryWorkbenchRouteContext): string =>
+  `${routeBase(input)}/island/workbench/chat-pane${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchChatBodyPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/chat-body${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench/chat-body${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchSelectionPath = (input: FactoryWorkbenchRouteContext): string =>
-  `/factory/island/workbench/select${buildFactoryWorkbenchSearch(input)}`;
+  `${routeBase(input)}/island/workbench/select${buildFactoryWorkbenchSearch(input)}`;
 
 const htmxNavAttrs = (
   path: string,
@@ -183,38 +204,20 @@ const htmxOobAttrs = (targetId: string): string =>
 const withOuterHtmlOob = (targetId: string, markup: string): string =>
   markup.replace(/^(<\w+)/, `$1 ${htmxOobAttrs(targetId)}`);
 
-const workbenchChatRegionTarget = "#factory-workbench-chat-region";
-
-const workbenchIslandBindings = (input: FactoryWorkbenchRouteContext) => ({
-  header: {
-    path: workbenchHeaderPath(input),
-    refreshOn: workbenchHeaderRefreshOn,
-  },
-  background: {
-    path: workbenchIslandPath(input),
-    refreshOn: workbenchBackgroundRefreshOn,
-  },
-  chat: {
-    path: chatIslandPath(input),
-    refreshOn: workbenchChatRefreshOn(input),
-  },
-});
-
-const uniqueWorkbenchProjections = (
-  values: ReadonlyArray<WorkbenchProjection>,
-): ReadonlyArray<WorkbenchProjection> => {
-  const seen = new Set<WorkbenchProjection>();
-  const unique: WorkbenchProjection[] = [];
-  for (const value of values) {
-    if (seen.has(value)) continue;
-    seen.add(value);
-    unique.push(value);
-  }
-  return unique;
+const workbenchEnvelopeAttrs = (envelope?: WorkbenchVersionEnvelope): string => {
+  if (!envelope) return "";
+  return [
+    `data-workbench-route-key="${esc(envelope.routeKey)}"`,
+    `data-workbench-profile-id="${esc(envelope.profileId)}"`,
+    `data-workbench-chat-id="${esc(envelope.chatId)}"`,
+    `data-workbench-objective-id="${esc(envelope.objectiveId ?? "")}"`,
+    `data-workbench-board-version="${esc(envelope.boardVersion)}"`,
+    `data-workbench-focus-version="${esc(envelope.focusVersion)}"`,
+    `data-workbench-chat-version="${esc(envelope.chatVersion)}"`,
+  ].join(" ");
 };
 
-const workbenchProjectionEvent = (projection: WorkbenchProjection): `${WorkbenchProjection}-refresh` =>
-  `${projection}-refresh`;
+const workbenchChatRegionTarget = "#factory-workbench-chat-region";
 
 const workbenchBlockProjections = (
   block: Pick<FactoryWorkbenchBlockModel, "key">,
@@ -230,16 +233,6 @@ const workbenchBlockProjections = (
       return ["profile-board", "objective-runtime"];
   }
 };
-
-const workbenchBlockRefreshOn = (
-  projections: ReadonlyArray<WorkbenchProjection>,
-) => [
-  ...uniqueWorkbenchProjections(projections).map((projection) => ({
-    kind: "body" as const,
-    event: workbenchProjectionEvent(projection),
-    throttleMs: 320,
-  })),
-] as const;
 
 const workbenchComposerPlaceholder = (objectiveId?: string): string => objectiveId
   ? "Chat with Factory, use /obj to create a new objective, or use /react to update the selected objective."
@@ -335,6 +328,7 @@ const objectiveHref = (
   inspectorTab: objectiveId ? "chat" : input.inspectorTab,
   focusKind: focus?.focusKind,
   focusId: focus?.focusId,
+  basePath: input.shellBase,
 });
 
 const filterHref = (
@@ -343,6 +337,7 @@ const filterHref = (
 ): string => buildFactoryWorkbenchRouteKey({
   ...input,
   filter,
+  basePath: input.shellBase,
 });
 
 const routeHref = (
@@ -351,6 +346,7 @@ const routeHref = (
 ): string => buildFactoryWorkbenchRouteKey({
   ...input,
   ...overrides,
+  basePath: input.shellBase,
 });
 
 const commandHref = (
@@ -556,6 +552,12 @@ const renderProfileOverviewPanel = (
   ) {
     return "";
   }
+  const summaryHighlights = summaries
+    .flatMap((summary) => summary
+      .split(/(?<=[.!?])\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean))
+    .slice(0, 4);
   return `<section class="border border-border bg-card">
     <div class="flex items-center gap-3 border-b border-border px-4 py-3">
       <span class="flex h-7 w-7 shrink-0 items-center justify-center text-primary">${iconWorker("h-4 w-4")}</span>
@@ -570,20 +572,20 @@ const renderProfileOverviewPanel = (
     <div class="flex flex-col">
       ${summaries.length > 0 ? `<section class="border-b border-border">
         <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</div>
-        <div class="factory-scrollbar h-48 space-y-4 overflow-x-hidden overflow-y-auto px-4 pb-4 text-sm leading-6 text-foreground">
-          ${summaries.map((summary) => `<div${tooltipAttr(summary)}>${esc(summary)}</div>`).join("")}
+        <div class="space-y-2 px-4 pb-4">
+          ${summaryHighlights.map((summary) => `<div class="border border-border bg-muted/25 px-3 py-2.5 text-sm leading-6 text-foreground"${tooltipAttr(summary)}>${esc(summary)}</div>`).join("")}
         </div>
       </section>` : ""}
       ${responsibilities.length > 0 ? `<section class="border-b border-border">
         <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Responsibilities</div>
-        <div class="factory-scrollbar h-40 space-y-0 overflow-x-hidden overflow-y-auto">
-          ${responsibilities.map((item, index) => `<div class="px-4 py-3 text-sm leading-6 text-foreground${index > 0 ? " border-t border-border" : ""}">${esc(item)}</div>`).join("")}
+        <div class="space-y-2 px-4 pb-4">
+          ${responsibilities.map((item) => `<div class="border border-border bg-muted/25 px-3 py-2.5 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
         </div>
       </section>` : ""}
       ${sections.map((section, index) => `<section class="${index === sections.length - 1 && tools.length === 0 ? "" : "border-b border-border"}">
         <div class="px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">${esc(section.title)}</div>
-        <div class="factory-scrollbar h-40 space-y-0 overflow-x-hidden overflow-y-auto">
-          ${section.items.map((item, itemIndex) => `<div class="px-4 py-3 text-sm leading-6 text-foreground${itemIndex > 0 ? " border-t border-border" : ""}">${esc(item)}</div>`).join("")}
+        <div class="space-y-2 px-4 pb-4">
+          ${section.items.map((item) => `<div class="border border-border bg-muted/25 px-3 py-2.5 text-sm leading-6 text-foreground">${esc(item)}</div>`).join("")}
         </div>
       </section>`).join("")}
       ${tools.length > 0 ? `<section>
@@ -694,7 +696,7 @@ const renderObjectiveCard = (
   const statusTileClass = objective.selected
     ? "border-primary/20 bg-primary/10"
     : "border-border/80 bg-background/80";
-  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchSelectionPath(selectRoute), "#factory-workbench-focus-shell")} data-objective-id="${esc(objective.objectiveId)}" data-selected="${objective.selected ? "true" : "false"}" ${objective.selected ? 'aria-current="page"' : ""} class="block px-2 py-2 transition">
+  return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchSelectionPath(selectRoute), "#factory-workbench-background-root")} data-objective-id="${esc(objective.objectiveId)}" data-selected="${objective.selected ? "true" : "false"}" ${objective.selected ? 'aria-current="page"' : ""} class="block px-2 py-2 transition">
     <div class="${cardClass} px-4 py-4 transition-colors">
     <div class="flex items-start gap-3">
       <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center border ${statusTileClass}">${statusDot(stateTone)}</div>
@@ -901,6 +903,15 @@ const renderSummaryTextCard = (label: string, body: string): string => `<section
   <div class="mt-2 text-sm leading-6 text-foreground">${esc(body)}</div>
 </section>`;
 
+const renderObjectiveHandoffOutputCard = (output?: string): string => {
+  const body = output?.trim();
+  if (!body) return "";
+  return `<section class="border border-border bg-muted/25 px-4 py-3">
+    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Returned Output</div>
+    <div class="mt-3 factory-markdown text-sm leading-6 text-foreground">${renderMarkdown(body)}</div>
+  </section>`;
+};
+
 const renderSummarySection = (
   section: FactoryWorkbenchSummarySectionModel,
   routeContext: FactoryWorkbenchRouteContext,
@@ -979,6 +990,11 @@ const renderSummarySection = (
     ?? objective.summary
     ?? objective.latestDecisionSummary
     ?? "No bottom line captured yet.";
+  const handoffOutput = objective.renderedBody?.trim();
+  const showHandoffOutput = Boolean(
+    handoffOutput
+    && normalizeSummaryCardValue(handoffOutput) !== normalizeSummaryCardValue(latestOutcome),
+  );
   const nextOperatorAction = objective.nextAction
     ?? objective.primaryAction?.label
     ?? "Ask engineer";
@@ -1029,6 +1045,7 @@ const renderSummarySection = (
       </aside>
     </div>
     <div class="space-y-3">
+      ${showHandoffOutput ? renderObjectiveHandoffOutputCard(handoffOutput) : ""}
       ${secondarySummaryCards.map((card) => renderSummaryTextCard(card.label, card.value)).join("")}
       ${renderObjectiveSelfImprovementSnapshot(objective, routeContext)}
     </div>
@@ -1273,16 +1290,18 @@ const renderWorkbenchPrimaryHeader = (
 export const factoryWorkbenchWorkspaceIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
 ): string => {
   return `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)] lg:gap-5 lg:overflow-hidden" data-workbench-objective-id="${esc(workspace.objectiveId ?? "")}" data-workbench-filter="${esc(workspace.filter)}">
-    ${factoryWorkbenchFocusIsland(workspace, routeContext)}
-    ${factoryWorkbenchRailIsland(workspace, routeContext)}
+    ${factoryWorkbenchFocusIsland(workspace, routeContext, envelope)}
+    ${factoryWorkbenchRailIsland(workspace, routeContext, envelope)}
   </div>`;
 };
 
 export const factoryWorkbenchFocusIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
 ): string => {
   const { feedBlocks, liveBlocks, visibleBlocks } = partitionWorkbenchBlocks(workspace);
   const content = feedBlocks.length === 0
@@ -1292,9 +1311,9 @@ export const factoryWorkbenchFocusIsland = (
     </div>`;
   return `<section id="factory-workbench-focus-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
     path: workbenchFocusPath(routeContext),
-    refreshOn: workbenchBlockRefreshOn(["profile-board", "objective-runtime"]),
-    swap: "outerHTML",
-  })}>
+    refreshOn: workbenchFocusRefreshOn,
+    clientOnly: true,
+  })} ${workbenchEnvelopeAttrs(envelope)}>
     ${feedBlocks.length === 0 ? "" : renderWorkbenchPrimaryHeader(workspace, routeContext)}
     <div id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5 lg:pr-1">
       ${content}
@@ -1305,13 +1324,14 @@ export const factoryWorkbenchFocusIsland = (
 export const factoryWorkbenchRailIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
 ): string => {
   const { feedBlocks } = partitionWorkbenchBlocks(workspace);
   return `<section id="factory-workbench-rail-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
-    path: workbenchRailPath(routeContext),
-    refreshOn: workbenchBlockRefreshOn(["profile-board"]),
-    swap: "outerHTML",
-  })}>
+    path: workbenchBoardPath(routeContext),
+    refreshOn: workbenchBoardRefreshOn,
+    clientOnly: true,
+  })} ${workbenchEnvelopeAttrs(envelope)}>
     ${renderWorkbenchFeedHeader(workspace, routeContext)}
     <div id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5">
       <div class="flex min-w-0 flex-col gap-6">
@@ -1358,8 +1378,9 @@ const renderEmployeeOverviewPanel = (
     ? "Current run updates stay pinned on the left."
     : "Pick an objective from the queue when you want its dedicated chat.";
   const profileOverview = renderProfileOverviewPanel(model);
-  return `<div class="space-y-4">
-    ${objective ? `<section class="border border-border bg-card px-4 py-4">
+  return objective
+    ? `<div class="space-y-4">
+    <section class="border border-border bg-card px-4 py-4">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
           <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Objective Brief</div>
@@ -1371,6 +1392,13 @@ const renderEmployeeOverviewPanel = (
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Latest Outcome</div>
         <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.bottomLine ?? objective.summary ?? "No bottom line yet.")}</div>
       </div>
+      ${objective.renderedBody?.trim()
+        && normalizeSummaryCardValue(objective.renderedBody) !== normalizeSummaryCardValue(objective.bottomLine ?? objective.summary)
+        ? `<div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
+          <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Returned Output</div>
+          <div class="mt-3 factory-markdown text-sm leading-6 text-foreground">${renderMarkdown(objective.renderedBody)}</div>
+        </div>`
+        : ""}
       <div class="mt-3 border border-border bg-muted/25 px-3 py-2.5">
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Next Operator Action</div>
         <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.nextAction ?? "Ask chat for the next step.")}</div>
@@ -1378,26 +1406,10 @@ const renderEmployeeOverviewPanel = (
       ${renderObjectiveSelfImprovementSnapshot(objective, routeContext, { compact: true })}
       <div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(overviewNote)}</div>
       <div class="mt-4 flex flex-wrap gap-2">${actions}</div>
-    </section>` : `<section class="border border-border bg-card px-4 py-4 text-sm leading-6 text-muted-foreground">
-      No objective is selected. Start in New Chat to discuss the work, or select an objective from the queue to reopen its chat.
-      <div class="mt-4">${actions}</div>
-    </section>`}
+    </section>
     ${profileOverview}
-  </div>`;
-};
-
-const renderRememberedPreferencesPanel = (
-  model: FactoryChatIslandModel,
-): string => {
-  const summary = model.userPreferencesSummary?.trim();
-  if (!summary) return "";
-  const sections = summary.split(/\n\s*\n/g).map((value) => value.trim()).filter(Boolean);
-  return `<section class="border border-border bg-card px-4 py-4">
-    <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Remembered Defaults</div>
-    <div class="mt-3 space-y-3">
-      ${sections.map((section) => `<div class="border border-border bg-muted/25 px-3 py-2.5 whitespace-pre-wrap text-sm leading-6 text-foreground">${esc(section)}</div>`).join("")}
-    </div>
-  </section>`;
+  </div>`
+    : profileOverview;
 };
 
 export const factoryWorkbenchChatIsland = (
@@ -1407,8 +1419,7 @@ export const factoryWorkbenchChatIsland = (
   const inspectorTab = routeContext.inspectorTab ?? "overview";
   const transcriptState = describeTranscriptState(model);
   const content = inspectorTab === "chat"
-    ? `${renderRememberedPreferencesPanel(model)}
-      ${model.items.length === 0 ? renderEngineerCard(model) : ""}
+    ? `${model.items.length === 0 ? renderEngineerCard(model) : ""}
       ${renderFactoryTranscriptSection(model, {
         sectionLabel: "Chat",
         objectiveHref: (objectiveId) => objectiveHref(routeContext, objectiveId),
@@ -1516,7 +1527,7 @@ const renderWorkbenchChatHeader = (
   newChatParams.set("inspectorTab", "chat");
   if (routeContext.detailTab) newChatParams.set("detailTab", routeContext.detailTab);
   newChatParams.set("filter", routeContext.filter);
-  const newChatHref = `/factory/new-chat?${newChatParams.toString()}`;
+  const newChatHref = `${routeContext.shellBase}/new-chat?${newChatParams.toString()}`;
   const newChatClass = routeContext.inspectorTab === "chat" && !routeContext.objectiveId
     ? "border-primary/20 bg-primary/10 text-primary"
     : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground";
@@ -1528,11 +1539,7 @@ const renderWorkbenchChatHeader = (
     </div>
     <div class="flex flex-wrap items-center gap-1.5">
       ${renderInspectorTabLink(routeContext, "overview", "Overview", true)}
-      <a href="${esc(newChatHref)}" ${htmxNavAttrs(workbenchChatShellPath({
-        ...routeContext,
-        objectiveId: undefined,
-        inspectorTab: "chat",
-      }), workbenchChatRegionTarget)} class="inline-flex items-center justify-center border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${newChatClass}">New Chat</a>
+      <a href="${esc(newChatHref)}" class="inline-flex items-center justify-center border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${newChatClass}">New Chat</a>
       <a href="/receipt" class="inline-flex items-center px-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition hover:text-foreground">Receipts</a>
     </div>
   </div>`;
@@ -1551,6 +1558,7 @@ const toWorkbenchChatHeaderModel = (
 export const factoryWorkbenchChatHeaderIsland = (
   model: FactoryWorkbenchPageModel,
 ): string => renderWorkbenchChatHeader(toWorkbenchChatHeaderModel({
+  shellBase: "/factory",
   profileId: model.activeProfileId,
   chatId: model.chatId,
   objectiveId: model.objectiveId,
@@ -1564,11 +1572,7 @@ export const factoryWorkbenchChatHeaderIsland = (
 
 export const factoryWorkbenchHeaderShell = (
   model: FactoryWorkbenchHeaderIslandModel,
-  routeContext: FactoryWorkbenchRouteContext,
-): string => `<header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5 lg:col-start-1 lg:row-start-1 lg:border-r lg:border-border" ${liveIslandAttrs({
-  ...workbenchIslandBindings(routeContext).header,
-  clientOnly: true,
-})}>
+): string => `<header id="factory-workbench-header" class="border-b border-border bg-background px-3 py-1.5">
   ${factoryWorkbenchHeaderIsland(model)}
 </header>`;
 
@@ -1585,20 +1589,23 @@ export const factoryWorkbenchChatRegion = (
   workspace: FactoryWorkbenchWorkspaceModel,
   chat: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
 ): string => `<div id="factory-workbench-chat-region" class="flex min-w-0 flex-1 flex-col bg-background lg:min-h-0" ${passiveRefreshAttrs(workbenchChatShellPath(routeContext))}>
   ${factoryWorkbenchChatHeaderShell(toWorkbenchChatHeaderModel(routeContext, chat, engineerPrimaryRole(chat)), { inPane: true })}
-  ${factoryWorkbenchChatBody(workspace, chat, routeContext)}
+  ${factoryWorkbenchChatBody(workspace, chat, routeContext, envelope)}
 </div>`;
 
 export const factoryWorkbenchChatBody = (
   _workspace: FactoryWorkbenchWorkspaceModel,
   chat: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
 ): string => `<div id="factory-workbench-chat-body" class="flex min-h-0 flex-1 flex-col lg:min-h-0" ${liveIslandAttrs({
   path: workbenchChatBodyPath(routeContext),
   refreshOn: workbenchChatRefreshOn(routeContext),
   swap: "outerHTML",
-})}>
+  clientOnly: true,
+})} ${workbenchEnvelopeAttrs(envelope)}>
   <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
     <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
       <div id="factory-workbench-chat" ${passiveRefreshAttrs(chatIslandPath(routeContext))}>
@@ -1624,7 +1631,7 @@ export const factoryWorkbenchChatShell = (
   });
   return `<div id="factory-workbench-chat-shell" class="factory-workbench-chat-shell flex shrink-0 flex-col overflow-hidden">
     <section id="factory-workbench-composer-shell" class="shrink-0 border-t border-border bg-background px-4 py-4">
-      <form id="factory-composer" action="${esc(`/factory/compose${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
+      <form id="factory-composer" action="${esc(`${routeContext.shellBase}/compose${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post" data-composer-commands='${esc(composerCommandsJson())}'>
         <input id="factory-composer-current-job" type="hidden" name="currentJobId" value="" />
         <label class="sr-only" for="factory-prompt">Factory prompt</label>
         <div class="space-y-3">
@@ -1651,30 +1658,88 @@ export const factoryWorkbenchChatShellResponse = (
   workspace: FactoryWorkbenchWorkspaceModel,
   chat: FactoryChatIslandModel,
   routeContext: FactoryWorkbenchRouteContext,
-): string => factoryWorkbenchChatRegion(workspace, chat, routeContext);
+  envelope?: WorkbenchVersionEnvelope,
+): string => factoryWorkbenchChatRegion(workspace, chat, routeContext, envelope);
+
+export const factoryWorkbenchChatPaneIsland = (
+  workspace: FactoryWorkbenchWorkspaceModel,
+  chat: FactoryChatIslandModel,
+  routeContext: FactoryWorkbenchRouteContext,
+  envelope?: WorkbenchVersionEnvelope,
+): string => `<aside id="factory-workbench-chat-pane" class="flex min-w-0 flex-col bg-background lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:min-h-0 lg:overflow-hidden" ${passiveRefreshAttrs(workbenchChatPanePath(routeContext))}>
+  ${factoryWorkbenchChatRegion(workspace, chat, routeContext, envelope)}
+  ${factoryWorkbenchChatShell(workspace, chat, routeContext)}
+</aside>`;
+
+export const factoryWorkbenchBoardResponse = (input: {
+  readonly header: FactoryWorkbenchHeaderIslandModel;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly routeContext: FactoryWorkbenchRouteContext;
+  readonly envelope?: WorkbenchVersionEnvelope;
+}): string => `<div data-workbench-sync="board" ${workbenchEnvelopeAttrs(input.envelope)}>
+  ${factoryWorkbenchHeaderShell(input.header)}
+  ${factoryWorkbenchRailIsland(input.workspace, input.routeContext, input.envelope)}
+</div>`;
+
+export const factoryWorkbenchBackgroundRootResponse = (input: {
+  readonly header: FactoryWorkbenchHeaderIslandModel;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly routeContext: FactoryWorkbenchRouteContext;
+  readonly envelope?: WorkbenchVersionEnvelope;
+}): string => `${factoryWorkbenchHeaderShell(input.header)}
+  <section class="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+    <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
+      <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${passiveRefreshAttrs(workbenchIslandPath(input.routeContext))}>
+        ${factoryWorkbenchWorkspaceIsland(input.workspace, input.routeContext, input.envelope)}
+      </div>
+    </div>
+  </section>`;
+
+export const factoryWorkbenchBackgroundRootIsland = (input: {
+  readonly header: FactoryWorkbenchHeaderIslandModel;
+  readonly workspace: FactoryWorkbenchWorkspaceModel;
+  readonly routeContext: FactoryWorkbenchRouteContext;
+  readonly envelope?: WorkbenchVersionEnvelope;
+}): string => `<div id="factory-workbench-background-root" class="flex min-h-0 min-w-0 flex-col bg-background lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:border-r lg:border-border" data-events-path="${esc(backgroundEventsPath(input.routeContext))}" ${liveIslandAttrs({
+  path: workbenchBackgroundRootPath(input.routeContext),
+  refreshOn: workbenchBackgroundRefreshOn,
+  clientOnly: true,
+})} ${workbenchEnvelopeAttrs(input.envelope)}>
+  ${factoryWorkbenchBackgroundRootResponse(input)}
+</div>`;
 
 export const factoryWorkbenchSelectionResponse = (input: {
   readonly header: FactoryWorkbenchHeaderIslandModel;
   readonly workspace: FactoryWorkbenchWorkspaceModel;
   readonly chat: FactoryChatIslandModel;
   readonly routeContext: FactoryWorkbenchRouteContext;
+  readonly envelope?: WorkbenchVersionEnvelope;
 }): string => {
-  const focus = factoryWorkbenchFocusIsland(input.workspace, input.routeContext);
-  const rail = factoryWorkbenchRailIsland(input.workspace, input.routeContext);
-  const header = factoryWorkbenchHeaderShell(input.header, input.routeContext);
-  const chatRegion = factoryWorkbenchChatRegion(input.workspace, input.chat, input.routeContext);
+  const backgroundRoot = factoryWorkbenchBackgroundRootIsland({
+    header: input.header,
+    workspace: input.workspace,
+    routeContext: input.routeContext,
+    envelope: input.envelope,
+  });
+  const chatPane = factoryWorkbenchChatPaneIsland(
+    input.workspace,
+    input.chat,
+    input.routeContext,
+    input.envelope,
+  );
   return [
-    focus,
-    withOuterHtmlOob("#factory-workbench-rail-shell", rail),
-    withOuterHtmlOob("#factory-workbench-header", header),
-    withOuterHtmlOob("#factory-workbench-chat-region", chatRegion),
+    backgroundRoot,
+    withOuterHtmlOob("#factory-workbench-chat-pane", chatPane),
   ].join("");
 };
 
 export const buildFactoryWorkbenchShellSnapshot = (
   model: FactoryWorkbenchPageModel,
+  shellBase: "/factory" | "/factory-new" = "/factory",
+  envelope?: WorkbenchVersionEnvelope,
 ): FactoryWorkbenchShellSnapshot => {
   const routeContext: FactoryWorkbenchRouteContext = {
+    shellBase,
     profileId: model.activeProfileId,
     chatId: model.chatId,
     objectiveId: model.objectiveId,
@@ -1692,17 +1757,17 @@ export const buildFactoryWorkbenchShellSnapshot = (
     pageTitle: "Receipt Factory Workbench",
     routeKey: buildFactoryWorkbenchRouteKey(routeContext),
     route: routeContext,
+    envelope,
     backgroundEventsPath: backgroundEventsPath(routeContext),
     chatEventsPath: chatEventsPath(routeContext),
-    workbenchHeaderPath: workbenchHeaderPath(routeContext),
-    chatHeaderPath: chatHeaderPath(routeContext),
+    backgroundRootPath: workbenchBackgroundRootPath(routeContext),
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
     workbenchHeaderHtml: renderWorkbenchHeader(headerModel),
     chatHeaderHtml: renderWorkbenchChatHeader(toWorkbenchChatHeaderModel(routeContext, model.chat, activeRole)),
-    workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext),
+    workbenchHtml: factoryWorkbenchWorkspaceIsland(model.workspace, routeContext, envelope),
     chatHtml: factoryWorkbenchChatIsland(model.chat, routeContext),
-    composeAction: `/factory/compose${pageQuery}`,
+    composeAction: `${routeContext.shellBase}/compose${pageQuery}`,
     composerPlaceholder: workbenchComposerPlaceholderForSelection({
       objectiveId: model.objectiveId,
       selectedObjective: model.workspace.selectedObjective,
@@ -1711,10 +1776,13 @@ export const buildFactoryWorkbenchShellSnapshot = (
   };
 };
 
-export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string => {
-  const shell = buildFactoryWorkbenchShellSnapshot(model);
+export const factoryWorkbenchShell = (
+  model: FactoryWorkbenchPageModel,
+  shellBase: "/factory" | "/factory-new" = "/factory",
+  envelope?: WorkbenchVersionEnvelope,
+): string => {
+  const shell = buildFactoryWorkbenchShellSnapshot(model, shellBase, envelope);
   const routeContext = shell.route;
-  const islandBindings = workbenchIslandBindings(routeContext);
   const headerModel = toWorkbenchHeaderModel(model);
   return `<!doctype html>
 <html class="dark h-full">
@@ -1729,26 +1797,16 @@ export const factoryWorkbenchShell = (model: FactoryWorkbenchPageModel): string 
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
   <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-factory-workbench data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
+<body data-factory-workbench data-shell-base="${esc(routeContext.shellBase)}" data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" ${workbenchEnvelopeAttrs(shell.envelope)} class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
-    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[auto_minmax(0,1fr)]">
-      ${factoryWorkbenchHeaderShell(headerModel, routeContext)}
-      <section class="flex min-h-0 min-w-0 flex-col bg-background lg:col-start-1 lg:row-start-2 lg:border-r lg:border-border">
-        <div class="flex-1 px-4 py-4 lg:min-h-0 lg:overflow-hidden">
-          <div id="factory-workbench-background-root" class="min-w-0 lg:h-full" data-events-path="${esc(backgroundEventsPath(routeContext))}">
-            <div id="factory-workbench-panel" class="min-w-0 lg:h-full" ${liveIslandAttrs({
-              ...islandBindings.background,
-              clientOnly: true,
-            })}>
-              ${shell.workbenchHtml}
-            </div>
-          </div>
-        </div>
-      </section>
-      <aside id="factory-workbench-chat-pane" class="flex min-w-0 flex-col bg-background lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:min-h-0 lg:overflow-hidden">
-        ${factoryWorkbenchChatRegion(model.workspace, model.chat, routeContext)}
-        ${factoryWorkbenchChatShell(model.workspace, model.chat, routeContext)}
-      </aside>
+    <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px]">
+      ${factoryWorkbenchBackgroundRootIsland({
+        header: headerModel,
+        workspace: model.workspace,
+        routeContext,
+        envelope: shell.envelope,
+      })}
+      ${factoryWorkbenchChatPaneIsland(model.workspace, model.chat, routeContext, shell.envelope)}
     </div>
   </div>
   <script src="/assets/factory-client.js?v=${CSS_VERSION}"></script>

@@ -5,10 +5,13 @@ import {
   shellPath,
 } from "./compose-navigation";
 import {
+  parseAgentPhasePayload,
   parseTokenEventPayload,
   renderEphemeralTurn,
 } from "./live-updates";
 import {
+  createQueuedRefreshRunner,
+  createReactivePushRouter,
   readReactiveRefreshPath,
 } from "./reactive";
 import {
@@ -35,15 +38,21 @@ import {
   type FactoryWorkbenchUiState,
 } from "./workbench-state";
 
-type WorkbenchFragmentKind =
-  | "header"
-  | "chat-header"
-  | "summary"
-  | "activity"
-  | "objectives"
-  | "history";
+type LiveRefreshSourceKey = "background" | "chat";
+type WorkbenchRefreshTargetKey = "board" | "focus" | "chat";
+type WorkbenchEnvelopeTargetKey = "board" | "focus" | "chat";
 
-type WorkbenchRefreshTargetKey = WorkbenchFragmentKind | "chat" | "workbench";
+type WorkbenchVersionEnvelope = {
+  readonly routeKey: string;
+  readonly profileId: string;
+  readonly chatId: string;
+  readonly objectiveId?: string;
+  readonly boardVersion: string;
+  readonly focusVersion: string;
+  readonly chatVersion: string;
+};
+
+const EPHEMERAL_PENDING_GRACE_MS = 1800;
 
 const isAbortError = (error: unknown): boolean =>
   Boolean(error && typeof error === "object" && "name" in error && (error as { readonly name?: string }).name === "AbortError");
@@ -55,12 +64,7 @@ export const initFactoryWorkbenchBrowser = () => {
   let defaultSubmitLabel = "Send";
   let ephemeralTurn: FactoryWorkbenchEphemeralTurn | null = null;
   let overlayRenderQueued = false;
-  let backgroundEvents: EventSource | null = null;
-  let backgroundEventsUrl: string | null = null;
-  let chatEvents: EventSource | null = null;
-  let chatEventsUrl: string | null = null;
-  const islandRefreshControllers = new Map<"chat" | "workbench", AbortController>();
-  const fragmentRefreshControllers = new Map<WorkbenchFragmentKind, AbortController>();
+  const refreshControllers = new Map<WorkbenchRefreshTargetKey, AbortController>();
 
   const chatInput = () => {
     const input = document.getElementById("factory-prompt");
@@ -107,6 +111,11 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
+  const workbenchHeader = () => {
+    const node = document.getElementById("factory-workbench-header");
+    return node instanceof HTMLElement ? node : null;
+  };
+
   const chatContainer = () => {
     const node = document.getElementById("factory-workbench-chat");
     return node instanceof HTMLElement ? node : null;
@@ -119,26 +128,6 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const chatRoot = () => {
     const node = document.getElementById("factory-workbench-chat-root");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const workbenchHeader = () => {
-    const node = document.getElementById("factory-workbench-header");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const workbenchSummaryBlock = () => {
-    const node = document.getElementById("factory-workbench-block-summary");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const workbenchObjectivesBlock = () => {
-    const node = document.getElementById("factory-workbench-block-objectives");
-    return node instanceof HTMLElement ? node : null;
-  };
-
-  const workbenchActivityBlock = () => {
-    const node = document.getElementById("factory-workbench-block-activity");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -162,12 +151,6 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
-
-  const workbenchHistoryBlock = () => {
-    const node = document.getElementById("factory-workbench-block-history");
-    return node instanceof HTMLElement ? node : null;
-  };
-
   const chatHeader = () => {
     const node = document.getElementById("factory-workbench-chat-header");
     return node instanceof HTMLElement ? node : null;
@@ -175,6 +158,11 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const chatRegion = () => {
     const node = document.getElementById("factory-workbench-chat-region");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const chatPane = () => {
+    const node = document.getElementById("factory-workbench-chat-pane");
     return node instanceof HTMLElement ? node : null;
   };
 
@@ -213,9 +201,57 @@ export const initFactoryWorkbenchBrowser = () => {
   const currentUrl = () =>
     resolveFactoryUrl(String(window.location && window.location.href ? window.location.href : "/factory"));
 
+  const documentShellBase = (): "/factory" | "/factory-new" => {
+    const value = document.body?.getAttribute("data-shell-base");
+    return value === "/factory-new" ? "/factory-new" : "/factory";
+  };
+
+  const routeBasePath = (route: FactoryWorkbenchRouteState): "/factory" | "/factory-new" => {
+    const url = resolveFactoryUrl(route.routeKey);
+    if (!url) return documentShellBase();
+    return url.pathname.startsWith("/factory-new") ? "/factory-new" : "/factory";
+  };
+
   const bodyRouteValue = (name: string): string | undefined => {
     const value = document.body?.getAttribute(name);
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  };
+
+  const readEnvelopeFromElement = (element: Element | null): WorkbenchVersionEnvelope | null => {
+    if (!(element instanceof HTMLElement)) return null;
+    const routeKey = asString(element.getAttribute("data-workbench-route-key"));
+    const profileId = asString(element.getAttribute("data-workbench-profile-id"));
+    const chatId = asString(element.getAttribute("data-workbench-chat-id"));
+    const boardVersion = asString(element.getAttribute("data-workbench-board-version"));
+    const focusVersion = asString(element.getAttribute("data-workbench-focus-version"));
+    const chatVersion = asString(element.getAttribute("data-workbench-chat-version"));
+    if (!routeKey || !profileId || !chatId || !boardVersion || !focusVersion || !chatVersion) return null;
+    return {
+      routeKey,
+      profileId,
+      chatId,
+      objectiveId: asString(element.getAttribute("data-workbench-objective-id")),
+      boardVersion,
+      focusVersion,
+      chatVersion,
+    };
+  };
+
+  const readDocumentEnvelope = (): WorkbenchVersionEnvelope | null =>
+    readEnvelopeFromElement(document.body);
+
+  const setDocumentEnvelopeTarget = (
+    target: WorkbenchEnvelopeTargetKey,
+    envelope: WorkbenchVersionEnvelope,
+  ) => {
+    if (!document.body) return;
+    document.body.setAttribute("data-workbench-route-key", envelope.routeKey);
+    document.body.setAttribute("data-workbench-profile-id", envelope.profileId);
+    document.body.setAttribute("data-workbench-chat-id", envelope.chatId);
+    document.body.setAttribute("data-workbench-objective-id", envelope.objectiveId ?? "");
+    if (target === "board") document.body.setAttribute("data-workbench-board-version", envelope.boardVersion);
+    if (target === "focus") document.body.setAttribute("data-workbench-focus-version", envelope.focusVersion);
+    if (target === "chat") document.body.setAttribute("data-workbench-chat-version", envelope.chatVersion);
   };
 
   const readDocumentRouteState = (url = currentUrl()): FactoryWorkbenchRouteState => createWorkbenchRouteState({
@@ -228,6 +264,7 @@ export const initFactoryWorkbenchBrowser = () => {
     page: asString(url?.searchParams.get("page")) ?? bodyRouteValue("data-page"),
     focusKind: asString(url?.searchParams.get("focusKind")) ?? bodyRouteValue("data-focus-kind"),
     focusId: asString(url?.searchParams.get("focusId")) ?? bodyRouteValue("data-focus-id"),
+    basePath: url?.pathname ?? documentShellBase(),
   });
 
   const sessionStorageApi = (): Storage | null => {
@@ -242,6 +279,7 @@ export const initFactoryWorkbenchBrowser = () => {
   };
 
   let workbenchState: FactoryWorkbenchUiState = createWorkbenchUiState(readDocumentRouteState());
+  let appliedEnvelope: WorkbenchVersionEnvelope | null = readDocumentEnvelope();
 
   const persistWorkbenchReplay = () => {
     const storage = sessionStorageApi();
@@ -277,7 +315,27 @@ export const initFactoryWorkbenchBrowser = () => {
     const url = resolveFactoryUrl(location);
     if (!url) return false;
     if (window.location && window.location.origin && url.origin !== window.location.origin) return false;
-    return url.pathname === "/factory" || url.pathname === "/factory/workbench";
+    return url.pathname === "/factory"
+      || url.pathname === "/factory/workbench"
+      || url.pathname === "/factory/new-chat"
+      || url.pathname === "/factory-new"
+      || url.pathname === "/factory-new/workbench"
+      || url.pathname === "/factory-new/new-chat";
+  };
+
+  const resolveInlineWorkbenchLocation = (location: string): Promise<string | null> => {
+    const url = resolveFactoryUrl(location);
+    if (!url) return Promise.resolve(null);
+    if (!url.pathname.endsWith("/new-chat")) return Promise.resolve(url.href);
+    return window.fetch(url.href, {
+      method: "GET",
+      headers: { Accept: "text/html" },
+      credentials: "same-origin",
+    }).then((response: FactoryFetchResponse) => {
+      if (!response.ok) throw new Error("Request failed.");
+      const resolved = typeof response.url === "string" ? resolveFactoryUrl(response.url) : null;
+      return resolved ? resolved.href : null;
+    });
   };
 
   const workbenchNavigationTarget = (event: Event): {
@@ -415,7 +473,7 @@ export const initFactoryWorkbenchBrowser = () => {
     if (body.selection?.objectiveId && /^\/(?:obj|new)\b/i.test(payload)) {
       return {
         ...turn,
-        surface: "handoff",
+        surface: "chat",
         statusLabel: "Queued",
         summary: `Objective ${body.selection.objectiveId} is now running. You can ask the next question while it updates on the left.`,
         runId: body.live?.runId || turn.runId,
@@ -446,6 +504,48 @@ export const initFactoryWorkbenchBrowser = () => {
     };
   };
 
+  const reduceEphemeralTurnOnPhase = (
+    turn: FactoryWorkbenchEphemeralTurn | null,
+    payload: {
+      readonly runId?: string;
+      readonly phase: string;
+      readonly summary: string;
+    },
+  ): FactoryWorkbenchEphemeralTurn | null => {
+    const state = currentChatState();
+    const runId = payload.runId || state.activeRunId || turn?.runId;
+    if (!acceptsStreamingRun(runId)) return turn;
+    const phase = payload.phase.trim().toLowerCase();
+    const statusLabel: FactoryWorkbenchEphemeralTurn["statusLabel"] = phase === "generating"
+      ? "Generating"
+      : phase === "starting"
+        ? "Starting"
+        : phase === "queued"
+          ? "Queued"
+          : "Processing";
+    const summary = payload.summary.trim() || (
+      statusLabel === "Generating"
+        ? "Generating a response."
+        : statusLabel === "Starting"
+          ? "Starting the reply."
+          : statusLabel === "Queued"
+            ? "Queued for execution."
+            : "Preparing context and tools."
+    );
+    return {
+      surface: "chat",
+      phase: turn?.runId === runId && turn?.assistantText ? "streaming" : "pending",
+      statusLabel,
+      summary,
+      userText: turn?.userText,
+      assistantText: turn?.runId === runId ? turn?.assistantText : undefined,
+      runId,
+      jobId: turn?.jobId,
+      transcriptSignature: turn?.transcriptSignature ?? state.transcriptSignature,
+      savedAt: Date.now(),
+    };
+  };
+
   const reduceEphemeralTurnOnToken = (
     turn: FactoryWorkbenchEphemeralTurn | null,
     payload: { readonly runId?: string; readonly delta: string },
@@ -458,7 +558,7 @@ export const initFactoryWorkbenchBrowser = () => {
       statusLabel: turn?.statusLabel ?? "Starting",
       summary: "Reply streaming live.",
       userText: turn?.userText,
-      assistantText: `${turn?.runId === runId ? (turn.assistantText ?? "") : ""}${payload.delta}`,
+      assistantText: `${turn?.runId === runId ? (turn?.assistantText ?? "") : ""}${payload.delta}`,
       runId,
       jobId: turn?.jobId,
       transcriptSignature: turn?.transcriptSignature ?? state.transcriptSignature,
@@ -551,6 +651,8 @@ export const initFactoryWorkbenchBrowser = () => {
     const state = currentChatState();
     if (!ephemeralTurn) return;
     let nextTurn = ephemeralTurn;
+    const ageMs = Math.max(0, Date.now() - (nextTurn.savedAt || 0));
+    const withinPendingGrace = nextTurn.phase !== "streaming" && ageMs < EPHEMERAL_PENDING_GRACE_MS;
     if (
       nextTurn.userText
       && nextTurn.transcriptSignature
@@ -592,6 +694,11 @@ export const initFactoryWorkbenchBrowser = () => {
       && state.knownRunIds.indexOf(nextTurn.runId) < 0
       && state.terminalRunIds.indexOf(nextTurn.runId) < 0
     ) {
+      if (withinPendingGrace) {
+        ephemeralTurn = nextTurn;
+        scheduleOverlayRender();
+        return;
+      }
       updateEphemeralTurn(null, {
         runId: nextTurn.runId,
         jobId: nextTurn.jobId,
@@ -762,18 +869,52 @@ export const initFactoryWorkbenchBrowser = () => {
       route: nextRoute,
     });
     applyRouteState(nextRoute, "none");
+    appliedEnvelope = readDocumentEnvelope();
   };
 
   const fetchHtml = (url: string, signal?: AbortSignal) =>
     window.fetch(url, {
       method: "GET",
-      headers: { Accept: "text/html" },
+      headers: {
+        Accept: "text/html",
+        "HX-Request": "true",
+      },
       credentials: "same-origin",
       signal,
     }).then((response: FactoryFetchResponse) => {
       if (!response.ok) throw new Error("Request failed.");
       return response.text();
     });
+
+  const parseMarkupDocument = (markup: string): DocumentFragment => {
+    const template = document.createElement("template");
+    template.innerHTML = markup.trim();
+    return template.content;
+  };
+
+  const envelopeVersionForTarget = (
+    envelope: WorkbenchVersionEnvelope | null,
+    target: WorkbenchEnvelopeTargetKey,
+  ): string | null => {
+    if (!envelope) return null;
+    if (target === "board") return envelope.boardVersion;
+    if (target === "focus") return envelope.focusVersion;
+    return envelope.chatVersion;
+  };
+
+  const shouldApplyEnvelope = (input: {
+    readonly target: WorkbenchEnvelopeTargetKey;
+    readonly baseline: WorkbenchVersionEnvelope | null;
+    readonly next: WorkbenchVersionEnvelope | null;
+    readonly expectedRouteKey: string;
+  }): boolean => {
+    if (!input.next) return false;
+    if (input.next.routeKey !== input.expectedRouteKey) return false;
+    if (currentRouteKey() !== input.expectedRouteKey) return false;
+    const currentVersion = envelopeVersionForTarget(appliedEnvelope, input.target);
+    const baselineVersion = envelopeVersionForTarget(input.baseline, input.target);
+    return currentVersion === baselineVersion;
+  };
 
   const startRefreshController = <Key extends string>(
     controllers: Map<Key, AbortController>,
@@ -798,12 +939,8 @@ export const initFactoryWorkbenchBrowser = () => {
     if (controllers.get(key) === controller) controllers.delete(key);
   };
 
-  const abortFragmentRefresh = (kind: WorkbenchFragmentKind) => {
-    fragmentRefreshControllers.get(kind)?.abort();
-  };
-
-  const abortIslandRefresh = (kind: "chat" | "workbench") => {
-    islandRefreshControllers.get(kind)?.abort();
+  const abortRefresh = (target: WorkbenchRefreshTargetKey) => {
+    refreshControllers.get(target)?.abort();
   };
 
   const setHistory = (url: URL, historyMode?: "replace" | "push" | "none") => {
@@ -816,31 +953,17 @@ export const initFactoryWorkbenchBrowser = () => {
     }
   };
 
-  const workbenchHeaderPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `/factory/island/workbench/header${routeSearch(route)}`;
+  const workbenchBackgroundRootPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `${routeBasePath(route)}/island/workbench/background-root${routeSearch(route)}`;
 
-  const chatHeaderPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `/factory/island/chat/header${routeSearch(route)}`;
-
-  const workbenchIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `/factory/island/workbench${routeSearch(route)}`;
+  const workbenchBoardPathForRoute = (route: FactoryWorkbenchRouteState): string =>
+    `${routeBasePath(route)}/island/workbench/board${routeSearch(route)}`;
 
   const chatIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `/factory/island/chat${routeSearch(route)}`;
-
-  const workbenchBlockPathForRoute = (
-    route: FactoryWorkbenchRouteState,
-    block: WorkbenchFragmentKind,
-  ): string => {
-    const url = resolveFactoryUrl(route.routeKey) ?? new URL(route.routeKey, "http://receipt.local");
-    const params = new URLSearchParams(url.search);
-    params.set("block", block);
-    const query = params.toString();
-    return `/factory/island/workbench/block${query ? `?${query}` : ""}`;
-  };
+    `${routeBasePath(route)}/island/chat${routeSearch(route)}`;
 
   const backgroundEventsPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `/factory/background/events${routeSearch(route)}`;
+    `${routeBasePath(route)}/background/events${routeSearch(route)}`;
 
   const chatEventsPathForRoute = (route: FactoryWorkbenchRouteState): string => {
     const params = new URLSearchParams();
@@ -848,11 +971,25 @@ export const initFactoryWorkbenchBrowser = () => {
     if (route.chatId) params.set("chat", route.chatId);
     if (route.objectiveId) params.set("objective", route.objectiveId);
     if (route.focusKind === "job" && route.focusId) params.set("job", route.focusId);
-    return `/factory/chat/events?${params.toString()}`;
+    return `${routeBasePath(route)}/chat/events?${params.toString()}`;
   };
+
+  const workbenchBackgroundDescriptor = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
+
+  const workbenchBoardDescriptor = "sse:profile-board-refresh@220,sse:objective-runtime-refresh@220";
+
+  const workbenchFocusDescriptor = "sse:profile-board-refresh@180,sse:objective-runtime-refresh@180";
+
+  const workbenchChatDescriptorForRoute = (route: FactoryWorkbenchRouteState): string => route.inspectorTab === "chat"
+    ? "sse:agent-refresh@180,sse:job-refresh@180"
+    : [
+        "sse:profile-board-refresh@300",
+        ...(route.objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
+      ].join(",");
 
   const syncWorkbenchRouteData = (route: FactoryWorkbenchRouteState) => {
     if (!document.body) return;
+    document.body.setAttribute("data-shell-base", routeBasePath(route));
     document.body.setAttribute("data-route-key", route.routeKey);
     document.body.setAttribute("data-chat-id", route.chatId ?? "");
     document.body.setAttribute("data-objective-id", route.objectiveId ?? "");
@@ -877,7 +1014,7 @@ export const initFactoryWorkbenchBrowser = () => {
       ? (header.querySelectorAll as ((selector: string) => NodeListOf<Element>) | undefined)
       : undefined;
     if (!header || typeof querySelectorAll !== "function") return;
-    for (const link of Array.from(querySelectorAll.call(header, 'a[href*="inspectorTab="], a[href="/factory"], a[href^="/factory?"]'))) {
+    for (const link of Array.from(querySelectorAll.call(header, 'a[href*="inspectorTab="], a[href^="/factory"], a[href^="/factory-new"]'))) {
       if (!(link instanceof HTMLElement)) continue;
       const href = link.getAttribute("href") || "";
       const url = resolveFactoryUrl(href);
@@ -902,37 +1039,37 @@ export const initFactoryWorkbenchBrowser = () => {
     const setRefreshPath = (element: HTMLElement | null, path: string) => {
       if (!element) return;
       element.setAttribute("data-refresh-path", path);
+      if (element.getAttribute("hx-get") !== null) element.setAttribute("hx-get", path);
     };
-    const currentWorkbenchHeader = workbenchHeader();
-    setRefreshPath(currentWorkbenchHeader, workbenchHeaderPathForRoute(route));
-    const currentChatHeader = chatHeader();
-    setRefreshPath(currentChatHeader, chatHeaderPathForRoute(route));
-    const currentWorkbench = workbenchContainer();
-    setRefreshPath(currentWorkbench, workbenchIslandPathForRoute(route));
+    const setRefreshDescriptor = (element: HTMLElement | null, descriptor: string) => {
+      if (!element) return;
+      element.setAttribute("data-refresh-on", descriptor);
+    };
+    const currentBackgroundRoot = backgroundRoot();
+    setRefreshPath(currentBackgroundRoot, workbenchBackgroundRootPathForRoute(route));
+    setRefreshDescriptor(currentBackgroundRoot, workbenchBackgroundDescriptor);
+    if (currentBackgroundRoot) currentBackgroundRoot.setAttribute("data-events-path", backgroundEventsPathForRoute(route));
     const currentFocusShell = workbenchFocusShell();
-    setRefreshPath(currentFocusShell, `/factory/island/workbench/focus${routeSearch(route)}`);
+    setRefreshDescriptor(currentFocusShell, workbenchFocusDescriptor);
+    setRefreshPath(currentFocusShell, `${routeBasePath(route)}/island/workbench/focus${routeSearch(route)}`);
     const currentRailShell = workbenchRailShell();
-    setRefreshPath(currentRailShell, `/factory/island/workbench/rail${routeSearch(route)}`);
+    setRefreshPath(currentRailShell, workbenchBoardPathForRoute(route));
+    setRefreshDescriptor(currentRailShell, workbenchBoardDescriptor);
+    const currentWorkbench = workbenchContainer();
+    setRefreshPath(currentWorkbench, `${routeBasePath(route)}/island/workbench${routeSearch(route)}`);
+    const currentChatPane = chatPane();
+    setRefreshPath(currentChatPane, `${routeBasePath(route)}/island/workbench/chat-pane${routeSearch(route)}`);
     const currentChatRegion = chatRegion();
-    setRefreshPath(currentChatRegion, `/factory/island/workbench/chat-shell${routeSearch(route)}`);
+    setRefreshPath(currentChatRegion, `${routeBasePath(route)}/island/workbench/chat-shell${routeSearch(route)}`);
     const currentChatBody = chatBody();
-    setRefreshPath(currentChatBody, `/factory/island/workbench/chat-body${routeSearch(route)}`);
+    setRefreshPath(currentChatBody, `${routeBasePath(route)}/island/workbench/chat-body${routeSearch(route)}`);
+    setRefreshDescriptor(currentChatBody, workbenchChatDescriptorForRoute(route));
     const currentChat = chatContainer();
     setRefreshPath(currentChat, chatIslandPathForRoute(route));
-    const currentBackgroundRoot = backgroundRoot();
-    if (currentBackgroundRoot) currentBackgroundRoot.setAttribute("data-events-path", backgroundEventsPathForRoute(route));
     const currentChatRoot = chatRoot();
     if (currentChatRoot) currentChatRoot.setAttribute("data-events-path", chatEventsPathForRoute(route));
     const form = composerForm();
-    if (form) form.action = `/factory/compose${routeSearch(route)}`;
-    const summary = workbenchSummaryBlock();
-    setRefreshPath(summary, workbenchBlockPathForRoute(route, "summary"));
-    const activity = workbenchActivityBlock();
-    setRefreshPath(activity, workbenchBlockPathForRoute(route, "activity"));
-    const objectives = workbenchObjectivesBlock();
-    setRefreshPath(objectives, workbenchBlockPathForRoute(route, "objectives"));
-    const history = workbenchHistoryBlock();
-    setRefreshPath(history, workbenchBlockPathForRoute(route, "history"));
+    if (form) form.action = `${routeBasePath(route)}/compose${routeSearch(route)}`;
   };
 
   const applyRouteState = (
@@ -957,94 +1094,141 @@ export const initFactoryWorkbenchBrowser = () => {
     });
   };
 
-  const islandContainer = (kind: "chat" | "workbench") =>
-    kind === "chat" ? chatContainer() : workbenchContainer();
-
-  const workbenchFragment = (kind: WorkbenchFragmentKind) => {
-    switch (kind) {
-      case "header":
-        return workbenchHeader();
-      case "chat-header":
-        return chatHeader();
-      case "summary":
-        return workbenchSummaryBlock();
-      case "activity":
-        return workbenchActivityBlock();
-      case "objectives":
-        return workbenchObjectivesBlock();
-      case "history":
-        return workbenchHistoryBlock();
-      default:
-        return null;
-    }
-  };
-
-  function refreshWorkbenchFragmentNow(
-    kind: WorkbenchFragmentKind,
+  function refreshBoardNow(
     expectedRouteKey: string,
     options?: {
       readonly replaceInFlight?: boolean;
     },
   ) {
-    const target = workbenchFragment(kind);
+    const target = workbenchRailShell();
     const path = readReactiveRefreshPath(target);
     if (!target || !path) return Promise.resolve();
     const documentScrollState = captureDocumentScrollState();
-    const controller = startRefreshController(fragmentRefreshControllers, kind, options);
+    const paneScrollState = captureWorkbenchPaneScrollState();
+    const baselineEnvelope = appliedEnvelope;
+    const controller = startRefreshController(refreshControllers, "board", options);
     return fetchHtml(path, controller?.signal).then((markup) => {
-      if (expectedRouteKey !== currentRouteKey()) return;
-      target.innerHTML = markup;
-      processHtmx(target);
+      const fragment = parseMarkupDocument(markup);
+      const wrapper = fragment.firstElementChild;
+      const nextEnvelope = readEnvelopeFromElement(wrapper);
+      if (!shouldApplyEnvelope({
+        target: "board",
+        baseline: baselineEnvelope,
+        next: nextEnvelope,
+        expectedRouteKey,
+      })) {
+        return;
+      }
+      if (!nextEnvelope) return;
+      const nextHeader = wrapper?.querySelector("#factory-workbench-header");
+      const nextRail = wrapper?.querySelector("#factory-workbench-rail-shell");
+      const currentHeader = workbenchHeader();
+      const currentRail = workbenchRailShell();
+      if (!(nextHeader instanceof HTMLElement) || !(nextRail instanceof HTMLElement) || !currentHeader || !currentRail) return;
+      currentHeader.outerHTML = nextHeader.outerHTML;
+      currentRail.outerHTML = nextRail.outerHTML;
+      setDocumentEnvelopeTarget("board", nextEnvelope);
+      appliedEnvelope = readDocumentEnvelope();
+      processHtmx(document.body);
       window.requestAnimationFrame(() => {
+        if (paneScrollState) restoreWorkbenchPaneScrollState(paneScrollState);
         restoreDocumentScrollState(documentScrollState);
       });
     }).catch((error: unknown) => {
       if (isAbortError(error)) return;
       throw error;
     }).finally(() => {
-      finishRefreshController(fragmentRefreshControllers, kind, controller);
+      finishRefreshController(refreshControllers, "board", controller);
     });
   }
 
-  function refreshIslandNow(
-    kind: "chat" | "workbench",
+  function refreshFocusNow(
     expectedRouteKey: string,
     options?: {
       readonly replaceInFlight?: boolean;
     },
   ) {
-    const target = islandContainer(kind);
+    const target = workbenchFocusShell();
     const path = readReactiveRefreshPath(target);
     if (!target || !path) return Promise.resolve();
     const documentScrollState = captureDocumentScrollState();
-    const paneScrollState = kind === "workbench" ? captureWorkbenchPaneScrollState() : null;
-    if (kind === "workbench" && options?.replaceInFlight) {
-      abortFragmentRefresh("summary");
-      abortFragmentRefresh("activity");
-      abortFragmentRefresh("objectives");
-      abortFragmentRefresh("history");
-    }
-    const controller = startRefreshController(islandRefreshControllers, kind, options);
+    const paneScrollState = captureWorkbenchPaneScrollState();
+    const baselineEnvelope = appliedEnvelope;
+    const controller = startRefreshController(refreshControllers, "focus", options);
     return fetchHtml(path, controller?.signal).then((markup) => {
-      if (expectedRouteKey !== currentRouteKey()) return;
-      target.innerHTML = markup;
-      processHtmx(target);
-      if (kind === "chat") handleWorkbenchChatSwap(target);
-      if (kind === "workbench" && paneScrollState) {
-        window.requestAnimationFrame(() => {
-          restoreWorkbenchPaneScrollState(paneScrollState);
-          restoreDocumentScrollState(documentScrollState);
-        });
+      const fragment = parseMarkupDocument(markup);
+      const nextTarget = fragment.firstElementChild;
+      const nextEnvelope = readEnvelopeFromElement(nextTarget);
+      if (!shouldApplyEnvelope({
+        target: "focus",
+        baseline: baselineEnvelope,
+        next: nextEnvelope,
+        expectedRouteKey,
+      })) {
         return;
       }
+      if (!nextEnvelope) return;
+      const currentTarget = workbenchFocusShell();
+      if (!(nextTarget instanceof HTMLElement) || !currentTarget) return;
+      currentTarget.outerHTML = nextTarget.outerHTML;
+      setDocumentEnvelopeTarget("focus", nextEnvelope);
+      appliedEnvelope = readDocumentEnvelope();
+      processHtmx(document.body);
       window.requestAnimationFrame(() => {
+        if (paneScrollState) restoreWorkbenchPaneScrollState(paneScrollState);
         restoreDocumentScrollState(documentScrollState);
       });
     }).catch((error: unknown) => {
       if (isAbortError(error)) return;
       throw error;
     }).finally(() => {
-      finishRefreshController(islandRefreshControllers, kind, controller);
+      finishRefreshController(refreshControllers, "focus", controller);
+    });
+  }
+
+  function refreshChatNow(
+    expectedRouteKey: string,
+    options?: {
+      readonly replaceInFlight?: boolean;
+    },
+  ) {
+    const target = chatBody();
+    const path = readReactiveRefreshPath(target);
+    if (!target || !path) return Promise.resolve();
+    const documentScrollState = captureDocumentScrollState();
+    const chatScrollState = captureChatScrollState();
+    const baselineEnvelope = appliedEnvelope;
+    const controller = startRefreshController(refreshControllers, "chat", options);
+    return fetchHtml(path, controller?.signal).then((markup) => {
+      const fragment = parseMarkupDocument(markup);
+      const nextTarget = fragment.firstElementChild;
+      const nextEnvelope = readEnvelopeFromElement(nextTarget);
+      if (!shouldApplyEnvelope({
+        target: "chat",
+        baseline: baselineEnvelope,
+        next: nextEnvelope,
+        expectedRouteKey,
+      })) {
+        return;
+      }
+      if (!nextEnvelope) return;
+      const currentTarget = chatBody();
+      if (!(nextTarget instanceof HTMLElement) || !currentTarget) return;
+      currentTarget.outerHTML = nextTarget.outerHTML;
+      setDocumentEnvelopeTarget("chat", nextEnvelope);
+      appliedEnvelope = readDocumentEnvelope();
+      const updatedTarget = chatBody();
+      processHtmx(updatedTarget ?? document.body);
+      if (updatedTarget) handleWorkbenchChatSwap(updatedTarget);
+      window.requestAnimationFrame(() => {
+        if (chatScrollState) restoreChatScrollState(chatScrollState);
+        restoreDocumentScrollState(documentScrollState);
+      });
+    }).catch((error: unknown) => {
+      if (isAbortError(error)) return;
+      throw error;
+    }).finally(() => {
+      finishRefreshController(refreshControllers, "chat", controller);
     });
   }
 
@@ -1057,17 +1241,20 @@ export const initFactoryWorkbenchBrowser = () => {
     for (const target of targets) {
       if (seen.has(target)) continue;
       seen.add(target);
-      if (target === "chat" || target === "workbench") {
-        abortIslandRefresh(target);
-        refreshes.push(
-          refreshIslandNow(target, routeKeyOverride ?? currentRouteKey(), { replaceInFlight: true }).then(() => undefined),
-        );
-        continue;
+      abortRefresh(target);
+      if (target === "board") {
+        refreshes.push(refreshBoardNow(routeKeyOverride ?? currentRouteKey(), {
+          replaceInFlight: true,
+        }).then(() => undefined));
+      } else if (target === "focus") {
+        refreshes.push(refreshFocusNow(routeKeyOverride ?? currentRouteKey(), {
+          replaceInFlight: true,
+        }).then(() => undefined));
+      } else {
+        refreshes.push(refreshChatNow(routeKeyOverride ?? currentRouteKey(), {
+          replaceInFlight: true,
+        }).then(() => undefined));
       }
-      abortFragmentRefresh(target);
-      refreshes.push(
-        refreshWorkbenchFragmentNow(target, routeKeyOverride ?? currentRouteKey(), { replaceInFlight: true }).then(() => undefined),
-      );
     }
     return Promise.all(refreshes).then(() => undefined);
   };
@@ -1080,18 +1267,16 @@ export const initFactoryWorkbenchBrowser = () => {
       current.profileId !== next.profileId
       || current.chatId !== next.chatId
       || current.objectiveId !== next.objectiveId
+      || current.detailTab !== next.detailTab
+      || current.filter !== next.filter
+      || current.page !== next.page
+      || current.focusKind !== next.focusKind
+      || current.focusId !== next.focusId
     ) {
-      return ["header", "chat-header", "workbench", "chat"];
+      return ["board", "focus", "chat"];
     }
-    if (current.detailTab !== next.detailTab) {
-      return ["chat-header", "workbench"];
-    }
-    return ["header", "chat-header", "workbench", "chat"];
-  };
-
-  const chatEventsPath = () => {
-    const node = chatRoot();
-    return node?.getAttribute("data-events-path") || null;
+    if (current.inspectorTab !== next.inspectorTab) return ["chat"];
+    return ["board", "focus", "chat"];
   };
 
   const backgroundEventsPath = () => {
@@ -1099,100 +1284,87 @@ export const initFactoryWorkbenchBrowser = () => {
     return node?.getAttribute("data-events-path") || null;
   };
 
-  const dispatchWorkbenchBodyEvent = (eventName: string) => {
-    if (document.body && typeof document.body.dispatchEvent === "function") {
-      document.body.dispatchEvent(new Event(eventName, { bubbles: true }));
-      return;
-    }
-    if (typeof document.dispatchEvent === "function") {
-      document.dispatchEvent(new Event(eventName, { bubbles: true }));
-    }
+  const chatEventsPath = () => {
+    const node = chatRoot();
+    return node?.getAttribute("data-events-path") || null;
   };
 
-  const declaredBodyRefreshEvents = (
-    elements: ReadonlyArray<HTMLElement | null>,
-  ): ReadonlyArray<string> => {
-    const events = new Set<string>();
-    for (const element of elements) {
-      const descriptor = element?.getAttribute("data-refresh-on") || "";
-      for (const part of descriptor.split(",")) {
-        const match = part.trim().match(/^body:([^@]+?)(?:@(\d+))?$/i);
-        if (match && match[1]) events.add(match[1]);
-      }
+  const liveRefreshRunner = createQueuedRefreshRunner<WorkbenchRefreshTargetKey, string>((targetKey, scopeKey) => {
+    const expectedRouteKey = scopeKey ?? currentRouteKey();
+    switch (targetKey) {
+      case "board":
+        return refreshBoardNow(expectedRouteKey);
+      case "focus":
+        return refreshFocusNow(expectedRouteKey);
+      case "chat":
+      default:
+        return refreshChatNow(expectedRouteKey);
     }
-    return Array.from(events);
-  };
+  });
 
-  const closeBackgroundEvents = () => {
-    if (backgroundEvents && typeof backgroundEvents.close === "function") backgroundEvents.close();
-    backgroundEvents = null;
-    backgroundEventsUrl = null;
-  };
-
-  const closeChatEvents = () => {
-    if (chatEvents && typeof chatEvents.close === "function") chatEvents.close();
-    chatEvents = null;
-    chatEventsUrl = null;
-  };
-
-  const connectBackgroundEvents = () => {
-    const nextUrl = backgroundEventsPath();
-    if (!nextUrl) {
-      closeBackgroundEvents();
-      return;
-    }
-    if (backgroundEvents && backgroundEventsUrl === nextUrl) return;
-    closeBackgroundEvents();
-    backgroundEvents = new EventSource(nextUrl);
-    backgroundEventsUrl = nextUrl;
-    for (const eventName of declaredBodyRefreshEvents([
-      workbenchRailShell(),
-      workbenchFocusShell(),
-      chatBody(),
-    ])) {
-      backgroundEvents.addEventListener(eventName, () => {
-        dispatchWorkbenchBodyEvent(eventName);
-      });
-    }
-  };
-
-  const connectChatEvents = () => {
-    const nextUrl = workbenchState.appliedRoute.inspectorTab === "chat" ? chatEventsPath() : null;
-    if (!nextUrl) {
-      closeChatEvents();
-      return;
-    }
-    if (chatEvents && chatEventsUrl === nextUrl) return;
-    closeChatEvents();
-    chatEvents = new EventSource(nextUrl);
-    chatEventsUrl = nextUrl;
-    for (const eventName of declaredBodyRefreshEvents([chatBody()])) {
-      chatEvents.addEventListener(eventName, () => {
-        const nextTurn = reduceEphemeralTurnOnComposeRefresh(ephemeralTurn, eventName);
+  const liveRefreshRouter = createReactivePushRouter<LiveRefreshSourceKey, WorkbenchRefreshTargetKey, string>({
+    sources: ["background", "chat"],
+    targets: () => [
+      {
+        key: "board",
+        source: "background",
+        element: workbenchRailShell,
+        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("board", delayMs, scopeKey),
+      },
+      {
+        key: "focus",
+        source: "background",
+        element: workbenchFocusShell,
+        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("focus", delayMs, scopeKey),
+      },
+      {
+        key: "chat",
+        source: workbenchState.appliedRoute.inspectorTab === "chat" ? "chat" : "background",
+        element: chatBody,
+        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("chat", delayMs, scopeKey),
+      },
+    ],
+    eventPath: (sourceKey) => sourceKey === "background"
+      ? backgroundEventsPath()
+      : workbenchState.appliedRoute.inspectorTab === "chat"
+        ? chatEventsPath()
+        : null,
+    getScopeKey: currentRouteKey,
+    onSseEvent: ({ sourceKey, eventName }) => {
+      if (sourceKey !== "chat") return;
+      if (eventName !== "agent-refresh" && eventName !== "job-refresh") return;
+      const nextTurn = reduceEphemeralTurnOnComposeRefresh(ephemeralTurn, eventName);
+      if (nextTurn !== ephemeralTurn) updateEphemeralTurn(nextTurn);
+    },
+    onEventSourceConnected: ({ sourceKey, eventSource }) => {
+      if (sourceKey !== "chat") return;
+      eventSource.addEventListener("agent-phase", (event) => {
+        const payload = parseAgentPhasePayload((event as MessageEvent<string>).data || "");
+        if (!payload) return;
+        const nextTurn = reduceEphemeralTurnOnPhase(ephemeralTurn, payload);
         if (nextTurn !== ephemeralTurn) updateEphemeralTurn(nextTurn);
-        dispatchWorkbenchBodyEvent(eventName);
       });
-    }
-    chatEvents.addEventListener("agent-token", (event) => {
-      const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
-      if (!payload) return;
-      const runId = payload.runId || currentChatState().activeRunId || ephemeralTurn?.runId;
-      if (!acceptsStreamingRun(runId)) return;
-      ephemeralTurn = reduceEphemeralTurnOnToken(ephemeralTurn, payload);
-      scheduleOverlayRender();
-    });
-    chatEvents.addEventListener("factory-stream-reset", () => {
-      reconcileEphemeralTurn();
-    });
-  };
+      eventSource.addEventListener("agent-token", (event) => {
+        const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
+        if (!payload) return;
+        const runId = payload.runId || currentChatState().activeRunId || ephemeralTurn?.runId;
+        if (!acceptsStreamingRun(runId)) return;
+        ephemeralTurn = reduceEphemeralTurnOnToken(ephemeralTurn, payload);
+        scheduleOverlayRender();
+      });
+      eventSource.addEventListener("factory-stream-reset", () => {
+        reconcileEphemeralTurn();
+      });
+    },
+  });
 
   const syncWorkbenchEventSources = () => {
-    connectBackgroundEvents();
-    connectChatEvents();
+    liveRefreshRouter.sync();
   };
 
   const refreshVisibleWorkbench = () => {
     syncWorkbenchEventSources();
+    return refreshRouteTargetsNow(["board", "focus", "chat"]).catch(() => undefined);
   };
 
   const navigateWithFeedback = (location: string) => {
@@ -1214,6 +1386,7 @@ export const initFactoryWorkbenchBrowser = () => {
       page: asString(url.searchParams.get("page")),
       focusKind: asString(url.searchParams.get("focusKind")),
       focusId: asString(url.searchParams.get("focusId")),
+      basePath: url.pathname,
     });
 
   const applyInlineLocation = (
@@ -1224,55 +1397,61 @@ export const initFactoryWorkbenchBrowser = () => {
       navigateWithFeedback(location);
       return Promise.resolve(false);
     }
-    const url = resolveFactoryUrl(location);
-    if (!url) {
-      navigateWithFeedback(location);
-      return Promise.resolve(false);
-    }
-    const nextRoute = routeStateFromLocation(url);
-    const currentRoute = workbenchState.desiredRoute;
-    const changeKind = classifyWorkbenchRouteChange(workbenchState.desiredRoute, nextRoute);
-    if (changeKind === "noop") return Promise.resolve(true);
-    if (changeKind === "inspector") {
-      dispatchWorkbenchAction({ type: "inspector.changed", route: nextRoute });
-      applyRouteState(nextRoute, "replace");
-      if (nextRoute.inspectorTab === "chat") {
-        window.requestAnimationFrame(() => {
-          const input = chatInput();
-          if (input) input.focus();
-        });
+    return resolveInlineWorkbenchLocation(location).then((resolvedLocation) => {
+      if (!resolvedLocation || !isInlineWorkbenchLocation(resolvedLocation)) {
+        navigateWithFeedback(location);
+        return false;
       }
-      return refreshRouteTargetsNow(["chat"], nextRoute.routeKey).then(() => true).catch(() => true);
-    }
-    if (changeKind === "focus") {
-      dispatchWorkbenchAction({ type: "focus.changed", route: nextRoute });
-      applyRouteState(nextRoute, "replace");
-      return refreshRouteTargetsNow(["summary", "activity"], nextRoute.routeKey).then(() => true).catch(() => true);
-    }
-    if (changeKind === "filter") {
-      dispatchWorkbenchAction({ type: "filter.changed", route: nextRoute });
-      applyRouteState(nextRoute, "push");
-      return refreshRouteTargetsNow(["header", "chat-header", "workbench"], nextRoute.routeKey).then(() => true).catch(() => true);
-    }
-    dispatchWorkbenchAction({
-      type: "route.applied",
-      route: nextRoute,
+      const url = resolveFactoryUrl(resolvedLocation);
+      if (!url) {
+        navigateWithFeedback(location);
+        return false;
+      }
+      const nextRoute = routeStateFromLocation(url);
+      const currentRoute = workbenchState.desiredRoute;
+      const changeKind = classifyWorkbenchRouteChange(workbenchState.desiredRoute, nextRoute);
+      if (changeKind === "noop") return true;
+      if (changeKind === "inspector") {
+        dispatchWorkbenchAction({ type: "inspector.changed", route: nextRoute });
+        applyRouteState(nextRoute, "replace");
+        if (nextRoute.inspectorTab === "chat") {
+          window.requestAnimationFrame(() => {
+            const input = chatInput();
+            if (input) input.focus();
+          });
+        }
+        return refreshRouteTargetsNow(["chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+      }
+      if (changeKind === "focus") {
+        dispatchWorkbenchAction({ type: "focus.changed", route: nextRoute });
+        applyRouteState(nextRoute, "replace");
+        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+      }
+      if (changeKind === "filter") {
+        dispatchWorkbenchAction({ type: "filter.changed", route: nextRoute });
+        applyRouteState(nextRoute, "push");
+        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+      }
+      dispatchWorkbenchAction({
+        type: "route.applied",
+        route: nextRoute,
+      });
+      applyRouteState(nextRoute, historyMode ?? "push");
+      return refreshRouteTargetsNow(scopeRefreshTargets(currentRoute, nextRoute), nextRoute.routeKey).then(() => {
+        if (shouldStickToBottom) {
+          window.requestAnimationFrame(() => {
+            const scroll = chatScroll();
+            if (!scroll) return;
+            if (typeof scroll.scrollTo === "function") {
+              scroll.scrollTo({ top: scroll.scrollHeight, behavior: "auto" });
+            } else {
+              scroll.scrollTop = scroll.scrollHeight;
+            }
+          });
+        }
+        return true;
+      }).catch(() => true);
     });
-    applyRouteState(nextRoute, historyMode ?? "push");
-    return refreshRouteTargetsNow(scopeRefreshTargets(currentRoute, nextRoute), nextRoute.routeKey).then(() => {
-      if (shouldStickToBottom) {
-        window.requestAnimationFrame(() => {
-          const scroll = chatScroll();
-          if (!scroll) return;
-          if (typeof scroll.scrollTo === "function") {
-            scroll.scrollTo({ top: scroll.scrollHeight, behavior: "auto" });
-          } else {
-            scroll.scrollTop = scroll.scrollHeight;
-          }
-        });
-      }
-      return true;
-    }).catch(() => true);
   };
 
   const htmxSwapTarget = (event: Event): HTMLElement | null => {
@@ -1503,7 +1682,8 @@ export const initFactoryWorkbenchBrowser = () => {
       const target = htmxSwapTarget(event);
       if (!target) return;
       const isWorkbenchShellSwap =
-        target.id === "factory-workbench-rail-shell"
+        target.id === "factory-workbench-background-root"
+        || target.id === "factory-workbench-rail-shell"
         || target.id === "factory-workbench-focus-shell"
         || target.id === "factory-workbench-chat-pane"
         || target.id === "factory-workbench-chat-region"
@@ -1512,7 +1692,7 @@ export const initFactoryWorkbenchBrowser = () => {
       pendingHtmxSwapStates.set(target.id, {
         targetId: target.id,
         documentScroll: isWorkbenchShellSwap ? null : captureDocumentScrollState(),
-        workbenchPanes: target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell"
+        workbenchPanes: target.id === "factory-workbench-background-root" || target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell"
           ? captureWorkbenchPaneScrollState()
           : null,
         chat: target.id === "factory-workbench-chat-pane" || target.id === "factory-workbench-chat-region" || target.id === "factory-workbench-chat-shell" || target.id === "factory-workbench-chat-body"
@@ -1526,6 +1706,18 @@ export const initFactoryWorkbenchBrowser = () => {
       const swapState = pendingHtmxSwapStates.get(target.id) ?? null;
       pendingHtmxSwapStates.delete(target.id);
       processHtmx(target);
+      const nextEnvelope = readEnvelopeFromElement(target);
+      if (target.id === "factory-workbench-background-root" && nextEnvelope) {
+        setDocumentEnvelopeTarget("board", nextEnvelope);
+        setDocumentEnvelopeTarget("focus", nextEnvelope);
+        setDocumentEnvelopeTarget("chat", nextEnvelope);
+      } else if (target.id === "factory-workbench-rail-shell" && nextEnvelope) {
+        setDocumentEnvelopeTarget("board", nextEnvelope);
+      } else if (target.id === "factory-workbench-focus-shell" && nextEnvelope) {
+        setDocumentEnvelopeTarget("focus", nextEnvelope);
+      } else if (target.id === "factory-workbench-chat-body" && nextEnvelope) {
+        setDocumentEnvelopeTarget("chat", nextEnvelope);
+      }
       syncWorkbenchStateFromLocation();
       if (ephemeralTurn) scheduleOverlayRender();
       if (target.id === "factory-workbench-chat-pane" || target.id === "factory-workbench-chat-region" || target.id === "factory-workbench-chat-shell" || target.id === "factory-workbench-chat-body") {
@@ -1536,7 +1728,7 @@ export const initFactoryWorkbenchBrowser = () => {
         }
         reconcileEphemeralTurn();
       }
-      if (target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell") {
+      if (target.id === "factory-workbench-background-root" || target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell") {
         if (swapState?.workbenchPanes) {
           window.requestAnimationFrame(() => {
             restoreWorkbenchPaneScrollState(swapState.workbenchPanes!);
@@ -1556,6 +1748,13 @@ export const initFactoryWorkbenchBrowser = () => {
     });
   }
 
+  if (typeof window.setInterval === "function") {
+    window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      refreshVisibleWorkbench();
+    }, 2500);
+  }
+
   window.requestAnimationFrame(() => {
     const nextScroll = chatScroll();
     if (!nextScroll) return;
@@ -1570,6 +1769,8 @@ export const initFactoryWorkbenchBrowser = () => {
   const replayStorage = sessionStorageApi();
   const replay = parseWorkbenchReplay(
     replayStorage?.getItem(replayStorageKey(bootRoute)) ?? null,
+    Date.now(),
+    bootRoute.routeKey,
   );
   dispatchWorkbenchAction({ type: "boot", route: bootRoute });
   const replayRoute = mergeReplayRoute(workbenchState.appliedRoute, replay, {
@@ -1593,6 +1794,7 @@ export const initFactoryWorkbenchBrowser = () => {
   } else {
     applyRouteState(workbenchState.appliedRoute, "none");
   }
+  appliedEnvelope = readDocumentEnvelope();
   processHtmx(document.body);
   scheduleOverlayRender();
   syncWorkbenchEventSources();

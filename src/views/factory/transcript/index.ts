@@ -90,6 +90,12 @@ const liveOutputCardSupport = (card: FactoryWorkCard): string | undefined => {
   return summary;
 };
 
+const renderRunningActivity = (): string =>
+  `<div class="factory-running-activity" aria-hidden="true">
+    <span class="factory-running-activity-orb"></span>
+    <span class="factory-running-activity-rail"></span>
+  </div>`;
+
 const renderLiveOutputWorkCard = (card: FactoryWorkCard): string => {
   const metadata = [
     card.taskId ? `Task ${card.taskId}` : undefined,
@@ -97,7 +103,7 @@ const renderLiveOutputWorkCard = (card: FactoryWorkCard): string => {
     card.jobId ? `Job ${card.jobId}` : undefined,
     card.meta,
   ].filter((value): value is string => Boolean(value));
-  return `<section class="border border-border bg-muted/45 px-3 py-3">
+  return `<section class="border border-border bg-muted/45 px-3 py-3 ${card.running ? "factory-running-card" : ""}">
     <div class="flex min-w-0 items-center justify-between gap-2">
       <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         ${iconForEntity(card.worker, "w-3 h-3 text-muted-foreground shrink-0 self-center")}
@@ -109,6 +115,7 @@ const renderLiveOutputWorkCard = (card: FactoryWorkCard): string => {
     <div class="mt-2 text-sm font-semibold text-foreground">${esc(liveOutputCardHeading(card))}</div>
     <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(liveOutputCardSummary(card))}</div>
     ${liveOutputCardSupport(card) ? `<div class="mt-1 text-xs leading-5 text-muted-foreground">${esc(liveOutputCardSupport(card)!)}</div>` : ""}
+    ${card.running ? renderRunningActivity() : ""}
     ${metadata.length > 0 ? `<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
       ${metadata.map((value) => `<span class="border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
     </div>` : ""}
@@ -205,6 +212,7 @@ const renderChatItem = (
       <div class="flex min-w-0 items-center justify-between gap-2">
         <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span class="text-xs font-semibold text-foreground">${esc(item.title)}</span>
+          ${item.meta ? `<span class="text-[11px] text-muted-foreground">${esc(item.meta)}</span>` : ""}
           ${body.summary ? `<span class="min-w-0 text-xs leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:1] overflow-hidden">${esc(body.summary)}</span>` : ""}
         </div>
         ${badge(systemBadgeLabel(item), tone)}
@@ -234,7 +242,7 @@ const renderChatItem = (
   }
   const card = item.card;
   if (card.variant === "live-output") return renderLiveOutputWorkCard(card);
-  return `<section class="border border-border bg-muted/45 px-3 py-2">
+  return `<section class="border border-border bg-muted/45 px-3 py-2 ${card.running ? "factory-running-card" : ""}">
     <div class="flex min-w-0 items-center justify-between gap-2">
       <div class="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         ${iconForEntity(card.worker, "w-3 h-3 text-muted-foreground shrink-0 self-center")}
@@ -244,6 +252,7 @@ const renderChatItem = (
       </div>
       ${badge(card.status)}
     </div>
+    ${card.running ? renderRunningActivity() : ""}
     ${card.detail || card.meta || card.link ? `<details class="mt-1.5">
       <summary class="cursor-pointer list-none text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:text-foreground">Details</summary>
       <div class="mt-1.5 space-y-1.5">
@@ -320,7 +329,8 @@ const blockedObjectiveTranscriptItem = (
   ].filter(Boolean);
   return {
     key: `objective-blocked-handoff-${thread?.objectiveId ?? workbench?.summary.objectiveId ?? model.objectiveId ?? "current"}-${thread?.latestDecisionAt ?? thread?.updatedAt ?? 0}`,
-    kind: "assistant",
+    kind: "system",
+    title: "Objective blocked",
     body: lines.join("\n\n"),
     meta: "Blocked handoff",
   };
@@ -331,7 +341,7 @@ const hasDurableObjectiveHandoff = (
 ): boolean => items.some((item) => item.key.includes("-objective-handoff-"));
 
 const durableObjectiveHandoffObjectiveId = (item: FactoryChatItem): string | undefined => {
-  if (item.kind !== "assistant") return undefined;
+  if (item.kind !== "assistant" && item.kind !== "system") return undefined;
   const match = item.key.match(/^run_objective_handoff_(.+)_[a-f0-9]{16}-objective-handoff-/);
   return match?.[1];
 };
@@ -365,14 +375,15 @@ const synthesizedTranscriptItems = (model: FactoryChatIslandModel): ReadonlyArra
   }
   const summary = thread?.summary?.trim();
   if (blockedHandoff) return [blockedHandoff];
-  if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !summary) return transcriptItems;
+  const terminalBody = thread?.renderedBody?.trim() || summary;
+  if (!thread || !isTerminalObjectiveStatusValue(thread.status) || !terminalBody) return transcriptItems;
   const detail = thread.nextAction?.trim();
   return [{
     key: `objective-summary-${thread.objectiveId}-${thread.status}`,
     kind: "assistant",
-    body: detail && detail !== summary && !(thread.status === "completed" && isGenericCompletedNextAction(detail))
-      ? `${summary}\n\nNext: ${detail}`
-      : summary,
+    body: detail && detail !== terminalBody && !(thread.status === "completed" && isGenericCompletedNextAction(detail))
+      ? `${terminalBody}\n\nNext: ${detail}`
+      : terminalBody,
     meta: displayLabel(thread.status) || thread.status,
   }];
 };

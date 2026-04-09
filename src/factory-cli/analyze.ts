@@ -1085,7 +1085,7 @@ export const readObjectiveAnalysis = async (
     if (count > 1) {
       addAnomaly(anomalies, {
         kind: "repeated_control_job",
-        severity: "medium",
+        severity: count >= 4 ? "medium" : "low",
         summary: `${count} control jobs used session ${sessionKey}`,
       });
     }

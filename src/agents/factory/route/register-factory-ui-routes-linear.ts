@@ -3,20 +3,22 @@ import type { Hono } from "hono";
 import { html, json } from "../../../framework/http";
 import {
   buildFactoryWorkbenchShellSnapshot,
-  factoryWorkbenchBoardResponse,
-  factoryWorkbenchBackgroundRootResponse,
-  factoryWorkbenchBlockIsland,
-  factoryWorkbenchChatBody,
-  factoryWorkbenchChatIsland,
-  factoryWorkbenchChatShell,
-  factoryWorkbenchChatShellResponse,
-  factoryWorkbenchFocusIsland,
-  factoryWorkbenchRailIsland,
-  factoryWorkbenchSelectionResponse,
-  factoryWorkbenchShell,
-  factoryWorkbenchWorkspaceIsland,
   type FactoryWorkbenchHeaderIslandModel,
+  type FactoryWorkbenchRouteContext,
 } from "../../../views/factory/workbench/page";
+import {
+  factoryWorkbenchLinearBackgroundRootResponse,
+  factoryWorkbenchLinearBlockIsland,
+  factoryWorkbenchLinearChatBody,
+  factoryWorkbenchLinearChatIsland,
+  factoryWorkbenchLinearChatPaneIsland,
+  factoryWorkbenchLinearChatShellResponse,
+  factoryWorkbenchLinearFocusIsland,
+  factoryWorkbenchLinearRailIsland,
+  factoryWorkbenchLinearSelectionResponse,
+  factoryWorkbenchLinearShell,
+  factoryWorkbenchLinearWorkspaceIsland,
+} from "../../../views/factory/workbench/page-linear";
 import type { FactoryWorkbenchPageModel } from "../../../views/factory-models";
 import { buildWorkbenchLink } from "./navigation";
 import {
@@ -40,7 +42,11 @@ type RouteWrap = <T>(
 type WorkbenchRequestModel = {
   readonly request: FactoryWorkbenchRequestState;
   readonly model: FactoryWorkbenchPageModel;
-  readonly envelope?: import("../../../views/factory-models").WorkbenchVersionEnvelope;
+};
+
+type WorkbenchRequestHeaderModel = {
+  readonly request: FactoryWorkbenchRequestState;
+  readonly model: FactoryWorkbenchHeaderIslandModel;
 };
 
 type WorkbenchRequestWorkspaceModel = {
@@ -64,27 +70,6 @@ type WorkbenchRequestSelectionModel = {
   readonly header: FactoryWorkbenchHeaderIslandModel;
   readonly workspace: FactoryWorkbenchPageModel["workspace"];
   readonly chat: FactoryWorkbenchPageModel["chat"];
-  readonly envelope?: import("../../../views/factory-models").WorkbenchVersionEnvelope;
-};
-
-type WorkbenchRequestBoardModel = {
-  readonly request: FactoryWorkbenchRequestState;
-  readonly header: FactoryWorkbenchHeaderIslandModel;
-  readonly workspace: FactoryWorkbenchPageModel["workspace"];
-  readonly envelope: import("../../../views/factory-models").WorkbenchVersionEnvelope;
-};
-
-type WorkbenchRequestFocusModel = {
-  readonly request: FactoryWorkbenchRequestState;
-  readonly workspace: FactoryWorkbenchPageModel["workspace"];
-  readonly envelope: import("../../../views/factory-models").WorkbenchVersionEnvelope;
-};
-
-type WorkbenchRequestChatBodyModel = {
-  readonly request: FactoryWorkbenchRequestState;
-  readonly workspace: FactoryWorkbenchPageModel["workspace"];
-  readonly chat: FactoryWorkbenchPageModel["chat"];
-  readonly envelope: import("../../../views/factory-models").WorkbenchVersionEnvelope;
 };
 
 type ServerTimingCollector = {
@@ -125,7 +110,7 @@ const createServerTimingCollector = (): ServerTimingCollector => {
 const routeContextForWorkspace = (
   request: FactoryWorkbenchRequestState,
   model: FactoryWorkbenchPageModel["workspace"],
-) => ({
+): FactoryWorkbenchRouteContext => ({
   shellBase: request.shellBase,
   profileId: model.activeProfileId,
   chatId: model.chatId,
@@ -141,7 +126,7 @@ const routeContextForWorkspace = (
 const routeContextForChat = (
   request: FactoryWorkbenchRequestState,
   model: FactoryWorkbenchPageModel["chat"],
-) => ({
+): FactoryWorkbenchRouteContext => ({
   shellBase: request.shellBase,
   profileId: model.activeProfileId,
   chatId: model.chatId ?? request.chatId,
@@ -154,32 +139,27 @@ const routeContextForChat = (
   filter: request.filter,
 });
 
-export const registerFactoryUiRoutes = (input: {
+export const registerFactoryLinearUiRoutes = (input: {
   readonly app: Hono;
-  readonly basePath?: "/factory" | "/factory-new";
   readonly wrap: RouteWrap;
   readonly loadWorkbenchRequestModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestModel>;
+  readonly loadWorkbenchRequestHeaderModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestHeaderModel>;
   readonly loadWorkbenchRequestWorkspaceModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestWorkspaceModel>;
-  readonly loadWorkbenchRequestBoardModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestBoardModel>;
-  readonly loadWorkbenchRequestFocusModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestFocusModel>;
   readonly loadWorkbenchRequestChatModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestChatModel>;
   readonly loadWorkbenchRequestChatShellModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestChatShellModel>;
-  readonly loadWorkbenchRequestChatBodyModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestChatBodyModel>;
   readonly loadWorkbenchRequestSelectionModel: (req: Request, timing?: ServerTimingCollector) => Promise<WorkbenchRequestSelectionModel>;
 }) => {
   const {
     app,
-    basePath = "/factory",
     wrap,
     loadWorkbenchRequestModel,
+    loadWorkbenchRequestHeaderModel,
     loadWorkbenchRequestWorkspaceModel,
-    loadWorkbenchRequestBoardModel,
-    loadWorkbenchRequestFocusModel,
     loadWorkbenchRequestChatModel,
     loadWorkbenchRequestChatShellModel,
-    loadWorkbenchRequestChatBodyModel,
     loadWorkbenchRequestSelectionModel,
   } = input;
+  const basePath: "/factory-new" = "/factory-new";
 
   const withTiming = <T>(
     load: (timing: ServerTimingCollector) => Promise<T>,
@@ -213,16 +193,32 @@ export const registerFactoryUiRoutes = (input: {
     c.header("Vary", "HX-Request");
   });
 
-  app.get(`${basePath}/control`, async (c) => {
-    const url = new URL(c.req.raw.url);
-    return new Response(null, {
-      status: 303,
-      headers: {
-        Location: `${basePath}${url.search}`,
-        "Cache-Control": "no-store",
-      },
-    });
-  });
+  app.get(basePath, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestModel(c.req.raw, timing),
+    ({ request, model }) => {
+      if (shouldRedirectWorkbenchRequest(request, model)) {
+        return new Response(null, {
+          status: 303,
+          headers: {
+            Location: buildWorkbenchLink({
+              profileId: model.activeProfileId,
+              chatId: model.chatId,
+              objectiveId: model.objectiveId,
+              inspectorTab: model.inspectorTab,
+              detailTab: model.detailTab,
+              page: model.page,
+              focusKind: model.focusKind,
+              focusId: model.focusId,
+              filter: model.filter,
+              basePath,
+            }),
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+      return html(factoryWorkbenchLinearShell(model, basePath));
+    },
+  ));
 
   app.get(`${basePath}/workbench`, async (c) => wrap(
     async () => loadWorkbenchRequestModel(c.req.raw),
@@ -246,121 +242,10 @@ export const registerFactoryUiRoutes = (input: {
     }),
   ));
 
-  app.get(`${basePath}/island/workbench/background-root`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestBoardModel(c.req.raw, timing),
-    ({ request, header, workspace, envelope }) => html(factoryWorkbenchBackgroundRootResponse({
-      header,
-      workspace,
-      routeContext: routeContextForWorkspace(request, workspace),
-      envelope,
-    })),
-  ));
-
-  app.get(`${basePath}/island/workbench/board`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestBoardModel(c.req.raw, timing),
-    ({ request, header, workspace, envelope }) => html(factoryWorkbenchBoardResponse({
-      header,
-      workspace,
-      routeContext: routeContextForWorkspace(request, workspace),
-      envelope,
-    })),
-  ));
-
-  app.get(`${basePath}/island/workbench/block`, async (c) => withTiming(
-    async (timing) => ({
-      ...(await loadWorkbenchRequestWorkspaceModel(c.req.raw, timing)),
-      blockKey: c.req.query("block")?.trim() || "summary",
-    }),
-    ({ request, model, blockKey }) => html(factoryWorkbenchBlockIsland(
-      model,
-      routeContextForWorkspace(request, model),
-      blockKey,
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
-    ({ request, model }) => html(factoryWorkbenchWorkspaceIsland(
-      model,
-      routeContextForWorkspace(request, model),
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench/focus`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestFocusModel(c.req.raw, timing),
-    ({ request, workspace, envelope }) => html(factoryWorkbenchFocusIsland(
-      workspace,
-      routeContextForWorkspace(request, workspace),
-      envelope,
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench/rail`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
-    ({ request, model }) => html(factoryWorkbenchRailIsland(
-      model,
-      routeContextForWorkspace(request, model),
-    )),
-  ));
-
-  app.get(`${basePath}/island/chat`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestChatModel(c.req.raw, timing),
-    ({ request, model }) => html(factoryWorkbenchChatIsland(
-      model,
-      routeContextForChat(request, model),
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench/chat-shell`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestChatShellModel(c.req.raw, timing),
-    ({ request, workspace, chat }) => html(factoryWorkbenchChatShellResponse(
-      workspace,
-      chat,
-      routeContextForWorkspace(request, workspace),
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench/chat-pane`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestChatShellModel(c.req.raw, timing),
-    ({ request, workspace, chat }) => {
-      const routeContext = routeContextForWorkspace(request, workspace);
-      return html(`${factoryWorkbenchChatShellResponse(
-        workspace,
-        chat,
-        routeContext,
-      )}${factoryWorkbenchChatShell(
-        workspace,
-        chat,
-        routeContext,
-      )}`);
-    },
-  ));
-
-  app.get(`${basePath}/island/workbench/chat-body`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestChatBodyModel(c.req.raw, timing),
-    ({ request, workspace, chat, envelope }) => html(factoryWorkbenchChatBody(
-      workspace,
-      chat,
-      routeContextForWorkspace(request, workspace),
-      envelope,
-    )),
-  ));
-
-  app.get(`${basePath}/island/workbench/select`, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestSelectionModel(c.req.raw, timing),
-    ({ request, header, workspace, chat, envelope }) => html(factoryWorkbenchSelectionResponse({
-      header,
-      workspace,
-      chat,
-      routeContext: routeContextForWorkspace(request, workspace),
-      envelope,
-    })),
-  ));
-
   app.get(`${basePath}/api/workbench-shell`, async (c) => withTiming(
     (timing) => loadWorkbenchRequestModel(c.req.raw, timing),
-    ({ request, model, envelope }) => {
-      const snapshot = buildFactoryWorkbenchShellSnapshot(model, request.shellBase, envelope);
+    ({ request, model }) => {
+      const snapshot = buildFactoryWorkbenchShellSnapshot(model, request.shellBase);
       return json(200, shouldRedirectWorkbenchRequest(request, model)
         ? {
             ...snapshot,
@@ -381,42 +266,117 @@ export const registerFactoryUiRoutes = (input: {
     },
   ));
 
-  app.get(basePath, async (c) => withTiming(
-    (timing) => loadWorkbenchRequestModel(c.req.raw, timing),
-    ({ request, model, envelope }) => {
-      if (shouldRedirectWorkbenchRequest(request, model)) {
-        return new Response(null, {
-          status: 303,
-          headers: {
-            Location: buildWorkbenchLink({
-              profileId: model.activeProfileId,
-              chatId: model.chatId,
-              objectiveId: model.objectiveId,
-              inspectorTab: model.inspectorTab,
-              detailTab: model.detailTab,
-              page: model.page,
-              focusKind: model.focusKind,
-              focusId: model.focusId,
-              filter: model.filter,
-              basePath: request.shellBase,
-            }),
-            "Cache-Control": "no-store",
-          },
-        });
-      }
-      return html(factoryWorkbenchShell(model, request.shellBase, envelope));
+  app.get(`${basePath}/island/workbench/background-root`, async (c) => withTiming(
+    async (timing) => {
+      const [headerResult, workspaceResult] = await Promise.all([
+        loadWorkbenchRequestHeaderModel(c.req.raw, timing),
+        loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
+      ]);
+      return {
+        request: workspaceResult.request,
+        header: headerResult.model,
+        workspace: workspaceResult.model,
+      };
     },
+    ({ request, header, workspace }) => html(factoryWorkbenchLinearBackgroundRootResponse({
+      header,
+      workspace,
+      routeContext: routeContextForWorkspace(request, workspace),
+    })),
+  ));
+
+  app.get(`${basePath}/island/workbench`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
+    ({ request, model }) => html(factoryWorkbenchLinearWorkspaceIsland(
+      model,
+      routeContextForWorkspace(request, model),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/focus`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
+    ({ request, model }) => html(factoryWorkbenchLinearFocusIsland(
+      model,
+      routeContextForWorkspace(request, model),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/rail`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestWorkspaceModel(c.req.raw, timing),
+    ({ request, model }) => html(factoryWorkbenchLinearRailIsland(
+      model,
+      routeContextForWorkspace(request, model),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/block`, async (c) => withTiming(
+    async (timing) => ({
+      ...(await loadWorkbenchRequestWorkspaceModel(c.req.raw, timing)),
+      blockKey: c.req.query("block")?.trim() || "summary",
+    }),
+    ({ request, model, blockKey }) => html(factoryWorkbenchLinearBlockIsland(
+      model,
+      routeContextForWorkspace(request, model),
+      blockKey,
+    )),
+  ));
+
+  app.get(`${basePath}/island/chat`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestChatModel(c.req.raw, timing),
+    ({ request, model }) => html(factoryWorkbenchLinearChatIsland(
+      model,
+      routeContextForChat(request, model),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/chat-shell`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestChatShellModel(c.req.raw, timing),
+    ({ request, workspace, chat }) => html(factoryWorkbenchLinearChatShellResponse(
+      workspace,
+      chat,
+      routeContextForWorkspace(request, workspace),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/chat-pane`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestChatShellModel(c.req.raw, timing),
+    ({ request, workspace, chat }) => html(factoryWorkbenchLinearChatPaneIsland(
+      workspace,
+      chat,
+      routeContextForWorkspace(request, workspace),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/chat-body`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestChatShellModel(c.req.raw, timing),
+    ({ request, chat, workspace }) => html(factoryWorkbenchLinearChatBody(
+      chat,
+      routeContextForWorkspace(request, workspace),
+    )),
+  ));
+
+  app.get(`${basePath}/island/workbench/select`, async (c) => withTiming(
+    (timing) => loadWorkbenchRequestSelectionModel(c.req.raw, timing),
+    ({ request, header, workspace, chat }) => html(factoryWorkbenchLinearSelectionResponse({
+      header,
+      workspace,
+      chat,
+      routeContext: routeContextForWorkspace(request, workspace),
+    })),
   ));
 
   app.get(`${basePath}/new-chat`, async (c) => wrap(
-    async () => buildWorkbenchLink({
-      profileId: requestedProfileId(c.req.raw) ?? "generalist",
-      chatId: readWorkbenchRequest(c.req.raw).chatId,
-      inspectorTab: "chat",
-      detailTab: requestedWorkbenchDetailTab(c.req.raw) ?? "queue",
-      filter: requestedWorkbenchFilter(c.req.raw),
-      basePath: readWorkbenchRequest(c.req.raw).shellBase,
-    }),
+    async () => {
+      const request = readWorkbenchRequest(c.req.raw);
+      return buildWorkbenchLink({
+        profileId: requestedProfileId(c.req.raw) ?? "generalist",
+        chatId: request.chatId,
+        inspectorTab: "chat",
+        detailTab: requestedWorkbenchDetailTab(c.req.raw) ?? "queue",
+        filter: requestedWorkbenchFilter(c.req.raw),
+        basePath: request.shellBase,
+      });
+    },
     (location) => new Response(null, {
       status: 303,
       headers: {

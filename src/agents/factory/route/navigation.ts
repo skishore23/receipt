@@ -40,6 +40,7 @@ export const workbenchNavigationResponse = (
     readonly focusKind?: "task" | "job";
     readonly focusId?: string;
     readonly live?: FactoryLiveScopePayload;
+    readonly queueDepth?: number;
   },
 ): Response =>
   wantsJsonNavigation(req)
@@ -47,6 +48,7 @@ export const workbenchNavigationResponse = (
         location,
         ...(options?.live ? { live: options.live } : {}),
         ...(options?.chatId ? { chat: { chatId: options.chatId } } : {}),
+        ...(typeof options?.queueDepth === "number" ? { queueDepth: options.queueDepth } : {}),
         ...(options?.objectiveId || (options?.focusKind && options?.focusId)
           ? {
               selection: {
@@ -75,4 +77,5 @@ export const buildWorkbenchLink = (input: {
   readonly focusKind?: "task" | "job";
   readonly focusId?: string;
   readonly filter?: FactoryWorkbenchFilterKey;
+  readonly basePath?: string;
 }): string => buildFactoryWorkbenchRouteKey(input);

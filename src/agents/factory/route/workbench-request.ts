@@ -15,12 +15,14 @@ import {
   requestedInspectorTab,
   requestedObjectiveId,
   requestedProfileId,
+  requestedWorkbenchShellBase,
   requestedWorkbenchDetailTab,
   requestedWorkbenchFilter,
   requestedWorkbenchPage,
 } from "./params";
 
 export type FactoryWorkbenchRequestState = {
+  readonly shellBase: "/factory" | "/factory-new";
   readonly hasRequestedProfile: boolean;
   readonly hasRequestedObjective: boolean;
   readonly hasRequestedFocus: boolean;
@@ -41,6 +43,7 @@ export const readWorkbenchRequest = (req: Request): FactoryWorkbenchRequestState
   const focusKind = requestedFocusKind(req);
   const focusId = requestedFocusId(req);
   return {
+    shellBase: requestedWorkbenchShellBase(req),
     hasRequestedProfile: profileId !== undefined,
     hasRequestedObjective: objectiveId !== undefined,
     hasRequestedFocus: focusKind !== undefined || focusId !== undefined,

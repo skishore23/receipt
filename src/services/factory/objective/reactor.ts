@@ -25,7 +25,7 @@ export type FactoryObjectiveReactorOps = {
   readonly redriveQueuedActiveTasks: (state: FactoryState) => Promise<void>;
   readonly stampCircuitBrokenTasks: (state: FactoryState) => Promise<void>;
   readonly derivePolicyBlockedReason: (state: FactoryState) => string | undefined;
-  readonly buildObjectiveBlockedEvents: (state: FactoryState, reason: string) => ReadonlyArray<FactoryEvent>;
+  readonly buildObjectiveBlockedEvents: (state: FactoryState, reason: string) => Promise<ReadonlyArray<FactoryEvent>>;
   readonly emitObjectiveBatch: (objectiveId: string, events: ReadonlyArray<FactoryEvent>, expectedPrev?: string) => Promise<void>;
   readonly syncInvestigationSynthesisIfReady: (state: FactoryState) => Promise<boolean>;
   readonly collectObjectivePlannerFacts: (state: FactoryState) => Promise<FactoryObjectivePlannerFacts>;
@@ -73,7 +73,7 @@ export const reactFactoryObjective = async (
 
   const elapsedBlockedReason = ops.derivePolicyBlockedReason(state);
   if (elapsedBlockedReason) {
-    await ops.emitObjectiveBatch(objectiveId, ops.buildObjectiveBlockedEvents(state, elapsedBlockedReason));
+    await ops.emitObjectiveBatch(objectiveId, await ops.buildObjectiveBlockedEvents(state, elapsedBlockedReason));
     await ops.rebalanceObjectiveSlots();
     return;
   }

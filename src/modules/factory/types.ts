@@ -92,9 +92,32 @@ export type FactoryObjectiveHandoffStatus =
   | "failed"
   | "canceled";
 
+export type FactoryTaskPresentationKind =
+  | "inline"
+  | "artifacts"
+  | "investigation_report"
+  | "generic";
+
+export type FactoryTaskPresentationRenderHint =
+  | "table"
+  | "report"
+  | "list"
+  | "generic";
+
+export type FactoryTaskPresentationRecord = {
+  readonly kind: FactoryTaskPresentationKind;
+  readonly renderHint: FactoryTaskPresentationRenderHint;
+  readonly inlineBody?: string;
+  readonly primaryArtifactLabels?: ReadonlyArray<string>;
+};
+
 export type FactoryObjectiveHandoffRecord = {
   readonly status: FactoryObjectiveHandoffStatus;
   readonly summary: string;
+  readonly renderedBody?: string;
+  readonly renderSourceHash?: string;
+  readonly renderedAt?: number;
+  readonly renderedBy?: "orchestrator_llm" | "fallback";
   readonly output?: string;
   readonly blocker?: string;
   readonly nextAction?: string;
@@ -171,6 +194,7 @@ export type FactoryInvestigationTaskReport = {
   readonly outcome: FactoryTaskResultOutcome;
   readonly summary: string;
   readonly handoff: string;
+  readonly presentation?: FactoryTaskPresentationRecord;
   readonly completion: FactoryTaskCompletionRecord;
   readonly report: FactoryInvestigationReport;
   readonly artifactRefs: Readonly<Record<string, GraphRef>>;
@@ -356,6 +380,7 @@ export type FactoryCandidateRecord = {
   readonly headCommit?: string;
   readonly summary?: string;
   readonly handoff?: string;
+  readonly presentation?: FactoryTaskPresentationRecord;
   readonly completion?: FactoryTaskCompletionRecord;
   readonly alignment?: FactoryTaskAlignmentRecord;
   readonly checkResults: ReadonlyArray<FactoryCheckResult>;

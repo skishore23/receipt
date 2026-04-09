@@ -27,6 +27,7 @@ export type TokenEventPayload = {
 
 export type FactoryFetchResponse = {
   readonly ok: boolean;
+  readonly url?: string;
   readonly headers: {
     readonly get: (name: string) => string | null;
   };

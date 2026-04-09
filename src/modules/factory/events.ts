@@ -16,6 +16,7 @@ import type {
   FactoryTaskAlignmentRecord,
   FactoryTaskRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskPresentationRecord,
   FactoryTaskResultOutcome,
   FactoryWorkerHandoffOutcome,
   FactoryWorkerHandoffScope,
@@ -138,6 +139,10 @@ export type FactoryEvent =
       readonly title: string;
       readonly status: FactoryObjectiveHandoffStatus;
       readonly summary: string;
+      readonly renderedBody?: string;
+      readonly renderSourceHash?: string;
+      readonly renderedAt?: number;
+      readonly renderedBy?: "orchestrator_llm" | "fallback";
       readonly output?: string;
       readonly blocker?: string;
       readonly nextAction?: string;
@@ -206,6 +211,7 @@ export type FactoryEvent =
       readonly headCommit: string;
       readonly summary: string;
       readonly handoff: string;
+      readonly presentation?: FactoryTaskPresentationRecord;
       readonly completion: FactoryTaskCompletionRecord;
       readonly alignment?: FactoryTaskAlignmentRecord;
       readonly checkResults: ReadonlyArray<FactoryCheckResult>;
@@ -222,6 +228,7 @@ export type FactoryEvent =
       readonly status: Extract<FactoryCandidateStatus, "changes_requested" | "approved" | "rejected">;
       readonly summary: string;
       readonly handoff: string;
+      readonly presentation?: FactoryTaskPresentationRecord;
       readonly reviewedAt: number;
     }
   | {
@@ -232,6 +239,7 @@ export type FactoryEvent =
       readonly outcome: FactoryTaskResultOutcome;
       readonly summary: string;
       readonly handoff: string;
+      readonly presentation?: FactoryTaskPresentationRecord;
       readonly completion: FactoryTaskCompletionRecord;
       readonly report: FactoryInvestigationReport;
       readonly artifactRefs: Readonly<Record<string, GraphRef>>;
