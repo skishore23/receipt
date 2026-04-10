@@ -201,6 +201,15 @@ test("factory task packets: context summary includes controller bootstrap seed a
     investigation: {
       reports: [],
     },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.synthesizing.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.synthesizing.context.md",
+      contextPackPath: ".receipt/factory/task_01.synthesizing.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.synthesizing.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.synthesizing.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
+    },
     helperCatalog: {
       runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",
       selectedHelpers: [
@@ -232,7 +241,7 @@ test("factory task packets: context summary includes controller bootstrap seed a
   expect(summary).toContain("Task Phase: synthesizing");
   expect(summary).toContain("## Bootstrap Seed");
   expect(summary).toContain("Controller precomputed this seed from the manifest, context pack, scoped memory, recent receipts, and mounted evidence.");
-  expect(summary).toContain("Exact packet paths from the workspace root: .receipt/factory/task_01.context.md, .receipt/factory/task_01.context-pack.json, .receipt/factory/task_01.memory.cjs.");
+  expect(summary).toContain("Exact packet paths from the workspace root: .receipt/factory/task_01.synthesizing.context.md, .receipt/factory/task_01.synthesizing.context-pack.json, .receipt/factory/task_01.synthesizing.memory.cjs.");
   expect(summary).toContain("When joining packet-relative paths to the workspace root, do not prefix them with a leading slash.");
   expect(summary).toContain("Checked-in worker skill path: /Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md.");
   expect(summary).toContain("Checked-in profile skill path: /Users/kishore/receipt/skills/factory-infrastructure-aws/SKILL.md.");
@@ -286,6 +295,15 @@ test("factory task packets: resource inventory bootstrap command follows the tas
     memory: {},
     investigation: {
       reports: [],
+    },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.context.md",
+      contextPackPath: ".receipt/factory/task_01.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
     },
     helperCatalog: {
       runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",
@@ -363,6 +381,15 @@ test("factory task packets: bootstrap seed picks the best matching helper instea
     investigation: {
       reports: [],
     },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.context.md",
+      contextPackPath: ".receipt/factory/task_01.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
+    },
     helperCatalog: {
       runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",
       selectedHelpers: [
@@ -437,6 +464,15 @@ test("factory task packets: bootstrap seed picks the best matching helper instea
     memory: {},
     investigation: {
       reports: [],
+    },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.context.md",
+      contextPackPath: ".receipt/factory/task_01.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
     },
     helperCatalog: {
       runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",

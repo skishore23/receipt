@@ -8,15 +8,17 @@ const AWS_MULTI_SERVICE_RE = /\b(ec2|ebs|snapshot|snapshots|s3|rds|nat|load bala
 const CLOUD_CONTEXT_HINT_RE = /\b(?:aws|gcp|azure|cloud\b|ec2|s3|rds|lambda|eks|ecr|ecs|iam|vpc|route53|cloudformation|cloudwatch|bigquery|pubsub|gcloud|google cloud|terraform|kubernetes|k8s|helm)\b/i;
 const FAIL_FAST_DENIED_RE = /fail fast if any aws cli call is denied and report exact error\.?/i;
 
-export const cloudProviderDefaultsToAws = (cloudProvider: string | undefined): boolean =>
+const isAwsCloudProvider = (cloudProvider: string | undefined): boolean =>
   cloudProvider === "aws";
 
 export const taskNeedsCloudExecutionContext = (input: {
+  readonly profileId?: string;
   readonly profileCloudProvider?: string;
   readonly taskTitle?: string;
   readonly taskPrompt: string;
 }): boolean =>
-  Boolean(input.profileCloudProvider?.trim())
+  input.profileId === "infrastructure"
+  || Boolean(input.profileCloudProvider?.trim())
   || CLOUD_CONTEXT_HINT_RE.test(`${input.taskTitle ?? ""}\n${input.taskPrompt}`);
 
 const countAwsServiceMentions = (prompt: string): number => {
@@ -38,7 +40,7 @@ export const rewriteInfrastructureTaskPromptForExecution = (input: {
   readonly objectiveMode: FactoryObjectiveMode;
   readonly taskPrompt: string;
 }): string => {
-  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return input.taskPrompt;
+  if (!isAwsCloudProvider(input.profileCloudProvider) || input.objectiveMode !== "investigation") return input.taskPrompt;
   if (!FAIL_FAST_DENIED_RE.test(input.taskPrompt)) return input.taskPrompt;
   if (!isBroadAwsMultiServiceInventoryPrompt(input.taskPrompt)) return input.taskPrompt;
   return input.taskPrompt.replace(
@@ -52,22 +54,31 @@ export const renderInfrastructureTaskExecutionGuidance = (input: {
   readonly objectiveMode: FactoryObjectiveMode;
   readonly cloudExecutionContext: FactoryCloudExecutionContext;
 }): ReadonlyArray<string> => {
-  if (!cloudProviderDefaultsToAws(input.profileCloudProvider) || input.objectiveMode !== "investigation") return [];
-  const provider = input.cloudExecutionContext.preferredProvider ?? "aws";
-  return [
+  if (input.objectiveMode !== "investigation") return [];
+  const provider = input.profileCloudProvider
+    ?? input.cloudExecutionContext.preferredProvider
+    ?? (input.cloudExecutionContext.activeProviders.length === 1
+      ? input.cloudExecutionContext.activeProviders[0]
+      : input.cloudExecutionContext.availableProviders.length === 1
+        ? input.cloudExecutionContext.availableProviders[0]
+        : undefined);
+  const generic = [
     `## Helper-First Execution`,
     `For infrastructure CLI investigations, prefer a checked-in helper over ad hoc one-off commands or a task-local script.`,
-    `For vague prompts such as "show me something interesting", decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command.`,
-    `After reading AGENTS.md, the task packet, the memory context/objective summaries, and the mounted helper skills, stop bootstrap and run the best matching checked-in helper. Do not keep exploring unrelated repo files for a simple AWS inventory task.`,
-    `Run helpers through \`python3 ${HELPER_RUNNER} run --provider aws --json <helper-id> -- ...\` and base the report on the helper output rather than memory or speculation.`,
-    `Use one primary evidence path. Only widen the investigation to a second AWS service when the first path is empty, contradictory, or permission-blocked.`,
-    `If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result. Do not spend extra turns reformatting already-valid AWS CLI JSON, re-checking git status, or doing optional follow-up probes.`,
+    `For vague prompts such as "show me something interesting", decide one concrete selection rule, one primary evidence source, and one stop condition before the first cloud command.`,
+    `After reading AGENTS.md, the task packet, the memory context/objective summaries, and the mounted helper skills, stop bootstrap and run the best matching checked-in helper. Do not keep exploring unrelated repo files for a simple cloud inventory task.`,
+    `Run helpers through \`python3 ${HELPER_RUNNER} run --provider ${provider ?? "<provider>"} --json <helper-id> -- ...\` and base the report on the helper output rather than memory or speculation.`,
+    `Use one primary evidence path. Only widen the investigation to a second service when the first path is empty, contradictory, or permission-blocked.`,
+    `If the helper succeeds and gives enough evidence to answer the task, stop immediately and return the final JSON result. Do not spend extra turns reformatting already-valid CLI JSON, re-checking git status, or doing optional follow-up probes.`,
     `Only rerun a helper or switch helpers to fix a concrete scope, auth, parsing, or redaction issue. Do not keep iterating once you already have a valid finding.`,
     `If the helper catalog misses the required behavior and the contract is clear enough, use the mounted helper authoring skill to add or extend a checked-in helper under \`skills/factory-helper-runtime/catalog/\`, then run it instead of stopping at a no-helper result.`,
     `Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.`,
     `Treat successful helper JSON output as sufficient machine-readable evidence unless the task explicitly asks for a different format.`,
     `Record the helper runner command in report.scriptsRun so the operator can rerun the exact evidence path.`,
     `If no checked-in helper matches the ask, create or extend a checked-in helper when the missing behavior is clear. Only stop when the helper contract is still ambiguous or repo edits are explicitly out of scope. Do not invent a new .receipt/factory script.`,
+  ];
+  return [
+    ...generic,
     ...(provider === "aws"
       ? [
           `For AWS tasks, prefer the checked-in \`aws_account_scope\` and \`aws_region_scope\` helpers when account or region scope is part of the evidence path.`,

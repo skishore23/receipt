@@ -140,6 +140,15 @@ export type FactoryContextPack = {
     readonly reports: ReadonlyArray<FactoryInvestigationTaskReport>;
     readonly synthesized?: FactoryInvestigationSynthesisRecord;
   };
+  readonly packetPaths: {
+    readonly root: string;
+    readonly manifestPath: string;
+    readonly contextSummaryPath: string;
+    readonly contextPackPath: string;
+    readonly memoryScriptPath: string;
+    readonly receiptCliPath: string;
+    readonly evidenceDir: string;
+  };
   readonly helperCatalog?: FactoryHelperContext;
   readonly contextSources: FactoryContextSources;
 };
@@ -256,6 +265,9 @@ export const buildTaskFilePaths = (
     receiptCliPath: path.join(root, `${taskId}${phaseSuffix}.receipt-cli.md`),
   };
 };
+
+const packetRelativePath = (filePath: string): string =>
+  path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(filePath));
 
 export const renderFactoryReceiptCliSurface = (input: {
   readonly objectiveId: string;
@@ -567,7 +579,6 @@ const renderBootstrapSeedLines = (
   mountedReadableArtifacts: ReadonlyArray<FactoryReadableArtifact>,
 ): ReadonlyArray<string> => {
   const helperCommand = suggestPrimaryHelperCommand(pack);
-  const packetBase = `.receipt/factory/${pack.task.taskId}`;
   const workerSkillPath = pack.contextSources.repoSkillPaths.find((skillPath) =>
     skillPath.replace(/\\/g, "/").endsWith("/skills/factory-receipt-worker/SKILL.md"));
   const selectedSkillPaths = pack.contextSources.repoSkillPaths.filter((skillPath) =>
@@ -577,7 +588,7 @@ const renderBootstrapSeedLines = (
   const lines = [
     "Controller precomputed this seed from the manifest, context pack, scoped memory, recent receipts, and mounted evidence.",
     "Start with this summary instead of rereading the whole packet stack.",
-    `Exact packet paths from the workspace root: ${packetBase}.context.md, ${packetBase}.context-pack.json, ${packetBase}.memory.cjs.`,
+    `Exact packet paths from the workspace root: ${pack.packetPaths.contextSummaryPath}, ${pack.packetPaths.contextPackPath}, ${pack.packetPaths.memoryScriptPath}.`,
     "When joining packet-relative paths to the workspace root, do not prefix them with a leading slash.",
     "Open the JSON context pack only when you need an exact field, ref, or artifact path.",
     "Run the memory script only if the summary and context pack still leave a factual gap.",
@@ -612,45 +623,22 @@ const renderBootstrapSeedLines = (
 };
 
 const appendEvidenceOutputDir = (args: string): string =>
-  /(^|\s)--output-dir(\s|$)/.test(args) ? args : `${args} --output-dir .receipt/factory/evidence`;
-
-const suggestResourceInventoryArgs = (tokens: ReadonlySet<string>): string => {
-  if (tokens.has("rds") || tokens.has("database") || tokens.has("databases")) {
-    return "--service rds --resource db-instances --all-regions --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("ecs")) {
-    if (tokens.has("service") || tokens.has("services")) {
-      return "--service ecs --resource services --all-regions --output-dir .receipt/factory/evidence";
-    }
-    if (tokens.has("task") || tokens.has("tasks") || tokens.has("container") || tokens.has("containers")) {
-      return "--service ecs --resource tasks --all-regions --output-dir .receipt/factory/evidence";
-    }
-    return "--service ecs --resource clusters --all-regions --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("ec2") || tokens.has("instance") || tokens.has("instances")) {
-    return "--service ec2 --resource instances --all-regions --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("volume") || tokens.has("volumes") || tokens.has("ebs")) {
-    return "--service ec2 --resource volumes --all-regions --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("bucket") || tokens.has("buckets") || tokens.has("s3")) {
-    return "--service s3 --resource buckets --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("lambda") || tokens.has("function") || tokens.has("functions")) {
-    return "--service lambda --resource functions --all-regions --output-dir .receipt/factory/evidence";
-  }
-  if (tokens.has("eks")) {
-    return "--service eks --resource clusters --all-regions --output-dir .receipt/factory/evidence";
-  }
-  return "--service s3 --resource buckets --output-dir .receipt/factory/evidence";
-};
+  /(^|\s)--output-dir(\s|$)/.test(args) ? args : `${args} --output-dir ${FACTORY_TASK_PACKET_DIR}/evidence`;
 
 const selectHelperExample = (
   helper: NonNullable<FactoryContextPack["helperCatalog"]>["selectedHelpers"][number],
-): string | undefined =>
-  helper.examples.find((example) => example.includes("--output-dir"))
-  ?? helper.examples.find((example) => example.includes("--all-regions"))
-  ?? helper.examples[0];
+  tokens: ReadonlySet<string>,
+): string | undefined => {
+  const ranked = helper.examples
+    .map((example) => {
+      const exampleTokens = new Set(normalizeBootstrapTokens(example));
+      const overlap = [...tokens].reduce((score, token) => score + (exampleTokens.has(token) ? 1 : 0), 0);
+      const outputDirBonus = example.includes("--output-dir") ? 1 : 0;
+      return { example, score: overlap * 10 + outputDirBonus };
+    })
+    .sort((left, right) => right.score - left.score || left.example.localeCompare(right.example));
+  return ranked[0]?.example ?? helper.examples[0];
+};
 
 const suggestPrimaryHelperCommand = (pack: FactoryContextPack): string | undefined => {
   const helper = selectPrimaryHelper(pack);
@@ -661,20 +649,8 @@ const suggestPrimaryHelperCommand = (pack: FactoryContextPack): string | undefin
     pack.task.title,
     pack.task.prompt,
   ].join("\n"));
-  switch (helper.id) {
-    case "aws_resource_inventory":
-      return suggestResourceInventoryArgs(tokens);
-    case "aws_ecs_ec2_container_inventory":
-      return "--profile default --all-regions --output-dir .receipt/factory/evidence";
-    case "aws_internet_exposure_inventory":
-      return "--profile default --all-regions --output-dir .receipt/factory/evidence";
-    case "aws_alarm_summary":
-      return "--all-regions --output-dir .receipt/factory/evidence";
-    default: {
-      const example = selectHelperExample(helper);
-      return example ? appendEvidenceOutputDir(example) : undefined;
-    }
-  }
+  const example = selectHelperExample(helper, tokens);
+  return example ? appendEvidenceOutputDir(example) : undefined;
 };
 
 export const renderTaskContextSummary = (

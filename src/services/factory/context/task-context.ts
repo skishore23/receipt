@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import type {
   FactoryCmd,
@@ -18,7 +19,10 @@ import {
   helperCatalogArtifactRefs,
   loadFactoryHelperContext,
 } from "../../factory-helper-catalog";
-import { taskNeedsCloudExecutionContext } from "../../factory-infrastructure-guidance";
+import {
+  FACTORY_TASK_PACKET_DIR,
+  buildTaskFilePaths,
+} from "../task-packets";
 import type {
   FactoryContextPack,
   FactoryContextReceipt,
@@ -37,24 +41,14 @@ type FactoryContextBuilderDeps = {
   readonly runtime: Runtime<FactoryCmd, FactoryEvent, FactoryState>;
   readonly memoryTools?: MemoryTools;
   readonly profileRoot: string;
-  readonly collectRepoSkillPaths: () => Promise<ReadonlyArray<string>>;
   readonly latestTaskCandidate: (
     state: FactoryState,
     taskId: string,
   ) => FactoryCandidateRecord | undefined;
-  readonly objectiveProfileForState: (
-    state: FactoryState,
-  ) => FactoryObjectiveProfileSnapshot;
   readonly objectiveContractForState: (
     state: FactoryState,
     planning?: FactoryPlanningReceiptRecord,
   ) => FactoryObjectiveContractRecord;
-  readonly workerTaskProfile: (
-    profile: FactoryObjectiveProfileSnapshot,
-  ) => FactoryObjectiveProfileSnapshot;
-  readonly loadObjectiveCloudExecutionContext: (
-    profile: FactoryObjectiveProfileSnapshot,
-  ) => Promise<FactoryCloudExecutionContext>;
   readonly compactCloudExecutionContextForPacket: (
     context: FactoryCloudExecutionContext,
   ) => FactoryContextPack["cloudExecutionContext"];
@@ -272,6 +266,9 @@ export const buildFactoryTaskContextPack = async (
   state: FactoryState,
   task: FactoryTaskRecord,
   candidateId: string,
+  profile: FactoryObjectiveProfileSnapshot,
+  cloudExecutionContext: FactoryCloudExecutionContext | undefined,
+  repoSkillPaths: ReadonlyArray<string>,
   taskPrompt = task.prompt,
 ): Promise<FactoryContextPack> => {
   const contextPackBuiltAt = Date.now();
@@ -407,14 +404,8 @@ export const buildFactoryTaskContextPack = async (
     .filter((receipt) => !focusedReceiptKeys.has(`${receipt.type}:${receipt.at}:${receipt.summary}`))
     .slice(0, 20)
     .reverse();
-  const profile = deps.workerTaskProfile(deps.objectiveProfileForState(state));
   const contract = deps.objectiveContractForState(state);
-  const includeCloudExecutionContext = taskNeedsCloudExecutionContext({
-    profileCloudProvider: profile.cloudProvider,
-    taskTitle: task.title,
-    taskPrompt,
-  });
-  const [overview, objectiveMemory, integrationMemory, repoAuditMemory, cloudExecutionContext] = await Promise.all([
+  const [overview, objectiveMemory, integrationMemory, repoAuditMemory] = await Promise.all([
     summarizeFactoryMemoryScope({
       memoryTools: deps.memoryTools,
       scope: `factory/objectives/${state.objectiveId}`,
@@ -443,11 +434,7 @@ export const buildFactoryTaskContextPack = async (
       maxChars: 400,
       operation: "summarize-scope",
     }),
-    includeCloudExecutionContext
-      ? deps.loadObjectiveCloudExecutionContext(profile)
-      : Promise.resolve(undefined),
   ]);
-  const repoSkillPaths = await deps.collectRepoSkillPaths();
   const helperCatalog = await loadFactoryHelperContext({
     profileRoot: deps.profileRoot,
     provider: profile.cloudProvider ?? cloudExecutionContext?.preferredProvider,
@@ -467,6 +454,7 @@ export const buildFactoryTaskContextPack = async (
     buildObjectiveSliceTasks(deps, state, recentCompletedTaskIds),
     buildObjectiveSliceTasks(deps, state, integrationTaskIds),
   ]);
+  const packet = buildTaskFilePaths("", task.taskId, task.executionPhase);
   return {
     objectiveId: state.objectiveId,
     title: state.title,
@@ -521,6 +509,15 @@ export const buildFactoryTaskContextPack = async (
         .map((taskId) => state.investigation.reports[taskId])
         .filter((report) => Boolean(report)),
       synthesized: state.investigation.synthesized,
+    },
+    packetPaths: {
+      root: FACTORY_TASK_PACKET_DIR,
+      manifestPath: path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(packet.manifestPath)),
+      contextSummaryPath: path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(packet.contextSummaryPath)),
+      contextPackPath: path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(packet.contextPackPath)),
+      memoryScriptPath: path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(packet.memoryScriptPath)),
+      receiptCliPath: path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(packet.receiptCliPath)),
+      evidenceDir: path.posix.join(FACTORY_TASK_PACKET_DIR, "evidence"),
     },
     helperCatalog,
     contextSources: {

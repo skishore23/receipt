@@ -1005,12 +1005,72 @@ export class FactoryService {
     );
   }
 
-  private workerTaskProfile(profile: FactoryObjectiveProfileSnapshot): FactoryObjectiveProfileSnapshot {
+  private baseWorkerTaskProfile(profile: FactoryObjectiveProfileSnapshot): FactoryObjectiveProfileSnapshot {
     const selectedSkills = this.workerTaskSkillRefs(profile.selectedSkills);
     if (selectedSkills.length === profile.selectedSkills.length) return profile;
     return {
       ...profile,
       selectedSkills,
+    };
+  }
+
+  private async resolveExistingSkillRefs(skillRefs: ReadonlyArray<string>): Promise<ReadonlyArray<string>> {
+    const resolved: string[] = [];
+    for (const skillRef of skillRefs) {
+      const trimmed = skillRef.trim();
+      if (!trimmed) continue;
+      const candidates = path.isAbsolute(trimmed)
+        ? [trimmed]
+        : [
+            path.join(this.git.repoRoot, trimmed),
+            path.join(this.profileRoot, trimmed),
+          ];
+      for (const absolute of candidates) {
+        const exists = await fs.stat(absolute).then((stat) => stat.isFile()).catch(() => false);
+        if (!exists) continue;
+        resolved.push(trimmed);
+        break;
+      }
+    }
+    return dedupeStrings(resolved);
+  }
+
+  private resolveCloudProvider(
+    profileCloudProvider: FactoryObjectiveProfileSnapshot["cloudProvider"],
+    cloudExecutionContext?: FactoryCloudExecutionContext,
+  ): FactoryObjectiveProfileSnapshot["cloudProvider"] {
+    if (profileCloudProvider) return profileCloudProvider;
+    if (!cloudExecutionContext) return undefined;
+    if (cloudExecutionContext.preferredProvider) return cloudExecutionContext.preferredProvider;
+    if (cloudExecutionContext.activeProviders.length === 1) return cloudExecutionContext.activeProviders[0];
+    if (cloudExecutionContext.availableProviders.length === 1) return cloudExecutionContext.availableProviders[0];
+    return undefined;
+  }
+
+  private async resolveWorkerTaskProfile(
+    profile: FactoryObjectiveProfileSnapshot,
+    cloudExecutionContext?: FactoryCloudExecutionContext,
+  ): Promise<FactoryObjectiveProfileSnapshot> {
+    const baseProfile = this.baseWorkerTaskProfile(profile);
+    const resolvedProvider = this.resolveCloudProvider(baseProfile.cloudProvider, cloudExecutionContext);
+    const providerSkills = baseProfile.rootProfileId === "infrastructure" && resolvedProvider
+      ? await this.resolveExistingSkillRefs([
+          `skills/factory-${resolvedProvider}-cli-cookbook/SKILL.md`,
+          `skills/factory-infrastructure-${resolvedProvider}/SKILL.md`,
+        ])
+      : [];
+    const selectedSkills = dedupeStrings([
+      ...baseProfile.selectedSkills,
+      ...providerSkills,
+    ]);
+    if (selectedSkills.join("\n") === baseProfile.selectedSkills.join("\n")
+      && resolvedProvider === baseProfile.cloudProvider) {
+      return baseProfile;
+    }
+    return {
+      ...baseProfile,
+      selectedSkills,
+      cloudProvider: resolvedProvider,
     };
   }
 
@@ -3235,6 +3295,18 @@ export class FactoryService {
       }).catch(() => undefined);
       return false;
     }
+    if (!["running", "reviewing"].includes(task.status)) {
+      await this.emitObjective(state.objectiveId, {
+        type: "monitor.recommendation.obsoleted",
+        objectiveId: state.objectiveId,
+        recommendationId: recommendation.recommendationId,
+        taskId: recommendation.taskId,
+        candidateId: recommendation.candidateId,
+        reason: `task status advanced to ${task.status} before control consumed the monitor recommendation`,
+        obsoletedAt: Date.now(),
+      }).catch(() => undefined);
+      return false;
+    }
     const basedOn = await this.currentHeadHash(state.objectiveId);
 
     switch (recommendation.recommendation.kind) {
@@ -3701,12 +3773,30 @@ export class FactoryService {
       await materializeFactoryIsolatedTaskSupportFiles(
         parsed.workspacePath,
         this.profileRoot,
-        this.workerTaskProfile(parsed.profile),
+        this.baseWorkerTaskProfile(parsed.profile),
       );
     }
     const packetPresent = await this.taskPacketPresent(parsed);
     if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
-      const packet = await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath, parsed.taskPhase);
+      const baseProfile = this.objectiveProfileForState(state);
+      const includeCloudExecutionContext = taskNeedsCloudExecutionContext({
+        profileId: baseProfile.rootProfileId,
+        profileCloudProvider: baseProfile.cloudProvider,
+        taskTitle: task.title,
+        taskPrompt: task.prompt,
+      });
+      const cloudExecutionContext = includeCloudExecutionContext
+        ? await this.loadObjectiveCloudExecutionContext(baseProfile)
+        : undefined;
+      const packet = await this.writeTaskPacket(
+        state,
+        task,
+        parsed.candidateId,
+        parsed.workspacePath,
+        parsed.taskPhase,
+        parsed.profile,
+        cloudExecutionContext,
+      );
       await archiveFactoryTaskPacketArtifacts({
         dataDir: this.dataDir,
         jobId,
@@ -5026,11 +5116,21 @@ export class FactoryService {
     const dispatchBaseCommit = this.resolveTaskBaseCommit(state, task);
     const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
     const executionMode = this.taskExecutionMode(state, task);
+    const includeCloudExecutionContext = taskNeedsCloudExecutionContext({
+      profileId: profile.rootProfileId,
+      profileCloudProvider: profile.cloudProvider,
+      taskTitle: task.title,
+      taskPrompt: task.prompt,
+    });
+    const cloudExecutionContext = includeCloudExecutionContext
+      ? await this.loadObjectiveCloudExecutionContext(profile)
+      : undefined;
+    const workerProfile = await this.resolveWorkerTaskProfile(profile, cloudExecutionContext);
     const workspace = await ensureFactoryTaskRuntime({
       dataDir: this.dataDir,
       executionMode,
       git: this.git,
-      profile: this.workerTaskProfile(profile),
+      profile: workerProfile,
       profileRoot: this.profileRoot,
       workspaceId,
       workerType,
@@ -5061,7 +5161,16 @@ export class FactoryService {
       })()
       : undefined;
     const jobId = factoryTaskRunJobId(state.objectiveId, task.taskId, candidateId, taskPhase, dispatchKey);
-    const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, taskPhase, pinnedBaseCommit);
+    const manifest = await this.writeTaskPacket(
+      state,
+      task,
+      candidateId,
+      workspace.path,
+      taskPhase,
+      workerProfile,
+      cloudExecutionContext,
+      pinnedBaseCommit,
+    );
     await archiveFactoryTaskPacketArtifacts({
       dataDir: this.dataDir,
       jobId,
@@ -5090,7 +5199,6 @@ export class FactoryService {
       },
     ], opts?.expectedPrev);
 
-    const workerProfile = this.workerTaskProfile(profile);
     const payload: FactoryTaskJobPayload = {
       kind: "factory.task.run",
       jobId,
@@ -6202,6 +6310,8 @@ export class FactoryService {
     candidateId: string,
     workspacePath: string,
     taskPhase: FactoryTaskExecutionPhase,
+    workerProfile: FactoryObjectiveProfileSnapshot,
+    cloudExecutionContext: FactoryCloudExecutionContext | undefined,
     pinnedBaseCommit?: string,
   ): Promise<{
     readonly manifestPath: string;
@@ -6221,27 +6331,22 @@ export class FactoryService {
     readonly sharedArtifactRefs: ReadonlyArray<GraphRef>;
     readonly contextRefs: ReadonlyArray<GraphRef>;
   }> {
-    const profile = this.workerTaskProfile(this.objectiveProfileForState(state));
     const taskPrompt = effectiveFactoryTaskPrompt({
-      profileCloudProvider: this.objectiveProfileForState(state).cloudProvider,
+      profileCloudProvider: workerProfile.cloudProvider,
       objectiveMode: state.objectiveMode,
       taskPrompt: task.prompt,
     });
     const files = buildTaskFilePaths(workspacePath, task.taskId, taskPhase);
     await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
     await fs.rm(files.resultPath, { force: true });
-    const repoSkillPaths = await this.collectWorkerRepoSkillPaths(profile);
+    const repoSkillPaths = await this.collectWorkerRepoSkillPaths(workerProfile);
     const memoryScopes = buildTaskMemoryScopes(state, task, candidateId, taskPrompt);
     const contextPack = await buildFactoryTaskContextPack({
       runtime: this.runtime,
       memoryTools: this.memoryTools,
       profileRoot: this.profileRoot,
-      collectRepoSkillPaths: () => this.collectRepoSkillPaths(),
       latestTaskCandidate: (inputState, taskId) => this.latestTaskCandidate(inputState, taskId),
-      objectiveProfileForState: (inputState) => this.objectiveProfileForState(inputState),
       objectiveContractForState: (inputState, planning) => this.objectiveContractForState(inputState, planning),
-      workerTaskProfile: (profileSnapshot) => this.workerTaskProfile(profileSnapshot),
-      loadObjectiveCloudExecutionContext: (profileSnapshot) => this.loadObjectiveCloudExecutionContext(profileSnapshot),
       compactCloudExecutionContextForPacket: (context) => this.compactCloudExecutionContextForPacket(context),
       buildContextSources: (inputState, repoSkills, sharedRefs) => this.buildContextSources(inputState, repoSkills, sharedRefs),
       objectiveProfileArtifactPath: (objectiveId) => this.objectiveProfileArtifactPath(objectiveId),
@@ -6249,7 +6354,7 @@ export class FactoryService {
       summarizeReceipt: (event) => this.summarizeReceipt(event),
       receiptTaskOrCandidateId: (event) => this.receiptTaskOrCandidateId(event),
       objectiveStream: (objectiveId) => objectiveStream(objectiveId),
-    }, state, task, candidateId, taskPrompt);
+    }, state, task, candidateId, workerProfile, cloudExecutionContext, repoSkillPaths, taskPrompt);
     const objectiveContract = this.objectiveContractForState(state, contextPack.planning);
     const sourceTask = task.sourceTaskId ? state.workflow.tasksById[task.sourceTaskId] : undefined;
     const inheritedSourceArtifactRefs = task.sourceTaskId
@@ -6318,8 +6423,8 @@ export class FactoryService {
       taskId: task.taskId,
       title: task.title,
       workerType: task.workerType,
-      profile,
-      selectedSkills: profile.selectedSkills,
+      profile: workerProfile,
+      selectedSkills: workerProfile.selectedSkills,
       repoSkillPaths: dedupeStrings(repoSkillPaths),
       generatedAt: Date.now(),
     };
@@ -6334,13 +6439,13 @@ export class FactoryService {
         severity: state.severity,
         checks: state.checks,
       },
-      profile,
+      profile: workerProfile,
       task: {
         taskId: task.taskId,
         title: task.title,
         prompt: taskPrompt,
         workerType: task.workerType,
-        executionMode: task.executionMode ?? profile.objectivePolicy.defaultTaskExecutionMode,
+        executionMode: task.executionMode ?? workerProfile.objectivePolicy.defaultTaskExecutionMode,
         baseCommit: pinnedBaseCommit ?? this.resolveTaskBaseCommit(state, task),
         dependsOn: task.dependsOn,
       },
@@ -6550,9 +6655,10 @@ export class FactoryService {
           })
         : Promise.resolve(undefined),
     ]);
+    const workerProfile = await this.resolveWorkerTaskProfile(profile, cloudExecutionContext);
     const helperCatalog = await loadFactoryHelperContext({
       profileRoot: this.profileRoot,
-      provider: profile.cloudProvider ?? cloudExecutionContext.preferredProvider,
+      provider: workerProfile.cloudProvider ?? cloudExecutionContext.preferredProvider,
       objectiveTitle: objectiveDetail?.title,
       objectivePrompt: input.prompt,
       taskTitle: objectiveDetail?.title ? `Direct probe for ${objectiveDetail.title}` : "Direct Codex Probe",
@@ -6570,7 +6676,7 @@ export class FactoryService {
       stream: input.stream,
       supervisorSessionId: input.supervisorSessionId,
       readOnly,
-      profile,
+      profile: workerProfile,
       cloudExecutionContext: this.compactCloudExecutionContextForPacket(cloudExecutionContext),
       repoScope,
       profileScope,
@@ -6671,7 +6777,7 @@ export class FactoryService {
       helperCatalog,
       repoSkillPaths,
       recentReceipts: objectiveReceipts.slice(-10),
-      profileSelectedSkills: profile.selectedSkills,
+      profileSelectedSkills: workerProfile.selectedSkills,
       repoRoot: this.git.repoRoot,
       factoryCliPrefix: FACTORY_CLI_PREFIX,
     });
@@ -6694,22 +6800,25 @@ export class FactoryService {
     payload: FactoryTaskJobPayload,
     guidanceHistory: ReadonlyArray<FactoryLiveGuidance> = [],
   ): Promise<string> {
+    const baseProfile = this.objectiveProfileForState(state);
+    const includeCloudExecutionContext = taskNeedsCloudExecutionContext({
+      profileId: payload.profile.rootProfileId,
+      profileCloudProvider: payload.profile.cloudProvider ?? baseProfile.cloudProvider,
+      taskTitle: task.title,
+      taskPrompt: task.prompt,
+    });
+    const cloudExecutionContext = includeCloudExecutionContext
+      ? await this.loadObjectiveCloudExecutionContext(baseProfile)
+      : undefined;
+    const workerProfile = await this.resolveWorkerTaskProfile(baseProfile, cloudExecutionContext);
     const taskPrompt = effectiveFactoryTaskPrompt({
-      profileCloudProvider: this.objectiveProfileForState(state).cloudProvider,
+      profileCloudProvider: workerProfile.cloudProvider,
       objectiveMode: state.objectiveMode,
       taskPrompt: task.prompt,
     });
-    const includeCloudExecutionContext = taskNeedsCloudExecutionContext({
-      profileCloudProvider: payload.profile.cloudProvider,
-      taskTitle: task.title,
-      taskPrompt,
-    });
-    const cloudExecutionContext = includeCloudExecutionContext
-      ? await this.loadObjectiveCloudExecutionContext(payload.profile)
-      : undefined;
     const helperCatalog = await loadFactoryHelperContext({
       profileRoot: this.profileRoot,
-      provider: payload.profile.cloudProvider ?? cloudExecutionContext?.preferredProvider,
+      provider: workerProfile.cloudProvider ?? cloudExecutionContext?.preferredProvider,
       objectiveTitle: state.title,
       objectivePrompt: state.prompt,
       taskTitle: task.title,
@@ -6718,7 +6827,7 @@ export class FactoryService {
     });
     const infrastructureTaskGuidance = cloudExecutionContext
       ? renderInfrastructureTaskExecutionGuidance({
-          profileCloudProvider: payload.profile.cloudProvider,
+          profileCloudProvider: workerProfile.cloudProvider,
           objectiveMode: state.objectiveMode,
           cloudExecutionContext,
         })
@@ -6920,11 +7029,18 @@ export class FactoryService {
     for (const skillRef of selected) {
       const trimmed = skillRef.trim();
       if (!trimmed) continue;
-      const absolute = path.isAbsolute(trimmed)
-        ? trimmed
-        : path.join(this.git.repoRoot, trimmed);
-      const exists = await fs.stat(absolute).then((stat) => stat.isFile()).catch(() => false);
-      if (exists) resolved.push(absolute);
+      const candidates = path.isAbsolute(trimmed)
+        ? [trimmed]
+        : [
+            path.join(this.git.repoRoot, trimmed),
+            path.join(this.profileRoot, trimmed),
+          ];
+      for (const absolute of candidates) {
+        const exists = await fs.stat(absolute).then((stat) => stat.isFile()).catch(() => false);
+        if (!exists) continue;
+        resolved.push(absolute);
+        break;
+      }
     }
     return [...new Set(resolved)].sort((a, b) => a.localeCompare(b));
   }

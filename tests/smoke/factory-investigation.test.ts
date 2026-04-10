@@ -599,7 +599,7 @@ test("factory profile summary: init stays fixed and does not mount generated rep
   expect(contextPack).not.toContain("\"repoExecutionLandscape\"");
 }, 120_000);
 
-test("factory cloud context: infrastructure packets mount AWS-first context and skills even when multiple providers are active locally", async () => {
+test("factory cloud context: infrastructure packets preserve mixed cloud context instead of hard-pinning AWS", async () => {
   const mixedContext: FactoryCloudExecutionContext = {
     summary: "AWS CLI is available via profile default; active identity arn:aws:iam::445567089271:user/csagent-api-service in account 445567089271 with region us-west-2. gcloud is available with account kishore@comfy.org and project comfy-cloud-dev. Multiple cloud providers are active locally. Confirm the intended provider before using high-confidence counts.",
     availableProviders: ["aws", "gcp"],
@@ -695,25 +695,22 @@ test("factory cloud context: infrastructure packets mount AWS-first context and 
       readonly azure?: unknown;
     };
   };
-  expect(parsedContextPack.cloudExecutionContext?.preferredProvider).toBe("aws");
-  expect(parsedContextPack.cloudExecutionContext?.availableProviders).toEqual(["aws"]);
-  expect(parsedContextPack.cloudExecutionContext?.activeProviders).toEqual(["aws"]);
+  expect(parsedContextPack.cloudExecutionContext?.preferredProvider).toBeUndefined();
+  expect(parsedContextPack.cloudExecutionContext?.availableProviders).toEqual(["aws", "gcp"]);
+  expect(parsedContextPack.cloudExecutionContext?.activeProviders).toEqual(["aws", "gcp"]);
   expect(parsedContextPack.cloudExecutionContext?.aws?.callerIdentity?.accountId).toBe("445567089271");
   expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.queryableRegions).toEqual(["us-west-2", "us-east-1"]);
   expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.skippedRegions?.[0]?.regionName).toBe("af-south-1");
   expect(parsedContextPack.cloudExecutionContext?.aws?.ec2RegionScope?.skippedRegions?.[0]?.optInStatus).toBe("not-opted-in");
-  expect(parsedContextPack.cloudExecutionContext?.gcp).toBeUndefined();
+  expect(parsedContextPack.cloudExecutionContext?.gcp).toBeTruthy();
   expect(parsedContextPack.cloudExecutionContext?.azure).toBeUndefined();
   expect(contextPack).not.toContain('"regions"');
-  expect(contextPack).toContain("Infrastructure profile is AWS-only for now");
-  expect(contextPack).toContain("skip 1 not-opted-in regions");
-  expect(contextPack).not.toContain("gcloud is available");
-  expect(manifest).toContain("skills/factory-infrastructure-aws/SKILL.md");
+  expect(contextPack).toContain("Multiple cloud providers are active locally");
+  expect(contextPack).toContain("gcloud is available");
+  expect(manifest).not.toContain("skills/factory-infrastructure-aws/SKILL.md");
   expect(packet.renderedPrompt).toContain("AWS CLI is available via profile default");
-  expect(packet.renderedPrompt).toContain("Infrastructure profile is AWS-only for now");
-  expect(packet.renderedPrompt).toContain("skip 1 not-opted-in regions");
-  expect(packet.renderedPrompt).not.toContain("Multiple cloud providers are active locally");
-  expect(packet.renderedPrompt).not.toContain("gcloud is available");
+  expect(packet.renderedPrompt).toContain("Multiple cloud providers are active locally");
+  expect(packet.renderedPrompt).toContain("gcloud is available");
 }, 120_000);
 
 test("factory investigation: infrastructure task prompts require helper-first AWS CLI guidance", async () => {
@@ -811,7 +808,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("Never build a new helper just to answer a one-off question");
   expect(prompt).toContain("### Investigation Budget");
   expect(prompt).toContain("Reserve at least 30% for your final structured JSON result");
-  expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first AWS command");
+  expect(prompt).toContain("decide one concrete selection rule, one primary evidence source, and one stop condition before the first cloud command");
   expect(prompt).toContain("stop bootstrap and run the best matching checked-in helper");
   expect(prompt).toContain("Helper manifests list required args, required context, and example invocations");
   expect(prompt).toContain("### Escalation order (follow strictly)");
@@ -825,8 +822,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("Keep this task session as the single owner of the final JSON result.");
   expect(prompt).toContain("Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.");
   expect(prompt).toContain("Do not fan out broad parallel exploration");
-  expect(prompt).toContain("Local execution context already indicates aws. Use that provider");
-  expect(prompt).toContain("Infrastructure profile is AWS-only for now");
+  expect(prompt).toContain("One provider is clearly usable from the local CLI context (aws). Use it by default");
   expect(prompt).toContain("AWS_MAX_ATTEMPTS=1");
   expect(prompt).toContain("do not blindly loop raw `aws ec2 describe-regions --all-regions` output");
   expect(prompt).toContain("run the checked-in `aws_region_scope` helper first");
@@ -1387,6 +1383,98 @@ test("factory investigation: synthesizing mode renders synth-only prompt and ref
 
   expect(attempts).toBe(1);
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("### Synthesis-Only Mode");
+}, 120_000);
+
+test("factory investigation: stale synth recommendation is obsoleted after the task already reported", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Ignore stale synth recommendation after report",
+    prompt: "Do not redispatch synthesis after the investigation already finished.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const emitObjective = (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective.bind(service);
+
+  await emitObjective(payload.objectiveId, {
+    type: "monitor.recommendation",
+    objectiveId: payload.objectiveId,
+    recommendationId: "recommendation_enter_synth_after_report",
+    taskId: payload.taskId,
+    candidateId: payload.candidateId,
+    jobId: taskJob!.id,
+    recommendation: {
+      kind: "recommend_enter_synthesizing",
+      reason: "Evidence is sufficient to finish.",
+    },
+    reasoning: "Mounted evidence already answers the task.",
+    recommendedAt: 10_000,
+  });
+  await emitObjective(payload.objectiveId, {
+    type: "investigation.reported",
+    objectiveId: payload.objectiveId,
+    taskId: payload.taskId,
+    candidateId: payload.candidateId,
+    outcome: "approved",
+    summary: "Final investigation report already exists.",
+    handoff: "No follow-up synthesis run is needed.",
+    presentation: { kind: "investigation_report", inlineBody: null, renderHint: "report" },
+    completion: {
+      changed: [],
+      proof: ["Captured the final approved investigation result."],
+      remaining: [],
+    },
+    report: {
+      conclusion: "The investigation already completed before control handled the monitor recommendation.",
+      evidence: [],
+      evidenceRecords: [],
+      scriptsRun: [],
+      disagreements: [],
+      nextSteps: [],
+    },
+    artifactRefs: {},
+    evidenceCommit: undefined,
+    reportedAt: 10_100,
+  });
+  await emitObjective(payload.objectiveId, {
+    type: "investigation.synthesized",
+    objectiveId: payload.objectiveId,
+    summary: "Investigation output is finalized.",
+    report: {
+      conclusion: "The investigation output is finalized.",
+      evidence: [],
+      evidenceRecords: [],
+      scriptsRun: [],
+      disagreements: [],
+      nextSteps: [],
+    },
+    taskIds: [payload.taskId],
+    synthesizedAt: 10_200,
+  });
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: payload.objectiveId,
+    reason: "reconcile",
+  });
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.synthesis.dispatched")).toBe(false);
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "monitor.recommendation.obsoleted"
+    && receipt.summary.includes("task status advanced to approved"))).toBe(true);
+  expect(detail.tasks).toHaveLength(1);
 }, 120_000);
 
 test("factory investigation: repeated synthesis dispatch loops are scored weak and churn-heavy", async () => {
