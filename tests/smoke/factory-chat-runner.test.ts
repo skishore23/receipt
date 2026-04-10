@@ -1772,6 +1772,161 @@ test("factory chat runner: profile.handoff finalizes the current run after queue
   expect(finalized && "content" in finalized ? finalized.content : "").toBe("Handing this over to infrastructure.");
 });
 
+test("factory chat runner: Tech Lead auto-handoffs clear infrastructure requests before giving generic advice", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-autohandoff-infra");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    handoffTargets: ["infrastructure"],
+  });
+  await writeProfile(profileRoot, {
+    id: "infrastructure",
+    label: "Infrastructure",
+  });
+
+  let agentActionCalls = 0;
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_autohandoff_infra",
+    problem: "List EC2 instances across every account in our AWS Organization.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: withTurnAnalysis(async ({ schema, schemaName }: Record<string, unknown>) => {
+      if (schemaName !== "agent_action") {
+        throw new Error(`unexpected schema ${String(schemaName)}`);
+      }
+      agentActionCalls += 1;
+      const typedSchema = schema as { parse: (value: unknown) => unknown };
+      return {
+        parsed: typedSchema.parse({
+          thought: "answer with generic advice",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "Here is generic AWS advice.",
+          },
+        }),
+        raw: "",
+      };
+    }),
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: {} as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(agentActionCalls).toBe(0);
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toBe("Handing this over to infrastructure.");
+
+  const jobs = await queue.listJobs({ limit: 10 });
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]?.agentId).toBe("factory");
+  expect(jobs[0]?.payload.profileId).toBe("infrastructure");
+  expect(String(jobs[0]?.payload.problem)).toContain("Engineer handoff from generalist to infrastructure.");
+  expect(String(jobs[0]?.payload.problem)).toContain("AWS or cloud investigation work");
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_autohandoff_infra"));
+  const handoffEvent = chain.find((receipt) => receipt.body.type === "profile.handoff")?.body;
+  expect(handoffEvent?.type).toBe("profile.handoff");
+  expect(handoffEvent && "toProfileId" in handoffEvent ? handoffEvent.toProfileId : undefined).toBe("infrastructure");
+});
+
+test("factory chat runner: Infrastructure auto-dispatches work turns into investigation objectives", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-auto-dispatch-infra");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "infrastructure",
+    label: "Infrastructure",
+    default: true,
+  });
+
+  let createdInput: Record<string, unknown> | undefined;
+  let agentActionCalls = 0;
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_auto_dispatch_infra",
+    problem: "show me list of s3 in a table",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: withTurnAnalysis(async ({ schema, schemaName }: Record<string, unknown>) => {
+      if (schemaName !== "agent_action") {
+        throw new Error(`unexpected schema ${String(schemaName)}`);
+      }
+      agentActionCalls += 1;
+      const typedSchema = schema as { parse: (value: unknown) => unknown };
+      return {
+        parsed: typedSchema.parse({
+          thought: "summarize that the investigation is running",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "Investigation started.",
+          },
+        }),
+        raw: "",
+      };
+    }),
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub({
+      createObjective: async (input: Record<string, unknown>) => {
+        createdInput = input;
+        return makeStubObjectiveDetail("objective_infra_created", "job_created");
+      },
+    }) as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(agentActionCalls).toBe(1);
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toBe("Investigation started.");
+  expect(createdInput).toMatchObject({
+    prompt: "show me list of s3 in a table",
+    objectiveMode: "investigation",
+    profileId: "infrastructure",
+    startImmediately: true,
+  });
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_auto_dispatch_infra"));
+  const dispatchCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+  )?.body;
+  expect(dispatchCall && "tool" in dispatchCall ? dispatchCall.tool : undefined).toBe("factory.dispatch");
+  expect(dispatchCall && "input" in dispatchCall ? dispatchCall.input : undefined).toMatchObject({
+    action: "create",
+    objectiveMode: "investigation",
+    prompt: "show me list of s3 in a table",
+  });
+});
+
 test("factory chat runner: profile.handoff accepts common profile id aliases", async () => {
   for (const [alias, runId] of [
     ["target", "run_handoff_alias_target"],

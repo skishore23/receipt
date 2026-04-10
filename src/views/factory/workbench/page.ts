@@ -119,6 +119,7 @@ const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspe
   ? [
       { event: "agent-refresh", throttleMs: 180 },
       { event: "job-refresh", throttleMs: 180 },
+      ...(input.objectiveId ? [{ event: "objective-runtime-refresh", throttleMs: 180 }] : []),
     ] as const
   : [
       { event: "profile-board-refresh", throttleMs: 300 },
@@ -1797,7 +1798,7 @@ export const factoryWorkbenchShell = (
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
   <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-factory-workbench data-shell-base="${esc(routeContext.shellBase)}" data-route-key="${esc(shell.routeKey)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" ${workbenchEnvelopeAttrs(shell.envelope)} class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
+<body data-factory-workbench data-shell-base="${esc(routeContext.shellBase)}" data-route-key="${esc(shell.routeKey)}" data-profile-id="${esc(model.activeProfileId)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "overview")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" ${workbenchEnvelopeAttrs(shell.envelope)} class="min-h-screen overflow-x-hidden font-sans antialiased lg:h-screen lg:overflow-hidden">
   <div class="factory-workbench-shell min-h-screen w-full bg-background text-foreground lg:h-screen">
     <div class="factory-workbench-grid grid min-h-screen w-full lg:h-full lg:grid-cols-[minmax(0,1fr)_420px]">
       ${factoryWorkbenchBackgroundRootIsland({

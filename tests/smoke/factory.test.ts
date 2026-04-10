@@ -37,7 +37,12 @@ import { FactoryService, FactoryServiceError, type FactoryTaskJobPayload } from 
 import { factoryChatSessionStream, factoryChatStream, repoKeyForRoot } from "../../src/services/factory-chat-profiles";
 import { ensureFactoryWorkspaceCommandEnv, runFactoryChecks } from "../../src/services/factory/check-runner";
 import { readPersistedObjectiveAuditMetadata } from "../../src/services/factory/objective-audit-artifacts";
-import { buildFactoryWorkbenchShellSnapshot, factoryWorkbenchHeaderIsland } from "../../src/views/factory/workbench/page";
+import {
+  buildFactoryWorkbenchShellSnapshot,
+  factoryWorkbenchBoardResponse,
+  factoryWorkbenchHeaderIsland,
+  factoryWorkbenchShell,
+} from "../../src/views/factory/workbench/page";
 import { buildFactoryWorkbench } from "../../src/views/factory-workbench";
 import type { FactoryWorkbenchPageModel } from "../../src/views/factory-models";
 import { renderFactoryTranscriptSection } from "../../src/views/factory/transcript";
@@ -3916,6 +3921,80 @@ test("factory workbench header renders the engineer profile as a borderless inli
   expect(markup).not.toContain('<div class="text-[15px] font-semibold leading-none text-foreground">Software</div>');
 });
 
+test("factory workbench shell publishes the active profile on body", () => {
+  const model = {
+    activeProfileId: "software",
+    activeProfileLabel: "Software",
+    chatId: "chat_demo",
+    detailTab: "queue",
+    filter: "objective.running",
+    inspectorTab: "chat",
+    page: 1,
+    profiles: [{
+      id: "software",
+      label: "Software",
+      href: "/factory?profile=software&chat=chat_demo&inspectorTab=chat&detailTab=queue",
+      selected: true,
+    }],
+    workspace: {
+      activeProfileId: "software",
+      activeProfileLabel: "Software",
+      chatId: "chat_demo",
+      detailTab: "queue",
+      filter: "objective.running",
+      inspectorTab: "chat",
+      page: 1,
+      filters: [],
+      board: {
+        objectives: [],
+        sections: {
+          needs_attention: [],
+          active: [],
+          queued: [],
+          completed: [],
+        },
+      },
+      activeObjectives: [],
+      pastObjectives: [],
+      blocks: [],
+    },
+    chat: {
+      activeProfileId: "software",
+      activeProfileLabel: "Software",
+      chatId: "chat_demo",
+      inspectorTab: "chat",
+      items: [],
+      jobs: [],
+      knownRunIds: [],
+      terminalRunIds: [],
+    },
+  } as FactoryWorkbenchPageModel;
+
+  const shell = factoryWorkbenchShell(model, "/factory");
+  const board = factoryWorkbenchBoardResponse({
+    header: {
+      activeProfileId: model.activeProfileId,
+      activeProfileLabel: model.activeProfileLabel,
+      profiles: model.profiles,
+      workspace: model.workspace,
+    },
+    workspace: model.workspace,
+    routeContext: {
+      shellBase: "/factory",
+      profileId: model.activeProfileId,
+      chatId: model.chatId,
+      inspectorTab: model.inspectorTab,
+      detailTab: model.detailTab,
+      page: model.page,
+      filter: model.filter,
+    },
+  });
+
+  expect(shell).toContain('data-profile-id="software"');
+  expect(board).toContain('id="factory-workbench-rail-shell"');
+  expect(board).toContain('id="factory-workbench-header"');
+});
+
 test("factory workbench chat header hides the duplicate profile label when a role is available", () => {
   const snapshot = buildFactoryWorkbenchShellSnapshot({
     activeProfileId: "infrastructure",
@@ -4076,6 +4155,7 @@ test("factory route: blocked objectives render a concrete handoff in the chat tr
   expect(body).toContain("Blocked handoff");
   expect(body).toContain("Need retained historical NAT or flow-log evidence to attribute the spike.");
   expect(body).toContain("Next: Use /react with more evidence, or ask Chat to summarize the current findings.");
+  expect(body).toContain('data-refresh-on="sse:agent-refresh@180,sse:job-refresh@180,sse:objective-runtime-refresh@180"');
 });
 
 test("factory route: objective handoff is durable in the bound chat session", async () => {

@@ -225,7 +225,10 @@ const WORKBENCH_FOCUS_DESCRIPTOR = "sse:profile-board-refresh@180,sse:objective-
 
 const workbenchChatDescriptor = (inspectorTab: string, objectiveId?: string) =>
   inspectorTab === "chat"
-    ? WORKBENCH_CHAT_DESCRIPTOR
+    ? [
+        WORKBENCH_CHAT_DESCRIPTOR,
+        ...(objectiveId ? ["sse:objective-runtime-refresh@180"] : []),
+      ].join(",")
     : [
         "sse:profile-board-refresh@300",
         ...(objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
@@ -305,7 +308,7 @@ const workbenchShellMarkup = (input: {
 <head>
   <title>Receipt Factory Workbench</title>
 </head>
-<body data-factory-workbench="true" data-route-key="/factory${search}" data-chat-id="${chatId}" data-objective-id="${objectiveId ?? ""}" data-inspector-tab="${inspectorTab}" data-focus-kind="${focusKind}" data-focus-id="${focusId}">
+<body data-factory-workbench="true" data-route-key="/factory${search}" data-profile-id="${profileId}" data-chat-id="${chatId}" data-objective-id="${objectiveId ?? ""}" data-inspector-tab="${inspectorTab}" data-focus-kind="${focusKind}" data-focus-id="${focusId}">
   <div id="factory-workbench-background-root" data-events-path="/factory/background/events${search}" data-refresh-path="${workbenchBackgroundRootPath(search)}" data-refresh-on="${WORKBENCH_BACKGROUND_DESCRIPTOR}">
     ${workbenchBackgroundRootMarkup(search, objectiveId, profileId, profileLabel, chatId || "chat_demo", "workbench panel", input.workbenchHtml)}
   </div>
@@ -1200,7 +1203,7 @@ test("factory workbench client: objective navigation updates the background root
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
   expect(chatSource()).toBeNull();
 });
@@ -1219,7 +1222,7 @@ test("factory workbench client: page-only navigation preserves the requested pag
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
 });
 
@@ -1311,7 +1314,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
   expect(locationState.search).toBe("?profile=software&chat=chat_demo&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-body?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.filter((call) => call.url.startsWith("/factory/island/")).every((call) => call.headers?.["HX-Request"] === "true")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
   expect(chatSource()).toBeNull();
@@ -1376,7 +1379,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
           json: async () => ({}),
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header"><span>Generalist</span></div>
-            <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+            <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
               <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_new">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
@@ -1410,7 +1413,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
   expect(locationState.search).toBe("?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_new");
 });
@@ -1427,7 +1430,7 @@ test("factory workbench client: chat events stream tokens and refresh the transc
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
             <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
@@ -1533,6 +1536,18 @@ test("factory workbench client: live chat refresh preserves composer text", asyn
   expect(fetchCalls.some((call) => call.url.includes("/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat"))).toBe(false);
 });
 
+test("factory workbench client: chat tab refreshes on objective runtime updates", async () => {
+  const { chatSource, fetchCalls } = await createWorkbenchHarness({
+    initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat",
+  });
+
+  chatSource()?.emit("objective-runtime-refresh", "objective_demo");
+  await flushAsync(220);
+
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action")).toBe(false);
+});
+
 test("factory workbench client: pressing Enter submits while Shift+Enter does not", async () => {
   const { textarea, fetchCalls } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&inspectorTab=chat",
@@ -1626,7 +1641,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+          text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
             <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
@@ -1651,7 +1666,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
           json: async () => ({}),
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>Generalist</span></div>
-            <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${WORKBENCH_CHAT_DESCRIPTOR}">
+            <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
               <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo${parsed.searchParams.get("objective") ? `&objective=${parsed.searchParams.get("objective")}` : ""}">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
@@ -1780,7 +1795,7 @@ test("factory workbench client: focus changes replace history and refresh coordi
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1");
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
 });
 
 test("factory workbench client: filter changes push history and refresh coordinated surfaces", async () => {
@@ -1798,7 +1813,7 @@ test("factory workbench client: filter changes push history and refresh coordina
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed");
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
   expect(fetchCalls.some((call) => call.url === "/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed")).toBe(false);
 });
 

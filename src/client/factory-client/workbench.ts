@@ -981,7 +981,11 @@ export const initFactoryWorkbenchBrowser = () => {
   const workbenchFocusDescriptor = "sse:profile-board-refresh@180,sse:objective-runtime-refresh@180";
 
   const workbenchChatDescriptorForRoute = (route: FactoryWorkbenchRouteState): string => route.inspectorTab === "chat"
-    ? "sse:agent-refresh@180,sse:job-refresh@180"
+    ? [
+        "sse:agent-refresh@180",
+        "sse:job-refresh@180",
+        ...(route.objectiveId ? ["sse:objective-runtime-refresh@180"] : []),
+      ].join(",")
     : [
         "sse:profile-board-refresh@300",
         ...(route.objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
@@ -991,10 +995,12 @@ export const initFactoryWorkbenchBrowser = () => {
     if (!document.body) return;
     document.body.setAttribute("data-shell-base", routeBasePath(route));
     document.body.setAttribute("data-route-key", route.routeKey);
+    document.body.setAttribute("data-profile-id", route.profileId);
     document.body.setAttribute("data-chat-id", route.chatId ?? "");
     document.body.setAttribute("data-objective-id", route.objectiveId ?? "");
     document.body.setAttribute("data-inspector-tab", route.inspectorTab ?? "overview");
     document.body.setAttribute("data-detail-tab", route.detailTab ?? "action");
+    document.body.setAttribute("data-page", String(route.page ?? 1));
     document.body.setAttribute("data-focus-kind", route.focusKind ?? "");
     document.body.setAttribute("data-focus-id", route.focusId ?? "");
   };
@@ -1190,9 +1196,11 @@ export const initFactoryWorkbenchBrowser = () => {
     expectedRouteKey: string,
     options?: {
       readonly replaceInFlight?: boolean;
+      readonly shell?: "body" | "region";
     },
   ) {
-    const target = chatBody();
+    const refreshScope = options?.shell ?? "body";
+    const target = refreshScope === "region" ? chatRegion() : chatBody();
     const path = readReactiveRefreshPath(target);
     if (!target || !path) return Promise.resolve();
     const documentScrollState = captureDocumentScrollState();
@@ -1202,7 +1210,10 @@ export const initFactoryWorkbenchBrowser = () => {
     return fetchHtml(path, controller?.signal).then((markup) => {
       const fragment = parseMarkupDocument(markup);
       const nextTarget = fragment.firstElementChild;
-      const nextEnvelope = readEnvelopeFromElement(nextTarget);
+      const nextEnvelope = readEnvelopeFromElement(nextTarget)
+        ?? (nextTarget instanceof HTMLElement
+          ? readEnvelopeFromElement(nextTarget.querySelector("#factory-workbench-chat-body"))
+          : null);
       if (!shouldApplyEnvelope({
         target: "chat",
         baseline: baselineEnvelope,
@@ -1212,12 +1223,12 @@ export const initFactoryWorkbenchBrowser = () => {
         return;
       }
       if (!nextEnvelope) return;
-      const currentTarget = chatBody();
+      const currentTarget = refreshScope === "region" ? chatRegion() : chatBody();
       if (!(nextTarget instanceof HTMLElement) || !currentTarget) return;
       currentTarget.outerHTML = nextTarget.outerHTML;
       setDocumentEnvelopeTarget("chat", nextEnvelope);
       appliedEnvelope = readDocumentEnvelope();
-      const updatedTarget = chatBody();
+      const updatedTarget = refreshScope === "region" ? chatRegion() : chatBody();
       processHtmx(updatedTarget ?? document.body);
       if (updatedTarget) handleWorkbenchChatSwap(updatedTarget);
       window.requestAnimationFrame(() => {
@@ -1235,6 +1246,7 @@ export const initFactoryWorkbenchBrowser = () => {
   const refreshRouteTargetsNow = (
     targets: ReadonlyArray<WorkbenchRefreshTargetKey>,
     routeKeyOverride?: string,
+    chatRefreshScope: "body" | "region" = "body",
   ) => {
     const seen = new Set<WorkbenchRefreshTargetKey>();
     const refreshes: Array<Promise<void>> = [];
@@ -1253,6 +1265,7 @@ export const initFactoryWorkbenchBrowser = () => {
       } else {
         refreshes.push(refreshChatNow(routeKeyOverride ?? currentRouteKey(), {
           replaceInFlight: true,
+          shell: chatRefreshScope,
         }).then(() => undefined));
       }
     }
@@ -1425,19 +1438,19 @@ export const initFactoryWorkbenchBrowser = () => {
       if (changeKind === "focus") {
         dispatchWorkbenchAction({ type: "focus.changed", route: nextRoute });
         applyRouteState(nextRoute, "replace");
-        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
       }
       if (changeKind === "filter") {
         dispatchWorkbenchAction({ type: "filter.changed", route: nextRoute });
         applyRouteState(nextRoute, "push");
-        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey).then(() => true).catch(() => true);
+        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
       }
       dispatchWorkbenchAction({
         type: "route.applied",
         route: nextRoute,
       });
       applyRouteState(nextRoute, historyMode ?? "push");
-      return refreshRouteTargetsNow(scopeRefreshTargets(currentRoute, nextRoute), nextRoute.routeKey).then(() => {
+      return refreshRouteTargetsNow(scopeRefreshTargets(currentRoute, nextRoute), nextRoute.routeKey, "region").then(() => {
         if (shouldStickToBottom) {
           window.requestAnimationFrame(() => {
             const scroll = chatScroll();
@@ -1746,13 +1759,6 @@ export const initFactoryWorkbenchBrowser = () => {
       if (document.visibilityState !== "visible") return;
       refreshVisibleWorkbench();
     });
-  }
-
-  if (typeof window.setInterval === "function") {
-    window.setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      refreshVisibleWorkbench();
-    }, 2500);
   }
 
   window.requestAnimationFrame(() => {

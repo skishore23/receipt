@@ -279,7 +279,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
         label: profile.label,
         href: buildWorkbenchLink({
           profileId: profile.id,
-          chatId: input.workspace.chatId,
+          chatId: input.request.chatId,
           objectiveId: input.workspace.selectedObjective?.profileId === profile.id ? input.workspace.objectiveId : undefined,
           inspectorTab: input.workspace.selectedObjective?.profileId === profile.id
             ? normalizedWorkbenchInspectorTab(input.request.inspectorTab)
@@ -1475,7 +1475,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         label: profile.label,
         href: buildWorkbenchLink({
           profileId: profile.id,
-          chatId: workspace.chatId,
+          chatId: input.chatId,
           objectiveId: workspace.selectedObjective?.profileId === profile.id ? workspace.objectiveId : undefined,
           inspectorTab: workspace.selectedObjective?.profileId === profile.id
             ? normalizedWorkbenchInspectorTab(input.inspectorTab)

@@ -38,6 +38,7 @@ import { summarizeChildProgress, asString } from "./input";
 import { codexJobSnapshot } from "./status";
 import { listChildJobsForRun } from "./input";
 import { analyzeFactoryChatTurn } from "./turn-analysis";
+import { decideFactoryChatAutoDispatch, decideFactoryChatAutoHandoff } from "./ownership";
 import {
   loadConversationProjection,
   renderSessionRecallSummary,
@@ -252,6 +253,68 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     turnAnalysisCache.set(key, created);
     return created;
   };
+  const initialTurnAnalysis = await analyzeTurn(input.problem);
+  const autoHandoff = decideFactoryChatAutoHandoff({
+    currentProfileId: resolvedProfile.root.id,
+    handoffTargets: resolvedProfile.handoffTargets,
+    problem: input.problem,
+    responseStyle: initialTurnAnalysis.responseStyle,
+    hasBoundObjective: Boolean(effectiveObjectiveId),
+  });
+  const autoDispatch = decideFactoryChatAutoDispatch({
+    currentProfileId: resolvedProfile.root.id,
+    problem: input.problem,
+    responseStyle: initialTurnAnalysis.responseStyle,
+    hasBoundObjective: Boolean(effectiveObjectiveId),
+  });
+  let forcedAutoHandoffUsed = false;
+  let forcedAutoDispatchUsed = false;
+  const llmStructuredWithAutoHandoff: FactoryChatRunInput["llmStructured"] = async (opts) => {
+    if (autoHandoff && opts.schemaName === "agent_action" && forcedAutoHandoffUsed === false) {
+      forcedAutoHandoffUsed = true;
+      const forcedAction = {
+        thought: `handoff clear ${autoHandoff.targetProfileId} work from Tech Lead`,
+        action: {
+          type: "tool",
+          name: "profile.handoff",
+          input: JSON.stringify({
+            profileId: autoHandoff.targetProfileId,
+            reason: autoHandoff.reason,
+            goal: autoHandoff.goal,
+            currentState: autoHandoff.currentState,
+            doneWhen: autoHandoff.doneWhen,
+          }),
+          text: null,
+        },
+      };
+      return {
+        parsed: opts.schema.parse(forcedAction),
+        raw: JSON.stringify(forcedAction),
+      };
+    }
+    if (autoDispatch && opts.schemaName === "agent_action" && forcedAutoDispatchUsed === false) {
+      forcedAutoDispatchUsed = true;
+      const forcedAction = {
+        thought: "start the infrastructure investigation in a tracked objective before answering",
+        action: {
+          type: "tool",
+          name: "factory.dispatch",
+          input: JSON.stringify({
+            action: "create",
+            prompt: autoDispatch.prompt,
+            objectiveMode: autoDispatch.objectiveMode,
+            reason: autoDispatch.reason,
+          }),
+          text: null,
+        },
+      };
+      return {
+        parsed: opts.schema.parse(forcedAction),
+        raw: JSON.stringify(forcedAction),
+      };
+    }
+    return input.llmStructured(opts);
+  };
   const discoveryBudget = resolvedProfile.orchestration.discoveryBudget;
   let discoveryUsed = 0;
   const consumeDiscoveryBudget = (): void => {
@@ -346,6 +409,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
   };
   return await runAgent({
     ...input,
+    llmStructured: llmStructuredWithAutoHandoff,
     config: {
       ...input.config,
       memoryScope: resolvedMemoryScope,

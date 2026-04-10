@@ -109,6 +109,7 @@ const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspe
   ? [
       { event: "agent-refresh", throttleMs: 180 },
       { event: "job-refresh", throttleMs: 180 },
+      ...(input.objectiveId ? [{ event: "objective-runtime-refresh", throttleMs: 180 }] : []),
     ] as const
   : [
       { event: "profile-board-refresh", throttleMs: 300 },
@@ -763,7 +764,7 @@ export const factoryWorkbenchLinearShell = (
   <script src="/assets/htmx.min.js?v=${CSS_VERSION}"></script>
   <script src="/assets/htmx-ext-sse.js?v=${CSS_VERSION}"></script>
 </head>
-<body data-factory-workbench data-shell-base="${esc(shellBase)}" data-route-key="${esc(routeHref(routeContext, {}))}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "chat")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden bg-background font-sans text-foreground antialiased">
+<body data-factory-workbench data-shell-base="${esc(shellBase)}" data-route-key="${esc(routeHref(routeContext, {}))}" data-profile-id="${esc(model.activeProfileId)}" data-chat-id="${esc(model.chatId)}" data-objective-id="${esc(model.objectiveId ?? "")}" data-inspector-tab="${esc(model.inspectorTab ?? "chat")}" data-detail-tab="${esc(model.detailTab)}" data-focus-kind="${esc(model.focusKind ?? "")}" data-focus-id="${esc(model.focusId ?? "")}" class="min-h-screen overflow-x-hidden bg-background font-sans text-foreground antialiased">
   <div class="factory-workbench-shell factory-workbench-linear-shell min-h-screen bg-[radial-gradient(circle_at_top,_rgba(99,102,241,0.08),_transparent_34%),linear-gradient(180deg,_rgba(255,255,255,0.02),_transparent_22%)]">
     <div class="mx-auto flex min-h-screen w-full max-w-[1680px] flex-col gap-4 px-4 pb-4 pt-4 lg:grid lg:grid-cols-[280px_minmax(0,760px)_320px] lg:grid-rows-[auto_minmax(0,1fr)] lg:gap-x-6 lg:gap-y-4 lg:px-6 lg:pb-6">
       ${factoryWorkbenchLinearBackgroundRootIsland({

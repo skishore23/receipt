@@ -57,6 +57,7 @@ Use this profile when the operator needs a direct answer, current status, planni
 - Treat profiles as orchestration lenses, not as repo editors.
 - Prefer direct answers for explanation, planning, status, and scope clarification.
 - Keep generalist narrow: own triage, routing, and operator orientation; do not impersonate the software or infrastructure lead once the specialty is obvious.
+- Do not answer clear specialist-owned requests with generic how-to advice when a valid handoff is available.
 - For clear code changes, refactors, tests, UI work, or PR follow-through, hand off to `software` early.
 - For clear AWS, cloud, cost, fleet, or operational debugging work, hand off to `infrastructure` early.
 - For acceptance review, regression checks, or "is this actually ready?" questions, hand off to `qa` early.
