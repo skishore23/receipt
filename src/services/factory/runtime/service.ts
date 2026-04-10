@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
-import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
+import { CodexControlSignalError, CodexExecutionError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
 import { HubGit } from "../../../adapters/hub-git";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import {
@@ -136,6 +136,7 @@ import {
   renderInvestigationReportText,
 } from "../result-contracts";
 import {
+  parseJsonObjectCandidate,
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
   type FactoryPublishResult,
@@ -3857,6 +3858,9 @@ export class FactoryService {
           outputSchemaPath: resultSchemaPath,
           completionSignalPath: parsed.lastMessagePath,
           completionQuietMs: 1_500,
+          stallTimeoutMs: parsed.objectiveMode === "investigation" && parsed.taskPhase === "synthesizing"
+            ? 60_000
+            : undefined,
           reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
           sandboxMode: sandboxModeForTask(),
           isolateCodexHome: true,
@@ -3875,7 +3879,22 @@ export class FactoryService {
         }, control);
         break;
       } catch (error) {
-        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") {
+          if (parsed.objectiveMode === "investigation" && parsed.taskPhase === "synthesizing") {
+            const fallbackExecution = await this.fallbackExecutionForTaskError(parsed, error);
+            const fallbackResult = await this.buildFallbackInvestigationTaskResult(parsed, fallbackExecution, error);
+            await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
+            await this.applyTaskWorkerResult(parsed, fallbackResult);
+            await this.reactObjective(parsed.objectiveId);
+            return {
+              objectiveId: parsed.objectiveId,
+              taskId: parsed.taskId,
+              candidateId: parsed.candidateId,
+              status: "completed",
+            };
+          }
+          throw error;
+        }
         const guidance = parseFactoryLiveGuidance(error.signal);
         if (!guidance) throw error;
         guidanceHistory.push(guidance);
@@ -7016,6 +7035,32 @@ export class FactoryService {
     }
   }
 
+  private async fallbackExecutionForTaskError(
+    payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "stdoutPath" | "stderrPath">,
+    error: unknown,
+  ): Promise<CodexRunResult> {
+    if (error instanceof CodexExecutionError) return error.result;
+    const [stdout, stderr, lastMessage] = await Promise.all([
+      fs.readFile(payload.stdoutPath, "utf-8").catch(() => ""),
+      fs.readFile(payload.stderrPath, "utf-8").catch(() => ""),
+      fs.readFile(payload.lastMessagePath, "utf-8").catch(() => ""),
+    ]);
+    const latestEventText = clipText(
+      optionalTrimmedString(lastMessage)
+        ?? optionalTrimmedString(stderr)
+        ?? optionalTrimmedString(stdout),
+      280,
+    );
+    return {
+      exitCode: 1,
+      signal: null,
+      stdout,
+      stderr,
+      lastMessage: optionalTrimmedString(lastMessage),
+      latestEventText,
+    };
+  }
+
   private async buildFallbackInvestigationTaskResult(
     payload: Pick<
       FactoryTaskJobPayload,
@@ -7025,6 +7070,7 @@ export class FactoryService {
     error: unknown,
   ): Promise<Record<string, unknown>> {
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
+    const helperEvidence = this.extractInvestigationHelperEvidence(telemetry);
     const command = clipText(optionalTrimmedString(telemetry?.command), 220) ?? "codex exec";
     const exitCode = typeof telemetry?.exitCode === "number"
       ? telemetry.exitCode
@@ -7032,12 +7078,15 @@ export class FactoryService {
     const latestEventText = clipText(optionalTrimmedString(execution.latestEventText), 280);
     const lastMessage = clipText(optionalTrimmedString(execution.lastMessage), 280);
     const fallbackSummary = clipText(
-      latestEventText
+      helperEvidence.summary
+        ?? latestEventText
         ?? lastMessage
         ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.",
       280,
     ) ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.";
-    const nextAction = "Review the preserved telemetry evidence and rerun with tighter steering if a structured report is required.";
+    const nextAction = helperEvidence.summary
+      ? "Review the mounted helper evidence for deeper ranking or narrative polish if a richer handoff is required."
+      : "Review the preserved telemetry evidence and rerun with tighter steering if a structured report is required.";
     const structuredResultError = clipText(error instanceof Error ? error.message : String(error), 500);
     const telemetryProof = isRecord(telemetry?.proof) ? telemetry.proof : undefined;
     const telemetryVerified = clipText(optionalTrimmedString(telemetryProof?.verified), 280);
@@ -7067,6 +7116,7 @@ export class FactoryService {
       telemetryVerified ? `Verified: ${telemetryVerified}` : undefined,
       telemetryHow ? `How: ${telemetryHow}` : undefined,
       telemetryFiles.length > 0 ? `Files captured: ${telemetryFiles.length}` : undefined,
+      helperEvidence.summary ? `Helper summary: ${helperEvidence.summary}` : undefined,
     ].filter((item): item is string => Boolean(item)).join("\n");
     const evidenceRecords = [{
       objective_id: payload.objectiveId,
@@ -7108,6 +7158,7 @@ export class FactoryService {
         proof: [
           fallbackScriptsRun[0]?.summary ?? "Telemetry evidence was preserved.",
           ...(telemetryVerified ? [telemetryVerified] : []),
+          ...(helperEvidence.summary ? [`Helper evidence summary: ${helperEvidence.summary}`] : []),
         ].filter((item): item is string => Boolean(item)),
         remaining: [nextAction],
       },
@@ -7115,6 +7166,7 @@ export class FactoryService {
       report: {
         conclusion: fallbackSummary,
         evidence: [
+          ...helperEvidence.evidence,
           {
             title: "Structured result missing",
             summary: "Codex did not emit a valid structured investigation result.",
@@ -7127,14 +7179,104 @@ export class FactoryService {
           },
         ],
         evidenceRecords,
-        scriptsRun: fallbackScriptsRun,
+        scriptsRun: helperEvidence.scriptsRun.length > 0
+          ? [...helperEvidence.scriptsRun, ...fallbackScriptsRun]
+          : fallbackScriptsRun,
         disagreements: [],
         nextSteps: [nextAction],
       },
     };
+    if (helperEvidence.artifacts.length > 0) {
+      fallbackResult.artifacts = helperEvidence.artifacts;
+    }
     return execution.tokensUsed !== undefined
       ? { ...fallbackResult, tokensUsed: execution.tokensUsed }
       : fallbackResult;
+  }
+
+  private extractInvestigationHelperEvidence(
+    telemetry: Record<string, unknown> | undefined,
+  ): {
+    readonly summary?: string;
+    readonly evidence: ReadonlyArray<{ readonly title: string; readonly summary: string; readonly detail?: string }>;
+    readonly artifacts: ReadonlyArray<{ readonly label: string; readonly path: string | null; readonly summary: string | null }>;
+    readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
+  } {
+    const stdout = optionalTrimmedString(telemetry?.stdout);
+    if (!stdout) {
+      return {
+        evidence: [],
+        artifacts: [],
+        scriptsRun: [],
+      };
+    }
+
+    const evidence: Array<{ readonly title: string; readonly summary: string; readonly detail?: string }> = [];
+    const artifacts: Array<{ readonly label: string; readonly path: string | null; readonly summary: string | null }> = [];
+    const scriptsRun: Array<FactoryExecutionScriptRun> = [];
+    let summary: string | undefined;
+
+    for (const rawLine of stdout.split("\n")) {
+      const event = parseJsonObjectCandidate(rawLine);
+      if (!event) continue;
+      const item = isRecord(event.item) ? event.item : undefined;
+      const command = optionalTrimmedString(item?.command);
+      const aggregatedOutput = optionalTrimmedString(item?.aggregated_output);
+      if (!command || !aggregatedOutput) continue;
+      if (command.includes("factory-helper-runtime/runner.py run")) {
+        const helperOutput = parseJsonObjectCandidate(aggregatedOutput);
+        const helperSummary = optionalTrimmedString(helperOutput?.summary);
+        if (helperSummary && !summary) summary = helperSummary;
+        const helperData = isRecord(helperOutput?.data) ? helperOutput.data : undefined;
+        const metricSummary = helperData ? this.summarizeHelperMetricCollections(helperData) : undefined;
+        evidence.push({
+          title: "Checked-in helper output",
+          summary: helperSummary ?? "Captured machine-readable helper output.",
+          detail: metricSummary,
+        });
+        scriptsRun.push({
+          command: clipText(command, 280) ?? command,
+          summary: helperSummary ?? "Checked-in helper produced investigation evidence.",
+          status: "ok",
+        });
+        const helperArtifacts = Array.isArray(helperOutput?.artifacts)
+          ? helperOutput.artifacts
+          : [];
+        for (const artifact of helperArtifacts) {
+          if (typeof artifact === "string") {
+            artifacts.push({
+              label: path.basename(artifact),
+              path: artifact,
+              summary: helperSummary ?? null,
+            });
+            continue;
+          }
+          if (!isRecord(artifact)) continue;
+          const artifactPath = optionalTrimmedString(artifact.path);
+          artifacts.push({
+            label: optionalTrimmedString(artifact.label) ?? path.basename(artifactPath ?? "artifact"),
+            path: artifactPath ?? null,
+            summary: optionalTrimmedString(artifact.summary) ?? helperSummary ?? null,
+          });
+        }
+      }
+    }
+
+    return {
+      summary,
+      evidence,
+      artifacts,
+      scriptsRun,
+    };
+  }
+
+  private summarizeHelperMetricCollections(data: Record<string, unknown>): string | undefined {
+    const metrics = Object.entries(data)
+      .filter(([, value]) => Array.isArray(value))
+      .slice(0, 8)
+      .map(([key, value]) => `${key}=${String(value.length)}`);
+    if (metrics.length === 0) return undefined;
+    return clipText(`Captured collections: ${metrics.join(", ")}`, 500);
   }
 
   private async readTaskTelemetryEvidence(

@@ -1392,6 +1392,106 @@ test("factory investigation: synthesizing mode rerenders with live guidance and 
   await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Synthesized the final investigation from existing evidence.");
 }, 120_000);
 
+test("factory investigation: synthesizing execution stall falls back to helper-backed partial completion", async () => {
+  const dataDir = await createTempDir("receipt-factory-investigation");
+  const repoRoot = await createSourceRepo();
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async (input) => {
+        const helperOutput = {
+          status: "ok",
+          summary: "Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s), 0 public RDS instance(s), and 0 public S3 bucket(s).",
+          artifacts: [{
+            label: "internet exposure inventory",
+            path: path.join(input.workspacePath, ".receipt", "factory", "evidence", "aws_internet_exposure_inventory.json"),
+            summary: "Structured internet exposure helper output.",
+          }],
+          data: {
+            publicNetworkInterfaces: new Array(14).fill({}),
+            internetFacingLoadBalancers: new Array(6).fill({}),
+            openSecurityGroups: new Array(10).fill({}),
+            publicRdsInstances: [],
+            publicS3Buckets: [],
+          },
+        };
+        const stdout = `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_0",
+            type: "command_execution",
+            command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory -- --profile default --all-regions --output-dir .receipt/factory/evidence",
+            aggregated_output: JSON.stringify(helperOutput),
+            exit_code: 0,
+            status: "completed",
+          },
+        })}\n`;
+        const stderr = "bootstrap complete\n";
+        await fs.writeFile(input.stdoutPath, stdout, "utf-8");
+        await fs.writeFile(input.stderrPath, stderr, "utf-8");
+        if (input.evidencePath) {
+          await fs.writeFile(input.evidencePath, JSON.stringify({
+            command: "codex exec",
+            stdout,
+            stderr,
+            exitCode: 1,
+            startedAt: Date.now() - 5_000,
+            finishedAt: Date.now(),
+            files: [],
+            proof: {
+              verified: "helper evidence captured before the synth worker stalled",
+              how: "preserved helper stdout in the telemetry evidence record",
+            },
+          }), "utf-8");
+        }
+        throw new Error("codex exec stalled after 1000ms without output or completion updates");
+      },
+    },
+    repoRoot,
+    profileRoot: process.cwd(),
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate synth stall fallback",
+    prompt: "Use mounted helper evidence to finish even if synth output stalls.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective(created.objectiveId, {
+    type: "task.phase.transitioned",
+    objectiveId: created.objectiveId,
+    taskId: (taskJob!.payload as FactoryTaskJobPayload).taskId,
+    candidateId: (taskJob!.payload as FactoryTaskJobPayload).candidateId,
+    phase: "synthesizing",
+    reason: "Evidence is ready; synthesize now.",
+    changedAt: 3_456,
+  });
+
+  const payload = {
+    ...(taskJob!.payload as FactoryTaskJobPayload),
+    taskPhase: "synthesizing" as const,
+  };
+  await service.runTask(payload);
+
+  const resultText = await fs.readFile(payload.resultPath, "utf-8");
+  expect(resultText).toContain("\"outcome\": \"partial\"");
+  expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
+  expect(resultText).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory");
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+}, 120_000);
+
 test("factory investigation: stale synth recommendation is obsoleted after the task already reported", async () => {
   const { service, queue } = await createFactoryService({
     codexRun: async () => ({ stdout: "", stderr: "" }),
