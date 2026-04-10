@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
 import { CodexControlSignalError, CodexExecutionError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
-import { HubGit } from "../../../adapters/hub-git";
+import { HubGit, HubGitError } from "../../../adapters/hub-git";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import {
   DEFAULT_FACTORY_OBJECTIVE_POLICY,
@@ -2815,11 +2815,41 @@ export class FactoryService {
           consumedAt: Date.now(),
         });
       }
-      if (effectiveReason === "reconcile") {
-        await this.processObjectiveReconcile(objectiveId);
-      } else {
-        const startupReason: "startup" | "admitted" = effectiveReason === "admitted" ? "admitted" : "startup";
-        await this.processObjectiveStartup(objectiveId, startupReason);
+      try {
+        if (effectiveReason === "reconcile") {
+          await this.processObjectiveReconcile(objectiveId);
+        } else {
+          const startupReason: "startup" | "admitted" = effectiveReason === "admitted" ? "admitted" : "startup";
+          await this.processObjectiveStartup(objectiveId, startupReason);
+        }
+      } catch (error) {
+        if (this.isInvalidBaseCommitControlError(error)) {
+          const reasonText = "objective canceled after invalid base commit was detected during control recovery";
+          await this.cancelObjectiveScopedJobs(objectiveId, reasonText, "factory.control");
+          const canceledAt = Date.now();
+          await this.emitObjectiveBatch(objectiveId, [
+            {
+              type: "objective.canceled",
+              objectiveId,
+              canceledAt,
+              reason: reasonText,
+            },
+            await this.buildRenderedObjectiveHandoffEvent({
+              state,
+              status: "canceled",
+              summary: `Objective canceled: ${reasonText}`,
+              blocker: reasonText,
+              sourceUpdatedAt: canceledAt,
+            }),
+          ]);
+          await this.rebalanceObjectiveSlots();
+          return {
+            objectiveId,
+            status: "completed",
+            reason: effectiveReason,
+          };
+        }
+        throw error;
       }
       const refreshed = await this.getObjectiveState(objectiveId);
       if (refreshed.archivedAt || this.isTerminalObjectiveStatus(refreshed.status)) {
@@ -2845,6 +2875,12 @@ export class FactoryService {
       status: "completed",
       reason: nextReason,
     };
+  }
+
+  private isInvalidBaseCommitControlError(error: unknown): boolean {
+    return error instanceof HubGitError
+      && error.status === 400
+      && /invalid commit hash/i.test(error.message);
   }
 
   private async rebalanceObjectiveSlots(): Promise<void> {

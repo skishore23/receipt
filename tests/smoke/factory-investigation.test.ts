@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { sqliteQueue, type QueueJob } from "../../src/adapters/sqlite-queue";
 import { CodexControlSignalError, type CodexExecutorInput, type CodexRunControl } from "../../src/adapters/codex-executor";
+import { HubGitError } from "../../src/adapters/hub-git";
 import { createRuntime } from "@receipt/core/runtime";
 import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
@@ -1692,6 +1693,37 @@ test("factory investigation: stale queued execution is downgraded to stalled", a
     anomaly.kind === "job_stalled" && anomaly.jobId === taskJob.id)).toBe(true);
   expect(report.assessment.verdict).toBe("weak");
   expect(report.assessment.notes.some((note) => note.includes("Live execution stalled"))).toBe(true);
+}, 120_000);
+
+test("factory investigation: invalid base commit during control recovery cancels the objective once", async () => {
+  const { service } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Cancel invalid-base objective",
+    prompt: "This objective should cancel instead of retrying forever when control sees an invalid base hash.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  });
+
+  (service as unknown as {
+    processObjectiveStartup: (objectiveId: string, reason: "startup" | "admitted") => Promise<void>;
+  }).processObjectiveStartup = async () => {
+    throw new HubGitError(400, "invalid commit hash");
+  };
+
+  const result = await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: created.objectiveId,
+    reason: "startup",
+  });
+
+  expect(result.status).toBe("completed");
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("canceled");
+  expect(detail.latestSummary).toContain("invalid base commit");
 }, 120_000);
 
 test("factory investigation: pre-evidence steer queues a follow-up task instead of blocking the task", async () => {
