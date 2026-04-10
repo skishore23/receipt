@@ -54,10 +54,10 @@ export type FactoryLongRunExperimentReport = {
   readonly changedFiles: ReadonlyArray<string>;
   readonly diffStat?: string;
   readonly interventions: {
-    readonly count: number;
-    readonly restartCount: number;
-    readonly operatorGuidanceApplied: boolean;
-    readonly courseCorrectionWorked: boolean;
+    readonly recommendationCount: number;
+    readonly synthesisDispatchCount: number;
+    readonly recommendationApplied: boolean;
+    readonly controllerCorrectionWorked: boolean;
   };
   readonly assessment: FactoryReceiptInvestigation["assessment"];
   readonly summaryPath: string;
@@ -408,8 +408,8 @@ const renderExperimentSummaryText = (report: FactoryLongRunExperimentReport): st
     `Easy route risk: ${report.assessment.easyRouteRisk}`,
     `Efficiency: ${report.assessment.efficiency}`,
     `Control churn: ${report.assessment.controlChurn}`,
-    `Operator guidance applied: ${report.assessment.operatorGuidanceApplied ? "yes" : "no"}`,
-    `Course correction worked: ${report.assessment.courseCorrectionWorked ? "yes" : "no"}`,
+    `Recommendation applied: ${report.assessment.recommendationApplied ? "yes" : "no"}`,
+    `Controller correction worked: ${report.assessment.controllerCorrectionWorked ? "yes" : "no"}`,
     "",
     "## Bundle",
     `Summary: ${report.summaryPath}`,
@@ -610,16 +610,16 @@ export const runFactoryLongRunExperiment = async (
   const auditTextPath = path.join(evidenceDir, "audit.md");
   const effectiveInterventions = auditObjective
     ? {
-        count: auditObjective.interventions,
-        restartCount: auditObjective.restartCount,
-        operatorGuidanceApplied: auditObjective.interventions > 0 || investigation.interventions.operatorGuidanceApplied,
-        courseCorrectionWorked: auditObjective.courseCorrectionWorked,
+        recommendationCount: auditObjective.interventions,
+        synthesisDispatchCount: auditObjective.synthesisDispatchCount,
+        recommendationApplied: auditObjective.interventions > 0 || investigation.interventions.recommendationApplied,
+        controllerCorrectionWorked: auditObjective.controllerCorrectionWorked,
       }
     : {
-        count: investigation.interventions.count,
-        restartCount: investigation.interventions.restartCount,
-        operatorGuidanceApplied: investigation.interventions.operatorGuidanceApplied,
-        courseCorrectionWorked: investigation.interventions.courseCorrectionWorked,
+        recommendationCount: investigation.interventions.recommendationCount,
+        synthesisDispatchCount: investigation.interventions.synthesisDispatchCount,
+        recommendationApplied: investigation.interventions.recommendationApplied,
+        controllerCorrectionWorked: investigation.interventions.controllerCorrectionWorked,
       };
   const effectiveAssessment = auditObjective
     ? {
@@ -628,7 +628,7 @@ export const runFactoryLongRunExperiment = async (
         easyRouteRisk: auditObjective.easyRouteRisk,
         efficiency: auditObjective.efficiency,
         controlChurn: auditObjective.controlChurn,
-        courseCorrectionWorked: auditObjective.courseCorrectionWorked,
+        controllerCorrectionWorked: auditObjective.controllerCorrectionWorked,
       }
     : investigation.assessment;
 

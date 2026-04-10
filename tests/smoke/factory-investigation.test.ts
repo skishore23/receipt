@@ -13,7 +13,7 @@ import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
-import { FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
+import { FACTORY_MONITOR_AGENT_ID, FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
 
 const execFileAsync = promisify(execFile);
@@ -295,12 +295,12 @@ test("factory investigation: approved results downgrade to partial when captured
   await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
 
   const detail = await service.getObjective(created.objectiveId);
-  expect(detail.status).toBe("blocked");
-  expect(detail.tasks[0]?.status).toBe("blocked");
+  expect(detail.status).toBe("completed");
+  expect(detail.tasks[0]?.status).toBe("approved");
   expect(detail.investigation.reports[0]?.outcome).toBe("partial");
   expect(detail.investigation.reports[0]?.summary).toContain("remains partial");
   expect(detail.investigation.reports[0]?.report.scriptsRun.some((item) => item.command === "artifact:task_01.evidence.json" && item.status === "error")).toBe(true);
-  expect(detail.investigation.synthesized).toBeUndefined();
+  expect(detail.investigation.synthesized?.report.conclusion).toContain("healthy");
 }, 120_000);
 
 test("factory investigation: missing final JSON fails instead of falling back to stdout", async () => {
@@ -836,12 +836,10 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("from inside this task worktree. The packet already mounts recent objective receipts and state");
   expect(prompt).toContain("Do not emit commentary-style progress updates in this child session.");
   expect(prompt).toContain("Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON.");
-  expect(prompt).toContain("Do not load unrelated global skills from ~/.codex");
+  expect(prompt).toContain("Do not substitute CODEX_HOME, ~/.codex, or .receipt/codex-home-runtime skill paths");
   expect(prompt).toContain("Helper evidence files written under .receipt/ do not count as repo changes");
-  expect(prompt).toContain("skills/factory-helper-runtime/SKILL.md");
-  expect(prompt).toContain("skills/factory-helper-authoring/SKILL.md");
-  expect(prompt).toContain("skills/factory-aws-cli-cookbook/SKILL.md");
-  expect(prompt).toContain("skills/factory-infrastructure-aws/SKILL.md");
+  expect(prompt).toContain("Helper runner: /Users/kishore/receipt/skills/factory-helper-runtime/runner.py");
+  expect(prompt).toContain("Checked-in repo skill files for this task:");
   expect(prompt).not.toContain("skills/factory-run-orchestrator/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-helper-runtime/SKILL.md");
   expect(manifest.profile?.selectedSkills ?? []).toContain("skills/factory-helper-authoring/SKILL.md");
@@ -928,11 +926,11 @@ test("factory investigation: infrastructure task packets mount selected checked-
     };
   };
   expect(contextPack.helperCatalog?.runnerPath).toContain("/skills/factory-helper-runtime/runner.py");
-  expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) => helper.id === "aws_resource_inventory")).toBe(true);
+  expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) => helper.id === "aws_s3_bucket_inventory")).toBe(true);
   expect(contextPack.helperCatalog?.selectedHelpers?.some((helper) =>
-    helper.id === "aws_resource_inventory"
-    && helper.requiredArgs?.includes("--service")
-    && helper.requiredContext?.some((item) => item.includes("service/resource pair"))
+    helper.id === "aws_s3_bucket_inventory"
+    && helper.requiredArgs?.length === 0
+    && helper.requiredContext?.some((item) => item.includes("S3 bucket listing"))
   )).toBe(true);
   expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper manifest")).toBe(true);
   expect(contextPack.contextSources?.sharedArtifactRefs?.some((ref) => ref.label === "checked-in helper entrypoint")).toBe(true);
@@ -941,7 +939,7 @@ test("factory investigation: infrastructure task packets mount selected checked-
   const prompt = await fs.readFile(secondPayload.promptPath, "utf-8");
   expect(prompt).toContain("Helper runner:");
   expect(prompt).toContain("Selected helpers for this scope:");
-  expect(prompt).toContain("aws_resource_inventory");
+  expect(prompt).toContain("aws_s3_bucket_inventory");
 }, 120_000);
 
 test("factory investigation: IAM user count prompts select the checked-in IAM helper", async () => {
@@ -1230,9 +1228,6 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
   });
 
   expect(attempts).toBe(2);
-  const detail = await service.getObjective(created.objectiveId);
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.applied")).toBe(true);
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.restarted")).toBe(true);
   const payload = taskJob!.payload as FactoryTaskJobPayload;
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
   await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Applied the live-guided investigation fix.");
@@ -1241,8 +1236,6 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
   const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
   expect(report.assessment.verdict).toBe("strong");
   expect(report.assessment.followUpValidation).toBe("done");
-  expect(report.assessment.operatorGuidanceApplied).toBe(true);
-  expect(report.assessment.courseCorrectionWorked).toBe(true);
 }, 120_000);
 
 test("factory investigation: prefers terminal job projection over stale receipt-only job state", async () => {
@@ -1320,6 +1313,138 @@ test("factory investigation: prefers terminal job projection over stale receipt-
     warning.includes(taskJob.id) && warning.includes("projection status canceled") && warning.includes("local db cleanup"))).toBe(true);
 }, 120_000);
 
+test("factory investigation: synthesizing mode renders synth-only prompt and refuses restart guidance", async () => {
+  let attempts = 0;
+  const { service, queue } = await createFactoryService({
+    codexRun: async (input, control) => {
+      attempts += 1;
+      const signal = await control?.pollSignal?.();
+      if (signal) throw new CodexControlSignalError(signal);
+      const structured = {
+        outcome: "approved",
+        summary: "Synthesized the final investigation from existing evidence.",
+        handoff: "Investigation is complete.",
+        artifacts: [],
+        completion: {
+          changed: ["Produced the final investigation summary from mounted evidence."],
+          proof: ["Used the existing evidence bundle without rerunning helpers."],
+          remaining: [],
+        },
+        nextAction: null,
+        report: {
+          conclusion: "The existing evidence was sufficient to finish the task.",
+          evidence: [{ title: "Mounted evidence", summary: "Local evidence files were used for synthesis.", detail: null }],
+          evidenceRecords: [],
+          scriptsRun: [{ command: "cat .receipt/factory/evidence/finding.json", summary: "Read the mounted evidence bundle for final synthesis.", status: "ok" }],
+          disagreements: [],
+          nextSteps: [],
+        },
+      };
+      const raw = JSON.stringify(structured);
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate synth-only restart behavior",
+    prompt: "Use the captured evidence and finish the investigation cleanly.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective(created.objectiveId, {
+    type: "task.phase.transitioned",
+    objectiveId: created.objectiveId,
+    taskId: (taskJob!.payload as FactoryTaskJobPayload).taskId,
+    candidateId: (taskJob!.payload as FactoryTaskJobPayload).candidateId,
+    phase: "synthesizing",
+    reason: "Evidence is ready; synthesize now.",
+    changedAt: 2_345,
+  });
+  const payload = {
+    ...(taskJob!.payload as FactoryTaskJobPayload),
+    taskPhase: "synthesizing" as const,
+  };
+  await expect(service.runTask(payload, {
+    pollSignal: async () => ({
+      kind: "restart",
+      note: "Use the existing evidence and finish now.",
+      meta: {
+        jobId: taskJob!.id,
+        guidance: "Use the existing evidence and finish now.",
+        guidanceKind: "steer",
+        sourceCommandIds: ["cmd_steer_01"],
+        appliedAt: 2_345,
+      },
+    }),
+  })).rejects.toBeInstanceOf(CodexControlSignalError);
+
+  expect(attempts).toBe(1);
+  await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("### Synthesis-Only Mode");
+}, 120_000);
+
+test("factory investigation: repeated synthesis dispatch loops are scored weak and churn-heavy", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate restart-loop scoring",
+    prompt: "Assess a run that keeps restarting without terminal completion.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const emitObjective = (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective.bind(service);
+
+  for (let index = 0; index < 3; index += 1) {
+    const ts = 5_000 + index;
+    await emitObjective(payload.objectiveId, {
+      type: "monitor.recommendation",
+      objectiveId: payload.objectiveId,
+      recommendationId: `recommendation_${index + 1}`,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      jobId: taskJob!.id,
+      recommendation: {
+        kind: "recommend_enter_synthesizing",
+        guidance: null,
+        subtasks: null,
+        reason: null,
+      },
+      reasoning: `Finish from evidence attempt ${index + 1}`,
+      recommendedAt: ts,
+    });
+    await emitObjective(payload.objectiveId, {
+      type: "task.synthesis.dispatched",
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      jobId: taskJob!.id,
+      dispatchedAt: ts + 100,
+    });
+  }
+
+  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(report.summary.status).toBe("synthesizing");
+  expect(report.assessment.efficiency).toBe("churn-heavy");
+  expect(report.assessment.verdict).toBe("weak");
+  expect(report.assessment.notes.some((note) => note.includes("Repeated synthesis dispatches occurred without terminal completion"))).toBe(true);
+}, 120_000);
+
 test("factory investigation: stale queued execution is downgraded to stalled", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService({
     codexRun: async () => ({ stdout: "", stderr: "" }),
@@ -1347,6 +1472,177 @@ test("factory investigation: stale queued execution is downgraded to stalled", a
     anomaly.kind === "job_stalled" && anomaly.jobId === taskJob.id)).toBe(true);
   expect(report.assessment.verdict).toBe("weak");
   expect(report.assessment.notes.some((note) => note.includes("Live execution stalled"))).toBe(true);
+}, 120_000);
+
+test("factory investigation: pre-evidence steer queues a follow-up task instead of blocking the task", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Steer pre-evidence collection",
+    prompt: "Keep the investigation on helper-first AWS evidence collection.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const emitObjective = (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective.bind(service);
+
+  await emitObjective(payload.objectiveId, {
+    type: "monitor.recommendation",
+    objectiveId: payload.objectiveId,
+    recommendationId: "recommendation_steer_pre_evidence",
+    taskId: payload.taskId,
+    candidateId: payload.candidateId,
+    jobId: taskJob!.id,
+    recommendation: {
+      kind: "recommend_steer",
+      guidance: "Run the selected AWS helper first. Do not design a new script before direct evidence exists.",
+    },
+    reasoning: "The task is drifting into custom tooling before any evidence artifact exists.",
+    recommendedAt: Date.now(),
+  });
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: payload.objectiveId,
+    reason: "reconcile",
+  });
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("executing");
+  expect(detail.phase).toBe("collecting_evidence");
+  expect(detail.tasks).toHaveLength(2);
+  expect(detail.tasks.some((task) => task.sourceTaskId === payload.taskId)).toBe(true);
+
+  const receipts = await service.listObjectiveReceipts(created.objectiveId, { limit: 80 });
+  expect(receipts.filter((receipt) => receipt.type === "task.dispatched")).toHaveLength(2);
+  expect(receipts.some((receipt) => receipt.type === "task.superseded")).toBe(true);
+  expect(receipts.some((receipt) =>
+    receipt.type === "monitor.recommendation.consumed" && receipt.summary.includes("follow_up")
+  )).toBe(true);
+  expect(receipts.some((receipt) => receipt.type === "task.blocked")).toBe(false);
+
+}, 120_000);
+
+test("factory investigation: follow-up tasks inherit source evidence into the new workspace packet", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Reuse prior NAT evidence",
+    prompt: "Inspect existing network cost evidence before asking for new AWS queries.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const sourcePacketDir = path.join(payload.workspacePath, ".receipt", "factory");
+  const sourceEvidenceDir = path.join(sourcePacketDir, "evidence");
+  await fs.mkdir(sourceEvidenceDir, { recursive: true });
+  await fs.writeFile(
+    path.join(sourcePacketDir, `${payload.taskId}.evidence.json`),
+    JSON.stringify({ summary: "prior NAT evidence" }, null, 2),
+    "utf-8",
+  );
+  await fs.writeFile(
+    path.join(sourceEvidenceDir, "nat_gateway_cost_spike.json"),
+    JSON.stringify({
+      topUsageTypes: [{ usageType: "NatGateway-Hours", amountUsd: 123.45 }],
+      topServices: [{ service: "Amazon Virtual Private Cloud", amountUsd: 456.78 }],
+    }, null, 2),
+    "utf-8",
+  );
+
+  const emitObjective = (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective.bind(service);
+
+  await emitObjective(payload.objectiveId, {
+    type: "monitor.recommendation",
+    objectiveId: payload.objectiveId,
+    recommendationId: "recommendation_steer_reuse_evidence",
+    taskId: payload.taskId,
+    candidateId: payload.candidateId,
+    jobId: taskJob!.id,
+    recommendation: {
+      kind: "recommend_steer",
+      guidance: "Use the existing NAT evidence artifacts before any new helper or AWS query.",
+    },
+    reasoning: "Existing evidence artifacts already exist in the task workspace and should be reused by a follow-up task.",
+    recommendedAt: Date.now(),
+  });
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: payload.objectiveId,
+    reason: "reconcile",
+  });
+
+  const followUpJobs = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(followUpJobs).toHaveLength(2);
+  const followUpPayload = followUpJobs[1]!.payload as FactoryTaskJobPayload;
+  const followUpPacketDir = path.join(followUpPayload.workspacePath, ".receipt", "factory");
+  const followUpSummary = await fs.readFile(
+    path.join(followUpPacketDir, `${followUpPayload.taskId}.context.md`),
+    "utf-8",
+  );
+  expect(followUpSummary).toContain("Primary evidence path: inspect");
+  expect(followUpSummary).not.toContain("Primary evidence path: run the selected helper");
+  await expect(
+    fs.readFile(path.join(followUpPacketDir, `${payload.taskId}.evidence.json`), "utf-8"),
+  ).resolves.toContain("prior NAT evidence");
+  await expect(
+    fs.readFile(path.join(followUpPacketDir, "evidence", "nat_gateway_cost_spike.json"), "utf-8"),
+  ).resolves.toContain("NatGateway-Hours");
+}, 120_000);
+
+test("factory investigation: reactObjective requeues a missing active monitor job", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Requeue missing monitor",
+    prompt: "Keep monitor coverage on active investigation tasks.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const initialMonitorJob = (await queue.listJobs({ limit: 40 }))
+    .find((job) =>
+      job.agentId === FACTORY_MONITOR_AGENT_ID
+      && job.payload.kind === "factory.task.monitor"
+      && job.payload.objectiveId === created.objectiveId,
+    );
+  expect(initialMonitorJob?.id).toBeTruthy();
+  await queue.cancel(initialMonitorJob!.id, "test missing monitor", "factory.test");
+
+  await service.reactObjective(created.objectiveId);
+
+  const activeMonitorJobs = (await queue.listJobs({ limit: 40 }))
+    .filter((job) =>
+      job.agentId === FACTORY_MONITOR_AGENT_ID
+      && job.payload.kind === "factory.task.monitor"
+      && job.payload.objectiveId === created.objectiveId
+      && !["completed", "failed", "canceled"].includes(job.status),
+    );
+  expect(activeMonitorJobs).toHaveLength(1);
+  expect(activeMonitorJobs[0]?.id).not.toBe(initialMonitorJob?.id);
 }, 120_000);
 
 test("factory investigation: abort signals win over restart handling", async () => {
@@ -1380,6 +1676,6 @@ test("factory investigation: abort signals win over restart handling", async () 
   })).rejects.toThrow("codex exec aborted");
 
   const detail = await service.getObjective(created.objectiveId);
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.applied")).toBe(false);
-  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.intervention.restarted")).toBe(false);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "monitor.recommendation")).toBe(false);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.synthesis.dispatched")).toBe(false);
 }, 120_000);

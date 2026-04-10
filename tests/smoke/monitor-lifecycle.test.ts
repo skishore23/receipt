@@ -31,12 +31,12 @@ test("monitor checkpoint with progressing worker returns continue", async () => 
     evaluateLlm: async () => ({
       assessment: "progressing",
       reasoning: "Worker has edited 2 files and all tests pass.",
-      action: { kind: "continue" },
+      recommendation: { kind: "continue" },
     }),
   });
 
   expect(result.assessment).toBe("progressing");
-  expect(result.action.kind).toBe("continue");
+  expect(result.recommendation.kind).toBe("continue");
 });
 
 test("monitor checkpoint with stalled worker returns split", async () => {
@@ -62,8 +62,8 @@ test("monitor checkpoint with stalled worker returns split", async () => {
     evaluateLlm: async () => ({
       assessment: "stalled",
       reasoning: "Worker is in an error loop. Task scope is too broad.",
-      action: {
-        kind: "split",
+      recommendation: {
+        kind: "recommend_split",
         subtasks: [
           { title: "Refactor auth module", prompt: "Refactor only src/auth/" },
           { title: "Refactor user module", prompt: "Refactor only src/user/", dependsOn: ["0"] },
@@ -74,13 +74,13 @@ test("monitor checkpoint with stalled worker returns split", async () => {
   });
 
   expect(result.assessment).toBe("stalled");
-  expect(result.action.kind).toBe("split");
-  if (result.action.kind === "split") {
-    expect(result.action.subtasks).toHaveLength(3);
+  expect(result.recommendation.kind).toBe("recommend_split");
+  if (result.recommendation.kind === "recommend_split") {
+    expect(result.recommendation.subtasks).toHaveLength(3);
   }
 });
 
-test("monitor checkpoint with off-track worker returns steer", async () => {
+test("monitor checkpoint with off-track worker returns recommend_steer", async () => {
   const dir = await createTempDir("monitor-lifecycle-offtrack");
   const stdoutPath = path.join(dir, "stdout.log");
   const stderrPath = path.join(dir, "stderr.log");
@@ -100,18 +100,18 @@ test("monitor checkpoint with off-track worker returns steer", async () => {
     evaluateLlm: async () => ({
       assessment: "off_track",
       reasoning: "Worker is editing database files instead of fixing CSS.",
-      action: {
-        kind: "steer",
+      recommendation: {
+        kind: "recommend_steer",
         guidance: "Stop editing database files. Focus only on the login button CSS in src/components/LoginButton.tsx.",
       },
     }),
   });
 
   expect(result.assessment).toBe("off_track");
-  expect(result.action.kind).toBe("steer");
+  expect(result.recommendation.kind).toBe("recommend_steer");
 });
 
-test("monitor checkpoint with failing worker returns abort", async () => {
+test("monitor checkpoint with failing worker returns recommend_abort", async () => {
   const dir = await createTempDir("monitor-lifecycle-abort");
   const stdoutPath = path.join(dir, "stdout.log");
   const stderrPath = path.join(dir, "stderr.log");
@@ -127,19 +127,19 @@ test("monitor checkpoint with failing worker returns abort", async () => {
     evaluateLlm: async () => ({
       assessment: "failing",
       reasoning: "Worker process is crashing with OOM errors.",
-      action: { kind: "abort", reason: "Persistent OOM crashes, needs human investigation." },
+      recommendation: { kind: "recommend_abort", reason: "Persistent OOM crashes, needs human investigation." },
     }),
   });
 
   expect(result.assessment).toBe("failing");
-  expect(result.action.kind).toBe("abort");
+  expect(result.recommendation.kind).toBe("recommend_abort");
 });
 
 test("MonitorCheckpointResultSchema rejects invalid assessment", () => {
   expect(() => MonitorCheckpointResultSchema.parse({
     assessment: "unknown_status",
     reasoning: "test",
-    action: { kind: "continue" },
+    recommendation: { kind: "continue" },
   })).toThrow();
 });
 
@@ -147,8 +147,8 @@ test("MonitorCheckpointResultSchema rejects split with fewer than 2 subtasks", (
   expect(() => MonitorCheckpointResultSchema.parse({
     assessment: "stalled",
     reasoning: "test",
-    action: {
-      kind: "split",
+    recommendation: {
+      kind: "recommend_split",
       subtasks: [{ title: "Only one", prompt: "Not enough" }],
     },
   })).toThrow();
@@ -158,8 +158,8 @@ test("MonitorCheckpointResultSchema rejects split with more than 5 subtasks", ()
   expect(() => MonitorCheckpointResultSchema.parse({
     assessment: "stalled",
     reasoning: "test",
-    action: {
-      kind: "split",
+    recommendation: {
+      kind: "recommend_split",
       subtasks: Array.from({ length: 6 }, (_, i) => ({ title: `Task ${i}`, prompt: `Do ${i}` })),
     },
   })).toThrow();
@@ -186,7 +186,7 @@ test("monitor checkpoint passes truncated logs to LLM", async () => {
       return {
         assessment: "progressing",
         reasoning: "OK",
-        action: { kind: "continue" },
+        recommendation: { kind: "continue" },
       };
     },
   });

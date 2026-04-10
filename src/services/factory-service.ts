@@ -1,4 +1,8 @@
-export { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory/runtime/service";
+export {
+  FACTORY_CONTROL_AGENT_ID,
+  FACTORY_MONITOR_AGENT_ID,
+  FactoryService,
+} from "./factory/runtime/service";
 export {
   FACTORY_PROFILE_SUMMARY,
   FactoryServiceError,

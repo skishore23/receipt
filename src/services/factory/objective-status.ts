@@ -149,9 +149,7 @@ export const classifyObjectiveLiveJobAuthority = (
       : "non_authoritative";
   }
   if (kind === "factory.task.run" || kind === "factory.task.monitor") {
-    return state.status === "executing" || state.status === "planning" || taskOrMonitorIsAuthoritativeDuringIntegration(state)
-      ? "authoritative"
-      : "non_authoritative";
+    return taskOrMonitorIsAuthoritativeDuringIntegration(state) ? "authoritative" : "non_authoritative";
   }
   return "non_authoritative";
 };
@@ -159,7 +157,7 @@ export const classifyObjectiveLiveJobAuthority = (
 const inferredExecutionPhase = (
   state: ObjectiveStateSlice,
   authoritativeJobs: ReadonlyArray<QueueJob>,
-): Extract<FactoryObjectivePhaseDetail, "executing" | "integrating" | "promoting"> => {
+): Extract<FactoryObjectivePhaseDetail, "collecting_evidence" | "evidence_ready" | "synthesizing" | "integrating" | "promoting"> => {
   if (authoritativeJobs.some((job) => jobKind(job) === "factory.integration.publish")) return "promoting";
   if (
     authoritativeJobs.some((job) => jobKind(job) === "factory.integration.validate")
@@ -170,7 +168,12 @@ const inferredExecutionPhase = (
     return "integrating";
   }
   if (state.status === "promoting" || state.integration.status === "promoting") return "promoting";
-  return "executing";
+  const activeTaskPhases = taskEntries(state)
+    .filter((task) => state.workflow.activeTaskIds.includes(task.taskId))
+    .map((task) => task.executionPhase ?? "collecting_evidence");
+  if (activeTaskPhases.includes("synthesizing")) return "synthesizing";
+  if (activeTaskPhases.includes("evidence_ready")) return "evidence_ready";
+  return "collecting_evidence";
 };
 
 const shouldSurfaceStalled = (
@@ -231,7 +234,7 @@ export const deriveObjectiveOperationalState = (
     return {
       displayState: "Stalled",
       phaseDetail: "stalled",
-      statusAuthority: hasAuthoritativeLiveJob ? "live_execution" : "objective",
+      statusAuthority: "objective",
       hasAuthoritativeLiveJob,
     };
   }
@@ -248,7 +251,34 @@ export const deriveObjectiveOperationalState = (
   if (input.state.scheduler.slotState === "queued") {
     return {
       displayState: "Queued",
-      phaseDetail: "queued",
+      phaseDetail: "waiting_for_slot",
+      statusAuthority: "objective",
+      hasAuthoritativeLiveJob,
+    };
+  }
+
+  if (input.state.wait?.kind === "control_reconcile") {
+    return {
+      displayState: "Running",
+      phaseDetail: "waiting_for_control",
+      statusAuthority: "objective",
+      hasAuthoritativeLiveJob,
+    };
+  }
+
+  if (input.state.wait?.kind === "synthesis_dispatch") {
+    return {
+      displayState: "Running",
+      phaseDetail: "waiting_for_synthesis",
+      statusAuthority: "objective",
+      hasAuthoritativeLiveJob,
+    };
+  }
+
+  if (input.state.wait?.kind === "promotion") {
+    return {
+      displayState: "Running",
+      phaseDetail: "waiting_for_promotion",
       statusAuthority: "objective",
       hasAuthoritativeLiveJob,
     };
@@ -263,19 +293,10 @@ export const deriveObjectiveOperationalState = (
     };
   }
 
-  if (hasAuthoritativeLiveJob) {
-    return {
-      displayState: "Running",
-      phaseDetail: inferredExecutionPhase(input.state, authoritativeJobs),
-      statusAuthority: "live_execution",
-      hasAuthoritativeLiveJob,
-    };
-  }
-
   if (reconcileJobs.length > 0) {
     return {
       displayState: "Running",
-      phaseDetail: "reconciling",
+      phaseDetail: "waiting_for_control",
       statusAuthority: "reconcile",
       hasAuthoritativeLiveJob,
     };
@@ -283,8 +304,8 @@ export const deriveObjectiveOperationalState = (
 
   if (input.state.status === "planning") {
     return {
-      displayState: "Running",
-      phaseDetail: "executing",
+      displayState: input.taskCount === 0 ? "Draft" : "Running",
+      phaseDetail: input.taskCount === 0 ? "draft" : "collecting_evidence",
       statusAuthority: "objective",
       hasAuthoritativeLiveJob,
     };
@@ -295,7 +316,9 @@ export const deriveObjectiveOperationalState = (
     phaseDetail:
       input.state.status === "promoting" ? "promoting"
       : input.state.status === "integrating" ? "integrating"
-      : "executing",
+      : input.state.status === "synthesizing" ? "synthesizing"
+      : input.state.status === "evidence_ready" ? "evidence_ready"
+      : inferredExecutionPhase(input.state, authoritativeJobs),
     statusAuthority: "objective",
     hasAuthoritativeLiveJob,
   };

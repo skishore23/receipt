@@ -202,6 +202,53 @@ const copyFileIfExists = async (sourcePath: string, targetPath: string): Promise
   }
 };
 
+const copyPathIfExists = async (sourcePath: string, targetPath: string): Promise<void> => {
+  try {
+    const stat = await fsp.stat(sourcePath);
+    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+    if (stat.isDirectory()) {
+      await fsp.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+      await fsp.cp(sourcePath, targetPath, { recursive: true, force: true });
+      return;
+    }
+    await fsp.copyFile(sourcePath, targetPath);
+  } catch (err) {
+    if (isMissingPathError(err)) return;
+    throw err;
+  }
+};
+
+const repoSkillRootsFromPaths = (repoSkillPaths: ReadonlyArray<string> | undefined): ReadonlyArray<{
+  readonly skillName: string;
+  readonly sourceRoot: string;
+}> => {
+  const roots = new Map<string, { readonly skillName: string; readonly sourceRoot: string }>();
+  for (const skillPath of repoSkillPaths ?? []) {
+    const trimmed = skillPath.trim();
+    if (!trimmed || !path.isAbsolute(trimmed)) continue;
+    const normalized = path.normalize(trimmed);
+    const segments = normalized.split(path.sep);
+    const skillsIndex = segments.lastIndexOf("skills");
+    if (skillsIndex < 0 || skillsIndex + 1 >= segments.length) continue;
+    const skillName = segments[skillsIndex + 1]?.trim();
+    if (!skillName) continue;
+    const sourceRoot = segments.slice(0, skillsIndex + 2).join(path.sep) || path.sep;
+    roots.set(sourceRoot, { skillName, sourceRoot });
+  }
+  return [...roots.values()];
+};
+
+const materializeRepoSkillsIntoIsolatedCodexHome = async (
+  isolatedHome: string,
+  repoSkillPaths: ReadonlyArray<string> | undefined,
+): Promise<void> => {
+  const skillRoots = repoSkillRootsFromPaths(repoSkillPaths);
+  await Promise.all(skillRoots.flatMap(({ skillName, sourceRoot }) => [
+    copyPathIfExists(sourceRoot, path.join(isolatedHome, "skills", skillName)),
+    copyPathIfExists(sourceRoot, path.join(isolatedHome, "skills", ".system", skillName)),
+  ]));
+};
+
 const resolveIsolatedCodexHomeRoot = (env: NodeJS.ProcessEnv, workspacePath: string): string => {
   const configuredRoot = env.RECEIPT_ISOLATED_CODEX_HOME_ROOT?.trim();
   if (configuredRoot) return path.resolve(configuredRoot);
@@ -211,23 +258,24 @@ const resolveIsolatedCodexHomeRoot = (env: NodeJS.ProcessEnv, workspacePath: str
 const prepareIsolatedCodexHome = async (
   env: NodeJS.ProcessEnv,
   workspacePath: string,
+  repoSkillPaths?: ReadonlyArray<string>,
 ): Promise<string | undefined> => {
   const sourceHome = env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
-  try {
-    const stat = await fsp.stat(sourceHome);
-    if (!stat.isDirectory()) return undefined;
-  } catch {
-    return undefined;
-  }
   const isolatedRoot = resolveIsolatedCodexHomeRoot(env, workspacePath);
   await fsp.mkdir(isolatedRoot, { recursive: true });
   const isolatedHome = await fsp.mkdtemp(path.join(isolatedRoot, "isolated-"));
-  await Promise.all([
-    copyFileIfExists(path.join(sourceHome, "auth.json"), path.join(isolatedHome, "auth.json")),
-    copyFileIfExists(path.join(sourceHome, "config.toml"), path.join(isolatedHome, "config.toml")),
-    copyFileIfExists(path.join(sourceHome, "version.json"), path.join(isolatedHome, "version.json")),
-    copyFileIfExists(path.join(sourceHome, ".codex-global-state.json"), path.join(isolatedHome, ".codex-global-state.json")),
-  ]);
+  const sourceHomeExists = await fsp.stat(sourceHome)
+    .then((stat) => stat.isDirectory())
+    .catch(() => false);
+  if (sourceHomeExists) {
+    await Promise.all([
+      copyFileIfExists(path.join(sourceHome, "auth.json"), path.join(isolatedHome, "auth.json")),
+      copyFileIfExists(path.join(sourceHome, "config.toml"), path.join(isolatedHome, "config.toml")),
+      copyFileIfExists(path.join(sourceHome, "version.json"), path.join(isolatedHome, "version.json")),
+      copyFileIfExists(path.join(sourceHome, ".codex-global-state.json"), path.join(isolatedHome, ".codex-global-state.json")),
+    ]);
+  }
+  await materializeRepoSkillsIntoIsolatedCodexHome(isolatedHome, repoSkillPaths);
   return isolatedHome;
 };
 
@@ -449,7 +497,7 @@ export class LocalCodexExecutor implements CodexExecutor {
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
     };
     if (input.isolateCodexHome) {
-      isolatedCodexHome = await prepareIsolatedCodexHome(childEnv, input.workspacePath);
+      isolatedCodexHome = await prepareIsolatedCodexHome(childEnv, input.workspacePath, input.repoSkillPaths);
       if (isolatedCodexHome) childEnv.CODEX_HOME = isolatedCodexHome;
     }
 

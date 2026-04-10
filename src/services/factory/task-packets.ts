@@ -106,6 +106,7 @@ export type FactoryContextPack = {
     readonly workerType: FactoryWorkerType;
     readonly executionMode: FactoryTaskExecutionMode;
     readonly status: FactoryTaskStatus;
+    readonly taskPhase?: "collecting_evidence" | "evidence_ready" | "synthesizing";
     readonly candidateId: string;
   };
   readonly integration: {
@@ -157,6 +158,12 @@ export type FactoryTaskPacketPaths = {
   readonly memoryScriptPath: string;
   readonly memoryConfigPath: string;
   readonly receiptCliPath: string;
+};
+
+export type FactoryReadableArtifact = {
+  readonly path: string;
+  readonly label: string;
+  readonly bytes: number;
 };
 
 export type FactoryIntegrationPacketPaths = {
@@ -229,22 +236,24 @@ export const buildTaskMemoryScopes = (
 export const buildTaskFilePaths = (
   workspacePath: string,
   taskId: string,
+  taskPhase?: "collecting_evidence" | "evidence_ready" | "synthesizing",
 ): FactoryTaskPacketPaths => {
   const root = path.join(workspacePath, FACTORY_TASK_PACKET_DIR);
+  const phaseSuffix = taskPhase === "synthesizing" ? `.synthesizing` : "";
   return {
-    manifestPath: path.join(root, `${taskId}.manifest.json`),
-    contextSummaryPath: path.join(root, `${taskId}.context.md`),
-    contextPackPath: path.join(root, `${taskId}.context-pack.json`),
-    promptPath: path.join(root, `${taskId}.prompt.md`),
-    resultPath: path.join(root, `${taskId}.result.json`),
-    stdoutPath: path.join(root, `${taskId}.stdout.log`),
-    stderrPath: path.join(root, `${taskId}.stderr.log`),
-    lastMessagePath: path.join(root, `${taskId}.last-message.md`),
-    evidencePath: path.join(root, `${taskId}.evidence.json`),
-    skillBundlePath: path.join(root, `${taskId}.skill-bundle.json`),
-    memoryScriptPath: path.join(root, `${taskId}.memory.cjs`),
-    memoryConfigPath: path.join(root, `${taskId}.memory-scopes.json`),
-    receiptCliPath: path.join(root, `${taskId}.receipt-cli.md`),
+    manifestPath: path.join(root, `${taskId}${phaseSuffix}.manifest.json`),
+    contextSummaryPath: path.join(root, `${taskId}${phaseSuffix}.context.md`),
+    contextPackPath: path.join(root, `${taskId}${phaseSuffix}.context-pack.json`),
+    promptPath: path.join(root, `${taskId}${phaseSuffix}.prompt.md`),
+    resultPath: path.join(root, `${taskId}${phaseSuffix}.result.json`),
+    stdoutPath: path.join(root, `${taskId}${phaseSuffix}.stdout.log`),
+    stderrPath: path.join(root, `${taskId}${phaseSuffix}.stderr.log`),
+    lastMessagePath: path.join(root, `${taskId}${phaseSuffix}.last-message.md`),
+    evidencePath: path.join(root, `${taskId}${phaseSuffix}.evidence.json`),
+    skillBundlePath: path.join(root, `${taskId}${phaseSuffix}.skill-bundle.json`),
+    memoryScriptPath: path.join(root, `${taskId}${phaseSuffix}.memory.cjs`),
+    memoryConfigPath: path.join(root, `${taskId}${phaseSuffix}.memory-scopes.json`),
+    receiptCliPath: path.join(root, `${taskId}${phaseSuffix}.receipt-cli.md`),
   };
 };
 
@@ -401,7 +410,7 @@ const readEvidenceFile = async (
 
 const listEvidenceDirEntries = async (
   evidenceDir: string,
-): Promise<ReadonlyArray<{ readonly path: string; readonly label: string; readonly bytes: number }>> => {
+): Promise<ReadonlyArray<FactoryReadableArtifact>> => {
   try {
     const entries = await fs.readdir(evidenceDir, { withFileTypes: true });
     const results = await Promise.all(
@@ -415,23 +424,50 @@ const listEvidenceDirEntries = async (
         }),
     );
     return results
-      .filter((entry): entry is { readonly path: string; readonly label: string; readonly bytes: number } => Boolean(entry))
+      .filter((entry): entry is FactoryReadableArtifact => Boolean(entry))
       .sort((left, right) => right.bytes - left.bytes || left.label.localeCompare(right.label));
   } catch {
     return [];
   }
 };
 
-export const readTaskEvidenceContents = async (
+export const listTaskReadableArtifacts = async (
   workspacePath: string,
   artifactActivity: ReadonlyArray<FactoryArtifactActivity>,
-): Promise<ReadonlyArray<FactoryEvidenceContent>> => {
+  extraReadableArtifacts: ReadonlyArray<FactoryReadableArtifact> = [],
+): Promise<ReadonlyArray<FactoryReadableArtifact>> => {
   const evidenceDir = path.join(workspacePath, FACTORY_TASK_PACKET_DIR, "evidence");
   const evidenceDirEntries = await listEvidenceDirEntries(evidenceDir);
   const artifactEntries = artifactActivity
     .filter((entry) => isReadableEvidenceFile(entry.label))
     .map((entry) => ({ path: entry.path, label: entry.label, bytes: entry.bytes }));
-  const allEntries = [...evidenceDirEntries, ...artifactEntries];
+  const deduped = new Map<string, FactoryReadableArtifact>();
+  for (const entry of [...extraReadableArtifacts, ...evidenceDirEntries, ...artifactEntries]) {
+    const key = `${entry.path}::${entry.label}`;
+    if (!deduped.has(key)) deduped.set(key, entry);
+  }
+  const evidenceDirPrefix = `${path.join(workspacePath, FACTORY_TASK_PACKET_DIR, "evidence")}${path.sep}`;
+  const artifactPriority = (entry: FactoryReadableArtifact): number => {
+    const normalizedPath = entry.path.replace(/\\/g, "/");
+    const normalizedEvidenceDirPrefix = evidenceDirPrefix.replace(/\\/g, "/");
+    if (normalizedPath.startsWith(normalizedEvidenceDirPrefix)) return 0;
+    if (/\/task_[^/]+\.evidence\.json$/i.test(normalizedPath)) return 1;
+    return 2;
+  };
+  return [...deduped.values()]
+    .sort((left, right) =>
+      artifactPriority(left) - artifactPriority(right)
+      || right.bytes - left.bytes
+      || left.label.localeCompare(right.label)
+    );
+};
+
+export const readTaskEvidenceContents = async (
+  workspacePath: string,
+  artifactActivity: ReadonlyArray<FactoryArtifactActivity>,
+  extraReadableArtifacts: ReadonlyArray<FactoryReadableArtifact> = [],
+): Promise<ReadonlyArray<FactoryEvidenceContent>> => {
+  const allEntries = await listTaskReadableArtifacts(workspacePath, artifactActivity, extraReadableArtifacts);
   if (allEntries.length === 0) return [];
 
   const contents: FactoryEvidenceContent[] = [];
@@ -448,8 +484,207 @@ export const readTaskEvidenceContents = async (
   return contents;
 };
 
-export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
+export const summarizeReadableTaskArtifacts = (
+  artifacts: ReadonlyArray<FactoryReadableArtifact>,
+): string | undefined => {
+  if (artifacts.length === 0) return undefined;
+  if (artifacts.length === 1) {
+    return `Mounted evidence artifact: ${artifacts[0]?.label}.`;
+  }
+  const listed = artifacts.slice(0, 3).map((artifact) => artifact.label).join(", ");
+  const extra = artifacts.length > 3 ? ` +${artifacts.length - 3} more` : "";
+  return `Mounted evidence artifacts: ${listed}${extra}.`;
+};
+
+const renderMountedArtifactPathLines = (
+  artifacts: ReadonlyArray<FactoryReadableArtifact>,
+): ReadonlyArray<string> =>
+  artifacts.slice(0, 3).map((artifact) => `- ${artifact.label}: ${artifact.path}`);
+
+const normalizeBootstrapTokens = (value: string): ReadonlySet<string> =>
+  new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0),
+  );
+
+const helperPriority = (
+  helper: NonNullable<FactoryContextPack["helperCatalog"]>["selectedHelpers"][number],
+  tokens: ReadonlySet<string>,
+): number => {
+  const id = helper.id.toLowerCase();
+  let score = 0;
+  if ((tokens.has("nat") || tokens.has("gateway") || tokens.has("egress")) && id.includes("nat_gateway")) {
+    score += 100;
+  }
+  if ((tokens.has("ecs") || tokens.has("container") || tokens.has("service")) && id.includes("ecs_ec2_container")) {
+    score += 100;
+  }
+  if ((tokens.has("rds") || tokens.has("database") || tokens.has("databases")) && id === "aws_resource_inventory") {
+    score += 100;
+  }
+  if ((tokens.has("exposure") || tokens.has("public") || tokens.has("internet")) && id.includes("internet_exposure")) {
+    score += 90;
+  }
+  if ((tokens.has("bucket") || tokens.has("buckets") || tokens.has("s3")) && id.includes("s3_bucket_inventory")) {
+    score += 90;
+  }
+  if ((tokens.has("cost") || tokens.has("billing") || tokens.has("spend")) && id.includes("cost")) {
+    score += 60;
+  }
+  if ((tokens.has("alarm") || tokens.has("alarms")) && id.includes("alarm")) {
+    score += 50;
+  }
+  if ((tokens.has("inventory") || tokens.has("count")) && id.includes("inventory")) {
+    score += 20;
+  }
+  return score;
+};
+
+const selectPrimaryHelper = (
+  pack: FactoryContextPack,
+): NonNullable<FactoryContextPack["helperCatalog"]>["selectedHelpers"][number] | undefined => {
+  const helpers = pack.helperCatalog?.selectedHelpers ?? [];
+  if (helpers.length === 0) return undefined;
+  const tokens = normalizeBootstrapTokens([
+    pack.title,
+    pack.prompt,
+    pack.task.title,
+    pack.task.prompt,
+  ].join("\n"));
+  return [...helpers]
+    .sort((left, right) =>
+      helperPriority(right, tokens) - helperPriority(left, tokens)
+      || left.id.localeCompare(right.id)
+    )[0];
+};
+
+const renderBootstrapSeedLines = (
+  pack: FactoryContextPack,
+  mountedReadableArtifacts: ReadonlyArray<FactoryReadableArtifact>,
+): ReadonlyArray<string> => {
+  const helperCommand = suggestPrimaryHelperCommand(pack);
+  const packetBase = `.receipt/factory/${pack.task.taskId}`;
+  const workerSkillPath = pack.contextSources.repoSkillPaths.find((skillPath) =>
+    skillPath.replace(/\\/g, "/").endsWith("/skills/factory-receipt-worker/SKILL.md"));
+  const selectedSkillPaths = pack.contextSources.repoSkillPaths.filter((skillPath) =>
+    pack.contextSources.profileSkillRefs.some((relativePath) =>
+      skillPath.replace(/\\/g, "/").endsWith(relativePath.replace(/\\/g, "/"))));
+  const primaryHelper = selectPrimaryHelper(pack);
+  const lines = [
+    "Controller precomputed this seed from the manifest, context pack, scoped memory, recent receipts, and mounted evidence.",
+    "Start with this summary instead of rereading the whole packet stack.",
+    `Exact packet paths from the workspace root: ${packetBase}.context.md, ${packetBase}.context-pack.json, ${packetBase}.memory.cjs.`,
+    "When joining packet-relative paths to the workspace root, do not prefix them with a leading slash.",
+    "Open the JSON context pack only when you need an exact field, ref, or artifact path.",
+    "Run the memory script only if the summary and context pack still leave a factual gap.",
+  ];
+  if (workerSkillPath) {
+    lines.push(`Checked-in worker skill path: ${workerSkillPath}.`);
+  }
+  if (selectedSkillPaths[0]) {
+    lines.push(`Checked-in profile skill path: ${selectedSkillPaths[0]}.`);
+  }
+  if (workerSkillPath || selectedSkillPaths[0]) {
+    lines.push("Do not substitute .receipt/codex-home-runtime or ~/.codex skill paths when these checked-in paths exist.");
+  }
+  if (mountedReadableArtifacts.length > 0) {
+    lines.push(`Primary evidence path: inspect ${mountedReadableArtifacts[0]!.path} (${mountedReadableArtifacts[0]!.label}) before new external queries.`);
+  } else if (primaryHelper && pack.task.taskPhase !== "synthesizing") {
+    lines.push(`Primary evidence path: run the selected helper ${primaryHelper.id} first.`);
+    if (pack.helperCatalog?.runnerPath && helperCommand) {
+      lines.push(`Primary evidence command: python3 ${pack.helperCatalog.runnerPath} run --provider ${primaryHelper.provider} --json ${primaryHelper.id} -- ${helperCommand}`);
+    }
+  } else if (pack.task.taskPhase === "synthesizing") {
+    lines.push("Primary evidence path: use inherited artifact refs and mounted evidence only; if they are insufficient, return partial or blocked instead of gathering new evidence.");
+  }
+  if (pack.objectiveMode === "investigation") {
+    lines.push("Stop condition: once one helper run or a small number of direct CLI calls answers the question, emit the final JSON immediately.");
+    if (mountedReadableArtifacts.length > 0) {
+      lines.push("Synthesis reporting: if mounted evidence already answers the question, return final JSON directly and prefer report.evidenceRecords: [] over timestamp reconstruction.");
+      lines.push("Synthesis reporting: use mounted artifact paths and already-captured helper commands as proof; do not run timestamp-only bookkeeping commands.");
+    }
+  }
+  return lines.map((line) => `- ${line}`);
+};
+
+const appendEvidenceOutputDir = (args: string): string =>
+  /(^|\s)--output-dir(\s|$)/.test(args) ? args : `${args} --output-dir .receipt/factory/evidence`;
+
+const suggestResourceInventoryArgs = (tokens: ReadonlySet<string>): string => {
+  if (tokens.has("rds") || tokens.has("database") || tokens.has("databases")) {
+    return "--service rds --resource db-instances --all-regions --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("ecs")) {
+    if (tokens.has("service") || tokens.has("services")) {
+      return "--service ecs --resource services --all-regions --output-dir .receipt/factory/evidence";
+    }
+    if (tokens.has("task") || tokens.has("tasks") || tokens.has("container") || tokens.has("containers")) {
+      return "--service ecs --resource tasks --all-regions --output-dir .receipt/factory/evidence";
+    }
+    return "--service ecs --resource clusters --all-regions --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("ec2") || tokens.has("instance") || tokens.has("instances")) {
+    return "--service ec2 --resource instances --all-regions --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("volume") || tokens.has("volumes") || tokens.has("ebs")) {
+    return "--service ec2 --resource volumes --all-regions --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("bucket") || tokens.has("buckets") || tokens.has("s3")) {
+    return "--service s3 --resource buckets --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("lambda") || tokens.has("function") || tokens.has("functions")) {
+    return "--service lambda --resource functions --all-regions --output-dir .receipt/factory/evidence";
+  }
+  if (tokens.has("eks")) {
+    return "--service eks --resource clusters --all-regions --output-dir .receipt/factory/evidence";
+  }
+  return "--service s3 --resource buckets --output-dir .receipt/factory/evidence";
+};
+
+const selectHelperExample = (
+  helper: NonNullable<FactoryContextPack["helperCatalog"]>["selectedHelpers"][number],
+): string | undefined =>
+  helper.examples.find((example) => example.includes("--output-dir"))
+  ?? helper.examples.find((example) => example.includes("--all-regions"))
+  ?? helper.examples[0];
+
+const suggestPrimaryHelperCommand = (pack: FactoryContextPack): string | undefined => {
+  const helper = selectPrimaryHelper(pack);
+  if (!helper) return undefined;
+  const tokens = normalizeBootstrapTokens([
+    pack.title,
+    pack.prompt,
+    pack.task.title,
+    pack.task.prompt,
+  ].join("\n"));
+  switch (helper.id) {
+    case "aws_resource_inventory":
+      return suggestResourceInventoryArgs(tokens);
+    case "aws_ecs_ec2_container_inventory":
+      return "--profile default --all-regions --output-dir .receipt/factory/evidence";
+    case "aws_internet_exposure_inventory":
+      return "--profile default --all-regions --output-dir .receipt/factory/evidence";
+    case "aws_alarm_summary":
+      return "--all-regions --output-dir .receipt/factory/evidence";
+    default: {
+      const example = selectHelperExample(helper);
+      return example ? appendEvidenceOutputDir(example) : undefined;
+    }
+  }
+};
+
+export const renderTaskContextSummary = (
+  pack: FactoryContextPack,
+  options?: {
+    readonly mountedReadableArtifacts?: ReadonlyArray<FactoryReadableArtifact>;
+  },
+): string => {
   const taskLine = `Task: ${pack.task.taskId} · ${pack.task.title} [${pack.task.status}]`;
+  const taskPhaseLine = pack.task.taskPhase ? `Task Phase: ${pack.task.taskPhase}` : "";
   const selectedHelpers = pack.helperCatalog?.selectedHelpers
     ?.slice(0, 4)
     .map((helper) => `- ${helper.id}: ${helper.description}`);
@@ -471,6 +706,10 @@ export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
   const objectiveReceipts = pack.objectiveSlice.recentObjectiveReceipts
     .slice(-8)
     .map((receipt) => `- ${receipt.type}: ${clipText(receipt.summary, 220) ?? receipt.summary}`);
+  const mountedReadableArtifacts = options?.mountedReadableArtifacts ?? [];
+  const mountedArtifactSummary = summarizeReadableTaskArtifacts(mountedReadableArtifacts);
+  const mountedArtifactPathLines = renderMountedArtifactPathLines(mountedReadableArtifacts);
+  const bootstrapSeedLines = renderBootstrapSeedLines(pack, mountedReadableArtifacts);
   return [
     "# Factory Task Context Summary",
     "",
@@ -478,6 +717,7 @@ export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
     `Mode: ${pack.objectiveMode}`,
     `Severity: ${pack.severity}`,
     taskLine,
+    taskPhaseLine,
     `Profile: ${pack.profile.rootProfileLabel} (${pack.profile.rootProfileId})`,
     `Runtime: ${pack.task.executionMode}`,
     `Candidate: ${pack.task.candidateId}`,
@@ -505,6 +745,13 @@ export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
     pack.cloudExecutionContext?.summary ?? "",
     ...(pack.cloudExecutionContext?.guidance ?? []).slice(0, 3).map((item) => `- ${item}`),
     "",
+    "## Bootstrap Seed",
+    ...bootstrapSeedLines,
+    "",
+    mountedArtifactSummary ? "## Mounted Evidence" : "",
+    mountedArtifactSummary ?? "",
+    ...mountedArtifactPathLines,
+    "",
     relatedTasks.length > 0 ? "## Related Tasks" : "",
     ...relatedTasks,
     "",
@@ -525,7 +772,8 @@ export const renderTaskContextSummary = (pack: FactoryContextPack): string => {
     "",
     "## Packet Usage",
     "Use this summary first.",
-    "Use the generated memory script for scoped recall.",
+    "If this summary already points at mounted evidence or a selected helper, follow that path before rereading the packet internals.",
     "Open the JSON context pack only when you need exact raw fields, refs, or artifact paths.",
+    "Use the generated memory script only when the summary and context pack still leave a factual gap.",
   ].filter(Boolean).join("\n");
 };

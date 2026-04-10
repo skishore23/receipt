@@ -23,8 +23,8 @@ type AuditObjectiveSample = {
   readonly tasks: number;
   readonly anomalies: number;
   readonly interventions: number;
-  readonly restartCount: number;
-  readonly courseCorrectionWorked: boolean;
+  readonly synthesisDispatchCount: number;
+  readonly controllerCorrectionWorked: boolean;
   readonly auditStale: boolean;
   readonly recommendationStatus?: "ready" | "failed";
   readonly recommendationError?: string;
@@ -324,10 +324,11 @@ export const readFactoryReceiptAudit = async (
   const reports = investigations.filter((report): report is FactoryReceiptInvestigation => Boolean(report));
   const objectives = reports.map((report) => {
     const stalled = report.anomalies.some((anomaly) => anomaly.kind === "job_stalled");
+    const activeStatus = new Set(["active", "executing", "collecting_evidence", "evidence_ready", "synthesizing"]);
     return {
       objectiveId: report.links.objectiveId ?? report.resolved.id,
       title: report.summary.title,
-      status: stalled && report.summary.status === "executing" ? "stalled" : report.summary.status,
+      status: stalled && activeStatus.has(report.summary.status) ? "stalled" : report.summary.status,
       verdict: report.assessment.verdict,
       easyRouteRisk: report.assessment.easyRouteRisk,
       efficiency: report.assessment.efficiency,
@@ -338,9 +339,9 @@ export const readFactoryReceiptAudit = async (
       jobs: report.jobs.length,
       tasks: report.tasks.length,
       anomalies: report.anomalies.length,
-      interventions: report.interventions.count,
-      restartCount: report.interventions.restartCount,
-      courseCorrectionWorked: report.interventions.courseCorrectionWorked,
+      interventions: report.interventions.recommendationCount,
+      synthesisDispatchCount: report.interventions.synthesisDispatchCount,
+      controllerCorrectionWorked: report.interventions.controllerCorrectionWorked,
       auditStale: report.audit?.stale ?? false,
       recommendationStatus: report.audit?.recommendationStatus,
       recommendationError: report.audit?.recommendationError,
@@ -475,7 +476,7 @@ export const renderFactoryReceiptAuditText = (report: FactoryReceiptAuditReport)
     "## Objectives",
     ...(report.objectives.length > 0
       ? report.objectives.slice(0, 12).map((objective) => [
-          `- ${objective.objectiveId} [${objective.status ?? "unknown"}] verdict=${objective.verdict} easy=${objective.easyRouteRisk} efficiency=${objective.efficiency} churn=${objective.controlChurn} jobs=${objective.jobs} tasks=${objective.tasks} anomalies=${objective.anomalies} interventions=${objective.interventions} restarts=${objective.restartCount} course_correction=${objective.courseCorrectionWorked ? "yes" : "no"}`,
+          `- ${objective.objectiveId} [${objective.status ?? "unknown"}] verdict=${objective.verdict} easy=${objective.easyRouteRisk} efficiency=${objective.efficiency} churn=${objective.controlChurn} jobs=${objective.jobs} tasks=${objective.tasks} anomalies=${objective.anomalies} recommendations=${objective.interventions} synthesis_dispatches=${objective.synthesisDispatchCount} controller_correction=${objective.controllerCorrectionWorked ? "yes" : "no"}`,
           `  alignment: verdict=${objective.alignmentVerdict} corrective_steer=${objective.correctiveSteerIssued ? "yes" : "no"} aligned_after_correction=${objective.alignedAfterCorrection ? "yes" : "no"}`,
           `  audit: recommendation_status=${objective.recommendationStatus ?? "none"}${objective.auditStale ? " stale=yes" : ""}${objective.recommendationError ? ` error=${truncateInline(objective.recommendationError, 120) ?? objective.recommendationError}` : ""}`,
           objective.title ? `  title: ${objective.title}` : "",

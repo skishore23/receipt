@@ -24,7 +24,11 @@ const FACTORY_HELPER_STOP_WORDS = new Set([
   "aws",
   "check",
   "current",
+  "currently",
   "describe",
+  "determine",
+  "evidence",
+  "backed",
   "find",
   "for",
   "from",
@@ -34,6 +38,8 @@ const FACTORY_HELPER_STOP_WORDS = new Set([
   "in",
   "infra",
   "infrastructure",
+  "investigate",
+  "investigation",
   "is",
   "it",
   "list",
@@ -46,13 +52,40 @@ const FACTORY_HELPER_STOP_WORDS = new Set([
   "resource",
   "resources",
   "show",
+  "specific",
+  "state",
+  "summarize",
   "that",
   "the",
   "this",
   "to",
+  "uncertainty",
   "what",
   "which",
   "with",
+  "across",
+  "conclude",
+  "conclusion",
+  "concrete",
+  "correlate",
+  "correlation",
+  "remaining",
+]);
+const FACTORY_HELPER_GENERIC_MATCH_TOKENS = new Set([
+  "active",
+  "account",
+  "accounts",
+  "count",
+  "current",
+  "estate",
+  "inventory",
+  "list",
+  "posture",
+  "resource",
+  "resources",
+  "scope",
+  "state",
+  "summary",
 ]);
 const FACTORY_HELPER_MAX_SELECTIONS = 3;
 
@@ -255,15 +288,37 @@ const scoreHelperSelection = (
   },
 ): number => {
   if (entry.provider !== input.provider) return 0;
+  const tokenSet = new Set(input.tokens);
   const searchable = new Set<string>([
     ...entry.tags,
     ...keywordTokens(entry.id.replace(/_/g, " ")),
     ...keywordTokens(entry.description),
   ]);
-  const overlap = input.tokens.filter((token) => searchable.has(token)).length;
-  if (overlap === 0) return 0;
-  const genericBoost = entry.id === "aws_resource_inventory" || entry.id === "aws_account_scope" ? 2 : 0;
-  return overlap * 10 + genericBoost;
+  const overlapScore = input.tokens.reduce((score, token) => {
+    if (!searchable.has(token)) return score;
+    return score + (FACTORY_HELPER_GENERIC_MATCH_TOKENS.has(token) ? 3 : 10);
+  }, 0);
+  if (overlapScore === 0) return 0;
+  const genericPenalty = entry.id === "aws_resource_inventory" || entry.id === "aws_account_scope" ? 8 : 0;
+  const anchorPenalty = entry.id === "aws_internet_exposure_inventory"
+    && !(tokenSet.has("internet") || tokenSet.has("exposure") || tokenSet.has("public") || tokenSet.has("policy") || tokenSet.has("security"))
+    ? 15
+    : 0;
+  const alarmBoost = entry.id === "aws_alarm_summary"
+    && (tokenSet.has("alarm") || tokenSet.has("alarms") || tokenSet.has("cloudwatch") || tokenSet.has("metric") || tokenSet.has("metrics"))
+    ? 15
+    : 0;
+  const ecsEc2Boost = entry.id === "aws_ecs_ec2_container_inventory"
+    && tokenSet.has("ecs")
+    && tokenSet.has("ec2")
+    ? 15
+    : 0;
+  const rdsInventoryBoost = entry.id === "aws_resource_inventory"
+    && (tokenSet.has("rds") || tokenSet.has("database") || tokenSet.has("databases"))
+    && (tokenSet.has("instance") || tokenSet.has("instances") || tokenSet.has("cluster") || tokenSet.has("clusters"))
+    ? 3
+    : 0;
+  return Math.max(1, overlapScore - genericPenalty - anchorPenalty + alarmBoost + ecsEc2Boost + rdsInventoryBoost);
 };
 
 export const loadFactoryHelperContext = async (input: {

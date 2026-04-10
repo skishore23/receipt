@@ -14,20 +14,23 @@ import type {
   FactoryObjectiveSeverity,
   FactoryRebracketRecord,
   FactoryTaskAlignmentRecord,
-  FactoryTaskRecord,
   FactoryTaskCompletionRecord,
+  FactoryTaskExecutionPhase,
   FactoryTaskPresentationRecord,
+  FactoryTaskRecord,
   FactoryTaskResultOutcome,
+  FactoryWaitRecord,
   FactoryWorkerHandoffOutcome,
   FactoryWorkerHandoffScope,
   FactoryWorkerType,
 } from "./types";
 
-export type MonitorCheckpointAction =
+export type MonitorRecommendation =
   | { readonly kind: "continue" }
-  | { readonly kind: "steer"; readonly guidance: string }
-  | { readonly kind: "split"; readonly subtasks: ReadonlyArray<{ readonly title: string; readonly prompt: string; readonly dependsOn?: ReadonlyArray<string> }> }
-  | { readonly kind: "abort"; readonly reason: string };
+  | { readonly kind: "recommend_steer"; readonly guidance: string }
+  | { readonly kind: "recommend_split"; readonly subtasks: ReadonlyArray<{ readonly title: string; readonly prompt: string; readonly dependsOn?: ReadonlyArray<string> }> }
+  | { readonly kind: "recommend_abort"; readonly reason: string }
+  | { readonly kind: "recommend_enter_synthesizing"; readonly reason: string };
 
 export type FactoryEvent =
   | {
@@ -64,6 +67,18 @@ export type FactoryEvent =
       readonly queuedAt: number;
     }
   | {
+      readonly type: "objective.control.wake.requested";
+      readonly objectiveId: string;
+      readonly reason: string;
+      readonly requestedAt: number;
+    }
+  | {
+      readonly type: "objective.control.wake.consumed";
+      readonly objectiveId: string;
+      readonly reason: string;
+      readonly consumedAt: number;
+    }
+  | {
       readonly type: "objective.slot.admitted";
       readonly objectiveId: string;
       readonly admittedAt: number;
@@ -91,6 +106,7 @@ export type FactoryEvent =
       readonly objectiveId: string;
       readonly taskId: string;
       readonly candidateId: string;
+      readonly taskPhase: FactoryTaskExecutionPhase;
       readonly jobId: string;
       readonly workspaceId: string;
       readonly workspacePath: string;
@@ -99,27 +115,39 @@ export type FactoryEvent =
       readonly startedAt: number;
     }
   | {
-      readonly type: "task.intervention.applied";
+      readonly type: "task.phase.transitioned";
       readonly objectiveId: string;
       readonly taskId: string;
       readonly candidateId: string;
-      readonly jobId: string;
-      readonly guidance: string;
-      readonly guidanceKind: "steer" | "follow_up" | "mixed";
-      readonly sourceCommandIds: ReadonlyArray<string>;
-      readonly appliedAt: number;
+      readonly phase: FactoryTaskExecutionPhase;
+      readonly wait?: FactoryWaitRecord;
+      readonly reason?: string;
+      readonly changedAt: number;
     }
   | {
-      readonly type: "task.intervention.restarted";
+      readonly type: "task.synthesis.dispatched";
       readonly objectiveId: string;
       readonly taskId: string;
       readonly candidateId: string;
       readonly jobId: string;
-      readonly guidance: string;
-      readonly guidanceKind: "steer" | "follow_up" | "mixed";
-      readonly sourceCommandIds: ReadonlyArray<string>;
-      readonly restartCount: number;
-      readonly restartedAt: number;
+      readonly detail: string;
+      readonly dispatchedAt: number;
+    }
+  | {
+      readonly type: "task.synthesis.completed";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly summary: string;
+      readonly completedAt: number;
+    }
+  | {
+      readonly type: "task.synthesis.blocked";
+      readonly objectiveId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly reason: string;
+      readonly blockedAt: number;
     }
   | {
       readonly type: "worker.handoff";
@@ -375,17 +403,37 @@ export type FactoryEvent =
       readonly checkpoint: number;
       readonly assessment: "progressing" | "stalled" | "off_track" | "failing";
       readonly reasoning: string;
-      readonly action: MonitorCheckpointAction;
+      readonly recommendation: MonitorRecommendation;
       readonly evaluatedAt: number;
     }
   | {
-      readonly type: "monitor.intervention";
+      readonly type: "monitor.recommendation";
       readonly objectiveId: string;
+      readonly recommendationId: string;
       readonly taskId: string;
+      readonly candidateId: string;
       readonly jobId: string;
-      readonly interventionKind: "steer" | "split" | "abort";
-      readonly detail: string;
-      readonly interventionAt: number;
+      readonly recommendation: MonitorRecommendation;
+      readonly reasoning: string;
+      readonly recommendedAt: number;
+    }
+    | {
+      readonly type: "monitor.recommendation.consumed";
+      readonly objectiveId: string;
+      readonly recommendationId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly outcome: "follow_up" | "split" | "abort" | "enter_synthesizing";
+      readonly consumedAt: number;
+    }
+  | {
+      readonly type: "monitor.recommendation.obsoleted";
+      readonly objectiveId: string;
+      readonly recommendationId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly reason: string;
+      readonly obsoletedAt: number;
     };
 
 export type FactoryCmd = {

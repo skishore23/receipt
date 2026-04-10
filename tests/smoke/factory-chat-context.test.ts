@@ -97,7 +97,7 @@ const createChatContextFixture = (overrides: Partial<FactoryChatContextProjectio
       objectiveId: "objective_demo",
       title: "Demo objective",
       status: "active",
-      phase: "executing",
+      phase: "collecting_evidence",
       summary: "Demo objective is executing.",
       importedBecause: "requested",
     },

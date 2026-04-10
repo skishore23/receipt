@@ -94,7 +94,7 @@ test("hub git reaps a stale remote config lock during bootstrap", async () => {
 
   const bareDir = path.join(dataDir, "hub", "repo.git");
   await fs.mkdir(bareDir, { recursive: true });
-  const lockPath = path.join(bareDir, ".receipt-remote.lock");
+  const lockPath = path.join(bareDir, ".receipt-bare.lock");
   await fs.writeFile(lockPath, "stale lock\n", "utf-8");
   const staleAt = new Date(Date.now() - 120_000);
   await fs.utimes(lockPath, staleAt, staleAt);
@@ -104,6 +104,40 @@ test("hub git reaps a stale remote config lock during bootstrap", async () => {
 
   await expect(fs.access(lockPath)).rejects.toThrow();
   await expect(git(bareDir, ["remote", "get-url", "source"])).resolves.toBe(path.resolve(repoRoot));
+});
+
+test("hub git serializes concurrent worktree creation across shared bare repo instances", async () => {
+  const repoRoot = await mkTmp("receipt-hub-git-concurrent-worktree-source");
+  const dataDir = await mkTmp("receipt-hub-git-concurrent-worktree-data");
+
+  await git(repoRoot, ["init"]);
+  await git(repoRoot, ["config", "user.name", "Hub Git Test"]);
+  await git(repoRoot, ["config", "user.email", "hub-git@example.com"]);
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# hub git concurrent worktree test\n", "utf-8");
+  await git(repoRoot, ["add", "README.md"]);
+  await git(repoRoot, ["commit", "-m", "init"]);
+  await git(repoRoot, ["branch", "-M", "main"]);
+
+  const bootstrap = new HubGit({ dataDir, repoRoot });
+  await bootstrap.ensureReady();
+
+  const hubA = new HubGit({ dataDir, repoRoot });
+  const hubB = new HubGit({ dataDir, repoRoot });
+  const [workspaceA, workspaceB] = await Promise.all([
+    hubA.createWorkspace({
+      workspaceId: "parallel-a",
+      agentId: "codex",
+    }),
+    hubB.createWorkspace({
+      workspaceId: "parallel-b",
+      agentId: "codex",
+    }),
+  ]);
+
+  await expect(git(workspaceA.path, ["rev-parse", "--abbrev-ref", "HEAD"])).resolves.toBe(workspaceA.branchName);
+  await expect(git(workspaceB.path, ["rev-parse", "--abbrev-ref", "HEAD"])).resolves.toBe(workspaceB.branchName);
+  await expect(fs.readFile(path.join(workspaceA.path, "README.md"), "utf-8")).resolves.toContain("concurrent worktree test");
+  await expect(fs.readFile(path.join(workspaceB.path, "README.md"), "utf-8")).resolves.toContain("concurrent worktree test");
 });
 
 test("hub git rewrites an inaccessible source remote to the current repo root", async () => {

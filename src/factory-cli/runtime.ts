@@ -188,19 +188,8 @@ export const createFactoryCliRuntime = (
             ),
         });
         if (!shouldQueue) continue;
-        queue
-          .enqueue({
-            agentId: FACTORY_CONTROL_AGENT_ID,
-            lane: "collect",
-            sessionKey: `factory:objective:${objectiveId}`,
-            singletonMode: "steer",
-            maxAttempts: 1,
-            payload: {
-              kind: "factory.objective.control",
-              objectiveId,
-              reason: "reconcile",
-            },
-          })
+        serviceRef
+          ?.scheduleObjectiveControl(objectiveId, "reconcile")
           .catch(() => undefined);
       }
     },

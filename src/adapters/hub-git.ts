@@ -92,7 +92,7 @@ type HubGitOptions = {
 const HASH_RE = /^[0-9a-f]{4,64}$/i;
 const RECORD_SEP = "\x1e";
 const FIELD_SEP = "\x1f";
-const REMOTE_LOCK_STALE_MS = 30_000;
+const BARE_REPO_LOCK_STALE_MS = 30_000;
 
 const clean = (value: string): string => value.trim();
 
@@ -375,18 +375,19 @@ export class HubGit {
     }
 
     const branchName = `hub/${safeBranchPart(spec.agentId)}/${spec.workspaceId}`;
-    const branchRef = `refs/heads/${branchName}`;
-    const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
-      .then(() => true)
-      .catch(() => false);
-    if (branchExists) {
-      throw new HubGitError(409, "workspace branch already exists");
-    }
-
     const baseHash = spec.baseHash ? await this.resolveCommit(spec.baseHash) : await this.requiredSourceHead();
-    await fs.promises.mkdir(this.worktreesDir, { recursive: true });
-    await this.execGit(["worktree", "add", "-b", branchName, workspacePath, baseHash], { gitDir: this.bareDir });
-    await this.configureWorktreeIdentity(workspacePath);
+    await this.withBareRepoMutationLock(async () => {
+      const branchRef = `refs/heads/${branchName}`;
+      const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
+        .then(() => true)
+        .catch(() => false);
+      if (branchExists) {
+        throw new HubGitError(409, "workspace branch already exists");
+      }
+      await fs.promises.mkdir(this.worktreesDir, { recursive: true });
+      await this.execGit(["worktree", "add", "-b", branchName, workspacePath, baseHash], { gitDir: this.bareDir });
+      await this.configureWorktreeIdentity(workspacePath);
+    });
     this.invalidateGraph();
     return {
       workspaceId: spec.workspaceId,
@@ -404,21 +405,23 @@ export class HubGit {
     if (workspaceExists && !hasWorktreeMetadata) {
       await this.removeWorkspaceDirectory(spec.workspacePath);
     }
-    if (!fs.existsSync(spec.workspacePath)) {
-      await this.execGit(["worktree", "prune"], { gitDir: this.bareDir });
-      const branchRef = `refs/heads/${spec.branchName}`;
-      const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
-        .then(() => true)
-        .catch(() => false);
-      if (branchExists) {
-        await this.execGit(["worktree", "add", "--force", spec.workspacePath, spec.branchName], { gitDir: this.bareDir });
-      } else {
-        const baseHash = await this.resolveCommit(spec.baseHash);
-        await this.execGit(["worktree", "add", "--force", "-b", spec.branchName, spec.workspacePath, baseHash], { gitDir: this.bareDir });
+    await this.withBareRepoMutationLock(async () => {
+      if (!fs.existsSync(spec.workspacePath)) {
+        await this.execGit(["worktree", "prune"], { gitDir: this.bareDir });
+        const branchRef = `refs/heads/${spec.branchName}`;
+        const branchExists = await this.execGit(["show-ref", "--verify", "--quiet", branchRef], { gitDir: this.bareDir })
+          .then(() => true)
+          .catch(() => false);
+        if (branchExists) {
+          await this.execGit(["worktree", "add", "--force", spec.workspacePath, spec.branchName], { gitDir: this.bareDir });
+        } else {
+          const baseHash = await this.resolveCommit(spec.baseHash);
+          await this.execGit(["worktree", "add", "--force", "-b", spec.branchName, spec.workspacePath, baseHash], { gitDir: this.bareDir });
+        }
+        this.invalidateGraph();
       }
-      this.invalidateGraph();
-    }
-    await this.configureWorktreeIdentity(spec.workspacePath);
+      await this.configureWorktreeIdentity(spec.workspacePath);
+    });
     return {
       workspaceId: spec.workspaceId,
       baseHash: spec.baseHash,
@@ -432,11 +435,15 @@ export class HubGit {
     if (!fs.existsSync(workspacePath)) return;
     if (!await this.hasLiveWorktreeMetadata(workspacePath)) {
       await this.removeWorkspaceDirectory(workspacePath);
-      await this.execGit(["worktree", "prune"], { gitDir: this.bareDir }).catch(() => undefined);
+      await this.withBareRepoMutationLock(async () => {
+        await this.execGit(["worktree", "prune"], { gitDir: this.bareDir }).catch(() => undefined);
+      });
       this.invalidateGraph();
       return;
     }
-    await this.execGit(["worktree", "remove", "--force", workspacePath], { gitDir: this.bareDir });
+    await this.withBareRepoMutationLock(async () => {
+      await this.execGit(["worktree", "remove", "--force", workspacePath], { gitDir: this.bareDir });
+    });
     this.invalidateGraph();
   }
 
@@ -509,7 +516,9 @@ export class HubGit {
         await this.execGit(["reset", "--hard", resolvedBase], { cwd: workspacePath });
         await this.execGit(["clean", "-fd", "-e", ".receipt/"], { cwd: workspacePath }).catch(() => undefined);
       }
-      await this.configureWorktreeIdentity(workspacePath);
+      await this.withBareRepoMutationLock(async () => {
+        await this.configureWorktreeIdentity(workspacePath);
+      });
       return {
         workspaceId,
         baseHash,
@@ -683,7 +692,7 @@ export class HubGit {
   }
 
   private async ensureRemote(): Promise<void> {
-    await this.withRemoteConfigLock(async () => {
+    await this.withBareRepoMutationLock(async () => {
       const desired = clean(path.resolve(this.repoRoot));
       const desiredCanonical = await canonicalizeRepoPath(desired);
       const current = clean(await this.execGit(["remote", "get-url", this.remoteName], { gitDir: this.bareDir }).catch(() => ""));
@@ -740,8 +749,8 @@ export class HubGit {
     return remotes.filter((remote): remote is { readonly name: string; readonly url: string } => Boolean(remote));
   }
 
-  private async withRemoteConfigLock<T>(op: () => Promise<T>): Promise<T> {
-    const lockPath = path.join(this.bareDir, ".receipt-remote.lock");
+  private async withBareRepoMutationLock<T>(op: () => Promise<T>): Promise<T> {
+    const lockPath = path.join(this.bareDir, ".receipt-bare.lock");
     for (;;) {
       let handle: fs.promises.FileHandle | undefined;
       try {
@@ -762,7 +771,7 @@ export class HubGit {
         await handle?.close().catch(() => undefined);
         if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
           const stale = await fs.promises.stat(lockPath)
-            .then((stat) => (Date.now() - stat.mtimeMs) > REMOTE_LOCK_STALE_MS)
+            .then((stat) => (Date.now() - stat.mtimeMs) > BARE_REPO_LOCK_STALE_MS)
             .catch(() => false);
           if (stale) {
             await fs.promises.unlink(lockPath).catch(() => undefined);

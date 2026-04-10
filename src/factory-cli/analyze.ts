@@ -422,16 +422,30 @@ const objectiveEventSummary = (event: FactoryEvent): string => {
       return "Objective admitted to execution slot";
     case "objective.slot.released":
       return `Objective slot released: ${event.reason}`;
+    case "objective.control.wake.requested":
+      return `Objective control wake requested: ${truncateInline(event.reason, 220)}`;
+    case "objective.control.wake.consumed":
+      return `Objective control wake consumed: ${truncateInline(event.reason, 220)}`;
     case "task.added":
       return `${event.task.taskId} added: ${event.task.title}`;
     case "task.ready":
       return `${event.taskId} ready`;
     case "task.dispatched":
       return `${event.taskId} dispatched as ${event.candidateId}`;
-    case "task.intervention.applied":
-      return `${event.taskId} live ${event.guidanceKind} applied: ${truncateInline(event.guidance, 220)}`;
-    case "task.intervention.restarted":
-      return `${event.taskId} restarted after live ${event.guidanceKind}: ${truncateInline(event.guidance, 220)}`;
+    case "task.phase.transitioned":
+      return `${event.taskId} phase -> ${event.phase}${event.reason ? `: ${truncateInline(event.reason, 220)}` : ""}`;
+    case "task.synthesis.dispatched":
+      return `${event.taskId} synthesis dispatched as ${event.candidateId}`;
+    case "task.synthesis.completed":
+      return `${event.taskId} synthesis completed: ${truncateInline(event.summary, 220)}`;
+    case "task.synthesis.blocked":
+      return `${event.taskId} synthesis blocked: ${truncateInline(event.reason, 220)}`;
+    case "monitor.recommendation":
+      return `${event.taskId} monitor recommended ${event.recommendation.kind}: ${truncateInline(event.reasoning, 220)}`;
+    case "monitor.recommendation.consumed":
+      return `${event.taskId} consumed monitor recommendation via ${event.outcome}`;
+    case "monitor.recommendation.obsoleted":
+      return `${event.taskId} obsoleted monitor recommendation: ${truncateInline(event.reason, 220)}`;
     case "worker.handoff":
       return `${event.scope} ${event.outcome} handoff: ${truncateInline(event.handoff)}`;
     case "objective.handoff":
@@ -1075,18 +1089,33 @@ export const readObjectiveAnalysis = async (
     }
   }
 
-  const controlJobsBySession = new Map<string, number>();
+  const controlJobsBySession = new Map<string, JobAnalysis[]>();
   for (const job of jobs) {
-    if (job.payloadKind === "factory.objective.control" && job.sessionKey) {
-      increment(controlJobsBySession, job.sessionKey);
-    }
+    if (job.payloadKind !== "factory.objective.control" || !job.sessionKey) continue;
+    const bucket = controlJobsBySession.get(job.sessionKey) ?? [];
+    bucket.push(job);
+    controlJobsBySession.set(job.sessionKey, bucket);
   }
-  for (const [sessionKey, count] of controlJobsBySession.entries()) {
-    if (count > 1) {
+  const terminalJobStatuses = new Set(["completed", "failed", "canceled", "timeout"]);
+  for (const [sessionKey, sessionJobs] of controlJobsBySession.entries()) {
+    const ordered = [...sessionJobs].sort((left, right) => left.createdAt - right.createdAt);
+    let overlapCount = 0;
+    let maxActive = 0;
+    let activeUntil = 0;
+    for (const job of ordered) {
+      const terminal = terminalJobStatuses.has(job.status);
+      const endAt = terminal ? job.updatedAt : Number.POSITIVE_INFINITY;
+      if (job.createdAt < activeUntil) {
+        overlapCount += 1;
+      }
+      activeUntil = Math.max(activeUntil, endAt);
+      maxActive = Math.max(maxActive, overlapCount + 1);
+    }
+    if (overlapCount > 0) {
       addAnomaly(anomalies, {
         kind: "repeated_control_job",
-        severity: count >= 4 ? "medium" : "low",
-        summary: `${count} control jobs used session ${sessionKey}`,
+        severity: maxActive >= 3 ? "medium" : "low",
+        summary: `${ordered.length} control jobs overlapped on session ${sessionKey} (peak concurrent ${maxActive})`,
       });
     }
   }

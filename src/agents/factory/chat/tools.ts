@@ -33,7 +33,7 @@ import { normalizeFactoryDispatchInput, resolveFactoryDispatchAction, isObjectiv
 import { asString, asRecord, asStringList, nextId, stableCodexSessionKey, workerMemoryScope, toolSummary, latestActiveCodexJob, jobMatchesProfileContext, codexJobPriority, normalizeJobSnapshot, reusableInfrastructureRefs } from "./input";
 import { commitWorkerSummary } from "./memory";
 import { codexJobSnapshot } from "./status";
-import { FactorySupervisorConfig, queueSupervisorCommandOnce, isSupervisorStallSummary } from "./supervisor";
+import { FactorySupervisorConfig } from "./supervisor";
 
 type FactoryChatToolsInput = {
   readonly queue: SqliteQueue;
@@ -59,6 +59,18 @@ type FactoryChatToolsInput = {
 
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
+
+const LIVE_FACTORY_STATUSES = new Set([
+  "queued",
+  "active",
+  "collecting_evidence",
+  "evidence_ready",
+  "executing",
+  "synthesizing",
+]);
+
+const isLiveFactoryStatus = (value: unknown): value is string =>
+  typeof value === "string" && LIVE_FACTORY_STATUSES.has(value);
 
 const latestObjectiveByStream = new Map<string, string>();
 
@@ -641,8 +653,8 @@ const createFactoryStatusTool = (input: FactoryChatToolsInput): AgentToolExecuto
         action: "status",
         ...summary,
         activeJobId: debug.activeJobs[0]?.id,
-        activeTaskId: detail.tasks.find((task) => task.status === "running")?.taskId,
-        activeTaskTitle: detail.tasks.find((task) => task.status === "running")?.title,
+        activeTaskId: detail.tasks.find((task) => isLiveFactoryStatus(task.status))?.taskId,
+        activeTaskTitle: detail.tasks.find((task) => isLiveFactoryStatus(task.status))?.title,
         nextTaskId: detail.tasks.find((task) => task.status === "pending")?.taskId,
         nextTaskTitle: detail.tasks.find((task) => task.status === "pending")?.title,
         latestDecision: detail.latestDecision,
@@ -662,12 +674,8 @@ const createFactoryStatusTool = (input: FactoryChatToolsInput): AgentToolExecuto
       };
     };
     const initial = await buildStatus();
-    const live = (
-      asString(initial.status) === "queued"
-      || asString(initial.status) === "active"
-      || asString(initial.status) === "executing"
-      || (Array.isArray(initial.activeJobs) && initial.activeJobs.length > 0)
-    );
+    const live = isLiveFactoryStatus(initial.status)
+      || (Array.isArray(initial.activeJobs) && initial.activeJobs.length > 0);
     const waitForChangeMs = input.profile.orchestration.executionMode === "supervisor"
       ? requestedWaitMs
       : effectiveFactoryLiveWaitMs(requestedWaitMs, live, input.liveWaitState);
@@ -677,64 +685,6 @@ const createFactoryStatusTool = (input: FactoryChatToolsInput): AgentToolExecuto
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
-    const maybeActiveJobId = asString(payload.activeJobId);
-    if (maybeActiveJobId && input.profile.orchestration.executionMode === "supervisor") {
-      const currentTaskId = asString(payload.activeTaskId);
-      const currentTaskTitle = asString(payload.activeTaskTitle);
-      const nextTaskId = asString(payload.nextTaskId);
-      const nextTaskTitle = asString(payload.nextTaskTitle);
-      const liveOutput = await input.factoryService
-        .getObjectiveLiveOutput(objectiveId, "task", currentTaskId ?? maybeActiveJobId)
-        .catch(() => undefined);
-      const liveSummary = [
-        asString(liveOutput?.stderrTail),
-        asString(liveOutput?.summary),
-        asString(liveOutput?.lastMessage),
-        asString(liveOutput?.stdoutTail),
-      ].filter(Boolean).join("\n");
-      const steerAfterMs = input.supervisorConfig.steerAfterMs ?? 0;
-      const abortAfterMs = input.supervisorConfig.abortAfterMs ?? 0;
-      if (/(AccessDenied|not authorized|forbidden)/i.test(liveSummary) && (nextTaskId || currentTaskId)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "follow_up",
-          payload: {
-            note: [
-              "partial investigation report",
-              "exact denied services/actions",
-              nextTaskId && nextTaskTitle
-                ? `${nextTaskId} (${nextTaskTitle})`
-                : (currentTaskId && currentTaskTitle ? `${currentTaskId} (${currentTaskTitle})` : currentTaskId),
-            ].join("; "),
-          },
-        });
-      }
-      if (waited.waitedMs >= steerAfterMs && currentTaskId && isSupervisorStallSummary(liveSummary)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "steer",
-          payload: {
-            problem: [
-              `Focus only on ${currentTaskId}${currentTaskTitle ? `: ${currentTaskTitle}` : ""}.`,
-              nextTaskId && nextTaskTitle ? `${nextTaskId} (${nextTaskTitle})` : undefined,
-            ].filter(Boolean).join(" "),
-          },
-        });
-      }
-      if (currentTaskId && abortAfterMs > 0 && waited.waitedMs >= abortAfterMs && isSupervisorStallSummary(liveSummary)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "abort",
-          payload: {
-            reason: `child stalled beyond ${abortAfterMs}ms`,
-          },
-        });
-        await input.factoryService.reactObjective(objectiveId).catch(() => undefined);
-      }
-    }
     const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     return {
@@ -793,51 +743,14 @@ const createFactoryOutputTool = (input: FactoryChatToolsInput): AgentToolExecuto
     const payload = waited.waitedMs > 0
       ? { ...waited.value, waitedMs: waited.waitedMs, changed: waited.changed }
       : waited.value;
-    const maybeActiveJobId = asString(payload.jobId) ?? asString(payload.focusId);
-    if (maybeActiveJobId && input.profile.orchestration.executionMode === "supervisor") {
-      const currentTask = asString(payload.taskId) ?? focusId;
-      const liveSummary = [
-        String(payload.stderrTail ?? ""),
-        String(payload.summary ?? ""),
-        String(payload.lastMessage ?? ""),
-        String(payload.stdoutTail ?? ""),
-      ].filter(Boolean).join("\n");
-      if (/(AccessDenied|not authorized|forbidden)/i.test(liveSummary)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "follow_up",
-          payload: {
-            note: ["partial investigation report", "exact denied services/actions", currentTask].join("; "),
-          },
-        });
-      } else if (waited.changed === false && waited.waitedMs >= (input.supervisorConfig.steerAfterMs ?? 0) && isSupervisorStallSummary(liveSummary)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "steer",
-          payload: {
-            problem: `Focus only on ${currentTask}.`,
-          },
-        });
-      } else if (waited.changed === false && waited.waitedMs >= (input.supervisorConfig.abortAfterMs ?? 0) && isSupervisorStallSummary(liveSummary)) {
-        await queueSupervisorCommandOnce({
-          queue: input.queue,
-          jobId: maybeActiveJobId,
-          command: "abort",
-          payload: {
-            reason: `child stalled beyond ${(input.supervisorConfig.abortAfterMs ?? 0)}ms`,
-          },
-        });
-        await input.factoryService.reactObjective(objectiveId).catch(() => undefined);
-      }
-    }
     const pauseBudget = waited.waitedMs > 0 && waited.changed === false && !input.liveWaitState.surfaced;
     if (live) input.liveWaitState.surfaced = true;
     const handoffPhase = asString(payload.handoffPhase);
     const evidenceCount = Array.isArray(payload.evidenceContents) ? payload.evidenceContents.length : 0;
     const handoffSuffix = handoffPhase === "evidence_ready"
       ? ` — evidence ready (${evidenceCount} file${evidenceCount === 1 ? "" : "s"} inlined), synthesize and finalize`
+      : handoffPhase === "synthesizing"
+        ? " — controller is running the bounded synthesis pass"
       : handoffPhase === "terminal_no_evidence"
         ? " — terminal, no evidence files"
         : "";

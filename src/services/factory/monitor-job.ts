@@ -3,7 +3,7 @@ import {
   buildMonitorCheckpointPrompt,
   type MonitorCheckpointResult,
 } from "./monitor-checkpoint";
-import type { FactoryObjectiveMode, FactoryObjectiveSeverity } from "../../modules/factory";
+import type { FactoryObjectiveMode, FactoryObjectiveSeverity, FactoryTaskExecutionPhase } from "../../modules/factory";
 
 const LOG_TAIL_CHARS = 2_000;
 
@@ -47,6 +47,7 @@ export type MonitorJobContext = {
   readonly checkpoint: number;
   readonly evidencePresent?: boolean;
   readonly objectiveMode?: FactoryObjectiveMode;
+  readonly taskExecutionPhase?: FactoryTaskExecutionPhase;
   readonly evaluateLlm: (prompt: { system: string; user: string }) => Promise<MonitorCheckpointResult>;
 };
 
@@ -64,6 +65,7 @@ export const runMonitorCheckpoint = async (
     checkpoint: ctx.checkpoint,
     evidencePresent: ctx.evidencePresent,
     objectiveMode: ctx.objectiveMode,
+    taskExecutionPhase: ctx.taskExecutionPhase,
   });
 
   return ctx.evaluateLlm(prompt);

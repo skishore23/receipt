@@ -94,11 +94,16 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
     title: "Refactor prompt rendering",
     prompt: "Extract the rendering helpers.",
     workerType: "codex",
+    executionPhase: "synthesizing",
   } as FactoryTaskRecord;
   const payload = {
     executionMode: "worktree",
     baseCommit: "abc123",
     candidateId: "task_01_candidate_01",
+    taskPhase: "synthesizing",
+    repoSkillPaths: [
+      "/Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md",
+    ],
     profile: {
       rootProfileLabel: "Default",
       rootProfileId: "default",
@@ -115,7 +120,15 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
     planningReceipt,
     objectiveContract,
     cloudExecutionContext,
-    helperCatalog: undefined,
+    helperCatalog: {
+      runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",
+      selectedHelpers: [{
+        id: "aws_alarm_summary",
+        description: "Summarize CloudWatch alarms.",
+        provider: "aws",
+        examples: ["--all-regions --output-dir .receipt/factory/evidence"],
+      }],
+    } as never,
     infrastructureTaskGuidance: [],
     dependencySummaries: "- none",
     downstreamSummaries: "- none",
@@ -132,7 +145,22 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
 
   expect(prompt).toContain("## Live Operator Guidance");
   expect(prompt).toContain("Stay focused on prompt rendering.");
+  expect(prompt).toContain("The controller already prepared a task context summary from the manifest, context pack, scoped memory, receipts, and mounted evidence.");
+  expect(prompt).toContain("Start with the task context summary.");
+  expect(prompt).toContain("Do not reread the full bootstrap stack unless that summary leaves an exact field, path, or contradiction unresolved.");
+  expect(prompt).toContain("Checked-in repo skill files for this task:");
+  expect(prompt).toContain("/Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md");
+  expect(prompt).toContain("Do not substitute CODEX_HOME, ~/.codex, or .receipt/codex-home-runtime skill paths");
   expect(prompt).toContain("Do not call `receipt factory inspect` from inside this task worktree.");
+  expect(prompt).toContain("### Synthesis-Only Mode");
+  expect(prompt).toContain("Do not rerun helpers, design new scripts, rediscover the packet stack, or launch new external queries.");
+  expect(prompt).toContain("Do not open the receipt CLI surface, memory script, or manifest in synth mode unless the context summary points to a missing or contradictory artifact path.");
+  expect(prompt).toContain("Do not run timestamp-only or bookkeeping commands such as `date`, `pwd`, or extra file listings just to pad report fields.");
+  expect(prompt).toContain("For synth-only investigation results, prefer `report.evidenceRecords: []` unless the mounted evidence already contains exact structured records with stable timestamps.");
+  expect(prompt).toContain("For synth-only investigation tasks, the default is report.evidenceRecords: [].");
+  expect(prompt).not.toContain("## Memory Access");
+  expect(prompt).not.toContain("aws_alarm_summary");
+  expect(prompt).not.toContain("Receipt CLI Surface (fallback only when packet surfaces are insufficient)");
   expect(prompt).toContain("Return exactly one JSON object matching this schema:");
 });
 
@@ -156,7 +184,7 @@ test("factory prompt rendering: direct probe prompt includes objective inspectio
       objectiveId: "objective_demo",
       title: "Refactor prompt helpers",
       status: "running",
-      phase: "executing",
+      phase: "collecting_evidence",
       latestDecision: { summary: "Dispatched the next task." },
       blockedExplanation: { summary: "Waiting on evidence." },
     },

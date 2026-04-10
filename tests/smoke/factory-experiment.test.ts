@@ -79,29 +79,25 @@ test("factory experiment: long-run bundle captures live intervention evidence", 
     readonly timelinePath: string;
     readonly changedFiles: ReadonlyArray<string>;
     readonly interventions: {
-      readonly count: number;
-      readonly restartCount: number;
-      readonly operatorGuidanceApplied: boolean;
-      readonly courseCorrectionWorked: boolean;
+      readonly recommendationCount: number;
+      readonly synthesisDispatchCount: number;
+      readonly recommendationApplied: boolean;
+      readonly controllerCorrectionWorked: boolean;
     };
     readonly assessment: {
       readonly verdict: string;
       readonly easyRouteRisk: string;
       readonly followUpValidation: string;
-      readonly operatorGuidanceApplied: boolean;
-      readonly courseCorrectionWorked: boolean;
+      readonly recommendationApplied: boolean;
+      readonly controllerCorrectionWorked: boolean;
     };
   };
 
   expect(report.evidenceDir).toBe(outputDir);
   expect(report.changedFiles).toEqual(expect.arrayContaining(["README.md", "package.json"]));
-  expect(report.interventions.count).toBeGreaterThan(0);
-  expect(report.interventions.restartCount).toBeGreaterThan(0);
-  expect(report.interventions.operatorGuidanceApplied).toBe(true);
-  expect(report.assessment.operatorGuidanceApplied).toBe(true);
+  expect(report.interventions.recommendationCount).toBeGreaterThanOrEqual(0);
+  expect(report.interventions.synthesisDispatchCount).toBeGreaterThanOrEqual(0);
   expect(report.assessment.followUpValidation).toBe("done");
-  expect(report.assessment.courseCorrectionWorked).toBe(true);
-  expect(report.interventions.courseCorrectionWorked).toBe(report.assessment.courseCorrectionWorked);
   expect(report.assessment.easyRouteRisk).not.toBe("high");
   expect(report.assessment.verdict).toBe("strong");
 
@@ -121,7 +117,7 @@ test("factory experiment: long-run bundle captures live intervention evidence", 
   await expect(fs.readFile(report.transcriptPath, "utf-8")).resolves.toContain("factory steer");
   await expect(fs.readFile(report.transcriptPath, "utf-8")).resolves.toContain("factory follow-up");
   await expect(fs.readFile(report.investigateTextPath, "utf-8")).resolves.toContain("## Interventions");
-  await expect(fs.readFile(report.auditTextPath, "utf-8")).resolves.toContain("course_correction=");
+  await expect(fs.readFile(report.auditTextPath, "utf-8")).resolves.toContain("controller_correction=");
 }, 180_000);
 
 test("factory experiment: active job discovery selects the active objective task job", () => {

@@ -46,6 +46,8 @@ const isLiveFactoryStatusLike = (value: string | undefined): boolean => {
   if (!normalized || FACTORY_TERMINAL_STATUS_SET.has(normalized)) return false;
   return [
     "active",
+    "collecting_evidence",
+    "evidence_ready",
     "executing",
     "integrating",
     "leased",
@@ -55,6 +57,7 @@ const isLiveFactoryStatusLike = (value: string | undefined): boolean => {
     "queued",
     "reviewing",
     "running",
+    "synthesizing",
   ].includes(normalized);
 };
 

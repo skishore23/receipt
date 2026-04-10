@@ -105,7 +105,7 @@ const createFactoryServiceStub = (overrides: Partial<Record<string, unknown>> = 
     objectiveId,
     title: "Objective demo",
     status: "active",
-    phase: "executing",
+    phase: "collecting_evidence",
     objectiveMode: "delivery",
     severity: 2,
     latestSummary: "Investigating the sidebar objective.",
@@ -165,7 +165,7 @@ const createFactoryServiceStub = (overrides: Partial<Record<string, unknown>> = 
     objectiveId,
     title: "Objective demo",
     status: "active",
-    phase: "executing",
+    phase: "collecting_evidence",
     latestSummary: message ?? "Reused current objective.",
     integration: { status: "idle", queuedCandidateIds: [] },
   }),
@@ -190,7 +190,7 @@ const createFactoryServiceStub = (overrides: Partial<Record<string, unknown>> = 
     objectiveId,
     title: "Objective demo",
     status: "active",
-    phase: "executing",
+    phase: "collecting_evidence",
     latestSummary: "Cleaned up.",
     integration: { status: "idle", queuedCandidateIds: [] },
   }),
@@ -242,7 +242,7 @@ const makeSupervisorObjectiveDetail = (input: {
   objectiveId: input.objectiveId,
   title: "Objective demo",
   status: "active",
-  phase: "executing",
+  phase: "collecting_evidence",
   objectiveMode: input.objectiveMode ?? "delivery",
   severity: 2,
   latestSummary: input.latestSummary ?? "Objective work is in progress.",
@@ -759,7 +759,7 @@ test("factory chat runner: status.read tools expose codex logs, objective status
         objectiveId,
         title: "Objective demo",
         status: "active",
-        phase: "executing",
+        phase: "collecting_evidence",
         objectiveMode: "delivery",
         severity: 2,
         latestSummary: "Investigating the sidebar objective.",
@@ -1105,7 +1105,7 @@ test("factory chat runner: active supervisor only monitors healthy objective-bac
   expect(refreshed?.commands).toHaveLength(0);
 });
 
-test("factory chat runner: active supervisor steers a stalled objective-backed codex task once without duplicates", async () => {
+test("factory chat runner: active supervisor does not steer a stalled objective-backed codex task", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-steer");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1227,13 +1227,10 @@ test("factory chat runner: active supervisor steers a stalled objective-backed c
 
   expect(result.status).toBe("completed");
   const refreshed = await queue.getJob(job.id);
-  const commands = refreshed?.commands.filter((command) => command.command === "steer") ?? [];
-  expect(commands).toHaveLength(1);
-  expect(commands[0]?.payload.problem).toContain("Focus only on task_03: Validate cost-driver inventory.");
-  expect(commands[0]?.payload.problem).toContain("task_04 (Synthesize consumption insights and recommendations)");
+  expect(refreshed?.commands).toHaveLength(0);
 });
 
-test("factory chat runner: active supervisor follows up on historical infrastructure-style access gaps instead of spinning", async () => {
+test("factory chat runner: active supervisor observes historical infrastructure-style access gaps without mutating the child", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-follow-up");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1369,14 +1366,10 @@ test("factory chat runner: active supervisor follows up on historical infrastruc
 
   expect(result.status).toBe("completed");
   const refreshed = await queue.getJob(job.id);
-  const followUps = refreshed?.commands.filter((command) => command.command === "follow_up") ?? [];
-  expect(followUps).toHaveLength(1);
-  expect(followUps[0]?.payload.note).toContain("partial investigation report");
-  expect(followUps[0]?.payload.note).toContain("exact denied services/actions");
-  expect(followUps[0]?.payload.note).toContain("task_04 (Synthesize consumption insights and actionable recommendations)");
+  expect(refreshed?.commands).toHaveLength(0);
 });
 
-test("factory chat runner: active supervisor aborts a repeatedly stalled child and re-enters objective control", async () => {
+test("factory chat runner: active supervisor does not abort a repeatedly stalled child", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-supervisor-abort");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
   const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
@@ -1507,9 +1500,8 @@ test("factory chat runner: active supervisor aborts a repeatedly stalled child a
 
   expect(result.status).toBe("completed");
   const refreshed = await queue.getJob(job.id);
-  expect(refreshed?.commands.filter((command) => command.command === "steer")).toHaveLength(1);
-  expect(refreshed?.commands.filter((command) => command.command === "abort")).toHaveLength(1);
-  expect(reactCalls).toBeGreaterThan(0);
+  expect(refreshed?.commands).toHaveLength(0);
+  expect(reactCalls).toBe(0);
 });
 
 test("factory chat runner: agent.delegate queues work and agent.status sees the queued job", async () => {
@@ -2523,7 +2515,7 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
         objectiveId,
         title: "Objective demo",
         status: "active",
-        phase: "executing",
+        phase: "collecting_evidence",
         objectiveMode: "delivery",
         severity: 2,
         latestSummary: "Still investigating the running objective.",
@@ -2562,7 +2554,7 @@ test("factory chat runner: unchanged live waits only pause the budget once per r
 
   expect(result.status).toBe("completed");
   expect(result.finalResponse).toContain("Work is still running in this chat.");
-  expect(result.finalResponse).toContain("Objective demo is active (executing).");
+  expect(result.finalResponse).toContain("Objective demo is active (collecting_evidence).");
   expect(llmCalls).toEqual(["factory.status", "factory.status"]);
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_live_wait_once"));
@@ -3663,7 +3655,7 @@ test("factory chat runner: factory.dispatch create starts a new objective instea
         objectiveId,
         title: "Objective demo",
         status: "active",
-        phase: "executing",
+        phase: "collecting_evidence",
         latestSummary: message ?? "Reused current objective.",
         integration: { status: "idle", queuedCandidateIds: [] },
       };
@@ -3744,7 +3736,7 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
       objectiveId: "objective_created",
       title: prompt,
       status: "active",
-      phase: "executing",
+      phase: "collecting_evidence",
       latestSummary: "Created the follow-up objective.",
       integration: { status: "idle", queuedCandidateIds: [] },
     }),
@@ -3754,7 +3746,7 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
         objectiveId,
         title: objectiveId === "objective_created" ? "Created objective" : "Starting objective",
         status: "active",
-        phase: "executing",
+        phase: "collecting_evidence",
         latestSummary: `Reacted ${objectiveId}.`,
         nextAction: "Keep working.",
         integration: { status: "idle", queuedCandidateIds: [] },
@@ -3768,7 +3760,7 @@ test("factory chat runner: default factory.dispatch follows the latest bound obj
       objectiveId,
       title: objectiveId === "objective_created" ? "Created objective" : "Starting objective",
       status: "active",
-      phase: "executing",
+      phase: "collecting_evidence",
       latestSummary: `Reacted ${objectiveId}.`,
       nextAction: "Keep working.",
       integration: { status: "idle", queuedCandidateIds: [] },
@@ -4333,7 +4325,7 @@ test("factory chat runner: canonical follow-up note reacts the active bound obje
         objectiveId,
         title: "Objective demo",
         status: "active",
-        phase: "executing",
+        phase: "collecting_evidence",
         latestSummary: message ?? "Reacted in place.",
         integration: { status: "idle", queuedCandidateIds: [] },
       };
@@ -4694,7 +4686,7 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
       objectiveId: "objective_created",
       title: prompt,
       status: "active",
-      phase: "executing",
+      phase: "collecting_evidence",
       latestSummary: "Created the follow-up objective.",
       integration: { status: "idle", queuedCandidateIds: [] },
     }),
@@ -4702,7 +4694,7 @@ test("factory chat runner: exhausted slices continue with the latest bound objec
       objectiveId,
       title: "Objective demo",
       status: "blocked",
-      phase: "executing",
+      phase: "collecting_evidence",
       objectiveMode: "delivery" as const,
       severity: 2,
       latestSummary: "Blocked on human input.",
@@ -4787,7 +4779,7 @@ test("factory chat runner: historical infrastructure loop continues on the lates
     objectiveId: historicalInfrastructureObjectiveId,
     title: "Inventory running EC2 instances and infer schedules",
     status: "active",
-    phase: "executing",
+    phase: "collecting_evidence",
     latestSummary: summary ?? `Historical EC2 poll ${++activePoll}`,
     nextAction: "Wait for the EC2 investigation to finish.",
     integration: {

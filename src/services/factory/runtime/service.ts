@@ -42,6 +42,7 @@ import {
   type FactoryTaskAlignmentRecord,
   type FactoryTaskCompletionRecord,
   type FactoryTaskExecutionMode,
+  type FactoryTaskExecutionPhase,
   type FactoryTaskPresentationRecord,
   type FactoryTaskResultOutcome,
   type FactoryTaskRecord,
@@ -49,6 +50,7 @@ import {
   type FactoryWorkerHandoffScope,
   type FactoryWorkerType,
   type FactoryCandidateStatus,
+  type MonitorRecommendation,
 } from "../../../modules/factory";
 import {
   assertFactoryProfileCreateModeAllowed,
@@ -114,7 +116,7 @@ import {
   planningReceiptFingerprint,
 } from "../planning";
 import { monitorCheckpointIntervalMs, monitorDetectEvidence, runMonitorCheckpoint } from "../monitor-job";
-import { MonitorCheckpointResultSchema, parseMonitorCheckpointAction } from "../monitor-checkpoint";
+import { MonitorCheckpointResultSchema, parseMonitorRecommendation } from "../monitor-checkpoint";
 import { llmStructured, llmText } from "../../../adapters/openai";
 import {
   factoryPromotionGateBlockedReason,
@@ -158,12 +160,14 @@ import {
   buildTaskFilePaths,
   buildTaskMemoryScopes,
   listTaskArtifactActivity,
+  listTaskReadableArtifacts,
   readTaskEvidenceContents,
   renderFactoryReceiptCliSurface,
   renderTaskContextSummary,
   summarizeTaskArtifactActivity,
   type FactoryContextPack,
   type FactoryMemoryScopeSpec,
+  type FactoryReadableArtifact,
 } from "../task-packets";
 import {
   buildFactoryDirectCodexProbeContextPack,
@@ -251,6 +255,7 @@ const FACTORY_STREAM_PREFIX = "factory/objectives";
 const DEFAULT_CHECKS = ["bun run build"] as const;
 const DEFAULT_FACTORY_PROFILE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 export const FACTORY_CONTROL_AGENT_ID = "factory-control";
+export const FACTORY_MONITOR_AGENT_ID = "factory-monitor";
 const OBJECTIVE_CONTROL_REDRIVE_AGE_MS = 30_000;
 const SUPPORTED_WORKER_TYPES = new Set<FactoryWorkerType>(["codex", "agent", "infra"]);
 
@@ -308,9 +313,51 @@ const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref,
 const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
+
+const READABLE_FACTORY_ARTIFACT_RE = /\.(json|md|txt|csv)$/i;
 const TERMINAL_RENDER_MAX_FILE_BYTES = 32_768;
 const TERMINAL_RENDER_MAX_ARTIFACTS = 6;
 const TERMINAL_RENDER_TEXT_FILE_RE = /\.(?:md|markdown|txt|json|log|csv)$/i;
+const FACTORY_TASK_EXECUTION_PHASE_ORDER: Readonly<Record<FactoryTaskExecutionPhase, number>> = {
+  collecting_evidence: 0,
+  evidence_ready: 1,
+  synthesizing: 2,
+};
+const taskExecutionPhaseValue = (task?: FactoryTaskRecord): FactoryTaskExecutionPhase =>
+  task?.executionPhase ?? "collecting_evidence";
+const taskExecutionPhaseAtLeast = (
+  task: FactoryTaskRecord | undefined,
+  phase: FactoryTaskExecutionPhase,
+): boolean => FACTORY_TASK_EXECUTION_PHASE_ORDER[taskExecutionPhaseValue(task)] >= FACTORY_TASK_EXECUTION_PHASE_ORDER[phase];
+const monitorRecommendationsEqual = (
+  left: MonitorRecommendation,
+  right: MonitorRecommendation,
+): boolean => {
+  if (left.kind !== right.kind) return false;
+  switch (left.kind) {
+    case "continue":
+      return true;
+    case "recommend_steer":
+      return right.kind === "recommend_steer" && left.guidance === right.guidance;
+    case "recommend_abort":
+      return right.kind === "recommend_abort" && left.reason === right.reason;
+    case "recommend_enter_synthesizing":
+      return right.kind === "recommend_enter_synthesizing" && left.reason === right.reason;
+    case "recommend_split":
+      return right.kind === "recommend_split"
+        && left.subtasks.length === right.subtasks.length
+        && left.subtasks.every((subtask, index) => {
+          const other = right.subtasks[index];
+          if (!other) return false;
+          const leftDependsOn = subtask.dependsOn ?? [];
+          const rightDependsOn = other.dependsOn ?? [];
+          return subtask.title === other.title
+            && subtask.prompt === other.prompt
+            && leftDependsOn.length === rightDependsOn.length
+            && leftDependsOn.every((dependency, dependencyIndex) => dependency === rightDependsOn[dependencyIndex]);
+        });
+  }
+};
 const artifactKeyFromLabel = (label: string, index: number): string => {
   const normalized = label
     .trim()
@@ -366,7 +413,33 @@ const factoryTaskRunJobId = (
   objectiveId: string,
   taskId: string,
   candidateId: string,
-): string => `job_factory_${objectiveId}_${taskId}_${candidateId}`;
+  taskPhase: FactoryTaskExecutionPhase,
+  dispatchKey: string,
+): string =>
+  taskPhase === "synthesizing"
+    ? `job_factory_${objectiveId}_${taskId}_${candidateId}_synthesizing_${dispatchKey}`
+    : `job_factory_${objectiveId}_${taskId}_${candidateId}_${dispatchKey}`;
+
+const factoryMonitorJobId = (
+  objectiveId: string,
+  taskId: string,
+  candidateId: string,
+  taskPhase: FactoryTaskExecutionPhase,
+  dispatchKey: string,
+): string =>
+  taskPhase === "synthesizing"
+    ? `job_factory_monitor_${objectiveId}_${taskId}_${candidateId}_synthesizing_${dispatchKey}`
+    : `job_factory_monitor_${objectiveId}_${taskId}_${candidateId}_${dispatchKey}`;
+
+const factoryDispatchKey = (): string =>
+  `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+const factoryRecommendationId = (
+  objectiveId: string,
+  taskId: string,
+  candidateId: string,
+  recommendedAt: number,
+): string => `recommendation_${objectiveId}_${taskId}_${candidateId}_${recommendedAt.toString(36)}`;
 
 const parseFactoryLiveGuidance = (
   signal: { readonly note?: string; readonly meta?: Record<string, unknown> } | undefined,
@@ -425,9 +498,12 @@ const isDisplayActiveJobStatus = (status?: string): boolean =>
   status === "queued" || status === "running";
 
 const resolveHandoffPhase = (
+  taskPhase: FactoryTaskExecutionPhase | undefined,
   active: boolean,
   evidenceContents: ReadonlyArray<FactoryEvidenceContent> | undefined,
 ): FactoryLiveOutputHandoffPhase => {
+  if (taskPhase === "synthesizing") return "synthesizing";
+  if (taskPhase === "evidence_ready") return "evidence_ready";
   if (active) return "active";
   if (evidenceContents && evidenceContents.length > 0) return "evidence_ready";
   return "terminal_no_evidence";
@@ -580,6 +656,10 @@ class FactoryStaleObjectiveError extends Error {
   }
 }
 
+const isFactoryStaleObjectiveConflict = (err: unknown): boolean =>
+  err instanceof FactoryStaleObjectiveError
+  || (err instanceof Error && err.message.startsWith("Expected prev hash "));
+
 const normalizeWorkerType = (value: string | undefined): FactoryWorkerType => {
   const normalized = (value ?? "codex").trim().toLowerCase() || "codex";
   return SUPPORTED_WORKER_TYPES.has(normalized) ? normalized : "codex";
@@ -632,6 +712,7 @@ export class FactoryService {
     readonly key: string;
     readonly card: FactoryObjectiveCard;
   }>();
+  private readonly objectiveControlEnqueueLocks = new Map<string, Promise<void>>();
 
   constructor(opts: FactoryServiceOptions) {
     this.dataDir = opts.dataDir;
@@ -663,6 +744,13 @@ export class FactoryService {
 
   async ensureBootstrap(): Promise<void> {
     await this.git.ensureReady();
+  }
+
+  async scheduleObjectiveControl(
+    objectiveId: string,
+    reason: FactoryObjectiveControlJobPayload["reason"],
+  ): Promise<void> {
+    await this.enqueueObjectiveControl(objectiveId, reason);
   }
 
   private async loadCloudExecutionContext(): Promise<FactoryCloudExecutionContext> {
@@ -1349,9 +1437,16 @@ export class FactoryService {
 
   async runMonitorJob(
     payload: Record<string, unknown>,
-    control: { shouldAbort: () => Promise<boolean> },
+    control: {
+      shouldAbort: () => Promise<boolean>;
+      jobId?: string;
+      workerId?: string;
+      pollIntervalMs?: number;
+      sleep?: (ms: number) => Promise<void>;
+    },
   ): Promise<Record<string, unknown>> {
-    const POLL_INTERVAL_MS = 10_000;
+    const pollIntervalMs = Math.max(1, Math.floor(control.pollIntervalMs ?? 10_000));
+    const sleepFor = control.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     const monitorPayload = payload as unknown as FactoryMonitorJobPayload;
     let checkpoint = 0;
     const startedAt = Date.now();
@@ -1362,9 +1457,16 @@ export class FactoryService {
       monitorPayload.objectiveMode,
       monitorPayload.severity,
     );
+    const loadMonitoredTask = async (): Promise<FactoryTaskRecord | undefined> => {
+      const state = await this.getObjectiveState(monitorPayload.objectiveId).catch(() => undefined);
+      if (!state) return undefined;
+      const task = state.workflow.tasksById[monitorPayload.taskId];
+      if (!task || task.candidateId !== monitorPayload.candidateId) return undefined;
+      return task;
+    };
 
     while (true) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      await sleepFor(pollIntervalMs);
 
       const codexJob = await this.queue.getJob(monitorPayload.codexJobId);
       if (!codexJob || isTerminalQueueJobStatus(codexJob.status)) {
@@ -1378,12 +1480,18 @@ export class FactoryService {
       const elapsedMs = Date.now() - startedAt;
       const hasEvidence = await monitorDetectEvidence(monitorPayload.evidenceDir);
       if (hasEvidence && !evidenceDetectedAt) evidenceDetectedAt = Date.now();
+      const monitoredTask = await loadMonitoredTask();
+      if (!monitoredTask || monitoredTask.status !== "running") {
+        return { status: "task_not_active", checkpoints: checkpoint };
+      }
 
-      await this.queue.progress(
-        monitorPayload.codexJobId.replace("job_factory_objective", "job_factory_monitor_objective"),
-        "factory-monitor",
-        { phase: "polling", elapsedMs, evidencePresent: hasEvidence, checkpoints: checkpoint },
-      ).catch(() => undefined);
+      if (control.jobId && control.workerId) {
+        await this.queue.progress(
+          control.jobId,
+          control.workerId,
+          { phase: "polling", elapsedMs, evidencePresent: hasEvidence, checkpoints: checkpoint },
+        ).catch(() => undefined);
+      }
 
       const sinceLastCheckpoint = Date.now() - lastCheckpointAt;
       const evidenceStale = evidenceDetectedAt !== undefined
@@ -1402,6 +1510,7 @@ export class FactoryService {
         checkpoint,
         evidencePresent: hasEvidence,
         objectiveMode: monitorPayload.objectiveMode,
+        taskExecutionPhase: taskExecutionPhaseValue(monitoredTask),
         evaluateLlm: async (prompt) => {
           const llmResult = await llmStructured({
             system: prompt.system,
@@ -1413,7 +1522,7 @@ export class FactoryService {
           return {
             assessment: parsed.assessment,
             reasoning: parsed.reasoning,
-            action: parseMonitorCheckpointAction(parsed.action),
+            recommendation: parseMonitorRecommendation(parsed.recommendation),
           };
         },
       });
@@ -1426,71 +1535,73 @@ export class FactoryService {
         checkpoint,
         assessment: result.assessment,
         reasoning: result.reasoning,
-        action: result.action,
+        recommendation: result.recommendation,
         evaluatedAt: Date.now(),
       });
 
-      if (result.action.kind === "continue") {
+      if (result.recommendation.kind === "continue") {
         continue;
       }
 
-      if (result.action.kind === "steer") {
-        await this.emitObjective(monitorPayload.objectiveId, {
-          type: "monitor.intervention",
-          objectiveId: monitorPayload.objectiveId,
-          taskId: monitorPayload.taskId,
-          jobId: monitorPayload.codexJobId,
-          interventionKind: "steer",
-          detail: result.action.guidance,
-          interventionAt: Date.now(),
-        });
-        await this.queue.queueCommand({
-          jobId: monitorPayload.codexJobId,
-          command: "steer",
-          payload: { message: result.action.guidance },
-        });
+      const taskPhase = taskExecutionPhaseValue(monitoredTask);
+      const recommendedAt = Date.now();
+      const recommendationId = factoryRecommendationId(
+        monitorPayload.objectiveId,
+        monitorPayload.taskId,
+        monitorPayload.candidateId,
+        recommendedAt,
+      );
+      const objectiveChain = await this.runtime.chain(objectiveStream(monitorPayload.objectiveId));
+      const resolvedRecommendationIds = new Set<string>();
+      for (const block of objectiveChain) {
+        const event = block.body;
+        if (!event) continue;
+        if (event.type === "monitor.recommendation.consumed" || event.type === "monitor.recommendation.obsoleted") {
+          resolvedRecommendationIds.add(event.recommendationId);
+        }
+      }
+      let priorRecommendationId: string | undefined;
+      let priorRecommendation: MonitorRecommendation | undefined;
+      for (let index = objectiveChain.length - 1; index >= 0; index -= 1) {
+        const event = objectiveChain[index]?.body;
+        if (!event || event.type !== "monitor.recommendation") continue;
+        if (resolvedRecommendationIds.has(event.recommendationId)) continue;
+        if (event.taskId !== monitorPayload.taskId || event.candidateId !== monitorPayload.candidateId) continue;
+        priorRecommendationId = event.recommendationId;
+        priorRecommendation = event.recommendation;
+        break;
+      }
+      if (!this.shouldEmitMonitorRecommendation(taskPhase, result.recommendation, priorRecommendation)) {
         continue;
       }
-
-      if (result.action.kind === "split") {
+      if (priorRecommendationId) {
         await this.emitObjective(monitorPayload.objectiveId, {
-          type: "monitor.intervention",
+          type: "monitor.recommendation.obsoleted",
           objectiveId: monitorPayload.objectiveId,
+          recommendationId: priorRecommendationId,
           taskId: monitorPayload.taskId,
-          jobId: monitorPayload.codexJobId,
-          interventionKind: "split",
-          detail: `Splitting into ${result.action.subtasks.length} subtasks`,
-          interventionAt: Date.now(),
+          candidateId: monitorPayload.candidateId,
+          reason: "superseded by a newer monitor recommendation for the active task candidate",
+          obsoletedAt: recommendedAt,
         });
-        await this.queue.queueCommand({
-          jobId: monitorPayload.codexJobId,
-          command: "abort",
-          payload: {},
-        });
-        await this.splitTask(
-          monitorPayload.objectiveId,
-          monitorPayload.taskId,
-          result.action.subtasks,
-        );
-        return { status: "split", checkpoints: checkpoint, subtasks: result.action.subtasks.length };
       }
-
-      if (result.action.kind === "abort") {
-        await this.emitObjective(monitorPayload.objectiveId, {
-          type: "monitor.intervention",
-          objectiveId: monitorPayload.objectiveId,
-          taskId: monitorPayload.taskId,
-          jobId: monitorPayload.codexJobId,
-          interventionKind: "abort",
-          detail: result.action.reason,
-          interventionAt: Date.now(),
-        });
-        await this.queue.queueCommand({
-          jobId: monitorPayload.codexJobId,
-          command: "abort",
-          payload: {},
-        });
-        return { status: "aborted", checkpoints: checkpoint, reason: result.action.reason };
+      await this.emitObjective(monitorPayload.objectiveId, {
+        type: "monitor.recommendation",
+        objectiveId: monitorPayload.objectiveId,
+        recommendationId,
+        taskId: monitorPayload.taskId,
+        candidateId: monitorPayload.candidateId,
+        jobId: monitorPayload.codexJobId,
+        recommendation: result.recommendation,
+        reasoning: result.reasoning,
+        recommendedAt,
+      });
+      await this.enqueueObjectiveControl(monitorPayload.objectiveId, "reconcile");
+      if (result.recommendation.kind === "recommend_abort") {
+        return { status: "recommended_abort", checkpoints: checkpoint, reason: result.recommendation.reason };
+      }
+      if (result.recommendation.kind === "recommend_split") {
+        return { status: "recommended_split", checkpoints: checkpoint, subtasks: result.recommendation.subtasks.length };
       }
     }
   }
@@ -1640,7 +1751,7 @@ export class FactoryService {
       const evidenceContents = !active && task.workspacePath
         ? await readTaskEvidenceContents(task.workspacePath, artifactActivity ?? [])
         : undefined;
-      const handoffPhase = resolveHandoffPhase(active, evidenceContents);
+      const handoffPhase = resolveHandoffPhase(task.executionPhase, active, evidenceContents);
       return {
         objectiveId,
         focusKind,
@@ -1712,7 +1823,13 @@ export class FactoryService {
     const evidenceContents = !active && workspacePath
       ? await readTaskEvidenceContents(workspacePath, artifactActivity ?? [])
       : undefined;
-    const handoffPhase = resolveHandoffPhase(active, evidenceContents);
+    const detail = taskId
+      ? await this.getObjective(objectiveId).catch(() => undefined)
+      : undefined;
+    const taskPhase = taskId
+      ? detail?.tasks.find((item) => item.taskId === taskId)?.executionPhase
+      : undefined;
+    const handoffPhase = resolveHandoffPhase(taskPhase, active, evidenceContents);
 
     return {
       objectiveId,
@@ -1913,6 +2030,19 @@ export class FactoryService {
   }
 
   async resumeObjectives(): Promise<void> {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await this.resumeObjectivesOnce();
+        return;
+      } catch (err) {
+        if (!isFactoryStaleObjectiveConflict(err) || attempt === 3) throw err;
+        await this.queue.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+  }
+
+  private async resumeObjectivesOnce(): Promise<void> {
     await this.queue.refresh();
     await this.reconcileQueuedObjectiveControlJobs();
     await this.reconcileStaleObjectiveExecutionJobs();
@@ -1981,14 +2111,14 @@ export class FactoryService {
   }
 
   private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
-    const queued = (await this.queue.listJobs({ status: "queued", limit: 500 }))
-      .filter((job) => this.isObjectiveControlJob(job));
-    if (queued.length === 0) return;
+    const active = (await this.queue.listJobs({ limit: 2000 }))
+      .filter((job) => this.isObjectiveControlJob(job) && isActiveQueueJobStatus(job.status));
+    if (active.length === 0) return;
 
     const summaries = await this.listObjectiveProjectionSummaries();
     const summariesById = new Map(summaries.map((summary) => [summary.objectiveId, summary] as const));
     const grouped = new Map<string, QueueJob[]>();
-    for (const job of queued) {
+    for (const job of active) {
       const key = job.sessionKey?.trim() || `factory:objective:${job.payload.objectiveId}`;
       const bucket = grouped.get(key) ?? [];
       bucket.push(job);
@@ -2013,7 +2143,17 @@ export class FactoryService {
         continue;
       }
 
-      if (this.redriveQueuedJob && this.shouldRedriveQueuedControlJob(current, now)) {
+      const state = objectiveId
+        ? await this.getObjectiveState(objectiveId).catch(() => undefined)
+        : undefined;
+      if (
+        current.status === "queued"
+        && this.redriveQueuedJob
+        && (
+          (state ? this.hasPendingObjectiveControlWake(state) : false)
+          || this.shouldRedriveQueuedControlJob(current, now)
+        )
+      ) {
         await this.redriveQueuedJob(current);
       }
     }
@@ -2044,6 +2184,9 @@ export class FactoryService {
       status: "completed",
       recoveredFromPersistedResult: true,
     });
+    if (completed) {
+      await this.enqueueObjectiveControl(parsed.objectiveId, "reconcile");
+    }
     return Boolean(completed);
   }
 
@@ -2460,30 +2603,113 @@ export class FactoryService {
     return activeCount >= this.repoSlotConcurrency;
   }
 
+  private hasPendingObjectiveControlWake(state: FactoryState): boolean {
+    return (state.scheduler.controlWakeRequestedAt ?? 0) > (state.scheduler.controlWakeConsumedAt ?? 0);
+  }
+
+  private nextObjectiveControlWakeReason(
+    state: FactoryState,
+    fallback: FactoryObjectiveControlJobPayload["reason"],
+  ): FactoryObjectiveControlJobPayload["reason"] {
+    const requestedReason = state.scheduler.controlWakeReason;
+    if (this.hasPendingObjectiveControlWake(state) && (requestedReason === "admitted" || requestedReason === "reconcile")) {
+      return requestedReason;
+    }
+    return fallback;
+  }
+
+  private async requestObjectiveControlWake(
+    objectiveId: string,
+    reason: FactoryObjectiveControlJobPayload["reason"],
+  ): Promise<boolean> {
+    const state = await this.getObjectiveState(objectiveId).catch(() => undefined);
+    if (!state?.objectiveId) return false;
+    const requestedAt = Date.now();
+    const pendingReason = state.scheduler.controlWakeReason;
+    if (this.hasPendingObjectiveControlWake(state) && pendingReason === reason) return false;
+    await this.emitObjective(objectiveId, {
+      type: "objective.control.wake.requested",
+      objectiveId,
+      reason,
+      requestedAt,
+    });
+    return true;
+  }
+
+  private async withObjectiveControlEnqueueLock(
+    objectiveId: string,
+    work: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.objectiveControlEnqueueLocks.get(objectiveId) ?? Promise.resolve();
+    let releaseCurrent!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const current = previous.catch(() => undefined).then(() => gate);
+    this.objectiveControlEnqueueLocks.set(objectiveId, current);
+    await previous.catch(() => undefined);
+    try {
+      await work();
+    } finally {
+      releaseCurrent();
+      if (this.objectiveControlEnqueueLocks.get(objectiveId) === current) {
+        this.objectiveControlEnqueueLocks.delete(objectiveId);
+      }
+    }
+  }
+
   private async enqueueObjectiveControl(
     objectiveId: string,
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
-    const created = await this.queue.enqueue({
-      agentId: FACTORY_CONTROL_AGENT_ID,
-      lane: "collect",
-      sessionKey: `factory:objective:${objectiveId}`,
-      singletonMode: reason === "admitted" ? "cancel" : "steer",
-      maxAttempts: 2,
-      payload: {
-        kind: "factory.objective.control",
-        objectiveId,
-        reason,
-      } satisfies FactoryObjectiveControlJobPayload,
+    await this.withObjectiveControlEnqueueLock(objectiveId, async () => {
+      const wakeRequested = await this.requestObjectiveControlWake(objectiveId, reason);
+      const sessionKey = `factory:objective:${objectiveId}`;
+      const now = Date.now();
+      const existing = (await this.listObjectiveScopedJobs(objectiveId, 2000))
+        .filter((job) => this.isObjectiveControlJob(job) && isActiveQueueJobStatus(job.status))
+        .sort((left, right) => this.compareRecentQueueJobs(left, right));
+      const fresh: QueueJob[] = [];
+      for (const job of existing) {
+        const staleAt = liveJobStaleAt(job);
+        if (typeof staleAt === "number" && staleAt <= now) {
+          await this.queue.cancel(job.id, "stale objective control job replaced", "factory.control");
+          continue;
+        }
+        fresh.push(job);
+      }
+      const current = fresh[0];
+      for (const duplicate of fresh.slice(1)) {
+        await this.queue.cancel(duplicate.id, "superseded duplicate objective control job", "factory.control");
+      }
+      if (current) {
+        if (
+          current.status === "queued"
+          && this.redriveQueuedJob
+          && (wakeRequested || this.shouldRedriveQueuedControlJob(current, now))
+        ) {
+          await this.redriveQueuedJob(current);
+        }
+        this.sse.publish("jobs", current.id);
+        return;
+      }
+      const created = await this.queue.enqueue({
+        agentId: FACTORY_CONTROL_AGENT_ID,
+        lane: "collect",
+        sessionKey,
+        singletonMode: "allow",
+        maxAttempts: 2,
+        payload: {
+          kind: "factory.objective.control",
+          objectiveId,
+          reason,
+        } satisfies FactoryObjectiveControlJobPayload,
+      });
+      this.sse.publish("jobs", created.id);
+      if (this.redriveQueuedJob && created.status === "queued") {
+        await this.redriveQueuedJob(created);
+      }
     });
-    this.sse.publish("jobs", created.id);
-    if (
-      this.redriveQueuedJob
-      && created.status === "queued"
-      && reason === "reconcile"
-    ) {
-      await this.redriveQueuedJob(created);
-    }
   }
 
   async runObjectiveControl(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2495,25 +2721,58 @@ export class FactoryService {
       ? payload.reason
       : "startup";
     await this.ensureBootstrap();
-    const state = await this.getObjectiveState(objectiveId);
-    if (state.archivedAt || this.isTerminalObjectiveStatus(state.status)) {
-      await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(state));
-      await this.rebalanceObjectiveSlots();
-      return {
-        objectiveId,
-        status: "completed",
-        reason,
-      };
-    }
-    if (reason === "reconcile") {
-      await this.processObjectiveReconcile(objectiveId);
-    } else {
-      await this.processObjectiveStartup(objectiveId, reason);
+    let nextReason = reason;
+    let passes = 0;
+    while (passes < 2) {
+      passes += 1;
+      const state = await this.getObjectiveState(objectiveId);
+      if (state.archivedAt || this.isTerminalObjectiveStatus(state.status)) {
+        await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(state));
+        await this.rebalanceObjectiveSlots();
+        return {
+          objectiveId,
+          status: "completed",
+          reason: nextReason,
+        };
+      }
+      const effectiveReason = this.nextObjectiveControlWakeReason(state, nextReason);
+      if (this.hasPendingObjectiveControlWake(state)) {
+        await this.emitObjective(objectiveId, {
+          type: "objective.control.wake.consumed",
+          objectiveId,
+          reason: effectiveReason,
+          consumedAt: Date.now(),
+        });
+      }
+      if (effectiveReason === "reconcile") {
+        await this.processObjectiveReconcile(objectiveId);
+      } else {
+        const startupReason: "startup" | "admitted" = effectiveReason === "admitted" ? "admitted" : "startup";
+        await this.processObjectiveStartup(objectiveId, startupReason);
+      }
+      const refreshed = await this.getObjectiveState(objectiveId);
+      if (refreshed.archivedAt || this.isTerminalObjectiveStatus(refreshed.status)) {
+        await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(refreshed));
+        await this.rebalanceObjectiveSlots();
+        return {
+          objectiveId,
+          status: "completed",
+          reason: effectiveReason,
+        };
+      }
+      if (!this.hasPendingObjectiveControlWake(refreshed)) {
+        return {
+          objectiveId,
+          status: "completed",
+          reason: effectiveReason,
+        };
+      }
+      nextReason = "reconcile";
     }
     return {
       objectiveId,
       status: "completed",
-      reason,
+      reason: nextReason,
     };
   }
 
@@ -2760,6 +3019,48 @@ export class FactoryService {
     return true;
   }
 
+  private async latestMonitorRecommendations(state: FactoryState): Promise<ReadonlyArray<{
+    readonly recommendationId: string;
+    readonly taskId: string;
+    readonly candidateId: string;
+    readonly recommendation: MonitorRecommendation;
+    readonly reasoning: string;
+    readonly recommendedAt: number;
+  }>> {
+    const chain = await this.runtime.chain(objectiveStream(state.objectiveId));
+    const resolvedRecommendationIds = new Set<string>();
+    for (const block of chain) {
+      const event = block.body;
+      if (!event) continue;
+      if (event.type === "monitor.recommendation.consumed" || event.type === "monitor.recommendation.obsoleted") {
+        resolvedRecommendationIds.add(event.recommendationId);
+      }
+    }
+    const latestByTask = new Map<string, {
+      readonly recommendationId: string;
+      readonly taskId: string;
+      readonly candidateId: string;
+      readonly recommendation: MonitorRecommendation;
+      readonly reasoning: string;
+      readonly recommendedAt: number;
+    }>();
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const event = chain[index]?.body;
+      if (!event || event.type !== "monitor.recommendation") continue;
+      if (resolvedRecommendationIds.has(event.recommendationId)) continue;
+      if (latestByTask.has(event.taskId)) continue;
+      latestByTask.set(event.taskId, {
+        recommendationId: event.recommendationId,
+        taskId: event.taskId,
+        candidateId: event.candidateId,
+        recommendation: event.recommendation,
+        reasoning: event.reasoning,
+        recommendedAt: event.recommendedAt,
+      });
+    }
+    return [...latestByTask.values()].sort((left, right) => left.recommendedAt - right.recommendedAt);
+  }
+
   private async collectObjectivePlannerFacts(state: FactoryState): Promise<FactoryObjectivePlannerFacts> {
     const latestObjectiveOperatorNote = await this.latestObjectiveOperatorNote(state.objectiveId);
     const taskReworkBlocks: FactoryTaskReworkBlock[] = [];
@@ -2771,9 +3072,11 @@ export class FactoryService {
         reason,
       });
     }
+    const monitorRecommendations = await this.latestMonitorRecommendations(state);
     return {
       latestObjectiveOperatorNote,
       taskReworkBlocks,
+      monitorRecommendations,
       dispatchCapacity: Math.max(0, this.effectiveMaxParallelChildren(state) - state.workflow.activeTaskIds.length),
       policyBlockedReason: state.taskRunsUsed >= state.policy.budgets.maxTaskRuns
         ? `Policy blocked: objective exhausted maxTaskRuns (${state.taskRunsUsed}/${state.policy.budgets.maxTaskRuns}).`
@@ -2838,6 +3141,269 @@ export class FactoryService {
     return true;
   }
 
+  private async cancelTaskExecutionJob(
+    task: FactoryTaskRecord,
+    reason: string,
+  ): Promise<void> {
+    if (!task.jobId) return;
+    const job = await this.queue.getJob(task.jobId);
+    if (!job || isTerminalQueueJobStatus(job.status)) return;
+    await this.queue.cancel(task.jobId, reason, "factory.control");
+  }
+
+  private isFactoryMonitorJob(job: QueueJob): job is QueueJob & {
+    readonly payload: FactoryMonitorJobPayload;
+  } {
+    return job.agentId === FACTORY_MONITOR_AGENT_ID
+      && isRecord(job.payload)
+      && job.payload.kind === "factory.task.monitor"
+      && typeof job.payload.objectiveId === "string"
+      && typeof job.payload.taskId === "string"
+      && typeof job.payload.candidateId === "string";
+  }
+
+  private async enqueueTaskMonitor(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+  ): Promise<void> {
+    if (!task.workspacePath || !task.jobId || !task.candidateId) return;
+    const taskPhase = taskExecutionPhaseValue(task);
+    const files = buildTaskFilePaths(task.workspacePath, task.taskId, taskPhase);
+    const dispatchKey = factoryDispatchKey();
+    await this.queue.enqueue({
+      jobId: factoryMonitorJobId(state.objectiveId, task.taskId, task.candidateId, taskPhase, dispatchKey),
+      agentId: FACTORY_MONITOR_AGENT_ID,
+      lane: "collect",
+      sessionKey: `factory:monitor:${state.objectiveId}:${task.taskId}`,
+      singletonMode: "allow",
+      maxAttempts: 1,
+      payload: {
+        kind: "factory.task.monitor",
+        objectiveId: state.objectiveId,
+        taskId: task.taskId,
+        candidateId: task.candidateId,
+        codexJobId: task.jobId,
+        stdoutPath: files.stdoutPath,
+        stderrPath: files.stderrPath,
+        taskPrompt: task.prompt,
+        splitDepth: task.splitDepth ?? 0,
+        objectiveMode: state.objectiveMode,
+        severity: state.severity,
+        evidenceDir: path.join(path.dirname(files.stdoutPath), "evidence"),
+      } satisfies FactoryMonitorJobPayload,
+    });
+  }
+
+  private async syncActiveTaskMonitors(state: FactoryState): Promise<void> {
+    const activeTasks = state.workflow.activeTaskIds
+      .map((taskId) => state.workflow.tasksById[taskId])
+      .filter((task): task is FactoryTaskRecord => Boolean(task) && task.status === "running");
+    if (activeTasks.length === 0) return;
+    const jobs = await this.listObjectiveScopedJobs(state.objectiveId, 2000);
+    for (const task of activeTasks) {
+      const activeMonitor = jobs.find((job) =>
+        this.isFactoryMonitorJob(job)
+        && isActiveQueueJobStatus(job.status)
+        && job.payload.taskId === task.taskId
+        && job.payload.candidateId === task.candidateId,
+      );
+      if (activeMonitor) {
+        if (activeMonitor.status === "queued" && this.redriveQueuedJob) {
+          await this.redriveQueuedJob(activeMonitor);
+        }
+        continue;
+      }
+      await this.enqueueTaskMonitor(state, task);
+    }
+  }
+
+  private async applyMonitorRecommendation(
+    state: FactoryState,
+    recommendation: FactoryObjectivePlannerFacts["monitorRecommendations"][number],
+  ): Promise<boolean> {
+    state = await this.getObjectiveState(state.objectiveId);
+    const task = state.workflow.tasksById[recommendation.taskId];
+    if (!task || task.candidateId !== recommendation.candidateId) {
+      await this.emitObjective(state.objectiveId, {
+        type: "monitor.recommendation.obsoleted",
+        objectiveId: state.objectiveId,
+        recommendationId: recommendation.recommendationId,
+        taskId: recommendation.taskId,
+        candidateId: recommendation.candidateId,
+        reason: "task candidate advanced before control consumed the monitor recommendation",
+        obsoletedAt: Date.now(),
+      }).catch(() => undefined);
+      return false;
+    }
+    const basedOn = await this.currentHeadHash(state.objectiveId);
+
+    switch (recommendation.recommendation.kind) {
+      case "continue":
+        return false;
+      case "recommend_enter_synthesizing": {
+        if (taskExecutionPhaseAtLeast(task, "synthesizing")) {
+          await this.emitObjective(state.objectiveId, {
+            type: "monitor.recommendation.obsoleted",
+            objectiveId: state.objectiveId,
+            recommendationId: recommendation.recommendationId,
+            taskId: recommendation.taskId,
+            candidateId: recommendation.candidateId,
+            reason: "task already entered synthesizing before control consumed the recommendation",
+            obsoletedAt: Date.now(),
+          }).catch(() => undefined);
+          return false;
+        }
+        await this.cancelTaskExecutionJob(
+          task,
+          `controller retired evidence collection after monitor recommendation for ${task.taskId}`,
+        );
+        const prefixEvents: FactoryEvent[] = [
+          this.runtimeDecisionEvent(
+            state,
+            `monitor_recommendation_${task.taskId}_enter_synthesizing`,
+            recommendation.reasoning,
+            { basedOn, frontierTaskIds: [task.taskId] },
+          ),
+        ];
+        if (!taskExecutionPhaseAtLeast(task, "evidence_ready")) {
+          prefixEvents.push({
+            type: "task.phase.transitioned",
+            objectiveId: state.objectiveId,
+            taskId: task.taskId,
+            candidateId: recommendation.candidateId,
+            phase: "evidence_ready",
+            reason: recommendation.recommendation.reason,
+            changedAt: Date.now(),
+          });
+        }
+        const dispatchKey = factoryDispatchKey();
+        prefixEvents.push({
+          type: "task.synthesis.dispatched",
+          objectiveId: state.objectiveId,
+          taskId: task.taskId,
+          candidateId: recommendation.candidateId,
+          jobId: factoryTaskRunJobId(state.objectiveId, task.taskId, recommendation.candidateId, "synthesizing", dispatchKey),
+          detail: recommendation.recommendation.reason,
+          dispatchedAt: Date.now(),
+        });
+        await this.dispatchTask(state, task, {
+          expectedPrev: basedOn,
+          prefixEvents,
+          dispatchKey,
+          taskPhaseOverride: "synthesizing",
+        });
+        await this.emitObjective(state.objectiveId, {
+          type: "monitor.recommendation.consumed",
+          objectiveId: state.objectiveId,
+          recommendationId: recommendation.recommendationId,
+          taskId: recommendation.taskId,
+          candidateId: recommendation.candidateId,
+          outcome: "enter_synthesizing",
+          consumedAt: Date.now(),
+        });
+        return true;
+      }
+      case "recommend_steer": {
+        if (taskExecutionPhaseAtLeast(task, "evidence_ready")) {
+          return this.applyMonitorRecommendation(state, {
+            ...recommendation,
+            recommendation: {
+              kind: "recommend_enter_synthesizing",
+              reason: recommendation.recommendation.guidance,
+            },
+          });
+        }
+        await this.cancelTaskExecutionJob(
+          task,
+          `controller retired collection run for ${task.taskId} after monitor course correction`,
+        );
+        await this.emitObjectiveBatch(state.objectiveId, [
+          this.runtimeDecisionEvent(
+            state,
+            `monitor_recommendation_${task.taskId}_follow_up`,
+            recommendation.reasoning,
+            { basedOn, frontierTaskIds: [task.taskId] },
+          ),
+          {
+            type: "objective.operator.noted",
+            objectiveId: state.objectiveId,
+            message: recommendation.recommendation.guidance,
+            notedAt: Date.now(),
+          },
+        ], basedOn);
+        const refreshed = await this.getObjectiveState(state.objectiveId);
+        await this.emitFollowUpTaskFromLatestNote(refreshed, recommendation.recommendation.guidance);
+        await this.emitObjective(state.objectiveId, {
+          type: "monitor.recommendation.consumed",
+          objectiveId: state.objectiveId,
+          recommendationId: recommendation.recommendationId,
+          taskId: recommendation.taskId,
+          candidateId: recommendation.candidateId,
+          outcome: "follow_up",
+          consumedAt: Date.now(),
+        });
+        return true;
+      }
+      case "recommend_split":
+        await this.cancelTaskExecutionJob(task, `controller splitting ${task.taskId} after monitor recommendation`);
+        await this.emitObjectiveBatch(state.objectiveId, [
+          this.runtimeDecisionEvent(
+            state,
+            `monitor_recommendation_${task.taskId}_split`,
+            recommendation.reasoning,
+            { basedOn, frontierTaskIds: [task.taskId] },
+          ),
+        ], basedOn);
+        await this.splitTask(state.objectiveId, task.taskId, recommendation.recommendation.subtasks);
+        await this.emitObjective(state.objectiveId, {
+          type: "monitor.recommendation.consumed",
+          objectiveId: state.objectiveId,
+          recommendationId: recommendation.recommendationId,
+          taskId: recommendation.taskId,
+          candidateId: recommendation.candidateId,
+          outcome: "split",
+          consumedAt: Date.now(),
+        });
+        return true;
+      case "recommend_abort": {
+        await this.cancelTaskExecutionJob(task, `controller aborting ${task.taskId} after monitor recommendation`);
+        await this.emitObjectiveBatch(state.objectiveId, [
+          this.runtimeDecisionEvent(
+            state,
+            `monitor_recommendation_${task.taskId}_abort`,
+            recommendation.reasoning,
+            { basedOn, frontierTaskIds: [task.taskId] },
+          ),
+          ...(await this.buildObjectiveBlockedEvents(state, recommendation.recommendation.reason)),
+        ], basedOn);
+        await this.emitObjective(state.objectiveId, {
+          type: "monitor.recommendation.consumed",
+          objectiveId: state.objectiveId,
+          recommendationId: recommendation.recommendationId,
+          taskId: recommendation.taskId,
+          candidateId: recommendation.candidateId,
+          outcome: "abort",
+          consumedAt: Date.now(),
+        });
+        return true;
+      }
+    }
+  }
+
+  private shouldEmitMonitorRecommendation(
+    taskPhase: FactoryTaskExecutionPhase,
+    recommendation: MonitorRecommendation,
+    priorRecommendation?: MonitorRecommendation,
+  ): boolean {
+    if (taskPhase === "synthesizing" && recommendation.kind === "recommend_enter_synthesizing") {
+      return false;
+    }
+    if (priorRecommendation && monitorRecommendationsEqual(priorRecommendation, recommendation)) {
+      return false;
+    }
+    return true;
+  }
+
   private async applyObjectivePreparationEffects(
     state: FactoryState,
     effects: ReadonlyArray<FactoryPlannerEffect>,
@@ -2860,6 +3426,10 @@ export class FactoryService {
     if (followUp && facts.latestObjectiveOperatorNote) {
       await this.emitFollowUpTaskFromLatestNote(state, facts.latestObjectiveOperatorNote);
       return true;
+    }
+
+    for (const recommendation of facts.monitorRecommendations) {
+      if (await this.applyMonitorRecommendation(state, recommendation)) return true;
     }
 
     const taskEvents = effects.flatMap((effect): FactoryEvent[] => {
@@ -2887,6 +3457,8 @@ export class FactoryService {
             reason: effect.reason,
             blockedAt: at,
           }];
+        case "task.handle_monitor_recommendation":
+          return [];
         default:
           return [];
       }
@@ -3052,29 +3624,35 @@ export class FactoryService {
   }
 
   async reactObjective(objectiveId: string): Promise<void> {
-    await reactFactoryObjective(objectiveId, {
-      getObjectiveState: (targetObjectiveId) => this.getObjectiveState(targetObjectiveId),
-      isTerminalObjectiveStatus: (status) => this.isTerminalObjectiveStatus(status),
-      rebalanceObjectiveSlots: () => this.rebalanceObjectiveSlots(),
-      syncFailedActiveTasks: (state) => this.syncFailedActiveTasks(state),
-      redriveQueuedActiveTasks: (state) => this.redriveQueuedActiveTasks(state),
-      stampCircuitBrokenTasks: (state) => this.stampCircuitBrokenTasks(state),
-      derivePolicyBlockedReason: (state) => this.derivePolicyBlockedReason(state),
-      buildObjectiveBlockedEvents: (state, reason) => this.buildObjectiveBlockedEvents(state, reason),
-      emitObjectiveBatch: (targetObjectiveId, events, expectedPrev) => this.emitObjectiveBatch(targetObjectiveId, events, expectedPrev),
-      syncInvestigationSynthesisIfReady: (state) => this.syncInvestigationSynthesisIfReady(state),
-      collectObjectivePlannerFacts: (state) => this.collectObjectivePlannerFacts(state),
-      applyObjectivePreparationEffects: (state, effects, facts) => this.applyObjectivePreparationEffects(state, effects, facts),
-      applyObjectiveDispatchEffect: (state, effect, selection) => this.applyObjectiveDispatchEffect(state, effect, selection),
-      applyObjectiveFinalEffect: (state, effect, selection) => this.applyObjectiveFinalEffect(state, effect, selection),
-    });
+    try {
+      await reactFactoryObjective(objectiveId, {
+        getObjectiveState: (targetObjectiveId) => this.getObjectiveState(targetObjectiveId),
+        isTerminalObjectiveStatus: (status) => this.isTerminalObjectiveStatus(status),
+        rebalanceObjectiveSlots: () => this.rebalanceObjectiveSlots(),
+        syncFailedActiveTasks: (state) => this.syncFailedActiveTasks(state),
+        syncActiveTaskMonitors: (state) => this.syncActiveTaskMonitors(state),
+        redriveQueuedActiveTasks: (state) => this.redriveQueuedActiveTasks(state),
+        stampCircuitBrokenTasks: (state) => this.stampCircuitBrokenTasks(state),
+        derivePolicyBlockedReason: (state) => this.derivePolicyBlockedReason(state),
+        buildObjectiveBlockedEvents: (state, reason) => this.buildObjectiveBlockedEvents(state, reason),
+        emitObjectiveBatch: (targetObjectiveId, events, expectedPrev) => this.emitObjectiveBatch(targetObjectiveId, events, expectedPrev),
+        syncInvestigationSynthesisIfReady: (state) => this.syncInvestigationSynthesisIfReady(state),
+        collectObjectivePlannerFacts: (state) => this.collectObjectivePlannerFacts(state),
+        applyObjectivePreparationEffects: (state, effects, facts) => this.applyObjectivePreparationEffects(state, effects, facts),
+        applyObjectiveDispatchEffect: (state, effect, selection) => this.applyObjectiveDispatchEffect(state, effect, selection),
+        applyObjectiveFinalEffect: (state, effect, selection) => this.applyObjectiveFinalEffect(state, effect, selection),
+      });
+    } catch (err) {
+      if (!isFactoryStaleObjectiveConflict(err)) throw err;
+      await this.enqueueObjectiveControl(objectiveId, "reconcile").catch(() => undefined);
+    }
   }
 
   async runTask(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
     await this.ensureBootstrap();
     const parsed = this.parseTaskPayload(payload);
-    const state = await this.getObjectiveState(parsed.objectiveId);
-    const task = state.workflow.tasksById[parsed.taskId];
+    let state = await this.getObjectiveState(parsed.objectiveId);
+    let task = state.workflow.tasksById[parsed.taskId];
     if (!task) throw new FactoryServiceError(404, "factory task not found");
     if (parsed.executionMode === "isolated" && parsed.objectiveMode !== "investigation") {
       const blockedAt = Date.now();
@@ -3094,7 +3672,6 @@ export class FactoryService {
         reason,
         blockedAt,
       });
-      await this.reactObjective(parsed.objectiveId);
       return {
         objectiveId: parsed.objectiveId,
         taskId: parsed.taskId,
@@ -3102,7 +3679,7 @@ export class FactoryService {
         status: "blocked",
       };
     }
-    const jobId = factoryTaskRunJobId(parsed.objectiveId, parsed.taskId, parsed.candidateId);
+    const jobId = parsed.jobId;
     let rebuiltPacket = false;
     if (parsed.executionMode === "worktree") {
       const workspaceStatus = await this.git.worktreeStatus(parsed.workspacePath);
@@ -3129,7 +3706,7 @@ export class FactoryService {
     }
     const packetPresent = await this.taskPacketPresent(parsed);
     if (rebuiltPacket || !packetPresent || parsed.executionMode === "worktree") {
-      const packet = await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath);
+      const packet = await this.writeTaskPacket(state, task, parsed.candidateId, parsed.workspacePath, parsed.taskPhase);
       await archiveFactoryTaskPacketArtifacts({
         dataDir: this.dataDir,
         jobId,
@@ -3155,10 +3732,12 @@ export class FactoryService {
       "utf-8",
     );
     const guidanceHistory: FactoryLiveGuidance[] = [];
-    let restartCount = 0;
     let execution;
     while (true) {
       try {
+        state = await this.getObjectiveState(parsed.objectiveId);
+        task = state.workflow.tasksById[parsed.taskId];
+        if (!task) throw new FactoryServiceError(404, "factory task not found");
         const prompt = await this.renderTaskPrompt(state, task, parsed, guidanceHistory);
         await archiveFactoryTaskPrompt({
           dataDir: this.dataDir,
@@ -3197,36 +3776,10 @@ export class FactoryService {
         break;
       } catch (error) {
         if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
+        if (parsed.taskPhase === "synthesizing") throw error;
         const guidance = parseFactoryLiveGuidance(error.signal);
         if (!guidance) throw error;
         guidanceHistory.push(guidance);
-        restartCount += 1;
-        const restartedAt = Date.now();
-        await this.emitObjectiveBatch(parsed.objectiveId, [
-          {
-            type: "task.intervention.applied",
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            appliedAt: guidance.appliedAt,
-          },
-          {
-            type: "task.intervention.restarted",
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            jobId: guidance.jobId ?? parsed.workspaceId,
-            guidance: guidance.guidance,
-            guidanceKind: guidance.guidanceKind,
-            sourceCommandIds: guidance.sourceCommandIds,
-            restartCount,
-            restartedAt,
-          },
-        ]);
       }
     }
     const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
@@ -3373,6 +3926,71 @@ export class FactoryService {
     return Object.fromEntries(
       records.flatMap((record) => Object.entries(record ?? {})),
     );
+  }
+
+  private inheritedArtifactDestination(
+    workspacePath: string,
+    sourcePath: string,
+    label?: string,
+  ): string {
+    const packetDir = path.join(workspacePath, ".receipt", "factory");
+    const normalized = sourcePath.replace(/\\/g, "/");
+    const marker = "/.receipt/factory/";
+    const markerIndex = normalized.lastIndexOf(marker);
+    if (markerIndex >= 0) {
+      const relative = normalized.slice(markerIndex + marker.length);
+      return path.join(packetDir, relative);
+    }
+    const fileName = path.basename(label?.trim() || sourcePath);
+    return path.join(packetDir, "inherited", fileName);
+  }
+
+  private async materializeInheritedReadableArtifacts(
+    workspacePath: string,
+    refs: ReadonlyArray<GraphRef>,
+  ): Promise<ReadonlyArray<FactoryReadableArtifact>> {
+    const readableArtifacts: FactoryReadableArtifact[] = [];
+    for (const ref of refs) {
+      if (ref.kind !== "artifact" && ref.kind !== "file") continue;
+      const sourcePath = optionalTrimmedString(ref.ref);
+      if (!sourcePath || !path.isAbsolute(sourcePath)) continue;
+      const label = path.basename(optionalTrimmedString(ref.label) || sourcePath);
+      if (!READABLE_FACTORY_ARTIFACT_RE.test(label)) continue;
+      const stat = await fs.stat(sourcePath).catch(() => undefined);
+      if (!stat?.isFile() || stat.size <= 0) continue;
+      readableArtifacts.push({
+        path: sourcePath,
+        label,
+        bytes: stat.size,
+      });
+    }
+    return this.materializeReadableArtifactsIntoWorkspace(workspacePath, readableArtifacts);
+  }
+
+  private async materializeReadableArtifactsIntoWorkspace(
+    workspacePath: string,
+    artifacts: ReadonlyArray<FactoryReadableArtifact>,
+  ): Promise<ReadonlyArray<FactoryReadableArtifact>> {
+    const copied = new Map<string, FactoryReadableArtifact>();
+    for (const artifact of artifacts) {
+      const sourcePath = artifact.path;
+      const label = path.basename(artifact.label);
+      if (!READABLE_FACTORY_ARTIFACT_RE.test(label)) continue;
+      const destinationPath = this.inheritedArtifactDestination(workspacePath, sourcePath, label);
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      if (destinationPath !== sourcePath) {
+        await fs.copyFile(sourcePath, destinationPath).catch(() => undefined);
+      }
+      const copiedStat = await fs.stat(destinationPath).catch(() => undefined);
+      if (!copiedStat?.isFile()) continue;
+      copied.set(destinationPath, {
+        path: destinationPath,
+        label,
+        bytes: copiedStat.size,
+      });
+    }
+    return [...copied.values()]
+      .sort((left, right) => right.bytes - left.bytes || left.label.localeCompare(right.label));
   }
 
   private latestRenderableCandidate(
@@ -3968,8 +4586,29 @@ export class FactoryService {
         ...workerArtifactRefs,
         ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
       } satisfies Readonly<Record<string, GraphRef>>;
-      await this.emitObjectiveBatch(payload.objectiveId, [
+      const investigationEvents: FactoryEvent[] = [
         workerHandoff,
+        ...(payload.taskPhase === "synthesizing"
+          ? [(
+              outcome === "blocked"
+                ? {
+                    type: "task.synthesis.blocked",
+                    objectiveId: payload.objectiveId,
+                    taskId: payload.taskId,
+                    candidateId: payload.candidateId,
+                    reason: effectiveSummary,
+                    blockedAt: completedAt,
+                  }
+                : {
+                    type: "task.synthesis.completed",
+                    objectiveId: payload.objectiveId,
+                    taskId: payload.taskId,
+                    candidateId: payload.candidateId,
+                    summary: effectiveSummary,
+                    completedAt,
+                  }
+            ) satisfies FactoryEvent]
+          : []),
         {
           type: "investigation.reported",
           objectiveId: payload.objectiveId,
@@ -3985,7 +4624,8 @@ export class FactoryService {
           evidenceCommit: committed?.hash,
           reportedAt: completedAt,
         },
-      ]);
+      ];
+      await this.emitObjectiveBatch(payload.objectiveId, investigationEvents);
       await commitFactoryTaskMemory(
         this.memoryTools,
         state,
@@ -3998,7 +4638,11 @@ export class FactoryService {
           [resultRefs],
           handoff,
         ),
-        outcome === "blocked" || outcome === "partial" ? "investigation_reported_partial" : "investigation_reported",
+        outcome === "blocked"
+          ? "investigation_reported_partial"
+          : outcome === "partial"
+            ? "investigation_reported_with_gaps"
+            : "investigation_reported",
       );
       return;
     }
@@ -4244,7 +4888,6 @@ export class FactoryService {
             tags: ["integration", "validated", "inherited_failures"],
           },
         );
-        await this.reactObjective(parsed.objectiveId);
         return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
       }
       const conflictedAt = Date.now();
@@ -4289,7 +4932,6 @@ export class FactoryService {
           sourceUpdatedAt: conflictedAt,
         }),
       ]);
-      await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "failed" };
     }
     const head = await this.git.worktreeStatus(parsed.workspacePath);
@@ -4321,7 +4963,6 @@ export class FactoryService {
       handoff: `${summary} Controller may continue toward promotion.`,
       tags: ["integration", "validated"],
     });
-    await this.reactObjective(parsed.objectiveId);
     return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
   }
 
@@ -4358,6 +4999,9 @@ export class FactoryService {
     opts?: {
       readonly expectedPrev?: string;
       readonly prefixEvents?: ReadonlyArray<FactoryEvent>;
+      readonly dispatchKey?: string;
+      readonly taskPhaseOverride?: FactoryTaskExecutionPhase;
+      readonly controllerGuidanceOverride?: string;
     },
   ): Promise<void> {
     state = await this.getObjectiveStateAtHead(state.objectiveId, opts?.expectedPrev);
@@ -4377,6 +5021,8 @@ export class FactoryService {
       );
     }
     const candidateId = this.resolveDispatchCandidateId(state, task);
+    const taskPhase = opts?.taskPhaseOverride ?? task.executionPhase ?? "collecting_evidence";
+    const dispatchKey = opts?.dispatchKey ?? factoryDispatchKey();
     const dispatchBaseCommit = this.resolveTaskBaseCommit(state, task);
     const workspaceId = `${state.objectiveId}_${task.taskId}_${candidateId}`;
     const executionMode = this.taskExecutionMode(state, task);
@@ -4414,8 +5060,8 @@ export class FactoryService {
         } satisfies FactoryEvent;
       })()
       : undefined;
-    const jobId = factoryTaskRunJobId(state.objectiveId, task.taskId, candidateId);
-    const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, pinnedBaseCommit);
+    const jobId = factoryTaskRunJobId(state.objectiveId, task.taskId, candidateId, taskPhase, dispatchKey);
+    const manifest = await this.writeTaskPacket(state, task, candidateId, workspace.path, taskPhase, pinnedBaseCommit);
     await archiveFactoryTaskPacketArtifacts({
       dataDir: this.dataDir,
       jobId,
@@ -4434,6 +5080,7 @@ export class FactoryService {
         objectiveId: state.objectiveId,
         taskId: task.taskId,
         candidateId,
+        taskPhase,
         jobId,
         workspaceId,
         workspacePath: workspace.path,
@@ -4446,8 +5093,10 @@ export class FactoryService {
     const workerProfile = this.workerTaskProfile(profile);
     const payload: FactoryTaskJobPayload = {
       kind: "factory.task.run",
+      jobId,
       objectiveId: state.objectiveId,
       taskId: task.taskId,
+      taskPhase,
       workerType,
       objectiveMode: state.objectiveMode,
       severity: state.severity,
@@ -4477,6 +5126,7 @@ export class FactoryService {
       contextRefs: manifest.contextRefs,
       integrationRef: state.integration.branchRef,
       problem: task.prompt,
+      controllerGuidance: opts?.controllerGuidanceOverride,
       config: {
         workspace: workspace.path,
         memoryScope: `factory/objectives/${state.objectiveId}/tasks/${task.taskId}`,
@@ -4495,7 +5145,7 @@ export class FactoryService {
     this.sse.publish("jobs", created.id);
 
     // Dispatch monitor job alongside codex task
-    const monitorJobId = `job_factory_monitor_${state.objectiveId}_${task.taskId}_${candidateId}`;
+    const monitorJobId = factoryMonitorJobId(state.objectiveId, task.taskId, candidateId, taskPhase, dispatchKey);
     const monitorPayload: FactoryMonitorJobPayload = {
       kind: "factory.task.monitor",
       objectiveId: state.objectiveId,
@@ -4512,7 +5162,7 @@ export class FactoryService {
     };
     await this.queue.enqueue({
       jobId: monitorJobId,
-      agentId: "codex",
+      agentId: FACTORY_MONITOR_AGENT_ID,
       lane: "collect",
       sessionKey: `factory:monitor:${state.objectiveId}:${task.taskId}`,
       singletonMode: "allow",
@@ -4848,7 +5498,6 @@ export class FactoryService {
           sourceUpdatedAt: promotedAt,
         }),
       ]);
-      await this.reactObjective(parsed.objectiveId);
       return {
         objectiveId: parsed.objectiveId,
         status: "completed",
@@ -4899,7 +5548,6 @@ export class FactoryService {
           sourceUpdatedAt: blockedAt,
         }),
       ]);
-      await this.reactObjective(parsed.objectiveId);
       return { objectiveId: parsed.objectiveId, status: "failed", message: reason };
     }
   }
@@ -5024,7 +5672,7 @@ export class FactoryService {
         : undefined,
       latestDecision: this.deriveLatestDecision(state),
       nextAction:
-        operationalState.phaseDetail === "reconciling"
+        operationalState.phaseDetail === "waiting_for_control"
           ? "Controller is reconciling the objective handoff before the next pass."
           : operationalState.phaseDetail === "cleaning_up"
             ? "Controller is retiring lingering jobs after the objective finished."
@@ -5084,7 +5732,9 @@ export class FactoryService {
             git: this.git,
           })
           : { exists: false, dirty: false };
-        const filePaths = task?.workspacePath ? buildTaskFilePaths(task.workspacePath, task.taskId) : undefined;
+        const filePaths = task?.workspacePath
+          ? buildTaskFilePaths(task.workspacePath, task.taskId, task.executionPhase)
+          : undefined;
         const artifactActivity = task?.workspacePath
           ? await listTaskArtifactActivity(
             task.workspacePath,
@@ -5235,7 +5885,7 @@ export class FactoryService {
             memoryScriptPath: undefined,
           };
         }
-        const files = buildTaskFilePaths(task.workspacePath, task.taskId);
+        const files = buildTaskFilePaths(task.workspacePath, task.taskId, task.executionPhase);
         return {
           taskId: task.taskId,
           candidateId: task.candidateId,
@@ -5367,6 +6017,10 @@ export class FactoryService {
         return "Objective admitted to the repo execution slot.";
       case "objective.slot.released":
         return `Objective released its slot: ${event.reason}`;
+      case "objective.control.wake.requested":
+        return `Objective control wake requested: ${event.reason}`;
+      case "objective.control.wake.consumed":
+        return `Objective control wake consumed: ${event.reason}`;
       case "task.added":
         return `${event.task.taskId} added: ${event.task.title}`;
       case "worker.handoff":
@@ -5381,10 +6035,20 @@ export class FactoryService {
         return `${event.taskId} completed with no repo diff: ${event.summary}`;
       case "task.superseded":
         return `${event.taskId} superseded: ${event.reason}`;
-      case "task.intervention.applied":
-        return `${event.taskId} live ${event.guidanceKind} applied: ${event.guidance}`;
-      case "task.intervention.restarted":
-        return `${event.taskId} restarted after live ${event.guidanceKind}: ${event.guidance}`;
+      case "task.phase.transitioned":
+        return `${event.taskId} phase -> ${event.phase}${event.reason ? `: ${event.reason}` : ""}`;
+      case "task.synthesis.dispatched":
+        return `${event.taskId} dispatched synthesis run for ${event.candidateId}`;
+      case "task.synthesis.completed":
+        return `${event.taskId} synthesis completed: ${event.summary}`;
+      case "task.synthesis.blocked":
+        return `${event.taskId} synthesis blocked: ${event.reason}`;
+      case "monitor.recommendation":
+        return `${event.taskId} monitor recommended ${event.recommendation.kind}: ${event.reasoning}`;
+      case "monitor.recommendation.consumed":
+        return `${event.taskId} consumed monitor recommendation via ${event.outcome}`;
+      case "monitor.recommendation.obsoleted":
+        return `${event.taskId} obsoleted monitor recommendation: ${event.reason}`;
       case "candidate.produced":
         return `${event.candidateId} produced: ${event.handoff || event.summary}`;
       case "candidate.reviewed":
@@ -5412,6 +6076,9 @@ export class FactoryService {
     switch (event.type) {
       case "planning.receipt":
         return {};
+      case "objective.control.wake.requested":
+      case "objective.control.wake.consumed":
+        return {};
       case "task.added":
         return { taskId: event.task.taskId };
       case "task.ready":
@@ -5426,8 +6093,13 @@ export class FactoryService {
           ? { taskId: event.taskId, candidateId: event.candidateId }
           : { taskId: event.taskId };
       case "task.dispatched":
-      case "task.intervention.applied":
-      case "task.intervention.restarted":
+      case "task.phase.transitioned":
+      case "task.synthesis.dispatched":
+      case "task.synthesis.completed":
+      case "task.synthesis.blocked":
+      case "monitor.recommendation":
+      case "monitor.recommendation.consumed":
+      case "monitor.recommendation.obsoleted":
         return { taskId: event.taskId, candidateId: event.candidateId };
       case "worker.handoff":
         return {
@@ -5529,6 +6201,7 @@ export class FactoryService {
     task: FactoryTaskRecord,
     candidateId: string,
     workspacePath: string,
+    taskPhase: FactoryTaskExecutionPhase,
     pinnedBaseCommit?: string,
   ): Promise<{
     readonly manifestPath: string;
@@ -5554,10 +6227,10 @@ export class FactoryService {
       objectiveMode: state.objectiveMode,
       taskPrompt: task.prompt,
     });
-    const files = buildTaskFilePaths(workspacePath, task.taskId);
+    const files = buildTaskFilePaths(workspacePath, task.taskId, taskPhase);
     await fs.mkdir(path.dirname(files.manifestPath), { recursive: true });
     await fs.rm(files.resultPath, { force: true });
-    const repoSkillPaths = await this.collectRepoSkillPaths();
+    const repoSkillPaths = await this.collectWorkerRepoSkillPaths(profile);
     const memoryScopes = buildTaskMemoryScopes(state, task, candidateId, taskPrompt);
     const contextPack = await buildFactoryTaskContextPack({
       runtime: this.runtime,
@@ -5578,8 +6251,62 @@ export class FactoryService {
       objectiveStream: (objectiveId) => objectiveStream(objectiveId),
     }, state, task, candidateId, taskPrompt);
     const objectiveContract = this.objectiveContractForState(state, contextPack.planning);
-    const sharedArtifactRefs = dedupeGraphRefs(contextPack.contextSources.sharedArtifactRefs);
-    const contextSummary = renderTaskContextSummary(contextPack);
+    const sourceTask = task.sourceTaskId ? state.workflow.tasksById[task.sourceTaskId] : undefined;
+    const inheritedSourceArtifactRefs = task.sourceTaskId
+      ? this.mergeArtifactRefs([
+          this.latestTaskCandidate(state, task.sourceTaskId)?.artifactRefs,
+          state.investigation.reports[task.sourceTaskId]?.artifactRefs,
+        ])
+      : {};
+    const sourceTaskArtifactActivity = sourceTask?.workspacePath
+      ? await listTaskArtifactActivity(
+          sourceTask.workspacePath,
+          sourceTask.taskId,
+          (resultPath) => this.taskResultSchemaPath(resultPath),
+        )
+      : [];
+    const sourceTaskReadableArtifacts = sourceTask?.workspacePath
+      ? await listTaskReadableArtifacts(sourceTask.workspacePath, sourceTaskArtifactActivity)
+      : [];
+    const inheritedReadableArtifacts = await this.materializeInheritedReadableArtifacts(
+      workspacePath,
+      Object.values(inheritedSourceArtifactRefs),
+    );
+    const inheritedSourceWorkspaceArtifacts = await this.materializeReadableArtifactsIntoWorkspace(
+      workspacePath,
+      sourceTaskReadableArtifacts,
+    );
+    const artifactActivity = await listTaskArtifactActivity(
+      workspacePath,
+      task.taskId,
+      (resultPath) => this.taskResultSchemaPath(resultPath),
+    );
+    const mountedReadableArtifacts = await listTaskReadableArtifacts(
+      workspacePath,
+      artifactActivity,
+      [...inheritedReadableArtifacts, ...inheritedSourceWorkspaceArtifacts],
+    );
+    const priorArtifactRefs = this.mergeArtifactRefs([
+      this.latestTaskCandidate(state, task.taskId)?.artifactRefs,
+      state.candidates[candidateId]?.artifactRefs,
+      state.investigation.reports[task.taskId]?.artifactRefs,
+      inheritedSourceArtifactRefs,
+    ]);
+    const sharedArtifactRefs = dedupeGraphRefs([
+      ...contextPack.contextSources.sharedArtifactRefs,
+      ...Object.values(priorArtifactRefs),
+      ...mountedReadableArtifacts.map((artifact) => artifactRef(artifact.path, artifact.label)),
+    ]);
+    const contextPackWithArtifacts: FactoryContextPack = {
+      ...contextPack,
+      contextSources: {
+        ...contextPack.contextSources,
+        sharedArtifactRefs,
+      },
+    };
+    const contextSummary = renderTaskContextSummary(contextPackWithArtifacts, {
+      mountedReadableArtifacts,
+    });
     const contextRefs = dedupeGraphRefs([
       ...task.contextRefs,
       ...sharedArtifactRefs,
@@ -5636,7 +6363,7 @@ export class FactoryService {
         summaryPath: files.contextSummaryPath,
         packPath: files.contextPackPath,
       },
-      contextSources: contextPack.contextSources,
+      contextSources: contextPackWithArtifacts.contextSources,
       contextRefs,
       sharedArtifactRefs,
       repoSkillPaths: dedupeStrings(repoSkillPaths),
@@ -5658,7 +6385,7 @@ export class FactoryService {
       scopes: memoryScopes,
     };
     await fs.writeFile(files.contextSummaryPath, contextSummary, "utf-8");
-    await fs.writeFile(files.contextPackPath, JSON.stringify(contextPack, null, 2), "utf-8");
+    await fs.writeFile(files.contextPackPath, JSON.stringify(contextPackWithArtifacts, null, 2), "utf-8");
     await fs.writeFile(files.manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
     await fs.writeFile(files.memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
     await fs.writeFile(files.receiptCliPath, renderFactoryReceiptCliSurface({
@@ -6052,8 +6779,12 @@ export class FactoryService {
     if (payload.kind !== "factory.task.run") throw new FactoryServiceError(400, "invalid factory task payload");
     return {
       kind: "factory.task.run",
+      jobId: requireNonEmpty(payload.jobId, "jobId required"),
       objectiveId: requireNonEmpty(payload.objectiveId, "objectiveId required"),
       taskId: requireNonEmpty(payload.taskId, "taskId required"),
+      taskPhase: payload.taskPhase === "evidence_ready" || payload.taskPhase === "synthesizing"
+        ? payload.taskPhase
+        : "collecting_evidence",
       workerType: normalizeWorkerType(requireNonEmpty(payload.workerType, "workerType required")),
       objectiveMode: normalizeObjectiveModeInput(payload.objectiveMode, "delivery"),
       severity: normalizeObjectiveSeverityInput(payload.severity, 1),
@@ -6087,6 +6818,7 @@ export class FactoryService {
         ? payload.integrationRef as GraphRef
         : undefined,
       problem: requireNonEmpty(payload.problem, "problem required"),
+      controllerGuidance: optionalTrimmedString(payload.controllerGuidance),
       config: isRecord(payload.config) ? payload.config : {},
     };
   }
@@ -6175,6 +6907,26 @@ export class FactoryService {
   private async collectRepoSkillPaths(): Promise<ReadonlyArray<string>> {
     const checkedIn = await this.collectCheckedInRepoSkillPaths();
     return [...new Set(checkedIn)].sort((a, b) => a.localeCompare(b));
+  }
+
+  private async collectWorkerRepoSkillPaths(
+    profile: Pick<FactoryObjectiveProfileSnapshot, "selectedSkills">,
+  ): Promise<ReadonlyArray<string>> {
+    const selected = new Set<string>([
+      "skills/factory-receipt-worker/SKILL.md",
+      ...profile.selectedSkills,
+    ]);
+    const resolved: string[] = [];
+    for (const skillRef of selected) {
+      const trimmed = skillRef.trim();
+      if (!trimmed) continue;
+      const absolute = path.isAbsolute(trimmed)
+        ? trimmed
+        : path.join(this.git.repoRoot, trimmed);
+      const exists = await fs.stat(absolute).then((stat) => stat.isFile()).catch(() => false);
+      if (exists) resolved.push(absolute);
+    }
+    return [...new Set(resolved)].sort((a, b) => a.localeCompare(b));
   }
 
   private async readTextTail(filePath: string | undefined, maxChars: number): Promise<string | undefined> {

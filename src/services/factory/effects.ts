@@ -4,6 +4,7 @@ import type {
   FactoryCandidateStatus,
   FactoryCheckResult,
   FactoryExecutionScriptRun,
+  MonitorRecommendation,
   FactoryState,
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
@@ -21,6 +22,14 @@ export type FactoryTaskReworkBlock = {
 export type FactoryObjectivePlannerFacts = {
   readonly latestObjectiveOperatorNote?: string;
   readonly taskReworkBlocks: ReadonlyArray<FactoryTaskReworkBlock>;
+  readonly monitorRecommendations: ReadonlyArray<{
+    readonly recommendationId: string;
+    readonly taskId: string;
+    readonly candidateId: string;
+    readonly recommendation: MonitorRecommendation;
+    readonly reasoning: string;
+    readonly recommendedAt: number;
+  }>;
   readonly dispatchCapacity: number;
   readonly policyBlockedReason?: string;
   readonly readyToPromoteBlockedReason?: string;
@@ -78,6 +87,10 @@ export type FactoryPlannerEffect =
       readonly type: "task.block";
       readonly taskId: string;
       readonly reason: string;
+    }
+  | {
+      readonly type: "task.handle_monitor_recommendation";
+      readonly taskId: string;
     }
   | {
       readonly type: "task.dispatch";

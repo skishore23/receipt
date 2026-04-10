@@ -11,7 +11,7 @@
     "Prefer existing packet region scope before widening to --all-regions."
   ],
   "examples": [
-    "--region us-west-2 --state-value ALARM",
-    "--all-regions --name-prefix api-"
+    "--region us-west-2 --state-value ALARM --output-dir .receipt/factory/evidence",
+    "--all-regions --output-dir .receipt/factory/evidence"
   ]
 }

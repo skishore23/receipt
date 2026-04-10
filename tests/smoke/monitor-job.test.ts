@@ -27,7 +27,7 @@ test("runMonitorCheckpoint reads logs and returns assessment", async () => {
       return {
         assessment: "progressing" as const,
         reasoning: "Worker is actively editing auth files.",
-        action: { kind: "continue" as const },
+        recommendation: { kind: "continue" as const },
       };
     },
   };
@@ -35,7 +35,7 @@ test("runMonitorCheckpoint reads logs and returns assessment", async () => {
   const result = await runMonitorCheckpoint(ctx);
   expect(llmCalled).toBe(true);
   expect(result.assessment).toBe("progressing");
-  expect(result.action.kind).toBe("continue");
+  expect(result.recommendation.kind).toBe("continue");
 });
 
 test("runMonitorCheckpoint handles missing log files gracefully", async () => {
@@ -49,7 +49,7 @@ test("runMonitorCheckpoint handles missing log files gracefully", async () => {
     evaluateLlm: async () => ({
       assessment: "stalled" as const,
       reasoning: "No output at all.",
-      action: { kind: "abort" as const, reason: "No worker output detected." },
+      recommendation: { kind: "recommend_abort" as const, reason: "No worker output detected." },
     }),
   };
 

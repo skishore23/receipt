@@ -2,6 +2,10 @@ import { type GraphRef } from "@receipt/core/graph";
 
 export type FactoryObjectiveStatus =
   | "planning"
+  | "waiting_for_slot"
+  | "collecting_evidence"
+  | "evidence_ready"
+  | "synthesizing"
   | "executing"
   | "integrating"
   | "promoting"
@@ -19,6 +23,11 @@ export type FactoryTaskStatus =
   | "integrated"
   | "blocked"
   | "superseded";
+
+export type FactoryTaskExecutionPhase =
+  | "collecting_evidence"
+  | "evidence_ready"
+  | "synthesizing";
 
 export type FactoryCandidateStatus =
   | "planned"
@@ -260,13 +269,42 @@ export type FactoryObjectiveProfileSnapshot = {
 export type FactoryObjectivePhase =
   | "planning"
   | "waiting_for_slot"
-  | "executing"
+  | "collecting_evidence"
+  | "evidence_ready"
+  | "synthesizing"
   | "integrating"
   | "promoting"
   | "completed"
   | "blocked";
 
 export type FactoryObjectiveSlotState = "queued" | "active" | "released";
+
+export type FactoryWaitKind =
+  | "slot"
+  | "control_reconcile"
+  | "evidence"
+  | "synthesis_dispatch"
+  | "promotion";
+
+export type FactoryWaitOwner =
+  | "controller"
+  | "task"
+  | "integration";
+
+export type FactoryWaitWakeCondition =
+  | "slot_admitted"
+  | "control_pass"
+  | "evidence_captured"
+  | "synthesis_dispatched"
+  | "promotion_finished";
+
+export type FactoryWaitRecord = {
+  readonly kind: FactoryWaitKind;
+  readonly reason: string;
+  readonly owner: FactoryWaitOwner;
+  readonly since: number;
+  readonly wakeCondition: FactoryWaitWakeCondition;
+};
 
 export type FactoryObjectivePolicy = {
   readonly concurrency?: {
@@ -317,6 +355,9 @@ export type FactorySchedulerRecord = {
   readonly admittedAt?: number;
   readonly releasedAt?: number;
   readonly releaseReason?: string;
+  readonly controlWakeRequestedAt?: number;
+  readonly controlWakeReason?: string;
+  readonly controlWakeConsumedAt?: number;
 };
 
 export type FactoryCheckResult = {
@@ -343,6 +384,7 @@ export type FactoryTaskRecord = {
   readonly nodeId: string;
   readonly dependsOn: ReadonlyArray<string>;
   readonly status: FactoryTaskStatus;
+  readonly executionPhase?: FactoryTaskExecutionPhase;
   readonly taskId: string;
   readonly taskKind: "planned";
   readonly title: string;
@@ -355,6 +397,7 @@ export type FactoryTaskRecord = {
   readonly latestSummary?: string;
   readonly latestTraceSummary?: string;
   readonly blockedReason?: string;
+  readonly wait?: FactoryWaitRecord;
   readonly candidateId?: string;
   readonly workspaceId?: string;
   readonly workspacePath?: string;
@@ -366,6 +409,9 @@ export type FactoryTaskRecord = {
   readonly createdAt: number;
   readonly readyAt?: number;
   readonly startedAt?: number;
+  readonly executionPhaseUpdatedAt?: number;
+  readonly evidenceReadyAt?: number;
+  readonly synthesizingAt?: number;
   readonly reviewingAt?: number;
   readonly completedAt?: number;
 };
@@ -449,6 +495,7 @@ export type FactoryState = {
   readonly latestSummary?: string;
   readonly latestHandoff?: FactoryObjectiveHandoffRecord;
   readonly blockedReason?: string;
+  readonly wait?: FactoryWaitRecord;
   readonly taskRunsUsed: number;
   readonly candidatePassesByTask: Readonly<Record<string, number>>;
   readonly consecutiveFailuresByTask: Readonly<Record<string, number>>;

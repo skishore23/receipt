@@ -24,7 +24,11 @@ import { createRuntime } from "@receipt/core/runtime";
 import type { JobHandler } from "../engine/runtime/job-worker";
 import type { SseHub } from "../framework/sse-hub";
 import type { JobCmd, JobEvent, JobState } from "../modules/job";
-import { FACTORY_CONTROL_AGENT_ID, FactoryService } from "./factory-service";
+import {
+  FACTORY_CONTROL_AGENT_ID,
+  FACTORY_MONITOR_AGENT_ID,
+  FactoryService,
+} from "./factory-service";
 import type { FactoryObjectiveAuditJobPayload, FactoryServiceOptions } from "./factory-types";
 import { runFactoryCodexJob } from "../agents/factory-chat";
 import {
@@ -69,6 +73,28 @@ const isTerminalJobStatus = (status: unknown): boolean =>
 
 const isRetryableAuditLockError = (error: unknown): boolean => {
   return isSqliteLockError(error);
+};
+
+const FACTORY_JOB_KEEPALIVE_MS = 5_000;
+const FACTORY_JOB_KEEPALIVE_LEASE_MS = 30_000;
+
+const withFactoryJobKeepalive = async <T>(
+  service: FactoryService,
+  jobId: string,
+  workerId: string,
+  work: () => Promise<T>,
+): Promise<T> => {
+  const timer = setInterval(() => {
+    void service.queue
+      .heartbeat(jobId, workerId, FACTORY_JOB_KEEPALIVE_LEASE_MS)
+      .catch(() => undefined);
+  }, FACTORY_JOB_KEEPALIVE_MS);
+  timer.unref?.();
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
 };
 
 const withObjectiveAuditRetry = async <T>(
@@ -1021,7 +1047,7 @@ export const createFactoryWorkerHandlers = (
     readonly auditAutoFixEnabled?: boolean;
     readonly auditAutoFixSourceChannels?: ReadonlyArray<string>;
   } = {},
-): Record<typeof FACTORY_CONTROL_AGENT_ID | "codex", JobHandler> => ({
+): Record<typeof FACTORY_CONTROL_AGENT_ID | typeof FACTORY_MONITOR_AGENT_ID | "codex", JobHandler> => ({
   [FACTORY_CONTROL_AGENT_ID]: async (job, ctx) => {
     await ctx.pullCommands(["abort", "steer"]);
     try {
@@ -1063,12 +1089,16 @@ export const createFactoryWorkerHandlers = (
       };
     }
   },
-  codex: async (job, ctx) => {
+  [FACTORY_MONITOR_AGENT_ID]: async (job, ctx) => {
     try {
-      if (job.payload.kind === "factory.task.monitor") {
-        const result = await service.runMonitorJob(
+      const result = await withFactoryJobKeepalive(
+        service,
+        job.id,
+        ctx.workerId,
+        () => service.runMonitorJob(
           job.payload as Record<string, unknown>,
           {
+            jobId: job.id,
             shouldAbort: async () => {
               const latest = await service.queue.getJob(job.id);
               return (
@@ -1076,13 +1106,34 @@ export const createFactoryWorkerHandlers = (
                 isTerminalJobStatus(latest?.status)
               );
             },
+            workerId: ctx.workerId,
           },
-        );
-        return { ok: true, result };
-      }
-
-      const result =
-        job.payload.kind === "factory.task.run"
+        ),
+      );
+      return { ok: true, result };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: message,
+        result: {
+          ...(typeof job.payload.objectiveId === "string"
+            ? { objectiveId: job.payload.objectiveId }
+            : {}),
+          status: "failed",
+          message,
+        },
+        noRetry: isNoRetryError(err),
+      };
+    }
+  },
+  codex: async (job, ctx) => {
+    try {
+      const result = await withFactoryJobKeepalive(
+        service,
+        job.id,
+        ctx.workerId,
+        async () => job.payload.kind === "factory.task.run"
           ? await service.runTask(job.payload, {
               shouldAbort: async () => {
                 const latest = await service.queue.getJob(job.id);
@@ -1289,8 +1340,19 @@ export const createFactoryWorkerHandlers = (
                     throw new Error(
                       `unsupported codex payload kind: ${String(job.payload.kind ?? "unknown")}`,
                     );
-                  })();
-      return { ok: true, result };
+                  })(),
+      );
+      const afterComplete = typeof result.objectiveId === "string"
+        && (
+          job.payload.kind === "factory.task.run"
+          || job.payload.kind === "factory.integration.validate"
+          || job.payload.kind === "factory.integration.publish"
+        )
+        ? async () => {
+            await service.reactObjective(result.objectiveId);
+          }
+        : undefined;
+      return { ok: true, result, afterComplete };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

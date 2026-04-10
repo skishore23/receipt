@@ -22,6 +22,7 @@ export type JobExecutionResult = {
   readonly result?: Record<string, unknown>;
   readonly error?: string;
   readonly noRetry?: boolean;
+  readonly afterComplete?: () => Promise<void>;
 };
 
 export type JobHandler = (job: QueueJob, ctx: JobExecutionContext) => Promise<JobExecutionResult>;
@@ -303,6 +304,13 @@ export class JobWorker {
       }
       if (result.ok) {
         await this.queue.complete(job.id, this.workerId, result.result);
+        if (result.afterComplete) {
+          try {
+            await result.afterComplete();
+          } catch (err) {
+            this.reportError(err);
+          }
+        }
       } else {
         await this.queue.fail(job.id, this.workerId, result.error ?? "job failed", result.noRetry, result.result);
       }

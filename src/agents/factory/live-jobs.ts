@@ -285,12 +285,15 @@ const toneFromStatusLike = (value: string | undefined): FactoryRunStep["tone"] =
   ].includes(normalized)) return "warning";
   if ([
     "running",
+    "collecting_evidence",
+    "evidence_ready",
     "executing",
     "active",
     "leased",
     "processing",
     "reviewing",
     "in_progress",
+    "synthesizing",
   ].includes(normalized)) return "info";
   return "neutral";
 };

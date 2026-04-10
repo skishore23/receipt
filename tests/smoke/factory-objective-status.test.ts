@@ -13,7 +13,7 @@ const makeState = (overrides: Partial<FactoryState> = {}): FactoryState => norma
   objectiveId: "objective_demo",
   title: "Demo objective",
   prompt: "Implement the objective.",
-  status: "executing",
+  status: "collecting_evidence",
   scheduler: {
     ...initialFactoryState.scheduler,
     slotState: "active",
@@ -84,24 +84,24 @@ test("factory objective status: queued planning objectives stay queued without l
     objectiveJobs: [],
   })).toEqual({
     displayState: "Queued",
-    phaseDetail: "queued",
+    phaseDetail: "waiting_for_slot",
     statusAuthority: "objective",
     hasAuthoritativeLiveJob: false,
   });
 });
 
-test("factory objective status: task execution stays running with executing phase detail", () => {
+test("factory objective status: task execution stays running with collecting_evidence phase detail", () => {
   expect(deriveObjectiveOperationalState({
     state: makeState({
-      status: "executing",
+      status: "collecting_evidence",
     }),
     taskCount: 1,
     objectiveJobs: [makeJob("factory.task.run")],
   })).toEqual({
     displayState: "Running",
-    phaseDetail: "executing",
-    statusAuthority: "live_execution",
-    hasAuthoritativeLiveJob: true,
+    phaseDetail: "collecting_evidence",
+    statusAuthority: "objective",
+    hasAuthoritativeLiveJob: false,
   });
 });
 
@@ -119,7 +119,7 @@ test("factory objective status: integration validation stays running with integr
   })).toEqual({
     displayState: "Running",
     phaseDetail: "integrating",
-    statusAuthority: "live_execution",
+    statusAuthority: "objective",
     hasAuthoritativeLiveJob: true,
   });
 });
@@ -138,12 +138,12 @@ test("factory objective status: publish execution stays running with promoting p
   })).toEqual({
     displayState: "Running",
     phaseDetail: "promoting",
-    statusAuthority: "live_execution",
+    statusAuthority: "objective",
     hasAuthoritativeLiveJob: true,
   });
 });
 
-test("factory objective status: control-only recovery shows reconciling instead of normal execution", () => {
+test("factory objective status: control-only recovery shows waiting_for_control instead of normal execution", () => {
   expect(deriveObjectiveOperationalState({
     state: makeState({
       status: "promoting",
@@ -162,7 +162,7 @@ test("factory objective status: control-only recovery shows reconciling instead 
     ],
   })).toEqual({
     displayState: "Running",
-    phaseDetail: "reconciling",
+    phaseDetail: "waiting_for_control",
     statusAuthority: "reconcile",
     hasAuthoritativeLiveJob: false,
   });
@@ -193,7 +193,7 @@ test("factory objective status: reconcile-worthy publish failures without a live
 test("factory objective status: canceled monitor recovery does not override an active task run", () => {
   expect(deriveObjectiveOperationalState({
     state: makeState({
-      status: "executing",
+      status: "collecting_evidence",
     }),
     taskCount: 1,
     objectiveJobs: [
@@ -207,10 +207,10 @@ test("factory objective status: canceled monitor recovery does not override an a
       }),
     ],
   })).toEqual({
-    displayState: "Running",
-    phaseDetail: "executing",
-    statusAuthority: "live_execution",
-    hasAuthoritativeLiveJob: true,
+    displayState: "Stalled",
+    phaseDetail: "stalled",
+    statusAuthority: "objective",
+    hasAuthoritativeLiveJob: false,
   });
 });
 

@@ -486,6 +486,7 @@ export const buildFactoryTaskContextPack = async (
       workerType: task.workerType,
       executionMode: task.executionMode ?? profile.objectivePolicy.defaultTaskExecutionMode,
       status: task.status,
+      taskPhase: task.executionPhase,
       candidateId,
     },
     integration: {

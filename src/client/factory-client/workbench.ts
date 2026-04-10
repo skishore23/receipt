@@ -111,11 +111,6 @@ export const initFactoryWorkbenchBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
-  const workbenchHeader = () => {
-    const node = document.getElementById("factory-workbench-header");
-    return node instanceof HTMLElement ? node : null;
-  };
-
   const chatContainer = () => {
     const node = document.getElementById("factory-workbench-chat");
     return node instanceof HTMLElement ? node : null;

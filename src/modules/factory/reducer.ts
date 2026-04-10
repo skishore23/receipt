@@ -16,8 +16,44 @@ import type {
   FactoryState,
   FactoryTaskRecord,
   FactoryTaskStatus,
+  FactoryWaitRecord,
   FactoryWorkflowStatus,
 } from "./types";
+
+const waitForEvidence = (since: number): FactoryWaitRecord => ({
+  kind: "evidence",
+  owner: "task",
+  reason: "Waiting for evidence collection to finish.",
+  since,
+  wakeCondition: "evidence_captured",
+});
+
+const waitForSynthesisDispatch = (since: number, reason?: string): FactoryWaitRecord => ({
+  kind: "synthesis_dispatch",
+  owner: "controller",
+  reason: reason?.trim() || "Waiting for the controller to dispatch the synthesize-only pass.",
+  since,
+  wakeCondition: "synthesis_dispatched",
+});
+
+const waitForControlPass = (since: number, reason: string): FactoryWaitRecord => ({
+  kind: "control_reconcile",
+  owner: "controller",
+  reason,
+  since,
+  wakeCondition: "control_pass",
+});
+
+const waitForSlot = (since: number): FactoryWaitRecord => ({
+  kind: "slot",
+  owner: "controller",
+  reason: "Waiting for a repo execution slot.",
+  since,
+  wakeCondition: "slot_admitted",
+});
+
+const objectiveStatusForTaskPhase = (_phase: FactoryTaskRecord["executionPhase"]): FactoryState["status"] =>
+  "executing";
 
 const updateTask = (
   state: FactoryState,
@@ -185,6 +221,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     case "objective.slot.queued":
       return {
         ...state,
+        status: "waiting_for_slot",
+        wait: waitForSlot(event.queuedAt),
         updatedAt: event.queuedAt,
         scheduler: {
           slotState: "queued",
@@ -192,11 +230,16 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           admittedAt: state.scheduler.admittedAt,
           releasedAt: state.scheduler.releasedAt,
           releaseReason: state.scheduler.releaseReason,
+          controlWakeRequestedAt: state.scheduler.controlWakeRequestedAt,
+          controlWakeReason: state.scheduler.controlWakeReason,
+          controlWakeConsumedAt: state.scheduler.controlWakeConsumedAt,
         },
       };
     case "objective.slot.admitted":
       return {
         ...state,
+        status: state.status === "waiting_for_slot" ? "planning" : state.status,
+        wait: state.wait?.kind === "slot" ? undefined : state.wait,
         updatedAt: event.admittedAt,
         scheduler: {
           slotState: "active",
@@ -204,11 +247,15 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           admittedAt: event.admittedAt,
           releasedAt: undefined,
           releaseReason: undefined,
+          controlWakeRequestedAt: state.scheduler.controlWakeRequestedAt,
+          controlWakeReason: state.scheduler.controlWakeReason,
+          controlWakeConsumedAt: state.scheduler.controlWakeConsumedAt,
         },
       };
     case "objective.slot.released":
       return {
         ...state,
+        wait: state.wait?.kind === "slot" ? undefined : state.wait,
         updatedAt: event.releasedAt,
         scheduler: {
           slotState: state.scheduler.slotState,
@@ -216,6 +263,31 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           admittedAt: state.scheduler.admittedAt,
           releasedAt: event.releasedAt,
           releaseReason: event.reason,
+          controlWakeRequestedAt: state.scheduler.controlWakeRequestedAt,
+          controlWakeReason: state.scheduler.controlWakeReason,
+          controlWakeConsumedAt: state.scheduler.controlWakeConsumedAt,
+        },
+      };
+    case "objective.control.wake.requested":
+      return {
+        ...state,
+        wait: waitForControlPass(event.requestedAt, event.reason),
+        updatedAt: event.requestedAt,
+        scheduler: {
+          ...state.scheduler,
+          controlWakeRequestedAt: event.requestedAt,
+          controlWakeReason: event.reason,
+        },
+      };
+    case "objective.control.wake.consumed":
+      return {
+        ...state,
+        wait: state.wait?.kind === "control_reconcile" ? undefined : state.wait,
+        updatedAt: event.consumedAt,
+        scheduler: {
+          ...state.scheduler,
+          controlWakeReason: event.reason,
+          controlWakeConsumedAt: event.consumedAt,
         },
       };
     case "task.added": {
@@ -239,9 +311,15 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...setWorkflowStatus(updateTask(state, event.taskId, {
           status: "ready",
+          executionPhase: undefined,
+          wait: undefined,
           readyAt: event.readyAt,
+          executionPhaseUpdatedAt: undefined,
+          evidenceReadyAt: undefined,
+          synthesizingAt: undefined,
         }), event.readyAt),
-        status: state.status === "blocked" ? "planning" : state.status,
+        status: state.status === "blocked" || state.status === "waiting_for_slot" ? "planning" : state.status,
+        wait: undefined,
         blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
         latestHandoff: undefined,
       };
@@ -250,6 +328,10 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       currentActive.add(event.taskId);
       let next = updateTask(state, event.taskId, {
         status: "running",
+        executionPhase: event.taskPhase,
+        wait: event.taskPhase === "collecting_evidence"
+          ? waitForEvidence(event.startedAt)
+          : undefined,
         candidateId: event.candidateId,
         jobId: event.jobId,
         workspaceId: event.workspaceId,
@@ -257,6 +339,9 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         skillBundlePaths: event.skillBundlePaths,
         contextRefs: event.contextRefs,
         startedAt: event.startedAt,
+        executionPhaseUpdatedAt: event.startedAt,
+        evidenceReadyAt: undefined,
+        synthesizingAt: undefined,
       });
       next = updateCandidate(next, event.candidateId, {
         status: "running",
@@ -264,28 +349,77 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       });
       return {
         ...setActiveTaskIds(next, [...currentActive], event.startedAt),
-        status: "executing",
+        status: objectiveStatusForTaskPhase(event.taskPhase),
+        wait: event.taskPhase === "collecting_evidence"
+          ? waitForEvidence(event.startedAt)
+          : undefined,
         blockedReason: undefined,
         latestHandoff: undefined,
         taskRunsUsed: state.taskRunsUsed + 1,
         lastDispatchAt: event.startedAt,
       };
     }
-    case "task.intervention.applied":
+    case "task.phase.transitioned": {
+      const current = state.workflow.tasksById[event.taskId];
+      if (!current || current.candidateId !== event.candidateId) {
+        return {
+          ...state,
+          updatedAt: event.changedAt,
+        };
+      }
       return {
         ...updateTask(state, event.taskId, {
-          latestTraceSummary: event.guidance,
+          executionPhase: event.phase,
+          wait: event.wait ?? (event.phase === "evidence_ready"
+            ? waitForSynthesisDispatch(event.changedAt, event.reason)
+            : undefined),
+          executionPhaseUpdatedAt: event.changedAt,
+          evidenceReadyAt: event.phase === "evidence_ready" || event.phase === "synthesizing"
+            ? current.evidenceReadyAt ?? event.changedAt
+            : current.evidenceReadyAt,
+          synthesizingAt: event.phase === "synthesizing"
+            ? current.synthesizingAt ?? event.changedAt
+            : current.synthesizingAt,
+          latestTraceSummary: event.reason ?? current.latestTraceSummary,
         }),
-        latestSummary: event.guidance,
-        updatedAt: event.appliedAt,
+        status: objectiveStatusForTaskPhase(event.phase),
+        wait: event.wait ?? (event.phase === "evidence_ready"
+          ? waitForSynthesisDispatch(event.changedAt, event.reason)
+          : undefined),
+        updatedAt: event.changedAt,
       };
-    case "task.intervention.restarted":
+    }
+    case "task.synthesis.dispatched":
       return {
         ...updateTask(state, event.taskId, {
-          latestTraceSummary: event.guidance,
+          latestTraceSummary: event.detail,
+          wait: undefined,
         }),
-        latestSummary: event.guidance,
-        updatedAt: event.restartedAt,
+        status: "synthesizing",
+        wait: undefined,
+        latestSummary: event.detail,
+        updatedAt: event.dispatchedAt,
+      };
+    case "task.synthesis.completed":
+      return {
+        ...updateTask(state, event.taskId, {
+          latestTraceSummary: event.summary,
+          wait: undefined,
+        }),
+        wait: undefined,
+        latestSummary: event.summary,
+        updatedAt: event.completedAt,
+      };
+    case "task.synthesis.blocked":
+      return {
+        ...updateTask(state, event.taskId, {
+          blockedReason: event.reason,
+          latestTraceSummary: event.reason,
+          wait: undefined,
+        }),
+        wait: undefined,
+        latestSummary: event.reason,
+        updatedAt: event.blockedAt,
       };
     case "worker.handoff":
       return event.taskId
@@ -320,6 +454,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     case "task.review.requested":
       return setActiveTaskIds(updateTask(state, event.taskId, {
         status: "reviewing",
+        wait: undefined,
         reviewingAt: event.reviewRequestedAt,
       }), state.workflow.activeTaskIds, event.reviewRequestedAt);
     case "task.approved": {
@@ -329,8 +464,10 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         ...setActiveTaskIds(updateTask(state, event.taskId, {
           status: "approved",
           latestSummary: event.summary,
+          wait: undefined,
           completedAt: event.approvedAt,
         }), active, event.approvedAt),
+        wait: undefined,
         latestSummary: event.summary,
         consecutiveFailuresByTask: remainingFailures,
       };
@@ -341,6 +478,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       let next = updateTask(state, event.taskId, {
         status: "integrated",
         latestSummary: event.summary,
+        wait: undefined,
         completedAt: event.integratedAt,
       });
       const candidate = latestTaskCandidate(next, event.taskId);
@@ -354,6 +492,8 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       }
       return {
         ...setActiveTaskIds(next, active, event.integratedAt),
+        status: "integrating",
+        wait: undefined,
         latestSummary: event.summary,
         consecutiveFailuresByTask: remainingFailures,
       };
@@ -364,6 +504,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       let next = updateTask(state, event.taskId, {
         status: "approved",
         latestSummary: event.summary,
+        wait: undefined,
         completedAt: event.completedAt,
       });
       next = updateCandidate(next, event.candidateId, {
@@ -374,6 +515,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       });
       return {
         ...setActiveTaskIds(next, active, event.completedAt),
+        wait: undefined,
         latestSummary: event.summary,
         consecutiveFailuresByTask: remainingFailures,
       };
@@ -386,6 +528,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       let next = updateTask(state, event.taskId, {
         status: "blocked",
         blockedReason: event.reason,
+        wait: undefined,
         completedAt: event.blockedAt,
       });
       const candidate = latestTaskCandidate(next, event.taskId);
@@ -398,6 +541,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       }
       return {
         ...setActiveTaskIds(next, active, event.blockedAt),
+        wait: undefined,
         latestSummary: event.reason,
         consecutiveFailuresByTask: wasDispatch
           ? { ...state.consecutiveFailuresByTask, [event.taskId]: prevFailures + 1 }
@@ -408,10 +552,16 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...setWorkflowStatus(updateTask(state, event.taskId, {
           status: "ready",
+          executionPhase: undefined,
+          wait: undefined,
           readyAt: event.readyAt,
           blockedReason: undefined,
+          executionPhaseUpdatedAt: undefined,
+          evidenceReadyAt: undefined,
+          synthesizingAt: undefined,
         }), event.readyAt),
-        status: state.status === "blocked" ? "planning" : state.status,
+        status: state.status === "blocked" || state.status === "waiting_for_slot" ? "planning" : state.status,
+        wait: undefined,
         blockedReason: state.status === "blocked" ? undefined : state.blockedReason,
         latestHandoff: undefined,
       };
@@ -485,11 +635,11 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     }
     case "investigation.reported": {
       const active = state.workflow.activeTaskIds.filter((taskId) => taskId !== event.taskId);
-      const taskStatus: FactoryTaskStatus = event.outcome === "approved"
-        ? "approved"
-        : "blocked";
+      const taskStatus: FactoryTaskStatus = event.outcome === "blocked"
+        ? "blocked"
+        : "approved";
       let next = updateCandidate(state, event.candidateId, {
-        status: event.outcome === "approved" ? "approved" : "changes_requested",
+        status: event.outcome === "blocked" ? "changes_requested" : "approved",
         summary: event.summary,
         handoff: event.handoff,
         presentation: event.presentation,
@@ -504,11 +654,13 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         candidateId: event.candidateId,
         latestSummary: event.summary,
         artifactRefs: event.artifactRefs,
+        wait: undefined,
         blockedReason: taskStatus === "blocked" ? event.handoff : undefined,
         completedAt: taskStatus === "approved" ? event.reportedAt : undefined,
       });
       return {
         ...setActiveTaskIds(next, active, event.reportedAt),
+        wait: undefined,
         latestSummary: event.summary,
         investigation: {
           reports: {
@@ -588,6 +740,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "integrating",
+        wait: undefined,
         updatedAt: event.queuedAt,
         integration: {
           ...state.integration,
@@ -603,6 +756,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "integrating",
+        wait: undefined,
         updatedAt: event.startedAt,
         integration: {
           ...state.integration,
@@ -615,6 +769,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "integrating",
+        wait: undefined,
         updatedAt: event.startedAt,
         integration: {
           ...state.integration,
@@ -627,6 +782,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "integrating",
+        wait: undefined,
         updatedAt: event.validatedAt,
         latestSummary: event.summary,
         integration: {
@@ -643,6 +799,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "promoting",
+        wait: undefined,
         updatedAt: event.readyAt,
         latestSummary: event.summary,
         integration: {
@@ -657,6 +814,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "promoting",
+        wait: undefined,
         updatedAt: event.startedAt,
         integration: {
           ...state.integration,
@@ -669,6 +827,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "completed",
+        wait: undefined,
         updatedAt: event.promotedAt,
         latestSummary: event.summary,
         blockedReason: undefined,
@@ -689,6 +848,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "integrating",
+        wait: undefined,
         updatedAt: event.conflictedAt,
         blockedReason: event.reason,
         integration: {
@@ -704,6 +864,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "completed",
+        wait: undefined,
         latestSummary: event.summary,
         blockedReason: undefined,
         updatedAt: event.completedAt,
@@ -717,6 +878,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "blocked",
+        wait: undefined,
         blockedReason: event.reason,
         latestSummary: event.summary,
         updatedAt: event.blockedAt,
@@ -730,6 +892,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "failed",
+        wait: undefined,
         blockedReason: event.reason,
         latestSummary: event.reason,
         updatedAt: event.failedAt,
@@ -743,6 +906,7 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
       return {
         ...state,
         status: "canceled",
+        wait: undefined,
         blockedReason: event.reason,
         latestSummary: event.reason ?? "canceled",
         updatedAt: event.canceledAt,
@@ -763,10 +927,20 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
         ...state,
         updatedAt: event.evaluatedAt,
       };
-    case "monitor.intervention":
+    case "monitor.recommendation":
       return {
         ...state,
-        updatedAt: event.interventionAt,
+        updatedAt: event.recommendedAt,
+      };
+    case "monitor.recommendation.consumed":
+      return {
+        ...state,
+        updatedAt: event.consumedAt,
+      };
+    case "monitor.recommendation.obsoleted":
+      return {
+        ...state,
+        updatedAt: event.obsoletedAt,
       };
     default: {
       const _never: never = event;

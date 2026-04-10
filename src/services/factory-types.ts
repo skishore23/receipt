@@ -21,6 +21,7 @@ import type {
   FactoryState,
   FactoryTaskAlignmentRecord,
   FactoryTaskExecutionMode,
+  FactoryTaskExecutionPhase,
   FactoryTaskCompletionRecord,
   FactoryTaskPresentationRecord,
   FactoryTaskRecord,
@@ -228,11 +229,15 @@ export type FactoryObjectiveDisplayState =
 
 export type FactoryObjectivePhaseDetail =
   | "draft"
-  | "queued"
-  | "executing"
+  | "waiting_for_slot"
+  | "waiting_for_control"
+  | "waiting_for_synthesis"
+  | "waiting_for_promotion"
+  | "collecting_evidence"
+  | "evidence_ready"
+  | "synthesizing"
   | "integrating"
   | "promoting"
-  | "reconciling"
   | "cleaning_up"
   | "awaiting_review"
   | "stalled"
@@ -244,7 +249,6 @@ export type FactoryObjectivePhaseDetail =
 
 export type FactoryObjectiveStatusAuthority =
   | "objective"
-  | "live_execution"
   | "reconcile"
   | "cleanup";
 
@@ -408,6 +412,7 @@ export type FactoryEvidenceContent = {
 export type FactoryLiveOutputHandoffPhase =
   | "active"
   | "evidence_ready"
+  | "synthesizing"
   | "terminal_no_evidence";
 
 export type FactoryLiveOutputSnapshot = {
@@ -490,8 +495,10 @@ export type FactoryDebugProjection = {
 
 export type FactoryTaskJobPayload = {
   readonly kind: "factory.task.run";
+  readonly jobId: string;
   readonly objectiveId: string;
   readonly taskId: string;
+  readonly taskPhase: FactoryTaskExecutionPhase;
   readonly workerType: FactoryWorkerType;
   readonly objectiveMode: FactoryObjectiveMode;
   readonly severity: FactoryObjectiveSeverity;
@@ -521,6 +528,7 @@ export type FactoryTaskJobPayload = {
   readonly contextRefs: ReadonlyArray<GraphRef>;
   readonly integrationRef?: GraphRef;
   readonly problem: string;
+  readonly controllerGuidance?: string;
   readonly config: Readonly<Record<string, unknown>>;
 };
 

@@ -1,0 +1,17 @@
+{
+  "id": "aws_internet_exposure_inventory",
+  "version": "1.0.0",
+  "provider": "aws",
+  "tags": ["internet", "exposure", "public", "security", "alb", "nlb", "elb", "security-group", "eni", "rds", "s3", "inventory", "network"],
+  "description": "Inventory common AWS internet-facing and public exposure surfaces across the active account.",
+  "entrypoint": "run.py",
+  "requiredArgs": [],
+  "requiredContext": [
+    "Use the mounted AWS profile and account context from the worker packet.",
+    "For broad exposure questions, prefer this helper before composing custom inventory scripts."
+  ],
+  "examples": [
+    "--profile default --all-regions --output-dir .receipt/factory/evidence",
+    "--profile default --regions us-east-1,us-west-2 --output-dir .receipt/factory/evidence"
+  ]
+}

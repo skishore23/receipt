@@ -52,11 +52,11 @@ type InvestigationEfficiency = "efficient" | "noisy" | "churn-heavy";
 type InvestigationValidationSignal = "done" | "skipped" | "not-requested";
 
 type InvestigationInterventions = {
-  readonly count: number;
-  readonly restartCount: number;
-  readonly operatorGuidanceApplied: boolean;
-  readonly courseCorrectionWorked: boolean;
-  readonly latestGuidance?: string;
+  readonly recommendationCount: number;
+  readonly synthesisDispatchCount: number;
+  readonly recommendationApplied: boolean;
+  readonly controllerCorrectionWorked: boolean;
+  readonly latestRecommendation?: string;
   readonly timeline: ReadonlyArray<string>;
 };
 
@@ -69,8 +69,8 @@ type InvestigationRunAssessment = {
   readonly alignmentVerdict: "aligned" | "uncertain" | "drifted" | "not_reported";
   readonly correctiveSteerIssued: boolean;
   readonly alignedAfterCorrection: boolean;
-  readonly operatorGuidanceApplied: boolean;
-  readonly courseCorrectionWorked: boolean;
+  readonly recommendationApplied: boolean;
+  readonly controllerCorrectionWorked: boolean;
   readonly proofPresent: boolean;
   readonly repoDiffProduced: boolean;
   readonly followUpValidation: InvestigationValidationSignal;
@@ -372,18 +372,18 @@ const summarizeContextPack = async (taskRun: InvestigationFocusTaskRun | undefin
 
 const buildInterventions = (
   parsed: FactoryParsedRun,
-): Omit<InvestigationInterventions, "courseCorrectionWorked"> => {
+): Omit<InvestigationInterventions, "controllerCorrectionWorked"> => {
   const interventionTimeline = parsed.timeline
-    .filter((item) => item.type === "task.intervention.applied" || item.type === "task.intervention.restarted")
+    .filter((item) => item.type === "monitor.recommendation" || item.type === "task.synthesis.dispatched")
     .map((item) => `${item.type}: ${truncateInline(item.summary, 220) ?? item.summary}`);
-  const applied = parsed.timeline.filter((item) => item.type === "task.intervention.applied");
-  const restarted = parsed.timeline.filter((item) => item.type === "task.intervention.restarted");
-  const latestGuidance = interventionTimeline.at(-1);
+  const recommendations = parsed.timeline.filter((item) => item.type === "monitor.recommendation");
+  const synthesisDispatches = parsed.timeline.filter((item) => item.type === "task.synthesis.dispatched");
+  const latestRecommendation = interventionTimeline.at(-1);
   return {
-    count: applied.length,
-    restartCount: restarted.length,
-    operatorGuidanceApplied: applied.length > 0,
-    latestGuidance,
+    recommendationCount: recommendations.length,
+    synthesisDispatchCount: synthesisDispatches.length,
+    recommendationApplied: recommendations.length > 0,
+    latestRecommendation,
     timeline: interventionTimeline,
   };
 };
@@ -392,7 +392,7 @@ const buildAssessment = (
   parsed: FactoryParsedRun,
   packetContext: InvestigationPacketContext | undefined,
   focusTaskRun: InvestigationFocusTaskRun | undefined,
-  interventions: Omit<InvestigationInterventions, "courseCorrectionWorked">,
+  interventions: Omit<InvestigationInterventions, "controllerCorrectionWorked">,
 ): InvestigationRunAssessment => {
   const analysis = parsed.objectiveAnalysis;
   const result = asRecord(parsed.outputs.result);
@@ -417,6 +417,8 @@ const buildAssessment = (
   const workspaceCollisionCount = analysis?.anomalies.filter((item) => /workspace (branch|path) already exists/i.test(item.summary)).length ?? 0;
   const success = parsed.summary.status === "completed";
   const blocked = parsed.summary.status === "blocked" || parsed.summary.status === "failed" || parsed.summary.status === "canceled";
+  const terminal = success || blocked;
+  const inFlight = !terminal;
   const objectiveMode = analysis?.objectiveMode ?? "unknown";
   const proofPresent = proof.length > 0;
   const repoDiffProduced = changed.length > 0;
@@ -442,7 +444,7 @@ const buildAssessment = (
   const normalizedRequiredChecks = requiredChecks.map((item) => item.toLowerCase());
   const validationRequested = normalizedRequiredChecks.length > 0
     || parsed.timeline.some((item) =>
-      (item.type === "task.intervention.applied" || item.type === "objective.operator.noted")
+      (item.type === "monitor.recommendation" || item.type === "objective.operator.noted")
       && VALIDATION_KEYWORD_RE.test(item.summary));
   const validationCommandMatched = normalizedRequiredChecks.some((check) =>
     normalizedValidationCommands.some((signal) => signal.includes(check)));
@@ -500,8 +502,13 @@ const buildAssessment = (
     easyRouteScore = Math.max(0, easyRouteScore - 1);
     notes.push(`Captured ${scriptCount + commandCount} execution signal(s), ${evidenceCount} evidence item(s), and ${helperCount} helper hint(s).`);
   }
-  if (interventions.operatorGuidanceApplied) {
-    notes.push(`Live operator guidance was applied ${interventions.count} time(s) with ${interventions.restartCount} restart(s).`);
+  if (interventions.recommendationApplied) {
+    notes.push(
+      `Controller-consumed monitor recommendations were recorded ${interventions.recommendationCount} time(s); synthesis was dispatched ${interventions.synthesisDispatchCount} time(s).`,
+    );
+  }
+  if (inFlight) {
+    notes.push(`Objective is still ${parsed.summary.status}, so this assessment is provisional rather than a final quality verdict.`);
   }
   if (contractCriteriaCount > 0) {
     notes.push(`Objective contract carried ${contractCriteriaCount} acceptance criteria into the worker packet.`);
@@ -523,11 +530,13 @@ const buildAssessment = (
 
   const controlChurn: InvestigationAssessmentLevel =
     controlJobs >= 20 ? "high" : controlJobs >= 6 ? "medium" : "low";
+  const synthesisLoop = inFlight && interventions.synthesisDispatchCount > 1;
+  const severeSynthesisLoop = inFlight && interventions.synthesisDispatchCount >= 3;
 
   const efficiency: InvestigationEfficiency =
-    stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
+    severeSynthesisLoop || stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
       ? "churn-heavy"
-      : controlJobs >= 6 || failedJobs >= 2 || leaseExpiredCount > 0 || budgetExceededCount > 0
+      : synthesisLoop || controlJobs >= 6 || failedJobs >= 2 || leaseExpiredCount > 0 || budgetExceededCount > 0
         ? "noisy"
         : "efficient";
 
@@ -549,6 +558,11 @@ const buildAssessment = (
   if (workspaceCollisionCount > 0) {
     notes.push(`Workspace collisions surfaced ${workspaceCollisionCount} time(s).`);
   }
+  if (synthesisLoop) {
+    notes.push(severeSynthesisLoop
+      ? "Repeated synthesis dispatches occurred without terminal completion; the runtime is churning after controller takeover."
+      : "A synthesis dispatch was required before the run reached terminal completion.");
+  }
   if (followUpValidation === "done") {
     notes.push("Validation evidence was captured after the worker change.");
   } else if (followUpValidation === "skipped") {
@@ -556,16 +570,16 @@ const buildAssessment = (
   }
 
   const verdict: InvestigationAssessmentVerdict =
-    blocked || stalledJobs > 0 || easyRouteRisk === "high" || efficiency === "churn-heavy" || alignmentVerdict === "drifted"
+    blocked || severeSynthesisLoop || stalledJobs > 0 || easyRouteRisk === "high" || efficiency === "churn-heavy" || alignmentVerdict === "drifted"
       ? "weak"
-      : easyRouteRisk === "medium" || efficiency === "noisy" || dbLockedCount > 0 || workspaceCollisionCount > 0 || alignmentVerdict === "uncertain"
+      : inFlight || synthesisLoop || easyRouteRisk === "medium" || efficiency === "noisy" || dbLockedCount > 0 || workspaceCollisionCount > 0 || alignmentVerdict === "uncertain"
         ? "mixed"
         : "strong";
   const primaryOutcomeCaptured = objectiveMode === "delivery"
     ? repoDiffProduced
     : repoDiffProduced || evidenceCount > 0 || scriptCount > 0 || commandCount > 0;
   const alignmentSatisfiedForObjective = objectiveMode !== "delivery" || alignmentVerdict === "aligned";
-  const courseCorrectionWorked = (interventions.operatorGuidanceApplied || correctiveSteerIssued)
+  const controllerCorrectionWorked = (interventions.recommendationApplied || correctiveSteerIssued)
     && success
     && primaryOutcomeCaptured
     && proofPresent
@@ -581,12 +595,12 @@ const buildAssessment = (
     alignmentVerdict,
     correctiveSteerIssued,
     alignedAfterCorrection,
-    operatorGuidanceApplied: interventions.operatorGuidanceApplied,
-    courseCorrectionWorked,
+    recommendationApplied: interventions.recommendationApplied,
+    controllerCorrectionWorked,
     proofPresent,
     repoDiffProduced,
     followUpValidation,
-    interventionRequired: interventions.operatorGuidanceApplied || correctiveSteerIssued,
+    interventionRequired: interventions.recommendationApplied || correctiveSteerIssued,
     notes: uniqueStrings(notes),
   };
 };
@@ -594,7 +608,7 @@ const buildAssessment = (
 const buildWhatHappened = (
   parsed: FactoryParsedRun,
   packetContext: InvestigationPacketContext | undefined,
-  interventions: Omit<InvestigationInterventions, "courseCorrectionWorked">,
+  interventions: Omit<InvestigationInterventions, "controllerCorrectionWorked">,
 ): ReadonlyArray<string> => {
   const analysis = parsed.objectiveAnalysis;
   const bullets: string[] = [];
@@ -634,8 +648,10 @@ const buildWhatHappened = (
       );
     }
   }
-  if (interventions.count > 0 || interventions.restartCount > 0) {
-    bullets.push(`Live operator guidance was applied ${interventions.count} time(s) and restarted the worker ${interventions.restartCount} time(s).`);
+  if (interventions.recommendationCount > 0 || interventions.synthesisDispatchCount > 0) {
+    bullets.push(
+      `Monitor recommendations were recorded ${interventions.recommendationCount} time(s); synthesis was dispatched ${interventions.synthesisDispatchCount} time(s).`,
+    );
   }
   if (packetContext?.alignmentVerdict) {
     bullets.push(`Latest worker alignment verdict: ${packetContext.alignmentVerdict}.`);
@@ -713,7 +729,7 @@ export const readFactoryReceiptInvestigation = async (
     autoFixObjectiveId: persistedAudit?.autoFixObjectiveId,
     interventions: {
       ...interventionSignals,
-      courseCorrectionWorked: assessment.courseCorrectionWorked,
+      controllerCorrectionWorked: assessment.controllerCorrectionWorked,
     },
     assessment,
   };
@@ -782,18 +798,18 @@ export const renderFactoryReceiptInvestigationText = (
     `Proof present: ${report.assessment.proofPresent ? "yes" : "no"}`,
     `Repo diff produced: ${report.assessment.repoDiffProduced ? "yes" : "no"}`,
     `Follow-up validation: ${report.assessment.followUpValidation}`,
-    `Operator guidance applied: ${report.assessment.operatorGuidanceApplied ? "yes" : "no"}`,
-    `Course correction worked: ${report.assessment.courseCorrectionWorked ? "yes" : "no"}`,
+    `Recommendation applied: ${report.assessment.recommendationApplied ? "yes" : "no"}`,
+    `Controller correction worked: ${report.assessment.controllerCorrectionWorked ? "yes" : "no"}`,
     ...(report.assessment.notes.length > 0
       ? report.assessment.notes.map((item) => `- ${truncateInline(item, 240) ?? item}`)
       : ["- No additional assessment notes."]),
     "",
     "## Interventions",
-    `Applied: ${report.interventions.count}`,
-    `Restarts: ${report.interventions.restartCount}`,
-    `Operator guidance applied: ${report.interventions.operatorGuidanceApplied ? "yes" : "no"}`,
-    `Course correction worked: ${report.interventions.courseCorrectionWorked ? "yes" : "no"}`,
-    report.interventions.latestGuidance ? `Latest guidance: ${truncateInline(report.interventions.latestGuidance, 240) ?? report.interventions.latestGuidance}` : undefined,
+    `Recommendations: ${report.interventions.recommendationCount}`,
+    `Synthesis dispatches: ${report.interventions.synthesisDispatchCount}`,
+    `Recommendation applied: ${report.interventions.recommendationApplied ? "yes" : "no"}`,
+    `Controller correction worked: ${report.interventions.controllerCorrectionWorked ? "yes" : "no"}`,
+    report.interventions.latestRecommendation ? `Latest recommendation: ${truncateInline(report.interventions.latestRecommendation, 240) ?? report.interventions.latestRecommendation}` : undefined,
     ...(report.interventions.timeline.length > 0
       ? report.interventions.timeline.map((item) => `- ${item}`)
       : ["- none"]),

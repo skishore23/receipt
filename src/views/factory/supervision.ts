@@ -63,8 +63,11 @@ export const displayStateForObjectiveStatus = (
 ): FactoryDisplayState => {
   switch (status) {
     case "planning":
-      return "Running";
     case "executing":
+    case "waiting_for_slot":
+    case "collecting_evidence":
+    case "evidence_ready":
+    case "synthesizing":
     case "integrating":
     case "promoting":
       return "Running";
@@ -76,6 +79,8 @@ export const displayStateForObjectiveStatus = (
       return "Failed";
     case "canceled":
       return "Canceled";
+    default:
+      return "Running";
   }
 };
 
@@ -358,7 +363,7 @@ export const buildEngineerPerspectiveOverview = (input: {
           ? `I've completed the main pass on "${objective.title}" and I'm ready for review. ${bottomLine ?? ""}`.trim()
           : displayState === "Failed" || displayState === "Canceled"
             ? `I had to stop "${objective.title}". ${bottomLine ?? "The current run is stopped and needs a follow-up decision."}`
-            : phaseDetail === "reconciling"
+            : phaseDetail === "waiting_for_control"
               ? `I'm reconciling "${objective.title}" after a worker handoff. ${bottomLine ?? "The controller is deciding the next step."}`
               : phaseDetail === "cleaning_up"
                 ? `I'm closing out "${objective.title}". ${bottomLine ?? "The result is terminal and the controller is retiring leftover jobs."}`
@@ -373,7 +378,7 @@ export const buildEngineerPerspectiveOverview = (input: {
           ? "I need you to review the stalled execution, react with guidance, or cancel the current pass."
         : displayState === "Completed" || displayState === "Archived"
           ? "I can take a follow-up objective or help you review the result."
-          : phaseDetail === "reconciling"
+          : phaseDetail === "waiting_for_control"
             ? "I need the controller reconcile pass to finish before I know whether to resume or stop."
           : "I can keep going without interruption unless you want to change direction.";
   const operating = `I'm operating as ${input.role ?? input.engineerLabel}. Current status: ${input.status}. Current load: ${input.load}.`;

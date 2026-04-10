@@ -88,6 +88,7 @@ import {
   loadFactoryHelperCatalog,
   runFactoryHelper,
 } from "../../services/factory-helper-catalog";
+import { resolveFactoryChatProfile } from "../../services/factory-chat-profiles";
 import type { FactoryCloudProvider } from "../../services/factory-cloud-context";
 import { readObjectiveReplaySnapshot } from "../../services/factory/objective-replay";
 
@@ -155,6 +156,24 @@ const parseChecksInput = (value: string): string[] =>
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean);
+
+const resolveObjectiveChecks = async (input: {
+  readonly repoRoot: string;
+  readonly profileRoot: string;
+  readonly profileId?: string;
+  readonly explicitChecks: ReadonlyArray<string>;
+  readonly fallbackChecks: ReadonlyArray<string>;
+}): Promise<ReadonlyArray<string> | undefined> => {
+  if (input.explicitChecks.length > 0) return input.explicitChecks;
+  const profile = await resolveFactoryChatProfile({
+    repoRoot: input.repoRoot,
+    profileRoot: input.profileRoot,
+    requestedId: input.profileId,
+  });
+  return profile.objectivePolicy.defaultValidationMode === "none"
+    ? undefined
+    : input.fallbackChecks;
+};
 
 const parseObjectiveModeFlag = (
   flags: Flags,
@@ -1379,21 +1398,29 @@ export const handleFactoryCommand = async (
         const explicitChecks = asStrings(flags, "check").flatMap(
           parseChecksInput,
         );
+        const profileId = asString(flags, "profile");
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
         );
         await runtime.start();
+        const checks = await resolveObjectiveChecks({
+          repoRoot: config.repoRoot,
+          profileRoot: runtime.service.profileRoot,
+          profileId,
+          explicitChecks,
+          fallbackChecks: config.defaultChecks,
+        });
         const created = await createObjectiveMutation(runtime, {
           prompt,
           title: asString(flags, "title"),
           baseHash: asString(flags, "base-hash"),
           objectiveMode,
           severity,
-          checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          checks,
           channel: asString(flags, "channel"),
           policy: policyOverride,
-          profileId: asString(flags, "profile"),
+          profileId,
         });
         if (json || !isInteractiveTerminal()) {
           const result = await waitForObjectiveTerminal(
@@ -1436,20 +1463,28 @@ export const handleFactoryCommand = async (
         const explicitChecks = asStrings(flags, "check").flatMap(
           parseChecksInput,
         );
+        const profileId = asString(flags, "profile");
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
         );
+        const checks = await resolveObjectiveChecks({
+          repoRoot: config.repoRoot,
+          profileRoot: runtime.service.profileRoot,
+          profileId,
+          explicitChecks,
+          fallbackChecks: config.defaultChecks,
+        });
         const result = await createObjectiveMutation(runtime, {
           prompt,
           title: asString(flags, "title"),
           baseHash: asString(flags, "base-hash"),
           objectiveMode,
           severity,
-          checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          checks,
           channel: asString(flags, "channel"),
           policy: policyOverride,
-          profileId: asString(flags, "profile"),
+          profileId,
         });
         await printMutationResult(result, json);
         return;
@@ -1466,10 +1501,18 @@ export const handleFactoryCommand = async (
         const explicitChecks = asStrings(flags, "check").flatMap(
           parseChecksInput,
         );
+        const profileId = asString(flags, "profile");
         const policyOverride = mergePolicy(
           config.defaultPolicy,
           await readPolicyFile(asString(flags, "policy-file")),
         );
+        const checks = await resolveObjectiveChecks({
+          repoRoot: config.repoRoot,
+          profileRoot: runtime.service.profileRoot,
+          profileId,
+          explicitChecks,
+          fallbackChecks: config.defaultChecks,
+        });
         const result = await composeObjectiveMutation(runtime, {
           prompt,
           objectiveId: asString(flags, "objective"),
@@ -1477,10 +1520,10 @@ export const handleFactoryCommand = async (
           baseHash: asString(flags, "base-hash"),
           objectiveMode,
           severity,
-          checks: explicitChecks.length ? explicitChecks : config.defaultChecks,
+          checks,
           channel: asString(flags, "channel"),
           policy: policyOverride,
-          profileId: asString(flags, "profile"),
+          profileId,
         });
         await printMutationResult(result, json);
         return;

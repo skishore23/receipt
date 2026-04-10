@@ -21,8 +21,10 @@ import type {
   FactoryState,
   FactoryTaskPresentationRecord,
   FactoryTaskExecutionMode,
+  FactoryTaskExecutionPhase,
   FactoryTaskRecord,
   FactoryTaskStatus,
+  FactoryWaitRecord,
   FactoryWorkerType,
   FactoryWorkflowStatus,
 } from "./types";
@@ -47,6 +49,11 @@ const normalizeDispatchActionList = (value: unknown): ReadonlyArray<FactoryProfi
 
 const normalizeTaskExecutionMode = (value: unknown): FactoryTaskExecutionMode =>
   value === "isolated" ? "isolated" : "worktree";
+
+const normalizeTaskExecutionPhase = (value: unknown): FactoryTaskExecutionPhase | undefined =>
+  value === "collecting_evidence" || value === "evidence_ready" || value === "synthesizing"
+    ? value
+    : undefined;
 
 const normalizeProfileCloudProvider = (value: unknown): FactoryProfileCloudProvider | undefined =>
   value === "aws" || value === "gcp" || value === "azure"
@@ -131,6 +138,41 @@ const normalizeIntegration = (value: unknown, updatedAt: number): FactoryIntegra
 
 const normalizeScheduler = (value: unknown): FactorySchedulerRecord =>
   isRecord(value) ? value as FactorySchedulerRecord : {};
+
+const normalizeWaitRecord = (value: unknown): FactoryWaitRecord | undefined => {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind === "slot"
+    || value.kind === "control_reconcile"
+    || value.kind === "evidence"
+    || value.kind === "synthesis_dispatch"
+    || value.kind === "promotion"
+    ? value.kind
+    : undefined;
+  const owner = value.owner === "controller" || value.owner === "task" || value.owner === "integration"
+    ? value.owner
+    : undefined;
+  const wakeCondition = value.wakeCondition === "slot_admitted"
+    || value.wakeCondition === "control_pass"
+    || value.wakeCondition === "evidence_captured"
+    || value.wakeCondition === "synthesis_dispatched"
+    || value.wakeCondition === "promotion_finished"
+    ? value.wakeCondition
+    : undefined;
+  const reason = typeof value.reason === "string" && value.reason.trim().length > 0
+    ? value.reason.trim()
+    : undefined;
+  const since = typeof value.since === "number" && Number.isFinite(value.since)
+    ? value.since
+    : undefined;
+  if (!kind || !owner || !wakeCondition || !reason || since === undefined) return undefined;
+  return {
+    kind,
+    owner,
+    wakeCondition,
+    reason,
+    since,
+  };
+};
 
 const normalizeTaskPresentation = (value: unknown): FactoryTaskPresentationRecord | undefined => {
   if (!isRecord(value)) return undefined;
@@ -274,7 +316,9 @@ export const normalizeTaskRecord = (
   defaultExecutionMode: FactoryTaskExecutionMode,
 ): FactoryTaskRecord => ({
   ...task,
+  wait: normalizeWaitRecord(task.wait),
   executionMode: normalizeTaskExecutionMode(task.executionMode ?? defaultExecutionMode),
+  executionPhase: normalizeTaskExecutionPhase(task.executionPhase),
 });
 
 export const normalizeFactoryObjectiveProfileSnapshot = (value: unknown): FactoryObjectiveProfileSnapshot => {
@@ -417,6 +461,7 @@ export const normalizeFactoryState = (state: FactoryState): FactoryState => {
     ...initialFactoryState,
     ...state,
     profile,
+    wait: normalizeWaitRecord(state.wait),
     candidates,
     candidateOrder,
     workflow: {

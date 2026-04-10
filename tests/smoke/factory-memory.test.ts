@@ -363,9 +363,10 @@ test("factory worker packets expose a layered memory script for bounded recall a
   const promptBody = await fs.readFile(payload.promptPath, "utf-8");
   expect(promptBody).toMatch(/The prompt is bootstrap only\./);
   expect(promptBody).toMatch(/AGENTS\.md and skills\/factory-receipt-worker\/SKILL\.md/);
-  expect(promptBody).toMatch(/Follow the checked-in worker bootstrap order: manifest, context pack, then memory script\./);
-  expect(promptBody).toMatch(/Context Pack:/);
-  expect(promptBody).toMatch(/Task Context Summary \(quick overview derived from the packet\):/);
+  expect(promptBody).toMatch(/Start with the task context summary\./);
+  expect(promptBody).toMatch(/Do not reread the full bootstrap stack unless that summary leaves an exact field, path, or contradiction unresolved\./);
+  expect(promptBody).toMatch(/Context Pack \(exact fields, refs, and artifact paths only when needed\):/);
+  expect(promptBody).toMatch(/Task Context Summary \(controller-precomputed bootstrap digest\):/);
   expect(promptBody).toMatch(new RegExp(payload.manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(new RegExp(String(payload.contextSummaryPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   expect(promptBody).toMatch(new RegExp(payload.contextPackPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

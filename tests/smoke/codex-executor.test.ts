@@ -888,6 +888,10 @@ test("local codex executor passes output schema and reasoning effort through to 
 test("local codex executor can isolate CODEX_HOME while preserving auth/config files", async () => {
   const root = await mkTmp("receipt-codex-executor-isolated-home-workspace");
   const sourceCodexHome = await mkTmp("receipt-codex-home-source");
+  const repoSkillsRoot = path.join(root, "skills");
+  await fs.mkdir(path.join(repoSkillsRoot, "factory-receipt-worker", "references"), { recursive: true });
+  await fs.writeFile(path.join(repoSkillsRoot, "factory-receipt-worker", "SKILL.md"), "# worker\n", "utf-8");
+  await fs.writeFile(path.join(repoSkillsRoot, "factory-receipt-worker", "references", "memory-scopes.md"), "memory\n", "utf-8");
   await fs.writeFile(path.join(sourceCodexHome, "auth.json"), "{\"token\":\"test\"}\n", "utf-8");
   await fs.writeFile(path.join(sourceCodexHome, "config.toml"), "model = \"gpt-5.4\"\n", "utf-8");
   await fs.mkdir(path.join(sourceCodexHome, "skills", "unwanted"), { recursive: true });
@@ -904,7 +908,9 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
     "if (!codexHome) throw new Error('missing CODEX_HOME');",
     "if (!fs.existsSync(path.join(codexHome, 'auth.json'))) throw new Error('missing auth.json');",
     "if (!fs.existsSync(path.join(codexHome, 'config.toml'))) throw new Error('missing config.toml');",
-    "if (fs.existsSync(path.join(codexHome, 'skills'))) throw new Error('skills directory should be absent');",
+    "if (!fs.existsSync(path.join(codexHome, 'skills', 'factory-receipt-worker', 'SKILL.md'))) throw new Error('missing repo skill copy');",
+    "if (!fs.existsSync(path.join(codexHome, 'skills', '.system', 'factory-receipt-worker', 'SKILL.md'))) throw new Error('missing repo skill alias');",
+    "if (fs.existsSync(path.join(codexHome, 'skills', 'unwanted'))) throw new Error('unexpected source home skills copied');",
     "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'isolated', handoff: 'ok' }), 'utf8');",
     "process.stdout.write('isolated-home-ok');",
   ].join("\n");
@@ -935,6 +941,7 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
     isolateCodexHome: true,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
+    repoSkillPaths: [path.join(repoSkillsRoot, "factory-receipt-worker", "SKILL.md")],
   });
 
   expect(result.exitCode).toBe(0);

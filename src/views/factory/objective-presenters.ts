@@ -1,4 +1,4 @@
-import { buildFactoryProjection, type FactoryState } from "../../modules/factory";
+import { buildFactoryProjection, type FactoryObjectivePhase, type FactoryState } from "../../modules/factory";
 import type {
   FactoryObjectiveCard,
   FactoryObjectiveDetail,
@@ -43,6 +43,23 @@ const latestCommitHashForState = (state: FactoryState): string | undefined => {
   const projection = buildFactoryProjection(state);
   const latestCandidate = projection.candidates.at(-1);
   return state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit;
+};
+
+const phaseForStateCard = (
+  state: FactoryState,
+  phaseDetail: FactorySelectedObjectiveCard["phaseDetail"],
+): FactoryObjectivePhase => {
+  if (state.status === "collecting_evidence" || state.status === "evidence_ready" || state.status === "synthesizing") {
+    return state.status;
+  }
+  if (state.status === "waiting_for_slot" || state.scheduler.slotState === "queued") return "waiting_for_slot";
+  if (phaseDetail === "waiting_for_synthesis") return "evidence_ready";
+  if (phaseDetail === "waiting_for_control") return "planning";
+  if (state.status === "planning") return "planning";
+  if (state.status === "integrating") return "integrating";
+  if (state.status === "promoting") return "promoting";
+  if (state.status === "completed") return "completed";
+  return "blocked";
 };
 
 export const summarizeFactoryObjective = (
@@ -178,7 +195,7 @@ export const toFactoryStateSelectedObjectiveCard = (
     profileLabel: state.profile.rootProfileLabel,
     title: state.title,
     status: state.status,
-    phase: state.status,
+    phase: phaseForStateCard(state, operationalState.phaseDetail),
     displayState: operationalState.displayState,
     phaseDetail: operationalState.phaseDetail,
     statusAuthority: operationalState.statusAuthority,

@@ -4,6 +4,7 @@ import {
   type FactoryObjectivePhase,
   type FactoryObjectiveStatus,
   type FactoryState,
+  type FactoryTaskRecord,
 } from "../../../modules/factory";
 import type { FactoryObjectiveCard } from "../../factory-types";
 
@@ -21,16 +22,26 @@ export const deriveObjectivePhase = (
 ): FactoryObjectivePhase => {
   if (state.status === "completed") return "completed";
   if (state.status === "blocked" || state.status === "failed" || state.status === "canceled") return "blocked";
-  if (state.scheduler.slotState === "queued") return "waiting_for_slot";
-  if (state.status === "planning") return "planning";
+  if (state.status === "waiting_for_slot" || state.scheduler.slotState === "queued") return "waiting_for_slot";
   if (state.status === "integrating") return "integrating";
   if (state.status === "promoting" || state.integration.status === "ready_to_promote" || state.integration.status === "promoting" || state.integration.status === "promoted") {
     return "promoting";
   }
-  if (state.status === "executing" && projection && projection.activeTasks === 0 && projection.readyTasks === 0) {
+  if (state.status === "collecting_evidence" || state.status === "evidence_ready" || state.status === "synthesizing") {
+    return state.status;
+  }
+  if (state.status === "planning") return "planning";
+  if (projection && projection.activeTasks === 0 && projection.readyTasks === 0 && state.workflow.taskIds.length > 0) {
     return "blocked";
   }
-  return "executing";
+  const activeTasks = state.workflow.activeTaskIds
+    .map((taskId) => state.workflow.tasksById[taskId])
+    .filter((task): task is FactoryTaskRecord => Boolean(task));
+  const phases = new Set(activeTasks.map((task) => task.executionPhase ?? "collecting_evidence"));
+  if (phases.has("synthesizing")) return "synthesizing";
+  if (phases.has("evidence_ready")) return "evidence_ready";
+  if (phases.has("collecting_evidence")) return "collecting_evidence";
+  return "planning";
 };
 
 export const deriveLatestDecision = (state: FactoryState): FactoryObjectiveCard["latestDecision"] | undefined => {
@@ -66,6 +77,8 @@ export const deriveNextAction = (state: FactoryState, queuePosition?: number): s
       ? `Waiting for the repo execution slot (${queuePosition} in queue).`
       : "Waiting for the repo execution slot.";
   }
+  if (state.wait?.kind === "control_reconcile") return state.wait.reason;
+  if (state.wait?.kind === "synthesis_dispatch") return state.wait.reason;
   if (state.status === "planning") {
     return state.workflow.taskIds.length === 0
       ? "Preparing the objective."
@@ -81,7 +94,17 @@ export const deriveNextAction = (state: FactoryState, queuePosition?: number): s
       ? "One task is ready to dispatch."
       : `${readyCount} tasks are ready to dispatch.`;
   }
-  if (state.workflow.activeTaskIds.length > 0) return "Wait for the active task pass to finish.";
+  if (state.workflow.activeTaskIds.length > 0) {
+    const activeTasks = state.workflow.activeTaskIds
+      .map((taskId) => state.workflow.tasksById[taskId])
+      .filter((task): task is FactoryTaskRecord => Boolean(task));
+    if (state.objectiveMode === "investigation") {
+      if (activeTasks.some((task) => task.executionPhase === "synthesizing")) return "Wait for the synthesize-only pass to finish.";
+      if (activeTasks.some((task) => task.executionPhase === "evidence_ready")) return "Controller has evidence and is preparing the synthesis pass.";
+      return "Wait for evidence collection to finish.";
+    }
+    return "Wait for the active task pass to finish.";
+  }
   if (state.integration.status === "queued" || state.integration.status === "merging" || state.integration.status === "validating") {
     return "Wait for integration validation to finish.";
   }

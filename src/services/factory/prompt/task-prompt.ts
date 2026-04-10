@@ -12,6 +12,22 @@ import {
 import type { FactoryTaskJobPayload } from "../../factory-types";
 import { renderPlanningReceiptLines } from "../planning";
 
+const resolveCheckedInSkillPathsForPrompt = (
+  payload: FactoryTaskJobPayload,
+): ReadonlyArray<string> => {
+  const selected = new Set(
+    payload.profile.selectedSkills
+      .map((item) => item.replace(/\\/g, "/").trim())
+      .filter((item) => item.length > 0),
+  );
+  const skillPaths = payload.repoSkillPaths.filter((skillPath) => {
+    const normalized = skillPath.replace(/\\/g, "/");
+    if (normalized.endsWith("/skills/factory-receipt-worker/SKILL.md")) return true;
+    return [...selected].some((relativePath) => normalized.endsWith(relativePath));
+  });
+  return [...new Set(skillPaths)];
+};
+
 const renderTaskPromptBody = (input: {
   readonly state: FactoryState;
   readonly task: FactoryTaskRecord;
@@ -35,17 +51,25 @@ const renderTaskPromptBody = (input: {
   readonly liveGuidanceSection?: string;
   readonly factoryCliPrefix: string;
 }): string[] => {
-  const bootstrapTargets = [
-    `AGENTS.md and skills/factory-receipt-worker/SKILL.md`,
-    `Manifest: ${input.manifestPathForPrompt}`,
-    `Context Pack: ${input.contextPackPathForPrompt}`,
-    `Memory Script: ${input.memoryScriptPathForPrompt}`,
-    `Receipt CLI Surface: ${input.receiptCliPathForPrompt}`,
-    ...(input.contextSummaryPathForPrompt
-      ? [`Task Context Summary (quick overview derived from the packet): ${input.contextSummaryPathForPrompt}`]
-      : []),
-    `Repo skills from the manifest, especially any execution or permissions landscape notes`,
-  ];
+  const checkedInSkillPaths = resolveCheckedInSkillPathsForPrompt(input.payload);
+  const synthMode = input.payload.taskPhase === "synthesizing";
+  const bootstrapTargets = synthMode
+    ? [
+        ...(input.contextSummaryPathForPrompt
+          ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
+          : []),
+        `Context Pack (exact artifact paths or contradictory fields only when needed): ${input.contextPackPathForPrompt}`,
+      ]
+    : [
+        ...(input.contextSummaryPathForPrompt
+          ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
+          : []),
+        `Context Pack (exact fields, refs, and artifact paths only when needed): ${input.contextPackPathForPrompt}`,
+        `Memory Script (fallback scoped recall only when the summary and packet are insufficient): ${input.memoryScriptPathForPrompt}`,
+        `Receipt CLI Surface (fallback only when packet surfaces are insufficient): ${input.receiptCliPathForPrompt}`,
+        `Manifest (only when reconciling a contract/path mismatch): ${input.manifestPathForPrompt}`,
+        `AGENTS.md and skills/factory-receipt-worker/SKILL.md when the packet does not already resolve the bootstrap question`,
+      ];
   const cloudContextSection = input.cloudExecutionContext
     ? [
         `## Live Cloud Context`,
@@ -75,6 +99,13 @@ const renderTaskPromptBody = (input: {
     `## Task Prompt`,
     input.taskPrompt,
     ``,
+    ...(input.payload.controllerGuidance
+      ? [
+          `## Controller Guidance`,
+          input.payload.controllerGuidance,
+          ``,
+        ]
+      : []),
     `## Objective Contract`,
     `Acceptance criteria:`,
     input.objectiveContract.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- none",
@@ -113,7 +144,7 @@ const renderTaskPromptBody = (input: {
           `### Investigation Budget`,
           `You have a limited output budget. Reserve at least 30% for your final structured JSON result.`,
           `If you have run more than 5 commands without producing evidence, you are over-engineering. Stop and answer with what you have.`,
-          `If evidence artifacts exist in the evidence directory, your only remaining job is to synthesize the final JSON.`,
+          `If evidence artifacts exist in the evidence directory, do not rerun helpers or launch new external queries. Read the local evidence files and the packet, then synthesize the final JSON.`,
           ``,
           `### Investigation Quality`,
           `Interpret command and script outputs in plain language. Do not just paste logs.`,
@@ -125,6 +156,22 @@ const renderTaskPromptBody = (input: {
           `Capture implementation and validation results precisely in the final JSON result.`,
           `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
         ]),
+    ...(synthMode
+      ? [
+          ``,
+    `### Synthesis-Only Mode`,
+    `The controller has already moved this task into synthesize-only mode.`,
+    `Do not rerun helpers, design new scripts, rediscover the packet stack, or launch new external queries.`,
+    `Use the mounted evidence, context summary, and any already-captured command output to write the final JSON result now.`,
+    `Treat mounted evidence artifacts as sufficient proof for this pass unless the packet explicitly says evidence is missing or contradictory.`,
+    `Do not open the receipt CLI surface, memory script, or manifest in synth mode unless the context summary points to a missing or contradictory artifact path.`,
+    `Do not run timestamp-only or bookkeeping commands such as \`date\`, \`pwd\`, or extra file listings just to pad report fields.`,
+    `For synth-only investigation results, prefer \`report.evidenceRecords: []\` unless the mounted evidence already contains exact structured records with stable timestamps.`,
+    `Do not reconstruct or backfill evidence-record timestamps from scratch during synthesis.`,
+    `Reuse prior helper commands in \`report.scriptsRun\` when they are already visible in mounted evidence or receipts; otherwise record only the artifact-read commands you actually ran in this synth pass.`,
+    `If the evidence is insufficient or contradictory, return "partial" or "blocked" and explain the missing evidence directly.`,
+        ]
+      : []),
     ``,
     `## Execution Discipline`,
     `Do not run \`${input.factoryCliPrefix} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
@@ -140,19 +187,20 @@ const renderTaskPromptBody = (input: {
     `Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.`,
     ``,
     ...(input.infrastructureTaskGuidance.length > 0 ? [...input.infrastructureTaskGuidance, ``] : []),
-    ...renderFactoryHelperPromptSection(input.helperCatalog),
+    ...(synthMode ? [] : renderFactoryHelperPromptSection(input.helperCatalog)),
     ...cloudContextSection,
     ...input.validationSection,
     ``,
     `## Bootstrap Context`,
-    `The prompt is bootstrap only. Follow the checked-in worker bootstrap order: manifest, context pack, then memory script.`,
-    `Use the task context summary as a quick overview after the packet, not as a replacement for it.`,
-    `The JSON context pack is part of the primary worker interface. Use it whenever you need exact raw fields, refs, or artifact paths.`,
+    `The prompt is bootstrap only. The controller already prepared a task context summary from the manifest, context pack, scoped memory, receipts, and mounted evidence.`,
+    `Start with the task context summary. Do not reread the full bootstrap stack unless that summary leaves an exact field, path, or contradiction unresolved.`,
+    `If the summary already points at mounted evidence or a selected helper, follow that evidence path before more packet reads or new external queries.`,
+    `The JSON context pack remains part of the primary worker interface, but use it only when you need exact raw fields, refs, or artifact paths.`,
     `Read, in order:`,
     ...bootstrapTargets.map((item, index) => `${index + 1}. ${item}`),
-    `Mounted profile skills for this task:`,
-    input.payload.profile.selectedSkills.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
-    `Use only the checked-in repo skills named in this packet. Do not load unrelated global skills from ~/.codex or other home-directory skill folders unless this packet explicitly names them.`,
+    `Checked-in repo skill files for this task:`,
+    checkedInSkillPaths.map((skillPath) => `- ${skillPath}`).join("\n") || "- none",
+    `Use these exact checked-in skill paths. Do not substitute CODEX_HOME, ~/.codex, or .receipt/codex-home-runtime skill paths unless this packet explicitly names them.`,
     `Use the generated Receipt CLI surface at ${input.receiptCliPathForPrompt} before ad-hoc \`${input.factoryCliPrefix} ...\` commands.`,
     `Read any mounted infrastructure or cloud profile skill before provider-sensitive commands.`,
     input.payload.executionMode === "worktree"
@@ -162,15 +210,19 @@ const renderTaskPromptBody = (input: {
       ? `If the packet and memory script are still insufficient, say which evidence is missing in the result instead of probing live objective state from the task worktree.`
       : `If the packet and memory script are still insufficient, say which evidence is missing in the result instead of probing live objective state from the isolated runtime.`,
     ``,
-    `## Memory Access`,
-    `Use the layered memory script at ${input.memoryScriptPathForPrompt} instead of raw memory dumps.`,
-    `Recommended commands:`,
-    `- bun ${input.memoryScriptPathForPrompt} context 2800`,
-    `- bun ${input.memoryScriptPathForPrompt} objective 1800`,
-    `- bun ${input.memoryScriptPathForPrompt} scope task "${input.task.title}" 1400`,
-    `- bun ${input.memoryScriptPathForPrompt} search repo "${input.task.title}" 6`,
-    `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
-    ``,
+    ...(synthMode
+      ? []
+      : [
+          `## Memory Access`,
+          `Use the layered memory script at ${input.memoryScriptPathForPrompt} instead of raw memory dumps.`,
+          `Recommended commands:`,
+          `- bun ${input.memoryScriptPathForPrompt} context 2800`,
+          `- bun ${input.memoryScriptPathForPrompt} objective 1800`,
+          `- bun ${input.memoryScriptPathForPrompt} scope task "${input.task.title}" 1400`,
+          `- bun ${input.memoryScriptPathForPrompt} search repo "${input.task.title}" 6`,
+          `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
+          ``,
+        ]),
     ...(input.liveGuidanceSection ? [input.liveGuidanceSection] : []),
     `## Result Contract`,
     `Return exactly one JSON object matching this schema:`,
@@ -190,6 +242,11 @@ const renderTaskPromptBody = (input: {
     input.state.objectiveMode === "investigation"
       ? `For investigation tasks, always include the report key and presentation. Use a report object whenever you gathered meaningful evidence; otherwise use null. Always include report.evidenceRecords, even when it is an empty array. Always include completion with changed, proof, and remaining arrays. Use [] for empty lists and null for detail, summary, status, nextAction, handoff, or report when they do not apply. Legacy handoff is still read during migration, but presentation is the primary contract.`
       : `For delivery tasks, keep the envelope small. Always include presentation, scriptsRun, completion, and alignment. Use the alignment block to map the result back to the objective contract before you return final JSON. Legacy handoff is still read during migration, but presentation is the primary contract.`,
+    ...(synthMode && input.state.objectiveMode === "investigation"
+      ? [
+          `For synth-only investigation tasks, the default is report.evidenceRecords: []. Only populate evidenceRecords when the mounted evidence already contains exact structured records with stable timestamps.`,
+        ]
+      : []),
     ``,
     `## Starting Hint`,
     input.memorySummary || "No durable task memory yet.",

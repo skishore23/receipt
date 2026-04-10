@@ -162,6 +162,12 @@ export const planObjectiveReact = (
   }
 
   const effects: FactoryPlannerEffect[] = [];
+  (facts.monitorRecommendations ?? []).forEach((recommendation) => {
+    effects.push({
+      type: "task.handle_monitor_recommendation",
+      taskId: recommendation.taskId,
+    });
+  });
   const latest = latestTask(state);
   const latestNoteSatisfied = taskPromptIncludesObjectiveNote(latest?.prompt, facts.latestObjectiveOperatorNote);
   const resumeBlockedObjective = canResumeBlockedObjective(state, facts.latestObjectiveOperatorNote);

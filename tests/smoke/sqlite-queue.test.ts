@@ -729,6 +729,54 @@ test("sqlite queue: enqueue wakes an idle worker without relying on a short poll
   }
 });
 
+test("sqlite queue: afterComplete hooks run only after the job is marked completed", async () => {
+  const dir = await mkTmp("receipt-queue-after-complete");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
+    const observedStatuses: string[] = [];
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_after_complete",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async (job) => ({
+          ok: true,
+          result: { ok: true },
+          afterComplete: async () => {
+            const latest = await queue.getJob(job.id);
+            observedStatuses.push(latest?.status ?? "missing");
+          },
+        }),
+      },
+    });
+
+    worker.start();
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_after_complete" },
+      maxAttempts: 1,
+    });
+    const settled = await queue.waitForJob(job.id, 2_000);
+    await waitFor(() => observedStatuses.length === 1, 2_000);
+    worker.stop();
+
+    expect(settled?.status).toBe("completed");
+    expect(observedStatuses).toEqual(["completed"]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite queue: waitForWork performs at most one refresh per idle timeout window", async () => {
   const dir = await mkTmp("receipt-queue-idle-refresh");
   try {

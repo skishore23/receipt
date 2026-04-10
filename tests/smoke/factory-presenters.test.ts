@@ -21,9 +21,9 @@ const makeObjectiveDetail = (): FactoryObjectiveDetail => ({
   objectiveId: "objective_demo",
   title: "Demo objective",
   status: "executing",
-  phase: "executing",
+  phase: "collecting_evidence",
   displayState: "Running",
-  phaseDetail: "executing",
+  phaseDetail: "collecting_evidence",
   statusAuthority: "objective",
   hasAuthoritativeLiveJob: false,
   objectiveMode: "delivery",
@@ -203,7 +203,7 @@ test("factory presenters: summarize objective uses the shared objective summary 
     objectiveId: "objective_demo",
     title: "Demo objective",
     status: "executing",
-    phase: "executing",
+    phase: "collecting_evidence",
     summary: "Demo summary",
     integrationStatus: "validated",
     latestCommitHash: "abc12345",
@@ -222,7 +222,7 @@ test("factory presenters: selected objective card keeps detail-only fields intac
   expect(card.checks).toEqual(["bun test"]);
   expect(card.prUrl).toBe("https://example.com/pr/42");
   expect(card.displayState).toBe("Running");
-  expect(card.phaseDetail).toBe("executing");
+  expect(card.phaseDetail).toBe("collecting_evidence");
   expect(card.statusAuthority).toBe("objective");
   expect(card.hasAuthoritativeLiveJob).toBe(false);
   expect(card.renderedBody).toBeUndefined();
@@ -271,8 +271,8 @@ test("factory presenters: active objective detail keeps a coarse running badge w
   const executing = toFactorySelectedObjectiveCard({
     ...makeObjectiveDetail(),
     status: "executing",
-    phase: "executing",
-    phaseDetail: "executing",
+    phase: "collecting_evidence",
+    phaseDetail: "collecting_evidence",
   });
   const integrating = toFactorySelectedObjectiveCard({
     ...makeObjectiveDetail(),
@@ -288,7 +288,7 @@ test("factory presenters: active objective detail keeps a coarse running badge w
   });
 
   expect(executing.displayState).toBe("Running");
-  expect(executing.phaseDetail).toBe("executing");
+  expect(executing.phaseDetail).toBe("collecting_evidence");
   expect(integrating.displayState).toBe("Running");
   expect(integrating.phaseDetail).toBe("integrating");
   expect(promoting.displayState).toBe("Running");
@@ -329,16 +329,20 @@ test("factory presenters: queued state-selected card surfaces queued display sta
   });
 
   expect(card.displayState).toBe("Queued");
-  expect(card.phaseDetail).toBe("queued");
+  expect(card.phaseDetail).toBe("waiting_for_slot");
 });
 
 test("factory presenters: state-selected card keeps active objective phases in phase detail", () => {
   expect(toFactoryStateSelectedObjectiveCard({
     ...makeState(),
     status: "executing",
+    integration: {
+      ...initialFactoryState.integration,
+      status: "idle",
+    },
   })).toMatchObject({
     displayState: "Running",
-    phaseDetail: "executing",
+    phaseDetail: "collecting_evidence",
     statusAuthority: "objective",
     hasAuthoritativeLiveJob: false,
   });

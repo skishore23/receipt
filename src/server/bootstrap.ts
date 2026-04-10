@@ -60,6 +60,7 @@ import {
 } from "../services/factory-runtime";
 import {
   FACTORY_CONTROL_AGENT_ID,
+  FACTORY_MONITOR_AGENT_ID,
   type FactoryService,
 } from "../services/factory-service";
 import {
@@ -223,19 +224,8 @@ const baseQueue = sqliteQueue({
         if (
           await shouldQueueFactoryObjectiveReconcile(objectiveId, job.updatedAt)
         ) {
-          queue
-            .enqueue({
-              agentId: "factory-control",
-              lane: "collect",
-              sessionKey: `factory:objective:${objectiveId}`,
-              singletonMode: "steer",
-              maxAttempts: 1,
-              payload: {
-                kind: "factory.objective.control",
-                objectiveId,
-                reason: "reconcile",
-              },
-            })
+          factoryServiceRef
+            ?.scheduleObjectiveControl(objectiveId, "reconcile")
             .catch(console.error);
         }
       }
@@ -1197,7 +1187,7 @@ const workers = [
     queue,
     handlers: jobHandlers,
     workerId: localWorkerStates.get("orchestration")!.workerId,
-    leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID],
+    leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID, FACTORY_MONITOR_AGENT_ID],
     idleResyncMs: jobIdleResyncMs,
     leaseMs: jobLeaseMs,
     concurrency: orchestrationJobConcurrency,

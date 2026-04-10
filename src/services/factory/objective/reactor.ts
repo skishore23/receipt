@@ -22,6 +22,7 @@ export type FactoryObjectiveReactorOps = {
   readonly isTerminalObjectiveStatus: (status: FactoryObjectiveStatus) => boolean;
   readonly rebalanceObjectiveSlots: () => Promise<void>;
   readonly syncFailedActiveTasks: (state: FactoryState) => Promise<void>;
+  readonly syncActiveTaskMonitors: (state: FactoryState) => Promise<void>;
   readonly redriveQueuedActiveTasks: (state: FactoryState) => Promise<void>;
   readonly stampCircuitBrokenTasks: (state: FactoryState) => Promise<void>;
   readonly derivePolicyBlockedReason: (state: FactoryState) => string | undefined;
@@ -61,6 +62,7 @@ export const reactFactoryObjective = async (
   if (state.scheduler.slotState === "queued") return;
 
   await ops.syncFailedActiveTasks(state);
+  await ops.syncActiveTaskMonitors(state);
   await ops.redriveQueuedActiveTasks(state);
   state = await refreshState();
   if (ops.isTerminalObjectiveStatus(state.status)) {
@@ -93,9 +95,8 @@ export const reactFactoryObjective = async (
       state,
       facts,
     });
-    if (effects.length === 0) break;
-
     if (await ops.applyObjectivePreparationEffects(state, effects, facts)) continue;
+    if (effects.length === 0) break;
 
     const selected = selectFactoryRebracketEffect({
       state,

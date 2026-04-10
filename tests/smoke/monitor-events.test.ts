@@ -89,26 +89,60 @@ test("monitor.checkpoint event is reduced without error", () => {
     checkpoint: 1,
     assessment: "progressing",
     reasoning: "Worker is actively editing files",
-    action: { kind: "continue" },
+    recommendation: { kind: "continue" },
     evaluatedAt: Date.now(),
   };
   const next = reduceFactory(state, event);
   expect(next.updatedAt).toBeGreaterThanOrEqual(event.evaluatedAt);
 });
 
-test("monitor.intervention event is reduced without error", () => {
+test("monitor.recommendation event is reduced without error", () => {
   const state = makeMinimalState();
   const event: FactoryEvent = {
-    type: "monitor.intervention",
+    type: "monitor.recommendation",
     objectiveId: "obj_1",
+    recommendationId: "recommendation_1",
     taskId: "task_1",
+    candidateId: "task_1_candidate_01",
     jobId: "job_monitor_1",
-    interventionKind: "split",
-    detail: "Task is too large, splitting into 3 subtasks",
-    interventionAt: Date.now(),
+    recommendation: { kind: "recommend_split", subtasks: [
+      { title: "Subtask A", prompt: "Handle part A" },
+      { title: "Subtask B", prompt: "Handle part B", dependsOn: ["0"] },
+    ] },
+    reasoning: "Task is too large, splitting into 2 subtasks",
+    recommendedAt: Date.now(),
   };
   const next = reduceFactory(state, event);
-  expect(next.updatedAt).toBeGreaterThanOrEqual(event.interventionAt);
+  expect(next.updatedAt).toBeGreaterThanOrEqual(event.recommendedAt);
+});
+
+test("task.phase.transitioned updates the running task execution phase for the active candidate", () => {
+  const base = makeMinimalState();
+  const state: FactoryState = {
+    ...base,
+    workflow: {
+      ...base.workflow,
+      tasksById: {
+        ...base.workflow.tasksById,
+        task_1: {
+          ...base.workflow.tasksById.task_1,
+          candidateId: "task_1_candidate_01",
+        },
+      },
+    },
+  };
+  const event: FactoryEvent = {
+    type: "task.phase.transitioned",
+    objectiveId: "obj_1",
+    taskId: "task_1",
+    candidateId: "task_1_candidate_01",
+    phase: "synthesizing",
+    reason: "Evidence is ready; synthesize now.",
+    changedAt: Date.now(),
+  };
+  const next = reduceFactory(state, event);
+  expect(next.workflow.tasksById.task_1.executionPhase).toBe("synthesizing");
+  expect(next.workflow.tasksById.task_1.synthesizingAt).toBe(event.changedAt);
 });
 
 test("task.added with splitDepth preserves the field", () => {

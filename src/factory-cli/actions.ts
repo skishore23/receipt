@@ -38,6 +38,26 @@ export type FactoryMutationResult =
 const activeJobStatus = (status?: string): boolean =>
   status === "queued" || status === "leased" || status === "running";
 
+const isOptimisticMutationConflict = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  return error.message.startsWith("Expected prev hash ")
+    || error.message.includes("advanced before applying a mutation");
+};
+
+const withOptimisticMutationRetry = async <T>(
+  work: () => Promise<T>,
+): Promise<T> => {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      if (!isOptimisticMutationConflict(error) || attempt === 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  throw new Error("unreachable optimistic mutation retry state");
+};
+
 export const pickActiveObjectiveJob = (
   detail: FactoryObjectiveDetail | undefined,
   live: FactoryLiveProjection | undefined,
@@ -67,7 +87,7 @@ export const createObjectiveMutation = async (
     title: input.title,
     objectiveMode: input.objectiveMode,
   });
-  const objective = await runtime.service.createObjective({
+  const objective = await withOptimisticMutationRetry(() => runtime.service.createObjective({
     title: prepared.title,
     prompt: prepared.prompt,
     baseHash: input.baseHash,
@@ -77,7 +97,7 @@ export const createObjectiveMutation = async (
     channel: input.channel,
     policy: input.policy,
     profileId: input.profileId,
-  });
+  }));
   return {
     kind: "objective",
     action: "create",
@@ -107,7 +127,7 @@ export const composeObjectiveMutation = async (
         title: input.title,
         objectiveMode: input.objectiveMode,
       });
-  const objective = await runtime.service.composeObjective({
+  const objective = await withOptimisticMutationRetry(() => runtime.service.composeObjective({
     prompt: prepared?.prompt ?? input.prompt,
     objectiveId: input.objectiveId,
     title: prepared?.title ?? input.title,
@@ -118,7 +138,7 @@ export const composeObjectiveMutation = async (
     channel: input.channel,
     policy: input.policy,
     profileId: input.profileId,
-  });
+  }));
   return {
     kind: "objective",
     action: "compose",
@@ -135,7 +155,7 @@ export const reactObjectiveMutation = async (
     readonly message?: string;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
-  const objective = await runtime.service.reactObjectiveWithNote(input.objectiveId, input.message);
+  const objective = await withOptimisticMutationRetry(() => runtime.service.reactObjectiveWithNote(input.objectiveId, input.message));
   return {
     kind: "objective",
     action: "react",
@@ -149,7 +169,7 @@ export const promoteObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
 ): Promise<FactoryObjectiveMutationResult> => {
-  const objective = await runtime.service.promoteObjective(objectiveId);
+  const objective = await withOptimisticMutationRetry(() => runtime.service.promoteObjective(objectiveId));
   return {
     kind: "objective",
     action: "promote",
@@ -165,7 +185,7 @@ export const cancelObjectiveMutation = async (
     readonly reason?: string;
   },
 ): Promise<FactoryObjectiveMutationResult> => {
-  const objective = await runtime.service.cancelObjective(input.objectiveId, input.reason);
+  const objective = await withOptimisticMutationRetry(() => runtime.service.cancelObjective(input.objectiveId, input.reason));
   return {
     kind: "objective",
     action: "cancel",
@@ -178,7 +198,7 @@ export const cleanupObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
 ): Promise<FactoryObjectiveMutationResult> => {
-  const objective = await runtime.service.cleanupObjectiveWorkspaces(objectiveId);
+  const objective = await withOptimisticMutationRetry(() => runtime.service.cleanupObjectiveWorkspaces(objectiveId));
   return {
     kind: "objective",
     action: "cleanup",
@@ -191,7 +211,7 @@ export const archiveObjectiveMutation = async (
   runtime: FactoryCliRuntime,
   objectiveId: string,
 ): Promise<FactoryObjectiveMutationResult> => {
-  const objective = await runtime.service.archiveObjective(objectiveId);
+  const objective = await withOptimisticMutationRetry(() => runtime.service.archiveObjective(objectiveId));
   return {
     kind: "objective",
     action: "archive",

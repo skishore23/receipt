@@ -9,7 +9,10 @@ import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite
 import { createRuntime } from "@receipt/core/runtime";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
-import { FactoryService } from "../../src/services/factory-service";
+import {
+  FACTORY_MONITOR_AGENT_ID,
+  FactoryService,
+} from "../../src/services/factory-service";
 
 const execFileAsync = promisify(execFile);
 
@@ -85,6 +88,7 @@ test("dispatching a codex task also enqueues a monitor job", async () => {
   });
 
   expect(monitorJobs.length).toBeGreaterThanOrEqual(1);
+  expect(monitorJobs[0]?.agentId).toBe(FACTORY_MONITOR_AGENT_ID);
   const monitorPayload = monitorJobs[0].payload as {
     readonly kind: string;
     readonly objectiveId: string;

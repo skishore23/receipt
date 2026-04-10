@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
 import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
+import { createObjectiveMutation } from "../../src/factory-cli/actions";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
 import { renderObjectivePanelText } from "../../src/factory-cli/format";
 import { createFactoryCliRuntime } from "../../src/factory-cli/runtime";
@@ -405,7 +406,7 @@ const makeWorkbenchSnapshot = () => {
     objectiveId: "objective_demo",
     title: "CLI workbench objective",
     status: "executing",
-    phase: "executing",
+    phase: "collecting_evidence",
     objectiveMode: "delivery",
     severity: 2,
     scheduler: { slotState: "active" },
@@ -2393,6 +2394,61 @@ test("factory cli: create, compose, and react expose structured mutation results
   expect(reactedPayload.objective.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
 }, 120_000);
 
+test("factory cli: profile validation defaults suppress repo checks for infrastructure investigations", async () => {
+  const repoDir = await createRepo();
+
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const infrastructureCreate = await runCli([
+    "factory",
+    "create",
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--profile",
+    "infrastructure",
+    "--objective-mode",
+    "investigation",
+    "--title",
+    "Infra investigation",
+    "--prompt",
+    "Investigate the active AWS estate and summarize findings.",
+  ]);
+  expect(infrastructureCreate.code).toBe(0);
+  const infrastructurePayload = JSON.parse(infrastructureCreate.stdout) as {
+    readonly objective: {
+      readonly checks: ReadonlyArray<string>;
+      readonly profile: { readonly rootProfileId: string };
+    };
+  };
+  expect(infrastructurePayload.objective.profile.rootProfileId).toBe("infrastructure");
+  expect(infrastructurePayload.objective.checks).toEqual([]);
+
+  const softwareCreate = await runCli([
+    "factory",
+    "create",
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--profile",
+    "software",
+    "--title",
+    "Software delivery",
+    "--prompt",
+    "Add a small software change and validate it.",
+  ]);
+  expect(softwareCreate.code).toBe(0);
+  const softwarePayload = JSON.parse(softwareCreate.stdout) as {
+    readonly objective: {
+      readonly checks: ReadonlyArray<string>;
+      readonly profile: { readonly rootProfileId: string };
+    };
+  };
+  expect(softwarePayload.objective.profile.rootProfileId).toBe("software");
+  expect(softwarePayload.objective.checks).toEqual(["bun run build"]);
+}, 120_000);
+
 test("factory cli: abort-job queues a structured abort command", async () => {
   const repoDir = await createRepo();
 
@@ -2621,6 +2677,32 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       message: "Run validation and include proof",
     },
   });
+});
+
+test("factory cli actions: create retries optimistic mutation conflicts", async () => {
+  let attempts = 0;
+  const runtime = {
+    service: {
+      createObjective: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("Expected prev hash stale-prev but head is fresh-prev");
+        }
+        return {
+          objectiveId: "objective_retry_create_01",
+        };
+      },
+    },
+  } as unknown as Parameters<typeof createObjectiveMutation>[0];
+
+  const result = await createObjectiveMutation(runtime, {
+    prompt: "Investigate the latest issue.",
+    title: "Retry create",
+    objectiveMode: "investigation",
+  });
+
+  expect(result.objectiveId).toBe("objective_retry_create_01");
+  expect(attempts).toBe(2);
 });
 
 test("factory cli: composer parser marks diagnostic prompts as investigations and adds root-cause guidance", () => {

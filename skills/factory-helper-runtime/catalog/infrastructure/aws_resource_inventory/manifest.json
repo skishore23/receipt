@@ -7,13 +7,13 @@
   "entrypoint": "run.py",
   "requiredArgs": ["--service", "--resource"],
   "requiredContext": [
-    "Requires an explicit service/resource pair such as s3/buckets, ec2/instances, ecs/clusters, ecs/tasks, ecs/services, eks/clusters, rds/db-instances, or lambda/functions.",
+    "Requires an explicit service/resource pair such as s3/buckets, ec2/instances, ecs/clusters, ecs/tasks, ecs/services, eks/clusters, rds/db-instances, rds/db-clusters, or lambda/functions.",
     "For region-scoped resources, provide --region, --regions, or --all-regions from the mounted scope."
   ],
   "examples": [
-    "--service s3 --resource buckets",
-    "--service ec2 --resource instances --all-regions",
-    "--service ecs --resource clusters --all-regions",
-    "--service ecs --resource tasks --region us-east-1"
+    "--service rds --resource db-instances --all-regions --output-dir .receipt/factory/evidence",
+    "--service rds --resource db-clusters --all-regions --output-dir .receipt/factory/evidence",
+    "--service ecs --resource services --all-regions --output-dir .receipt/factory/evidence",
+    "--service s3 --resource buckets --output-dir .receipt/factory/evidence"
   ]
 }
