@@ -39,8 +39,8 @@ import {
 } from "./workbench-state";
 
 type LiveRefreshSourceKey = "background" | "chat";
-type WorkbenchRefreshTargetKey = "board" | "focus" | "chat";
-type WorkbenchEnvelopeTargetKey = "board" | "focus" | "chat";
+type WorkbenchRefreshTargetKey = "background" | "chat";
+type WorkbenchEnvelopeTargetKey = "background" | "chat";
 
 type WorkbenchVersionEnvelope = {
   readonly routeKey: string;
@@ -249,8 +249,10 @@ export const initFactoryWorkbenchBrowser = () => {
     document.body.setAttribute("data-workbench-profile-id", envelope.profileId);
     document.body.setAttribute("data-workbench-chat-id", envelope.chatId);
     document.body.setAttribute("data-workbench-objective-id", envelope.objectiveId ?? "");
-    if (target === "board") document.body.setAttribute("data-workbench-board-version", envelope.boardVersion);
-    if (target === "focus") document.body.setAttribute("data-workbench-focus-version", envelope.focusVersion);
+    if (target === "background") {
+      document.body.setAttribute("data-workbench-board-version", envelope.boardVersion);
+      document.body.setAttribute("data-workbench-focus-version", envelope.focusVersion);
+    }
     if (target === "chat") document.body.setAttribute("data-workbench-chat-version", envelope.chatVersion);
   };
 
@@ -892,16 +894,6 @@ export const initFactoryWorkbenchBrowser = () => {
     return template.content;
   };
 
-  const envelopeVersionForTarget = (
-    envelope: WorkbenchVersionEnvelope | null,
-    target: WorkbenchEnvelopeTargetKey,
-  ): string | null => {
-    if (!envelope) return null;
-    if (target === "board") return envelope.boardVersion;
-    if (target === "focus") return envelope.focusVersion;
-    return envelope.chatVersion;
-  };
-
   const shouldApplyEnvelope = (input: {
     readonly target: WorkbenchEnvelopeTargetKey;
     readonly baseline: WorkbenchVersionEnvelope | null;
@@ -911,9 +903,11 @@ export const initFactoryWorkbenchBrowser = () => {
     if (!input.next) return false;
     if (input.next.routeKey !== input.expectedRouteKey) return false;
     if (currentRouteKey() !== input.expectedRouteKey) return false;
-    const currentVersion = envelopeVersionForTarget(appliedEnvelope, input.target);
-    const baselineVersion = envelopeVersionForTarget(input.baseline, input.target);
-    return currentVersion === baselineVersion;
+    if (input.target === "background") {
+      return appliedEnvelope?.boardVersion === input.baseline?.boardVersion
+        && appliedEnvelope?.focusVersion === input.baseline?.focusVersion;
+    }
+    return appliedEnvelope?.chatVersion === input.baseline?.chatVersion;
   };
 
   const startRefreshController = <Key extends string>(
@@ -956,9 +950,6 @@ export const initFactoryWorkbenchBrowser = () => {
   const workbenchBackgroundRootPathForRoute = (route: FactoryWorkbenchRouteState): string =>
     `${routeBasePath(route)}/island/workbench/background-root${routeSearch(route)}`;
 
-  const workbenchBoardPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `${routeBasePath(route)}/island/workbench/board${routeSearch(route)}`;
-
   const chatIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
     `${routeBasePath(route)}/island/chat${routeSearch(route)}`;
 
@@ -975,10 +966,6 @@ export const initFactoryWorkbenchBrowser = () => {
   };
 
   const workbenchBackgroundDescriptor = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
-
-  const workbenchBoardDescriptor = "sse:profile-board-refresh@220,sse:objective-runtime-refresh@220";
-
-  const workbenchFocusDescriptor = "sse:profile-board-refresh@180,sse:objective-runtime-refresh@180";
 
   const workbenchChatDescriptorForRoute = (route: FactoryWorkbenchRouteState): string => route.inspectorTab === "chat"
     ? [
@@ -1051,16 +1038,21 @@ export const initFactoryWorkbenchBrowser = () => {
       if (!element) return;
       element.setAttribute("data-refresh-on", descriptor);
     };
+    const clearRefreshDescriptor = (element: HTMLElement | null) => {
+      if (!element) return;
+      element.removeAttribute("data-refresh-on");
+      element.removeAttribute("hx-trigger");
+    };
     const currentBackgroundRoot = backgroundRoot();
     setRefreshPath(currentBackgroundRoot, workbenchBackgroundRootPathForRoute(route));
     setRefreshDescriptor(currentBackgroundRoot, workbenchBackgroundDescriptor);
     if (currentBackgroundRoot) currentBackgroundRoot.setAttribute("data-events-path", backgroundEventsPathForRoute(route));
     const currentFocusShell = workbenchFocusShell();
-    setRefreshDescriptor(currentFocusShell, workbenchFocusDescriptor);
     setRefreshPath(currentFocusShell, `${routeBasePath(route)}/island/workbench/focus${routeSearch(route)}`);
+    clearRefreshDescriptor(currentFocusShell);
     const currentRailShell = workbenchRailShell();
-    setRefreshPath(currentRailShell, workbenchBoardPathForRoute(route));
-    setRefreshDescriptor(currentRailShell, workbenchBoardDescriptor);
+    setRefreshPath(currentRailShell, `${routeBasePath(route)}/island/workbench/rail${routeSearch(route)}`);
+    clearRefreshDescriptor(currentRailShell);
     const currentWorkbench = workbenchContainer();
     setRefreshPath(currentWorkbench, `${routeBasePath(route)}/island/workbench${routeSearch(route)}`);
     const currentChatPane = chatPane();
@@ -1100,25 +1092,24 @@ export const initFactoryWorkbenchBrowser = () => {
     });
   };
 
-  function refreshBoardNow(
+  function refreshBackgroundNow(
     expectedRouteKey: string,
     options?: {
       readonly replaceInFlight?: boolean;
     },
   ) {
-    const target = workbenchRailShell();
+    const target = backgroundRoot();
     const path = readReactiveRefreshPath(target);
     if (!target || !path) return Promise.resolve();
     const documentScrollState = captureDocumentScrollState();
     const paneScrollState = captureWorkbenchPaneScrollState();
     const baselineEnvelope = appliedEnvelope;
-    const controller = startRefreshController(refreshControllers, "board", options);
+    const controller = startRefreshController(refreshControllers, "background", options);
     return fetchHtml(path, controller?.signal).then((markup) => {
       const fragment = parseMarkupDocument(markup);
-      const wrapper = fragment.firstElementChild;
-      const nextEnvelope = readEnvelopeFromElement(wrapper);
+      const nextEnvelope = readEnvelopeFromElement(fragment.querySelector("[data-workbench-route-key]"));
       if (!shouldApplyEnvelope({
-        target: "board",
+        target: "background",
         baseline: baselineEnvelope,
         next: nextEnvelope,
         expectedRouteKey,
@@ -1126,16 +1117,10 @@ export const initFactoryWorkbenchBrowser = () => {
         return;
       }
       if (!nextEnvelope) return;
-      const nextHeader = wrapper?.querySelector("#factory-workbench-header");
-      const nextRail = wrapper?.querySelector("#factory-workbench-rail-shell");
-      const currentHeader = workbenchHeader();
-      const currentRail = workbenchRailShell();
-      if (!(nextHeader instanceof HTMLElement) || !(nextRail instanceof HTMLElement) || !currentHeader || !currentRail) return;
-      currentHeader.outerHTML = nextHeader.outerHTML;
-      currentRail.outerHTML = nextRail.outerHTML;
-      setDocumentEnvelopeTarget("board", nextEnvelope);
+      target.innerHTML = markup;
+      setDocumentEnvelopeTarget("background", nextEnvelope);
       appliedEnvelope = readDocumentEnvelope();
-      processHtmx(document.body);
+      processHtmx(target);
       window.requestAnimationFrame(() => {
         if (paneScrollState) restoreWorkbenchPaneScrollState(paneScrollState);
         restoreDocumentScrollState(documentScrollState);
@@ -1144,51 +1129,7 @@ export const initFactoryWorkbenchBrowser = () => {
       if (isAbortError(error)) return;
       throw error;
     }).finally(() => {
-      finishRefreshController(refreshControllers, "board", controller);
-    });
-  }
-
-  function refreshFocusNow(
-    expectedRouteKey: string,
-    options?: {
-      readonly replaceInFlight?: boolean;
-    },
-  ) {
-    const target = workbenchFocusShell();
-    const path = readReactiveRefreshPath(target);
-    if (!target || !path) return Promise.resolve();
-    const documentScrollState = captureDocumentScrollState();
-    const paneScrollState = captureWorkbenchPaneScrollState();
-    const baselineEnvelope = appliedEnvelope;
-    const controller = startRefreshController(refreshControllers, "focus", options);
-    return fetchHtml(path, controller?.signal).then((markup) => {
-      const fragment = parseMarkupDocument(markup);
-      const nextTarget = fragment.firstElementChild;
-      const nextEnvelope = readEnvelopeFromElement(nextTarget);
-      if (!shouldApplyEnvelope({
-        target: "focus",
-        baseline: baselineEnvelope,
-        next: nextEnvelope,
-        expectedRouteKey,
-      })) {
-        return;
-      }
-      if (!nextEnvelope) return;
-      const currentTarget = workbenchFocusShell();
-      if (!(nextTarget instanceof HTMLElement) || !currentTarget) return;
-      currentTarget.outerHTML = nextTarget.outerHTML;
-      setDocumentEnvelopeTarget("focus", nextEnvelope);
-      appliedEnvelope = readDocumentEnvelope();
-      processHtmx(document.body);
-      window.requestAnimationFrame(() => {
-        if (paneScrollState) restoreWorkbenchPaneScrollState(paneScrollState);
-        restoreDocumentScrollState(documentScrollState);
-      });
-    }).catch((error: unknown) => {
-      if (isAbortError(error)) return;
-      throw error;
-    }).finally(() => {
-      finishRefreshController(refreshControllers, "focus", controller);
+      finishRefreshController(refreshControllers, "background", controller);
     });
   }
 
@@ -1254,12 +1195,8 @@ export const initFactoryWorkbenchBrowser = () => {
       if (seen.has(target)) continue;
       seen.add(target);
       abortRefresh(target);
-      if (target === "board") {
-        refreshes.push(refreshBoardNow(routeKeyOverride ?? currentRouteKey(), {
-          replaceInFlight: true,
-        }).then(() => undefined));
-      } else if (target === "focus") {
-        refreshes.push(refreshFocusNow(routeKeyOverride ?? currentRouteKey(), {
+      if (target === "background") {
+        refreshes.push(refreshBackgroundNow(routeKeyOverride ?? currentRouteKey(), {
           replaceInFlight: true,
         }).then(() => undefined));
       } else {
@@ -1286,10 +1223,10 @@ export const initFactoryWorkbenchBrowser = () => {
       || current.focusKind !== next.focusKind
       || current.focusId !== next.focusId
     ) {
-      return ["board", "focus", "chat"];
+      return ["background", "chat"];
     }
     if (current.inspectorTab !== next.inspectorTab) return ["chat"];
-    return ["board", "focus", "chat"];
+    return ["background", "chat"];
   };
 
   const backgroundEventsPath = () => {
@@ -1305,10 +1242,8 @@ export const initFactoryWorkbenchBrowser = () => {
   const liveRefreshRunner = createQueuedRefreshRunner<WorkbenchRefreshTargetKey, string>((targetKey, scopeKey) => {
     const expectedRouteKey = scopeKey ?? currentRouteKey();
     switch (targetKey) {
-      case "board":
-        return refreshBoardNow(expectedRouteKey);
-      case "focus":
-        return refreshFocusNow(expectedRouteKey);
+      case "background":
+        return refreshBackgroundNow(expectedRouteKey);
       case "chat":
       default:
         return refreshChatNow(expectedRouteKey);
@@ -1319,29 +1254,21 @@ export const initFactoryWorkbenchBrowser = () => {
     sources: ["background", "chat"],
     targets: () => [
       {
-        key: "board",
+        key: "background",
         source: "background",
-        element: workbenchRailShell,
-        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("board", delayMs, scopeKey),
-      },
-      {
-        key: "focus",
-        source: "background",
-        element: workbenchFocusShell,
-        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("focus", delayMs, scopeKey),
+        element: backgroundRoot,
+        queue: (delayMs, scopeKey) => liveRefreshRunner.queue("background", delayMs, scopeKey),
       },
       {
         key: "chat",
-        source: workbenchState.appliedRoute.inspectorTab === "chat" ? "chat" : "background",
+        source: "chat",
         element: chatBody,
         queue: (delayMs, scopeKey) => liveRefreshRunner.queue("chat", delayMs, scopeKey),
       },
     ],
     eventPath: (sourceKey) => sourceKey === "background"
       ? backgroundEventsPath()
-      : workbenchState.appliedRoute.inspectorTab === "chat"
-        ? chatEventsPath()
-        : null,
+      : chatEventsPath(),
     getScopeKey: currentRouteKey,
     onSseEvent: ({ sourceKey, eventName }) => {
       if (sourceKey !== "chat") return;
@@ -1377,7 +1304,7 @@ export const initFactoryWorkbenchBrowser = () => {
 
   const refreshVisibleWorkbench = () => {
     syncWorkbenchEventSources();
-    return refreshRouteTargetsNow(["board", "focus", "chat"]).catch(() => undefined);
+    return refreshRouteTargetsNow(["background", "chat"]).catch(() => undefined);
   };
 
   const navigateWithFeedback = (location: string) => {
@@ -1438,12 +1365,12 @@ export const initFactoryWorkbenchBrowser = () => {
       if (changeKind === "focus") {
         dispatchWorkbenchAction({ type: "focus.changed", route: nextRoute });
         applyRouteState(nextRoute, "replace");
-        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
+        return refreshRouteTargetsNow(["background", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
       }
       if (changeKind === "filter") {
         dispatchWorkbenchAction({ type: "filter.changed", route: nextRoute });
         applyRouteState(nextRoute, "push");
-        return refreshRouteTargetsNow(["board", "focus", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
+        return refreshRouteTargetsNow(["background", "chat"], nextRoute.routeKey, "region").then(() => true).catch(() => true);
       }
       dispatchWorkbenchAction({
         type: "route.applied",
@@ -1721,13 +1648,9 @@ export const initFactoryWorkbenchBrowser = () => {
       processHtmx(target);
       const nextEnvelope = readEnvelopeFromElement(target);
       if (target.id === "factory-workbench-background-root" && nextEnvelope) {
-        setDocumentEnvelopeTarget("board", nextEnvelope);
-        setDocumentEnvelopeTarget("focus", nextEnvelope);
-        setDocumentEnvelopeTarget("chat", nextEnvelope);
-      } else if (target.id === "factory-workbench-rail-shell" && nextEnvelope) {
-        setDocumentEnvelopeTarget("board", nextEnvelope);
-      } else if (target.id === "factory-workbench-focus-shell" && nextEnvelope) {
-        setDocumentEnvelopeTarget("focus", nextEnvelope);
+        setDocumentEnvelopeTarget("background", nextEnvelope);
+      } else if ((target.id === "factory-workbench-rail-shell" || target.id === "factory-workbench-focus-shell") && nextEnvelope) {
+        setDocumentEnvelopeTarget("background", nextEnvelope);
       } else if (target.id === "factory-workbench-chat-body" && nextEnvelope) {
         setDocumentEnvelopeTarget("chat", nextEnvelope);
       }

@@ -220,8 +220,6 @@ const chatMarkup = (input: {
 
 const WORKBENCH_CHAT_DESCRIPTOR = "sse:agent-refresh@180,sse:job-refresh@180";
 const WORKBENCH_BACKGROUND_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
-const WORKBENCH_BOARD_DESCRIPTOR = "sse:profile-board-refresh@220,sse:objective-runtime-refresh@220";
-const WORKBENCH_FOCUS_DESCRIPTOR = "sse:profile-board-refresh@180,sse:objective-runtime-refresh@180";
 
 const workbenchChatDescriptor = (inspectorTab: string, objectiveId?: string) =>
   inspectorTab === "chat"
@@ -247,14 +245,14 @@ const workbenchBlockPath = (search: string, block: "summary" | "activity" | "obj
 
 const workbenchPanelMarkup = (search: string, objectiveId?: string, content = "workbench panel") =>
   `<div class="flex min-w-0 flex-col gap-4 lg:grid lg:grid-cols-[minmax(320px,0.88fr)_minmax(0,1.12fr)]" data-workbench-objective-id="${objectiveId ?? ""}">
-    <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}">
+    <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(search)}">
       <section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto">
         <div id="factory-workbench-block-summary" data-workbench-projections="profile-board objective-runtime" data-refresh-path="${workbenchBlockPath(search, "summary")}"><div>${content} summary</div></div>
         <div id="factory-workbench-block-objectives" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "objectives")}"><div>${content} objectives</div></div>
         <div id="factory-workbench-block-history" data-workbench-projections="profile-board" data-refresh-path="${workbenchBlockPath(search, "history")}"><div>${content} history</div></div>
       </section>
     </section>
-    <section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(search)}" data-refresh-on="${WORKBENCH_FOCUS_DESCRIPTOR}">
+    <section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(search)}">
       <section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 overflow-y-auto">
         <div id="factory-workbench-block-activity" data-workbench-projections="objective-runtime" data-refresh-path="${workbenchBlockPath(search, "activity")}"><div>${content} activity</div></div>
       </section>
@@ -956,7 +954,7 @@ const createWorkbenchHarness = async (options: {
                 <option value="/factory?profile=software&chat=${chatId}">Software</option>
               </select>
             </div>
-            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}">
+            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}">
               <section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>board refreshed</div></section>
             </section>
           </div>`,
@@ -967,7 +965,7 @@ const createWorkbenchHarness = async (options: {
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}" data-refresh-on="${WORKBENCH_FOCUS_DESCRIPTOR}">
+          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}">
             <section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>focus refreshed</div></section>
           </section>`,
         };
@@ -1153,21 +1151,21 @@ test("factory workbench client: profile-board and objective-runtime events refre
   document.body.scrollTop = 220;
 
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action");
-  expect(chatSource()).toBeNull();
+  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_demo");
 
   backgroundSource()?.emit("profile-board-refresh", "generalist");
+  chatSource()?.emit("profile-board-refresh", "generalist");
   await flushAsync(380);
 
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
   expect(document.body.scrollTop).toBe(220);
 
   backgroundSource()?.emit("objective-runtime-refresh", "objective_demo");
+  chatSource()?.emit("objective-runtime-refresh", "objective_demo");
   await flushAsync(380);
 
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(2);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(2);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action").length).toBeGreaterThanOrEqual(2);
   expect(document.body.scrollTop).toBe(220);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
 });
@@ -1176,15 +1174,12 @@ test("factory workbench client: reactive refresh routing follows data-refresh-on
   const { backgroundSource, fetchCalls, document } = await createWorkbenchHarness({
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
   });
-  (document.getElementById("factory-workbench-rail-shell") as MockElement | null)?.setAttribute("data-refresh-on", WORKBENCH_BOARD_DESCRIPTOR);
-  (document.getElementById("factory-workbench-focus-shell") as MockElement | null)?.setAttribute("data-refresh-on", WORKBENCH_FOCUS_DESCRIPTOR);
   (document.getElementById("factory-workbench-chat-body") as MockElement | null)?.setAttribute("data-refresh-on", "");
 
   backgroundSource()?.emit("profile-board-refresh", "generalist");
   await flushAsync(380);
 
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(0);
 });
 
@@ -1201,11 +1196,10 @@ test("factory workbench client: objective navigation updates the background root
   expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action"]);
   expect(historyState.replaced).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action");
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
-  expect(chatSource()).toBeNull();
+  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_b");
 });
 
 test("factory workbench client: page-only navigation preserves the requested pagination state", async () => {
@@ -1220,8 +1214,7 @@ test("factory workbench client: page-only navigation preserves the requested pag
 
   expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2"]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2");
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&page=2")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
 });
@@ -1260,7 +1253,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
           json: async () => ({}),
           text: async () => `<div data-workbench-sync="board">
             <div id="factory-workbench-header"><select id="factory-workbench-profile-select" data-factory-profile-select="true"><option value="/factory?profile=${profileId}&chat=${chatId}" selected>${profileLabel}</option></select></div>
-            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}"><section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>${profileLabel} board</div></section></section>
+            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}"><section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>${profileLabel} board</div></section></section>
           </div>`,
         };
       }
@@ -1269,7 +1262,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}" data-refresh-on="${WORKBENCH_FOCUS_DESCRIPTOR}"><section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>${profileLabel} focus</div></section></section>`,
+          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}"><section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>${profileLabel} focus</div></section></section>`,
         };
       }
       if (parsed.pathname === "/factory/island/workbench/chat-pane") {
@@ -1312,12 +1305,11 @@ test("factory workbench client: profile dropdown updates the page route and stre
   expect(historyState.replaced).toEqual([]);
   expect(locationState.pathname).toBe("/factory");
   expect(locationState.search).toBe("?profile=software&chat=chat_demo&detailTab=action");
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.filter((call) => call.url.startsWith("/factory/island/")).every((call) => call.headers?.["HX-Request"] === "true")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
-  expect(chatSource()).toBeNull();
+  expect(chatSource()?.url).toBe("/factory/chat/events?profile=software&chat=chat_demo");
 });
 
 test("factory workbench client: New Chat resolves the server redirect and swaps to the new chat session", async () => {
@@ -1358,7 +1350,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
           json: async () => ({}),
           text: async () => `<div data-workbench-sync="board">
             <div id="factory-workbench-header"><select id="factory-workbench-profile-select" data-factory-profile-select="true"><option value="/factory?profile=generalist&chat=chat_new" selected>Generalist</option></select></div>
-            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}"><section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>new chat board</div></section></section>
+            <section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}"><section id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail"><div>new chat board</div></section></section>
           </div>`,
         };
       }
@@ -1368,7 +1360,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
           url,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}" data-refresh-on="${WORKBENCH_FOCUS_DESCRIPTOR}"><section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>new chat focus</div></section></section>`,
+          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}"><section id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus"><div>new chat focus</div></section></section>`,
         };
       }
       if (parsed.pathname === "/factory/island/workbench/chat-pane") {
@@ -1411,8 +1403,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
   expect(fetchCalls[0]?.url).toBe("http://receipt.test/factory/new-chat?profile=generalist&inspectorTab=chat&detailTab=action");
   expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action"]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
   expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_new");
@@ -1793,8 +1784,7 @@ test("factory workbench client: focus changes replace history and refresh coordi
   expect(historyState.replaced).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1"]);
   expect(historyState.pushed).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1");
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&focusKind=task&focusId=task_1")).toHaveLength(1);
 });
 
@@ -1811,8 +1801,7 @@ test("factory workbench client: filter changes push history and refresh coordina
   expect(historyState.pushed).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed"]);
   expect(historyState.replaced).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed");
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action&filter=objective.completed")).toHaveLength(1);
   expect(fetchCalls.some((call) => call.url === "/factory/api/workbench-shell?profile=generalist&chat=chat_demo&objective=objective_demo&filter=objective.completed")).toBe(false);
 });
@@ -1823,14 +1812,13 @@ test("factory workbench client: window focus and pageshow resync live sources an
   });
 
   expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action");
-  expect(chatSource()).toBeNull();
+  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_demo");
 
   dispatchWindowEvent("focus");
   dispatchWindowEvent("pageshow");
   await flushAsync();
 
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
-  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/focus?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
+  expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(2);
 });
 
@@ -1939,13 +1927,20 @@ test("factory workbench client: superseded scope refreshes abort stale scope fet
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_a",
     fetchImpl: async (url, init) => {
       const parsed = new URL(url, "http://receipt.test");
-      if (parsed.pathname === "/factory/island/workbench/board" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action") {
+      if (parsed.pathname === "/factory/island/workbench/background-root" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action") {
         return await new Promise((resolve, reject) => {
           resolveObjectiveB = () => resolve({
             ok: true,
             headers: { get: () => "text/html" },
             json: async () => ({}),
-            text: async () => `<div data-workbench-sync="board"><div id="factory-workbench-header"></div><section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}"><section id="factory-workbench-rail-scroll">objective b</section></section></div>`,
+            text: async () => workbenchBackgroundRootMarkup(
+              parsed.search,
+              parsed.searchParams.get("objective") || "objective_b",
+              "generalist",
+              "Generalist",
+              "chat_demo",
+              "objective b",
+            ),
           });
           init.signal?.addEventListener("abort", () => {
             resolveObjectiveB = undefined;
@@ -1959,13 +1954,20 @@ test("factory workbench client: superseded scope refreshes abort stale scope fet
           readonly text: () => Promise<string>;
         };
       }
-      if (parsed.pathname === "/factory/island/workbench/board" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_c&detailTab=action") {
+      if (parsed.pathname === "/factory/island/workbench/background-root" && parsed.search === "?profile=generalist&chat=chat_demo&objective=objective_c&detailTab=action") {
         return await new Promise((resolve, reject) => {
           resolveObjectiveC = () => resolve({
             ok: true,
             headers: { get: () => "text/html" },
             json: async () => ({}),
-            text: async () => `<div data-workbench-sync="board"><div id="factory-workbench-header"></div><section id="factory-workbench-rail-shell" data-refresh-path="${workbenchBoardPath(parsed.search)}" data-refresh-on="${WORKBENCH_BOARD_DESCRIPTOR}"><section id="factory-workbench-rail-scroll">objective c</section></section></div>`,
+            text: async () => workbenchBackgroundRootMarkup(
+              parsed.search,
+              parsed.searchParams.get("objective") || "objective_c",
+              "generalist",
+              "Generalist",
+              "chat_demo",
+              "objective c",
+            ),
           });
           init.signal?.addEventListener("abort", () => {
             resolveObjectiveC = undefined;
@@ -2048,7 +2050,7 @@ test("factory workbench client: superseded scope refreshes abort stale scope fet
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
-          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}" data-refresh-on="${WORKBENCH_FOCUS_DESCRIPTOR}"><section id="factory-workbench-focus-scroll">focus ${parsed.searchParams.get("objective") || "objective_a"}</section></section>`,
+          text: async () => `<section id="factory-workbench-focus-shell" data-refresh-path="${workbenchFocusPath(parsed.search)}"><section id="factory-workbench-focus-scroll">focus ${parsed.searchParams.get("objective") || "objective_a"}</section></section>`,
         };
       }
       if (parsed.pathname === "/factory/island/workbench/chat-body") {
@@ -2092,6 +2094,6 @@ test("factory workbench client: superseded scope refreshes abort stale scope fet
   ]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_c&detailTab=action");
   expect(resolveObjectiveB).toBeUndefined();
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
-  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/board?profile=generalist&chat=chat_demo&objective=objective_c&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
+  expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_c&detailTab=action")).toBe(true);
 });

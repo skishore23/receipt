@@ -333,6 +333,36 @@ const createJsonStructuredStreamingCodexStub = async (): Promise<string> => {
   return scriptPath;
 };
 
+const createLateStructuredLastMessageCodexStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-late-structured-last-message");
+  const scriptPath = path.join(dir, "codex-late-structured-last-message-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+    "(async () => {",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  await readAll();",
+    "  process.stdout.write(JSON.stringify({ type: 'thread.started' }) + '\\n');",
+    "  process.stdout.write(JSON.stringify({ type: 'turn.started' }) + '\\n');",
+    "  await sleep(700);",
+    "  fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'late structured completion', handoff: 'waited for real payload' }), 'utf8');",
+    "  process.stderr.write('late structured message written\\n');",
+    "  setInterval(() => { process.stderr.write('still streaming\\n'); }, 100);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
 test("local codex executor completes once a task result file exists and output goes quiet", async () => {
   const root = await mkTmp("receipt-codex-executor-workspace");
   const stub = await createHungCodexStub();
@@ -571,6 +601,51 @@ test("local codex executor falls back to structured json agent messages when out
   expect(result.lastMessage).toContain("\"summary\":\"structured json progress\"");
   await expect(fs.readFile(lastMessagePath, "utf-8")).resolves.toContain("\"summary\":\"structured json progress\"");
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("still streaming");
+}, 15_000);
+
+test("local codex executor waits for structured completion content instead of an empty precreated last-message file", async () => {
+  const root = await mkTmp("receipt-codex-executor-late-structured-last-message-workspace");
+  const stub = await createLateStructuredLastMessageCodexStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const outputSchemaPath = path.join(artifactDir, "task.schema.json");
+  await fs.mkdir(path.dirname(outputSchemaPath), { recursive: true });
+  await fs.writeFile(outputSchemaPath, JSON.stringify({
+    type: "object",
+    required: ["outcome", "summary", "handoff"],
+  }), "utf-8");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+
+  const startedAt = Date.now();
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    jsonOutput: true,
+    outputSchemaPath,
+    completionSignalPath: lastMessagePath,
+    completionQuietMs: 300,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+  const elapsed = Date.now() - startedAt;
+
+  expect(elapsed).toBeGreaterThanOrEqual(650);
+  expect(elapsed).toBeLessThan(5_000);
+  expect(result.exitCode).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(result.lastMessage).toContain("\"summary\":\"late structured completion\"");
+  await expect(fs.readFile(lastMessagePath, "utf-8")).resolves.toContain("\"summary\":\"late structured completion\"");
+  await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("late structured message written");
 }, 15_000);
 
 test("local codex executor aborts a wedged codex child after the stall timeout", async () => {

@@ -4195,6 +4195,59 @@ test("factory route: objective handoff is durable in the bound chat session", as
   expect(replayBody).toContain("Next: Use /react with more evidence, or ask Chat to summarize the current findings.");
 });
 
+test("factory route: workbench selection writes blocked handoffs into the profile chat session", async () => {
+  const blockedObjective = {
+    ...makeRunningWorkbenchObjectiveDetail("objective_blocked"),
+    title: "Investigate NAT gateway cost spike",
+    status: "blocked",
+    phase: "blocked",
+    latestSummary: "We proved it was a NAT data-processing surge, but not which workload caused it.",
+    blockedReason: "Need retained historical NAT or flow-log evidence to attribute the spike.",
+    blockedExplanation: "Need retained historical NAT or flow-log evidence to attribute the spike.",
+    nextAction: "Use /react with more evidence, or ask Chat to summarize the current findings.",
+    activeTaskCount: 0,
+    readyTaskCount: 0,
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+
+  let agentEventStore: Map<string, AgentEvent[]> | undefined;
+  const app = createRouteTestApp({
+    captureAgentEventStore: (store) => {
+      agentEventStore = store;
+    },
+    service: {
+      listObjectives: async () => [
+        blockedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => blockedObjective,
+    },
+  });
+
+  const selectResponse = await app.request(
+    "http://receipt.test/factory/island/workbench/select?profile=generalist&chat=chat_demo&objective=objective_blocked&inspectorTab=chat",
+    { headers: { "HX-Request": "true" } },
+  );
+  const selectBody = await selectResponse.text();
+
+  expect(selectResponse.status).toBe(200);
+  expect(selectBody).toContain("Blocked handoff");
+
+  const sessionStream = factoryChatSessionStream(process.cwd(), "generalist", "chat_demo");
+  const sessionEvents = agentEventStore?.get(sessionStream) ?? [];
+  const finalEvent = sessionEvents.find((event): event is Extract<AgentEvent, { type: "response.finalized" }> =>
+    event.type === "response.finalized"
+  );
+  expect(finalEvent?.content).toContain("We proved it was a NAT data-processing surge");
+
+  const replayResponse = await app.request("http://receipt.test/factory/island/chat?profile=generalist&chat=chat_demo&inspectorTab=chat", {
+    headers: { "HX-Request": "true" },
+  });
+  const replayBody = await replayResponse.text();
+
+  expect(replayResponse.status).toBe(200);
+  expect(replayBody).toContain("We proved it was a NAT data-processing surge");
+  expect(replayBody).toContain("Next: Use /react with more evidence, or ask Chat to summarize the current findings.");
+});
+
 test("factory route: objective handoff writes an interpreted final response into the bound chat session", async () => {
   const blockedObjective = {
     ...makeRunningWorkbenchObjectiveDetail("objective_blocked"),
@@ -4908,6 +4961,9 @@ test("factory workbench route: renders the split workbench shell with objective 
   expect(body).not.toContain('hx-trigger="sse:profile-board-refresh throttle:320ms, sse:objective-runtime-refresh throttle:320ms"');
   expect(body).not.toContain('sse-connect="/factory/background/events?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');
   expect(body).toMatch(/id="factory-workbench-background-root"[^>]*data-refresh-path="\/factory\/island\/workbench\/background-root\?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"/);
+  expect(body).toMatch(/id="factory-workbench-chat-body"[^>]*data-refresh-on="sse:profile-board-refresh@300,sse:objective-runtime-refresh@300"/);
+  expect(body).not.toMatch(/id="factory-workbench-rail-shell"[^>]*data-refresh-on=/);
+  expect(body).not.toMatch(/id="factory-workbench-focus-shell"[^>]*data-refresh-on=/);
   expect(body).toMatch(/id="factory-workbench-panel"[^>]*data-refresh-path="\/factory\/island\/workbench\?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"/);
   expect(body).not.toMatch(/id="factory-workbench-panel"[^>]*data-refresh-on=/);
   expect(body).not.toContain('data-refresh-path="/factory/island/workbench/header?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live&amp;detailTab=action&amp;focusKind=task&amp;focusId=task_01"');

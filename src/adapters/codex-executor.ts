@@ -284,6 +284,22 @@ const parseJsonObjectCandidate = (raw: string): Record<string, unknown> | undefi
   }
 };
 
+const readStructuredCompletionSignal = async (targetPath: string): Promise<{
+  readonly mtimeMs?: number;
+  readonly ready: boolean;
+}> => {
+  try {
+    const stats = await fsp.stat(targetPath);
+    const raw = await fsp.readFile(targetPath, "utf-8");
+    return {
+      mtimeMs: stats.mtimeMs,
+      ready: Boolean(parseJsonObjectCandidate(raw)),
+    };
+  } catch {
+    return { ready: false };
+  }
+};
+
 const clipInline = (value: string | undefined, max = 260): string | undefined => {
   const normalized = value?.trim().replace(/\s+/g, " ");
   if (!normalized) return undefined;
@@ -445,7 +461,7 @@ export class LocalCodexExecutor implements CodexExecutor {
         await fsp.mkdir(path.dirname(input.stderrPath), { recursive: true });
         await Promise.all([
           fsp.writeFile(input.promptPath, input.prompt, "utf-8"),
-          fsp.writeFile(input.lastMessagePath, "", "utf-8"),
+          fsp.rm(input.lastMessagePath, { force: true }),
           prepareAttemptLog(input.stdoutPath, "stdout"),
           prepareAttemptLog(input.stderrPath, "stderr"),
         ]);
@@ -622,7 +638,11 @@ export class LocalCodexExecutor implements CodexExecutor {
             let completionSignalMtimeMs: number | undefined;
             let completionStableSince: number | undefined;
             while (child.exitCode === null && !child.killed && !completionTriggered) {
-              const signalMtimeMs = await fileContentMtimeMs(completionSignalPath);
+              const structuredSignal = prefersStructuredCompletion
+                ? await readStructuredCompletionSignal(completionSignalPath)
+                : undefined;
+              const signalMtimeMs = structuredSignal?.mtimeMs
+                ?? await fileContentMtimeMs(completionSignalPath);
               if (signalMtimeMs !== undefined) {
                 if (signalMtimeMs !== completionSignalMtimeMs) {
                   completionSignalMtimeMs = signalMtimeMs;
@@ -632,7 +652,13 @@ export class LocalCodexExecutor implements CodexExecutor {
                 const outputQuiet = Date.now() - lastOutputAt >= completionQuietMs;
                 const completionStable = completionStableSince !== undefined
                   && Date.now() - completionStableSince >= completionQuietMs;
-                if (outputQuiet || (prefersStructuredCompletion && completionStable)) {
+                const structuredReady = prefersStructuredCompletion
+                  ? Boolean(structuredSignal?.ready)
+                  : true;
+                if (
+                  structuredReady
+                  && (outputQuiet || (prefersStructuredCompletion && completionStable))
+                ) {
                   completionTriggered = true;
                   child.kill("SIGTERM");
                   completionKillTimer = setTimeout(() => {

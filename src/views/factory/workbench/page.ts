@@ -105,16 +105,6 @@ const workbenchBackgroundRefreshOn = [
   { event: "objective-runtime-refresh", throttleMs: 320 },
 ] as const;
 
-const workbenchBoardRefreshOn = [
-  { event: "profile-board-refresh", throttleMs: 220 },
-  { event: "objective-runtime-refresh", throttleMs: 220 },
-] as const;
-
-const workbenchFocusRefreshOn = [
-  { event: "profile-board-refresh", throttleMs: 180 },
-  { event: "objective-runtime-refresh", throttleMs: 180 },
-] as const;
-
 const workbenchChatRefreshOn = (input: Pick<FactoryWorkbenchRouteContext, "inspectorTab" | "objectiveId">) => input.inspectorTab === "chat"
   ? [
       { event: "agent-refresh", throttleMs: 180 },
@@ -1310,11 +1300,7 @@ export const factoryWorkbenchFocusIsland = (
     : `<div class="flex min-w-0 flex-col gap-6">
       ${liveBlocks.map((block) => renderWorkbenchBlockIsland(block, routeContext)).join("")}
     </div>`;
-  return `<section id="factory-workbench-focus-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
-    path: workbenchFocusPath(routeContext),
-    refreshOn: workbenchFocusRefreshOn,
-    clientOnly: true,
-  })} ${workbenchEnvelopeAttrs(envelope)}>
+  return `<section id="factory-workbench-focus-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${passiveRefreshAttrs(workbenchFocusPath(routeContext))} ${workbenchEnvelopeAttrs(envelope)}>
     ${feedBlocks.length === 0 ? "" : renderWorkbenchPrimaryHeader(workspace, routeContext)}
     <div id="factory-workbench-focus-scroll" data-preserve-scroll-key="focus" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5 lg:pr-1">
       ${content}
@@ -1328,11 +1314,7 @@ export const factoryWorkbenchRailIsland = (
   envelope?: WorkbenchVersionEnvelope,
 ): string => {
   const { feedBlocks } = partitionWorkbenchBlocks(workspace);
-  return `<section id="factory-workbench-rail-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${liveIslandAttrs({
-    path: workbenchBoardPath(routeContext),
-    refreshOn: workbenchBoardRefreshOn,
-    clientOnly: true,
-  })} ${workbenchEnvelopeAttrs(envelope)}>
+  return `<section id="factory-workbench-rail-shell" class="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-card/35" ${passiveRefreshAttrs(workbenchBoardPath(routeContext))} ${workbenchEnvelopeAttrs(envelope)}>
     ${renderWorkbenchFeedHeader(workspace, routeContext)}
     <div id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5">
       <div class="flex min-w-0 flex-col gap-6">

@@ -1302,6 +1302,23 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
           actor: "factory-ui",
         })
       : undefined;
+    const selectedObjectiveId = input.selectedObjectiveId?.trim();
+    if (selectedObjectiveId) {
+      try {
+        const selectedObjective = toFactorySelectedObjectiveCard(await service.getObjective(selectedObjectiveId));
+        await ensureObjectiveHandoffInSession({
+          profileId: resolved.root.id,
+          chatId: input.chatId,
+          objective: selectedObjective,
+        });
+      } catch (err: unknown) {
+        const status = typeof err === "object" && err !== null && "status" in err
+          ? (err as { readonly status?: unknown }).status
+          : undefined;
+        const message = err instanceof Error ? err.message : undefined;
+        if (status !== 404 && !message?.includes("not found")) throw err;
+      }
+    }
     const sessionStream = factoryChatSessionStream(repoRoot, resolved.root.id, input.chatId);
     const fallbackSessionChain = chatProjectionDataDir
       ? undefined
@@ -1311,22 +1328,22 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       fallbackChain: fallbackSessionChain,
     });
     const projectedRuns = chatContext?.runs ?? [];
-    const canScopeProjectedConversation = !input.selectedObjectiveId
-      || projectedRuns.some((run) => run.objectiveId === input.selectedObjectiveId);
+    const canScopeProjectedConversation = !selectedObjectiveId
+      || projectedRuns.some((run) => run.objectiveId === selectedObjectiveId);
     if (!chatContext || !canScopeProjectedConversation) {
       const runtime = await buildWorkbenchSessionRuntimeCached({
         repoRoot,
         profileId: resolved.root.id,
         profileLabel: resolved.root.label,
         chatId: input.chatId,
-        objectiveId: input.selectedObjectiveId,
+        objectiveId: selectedObjectiveId,
       });
       const jobsById = new Map(runtime.scopedJobs.map((job) => [job.id, job] as const));
       return {
         activeProfileId: resolved.root.id,
         activeProfileLabel: resolved.root.label,
         chatId: input.chatId,
-        objectiveId: input.selectedObjectiveId,
+        objectiveId: selectedObjectiveId,
         runId: runtime.activeRunId,
         knownRunIds: runtime.runIds,
         terminalRunIds: collectTerminalRunIds(runtime.runIds, runtime.runChains),
@@ -1348,10 +1365,10 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
       };
     }
-    const scopedRuns = input.selectedObjectiveId
-      ? projectedRuns.filter((run) => run.objectiveId === input.selectedObjectiveId)
+    const scopedRuns = selectedObjectiveId
+      ? projectedRuns.filter((run) => run.objectiveId === selectedObjectiveId)
       : projectedRuns;
-    const discoveredObjectiveId = input.selectedObjectiveId
+    const discoveredObjectiveId = selectedObjectiveId
       ?? chatContext.bindings.objectiveId;
     return {
       activeProfileId: resolved.root.id,
@@ -1378,7 +1395,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       chatContext,
       items: buildChatItemsFromConversation(chatContext.conversation, {
         runs: projectedRuns,
-        selectedObjectiveId: input.selectedObjectiveId,
+        selectedObjectiveId,
       }),
     };
   };
