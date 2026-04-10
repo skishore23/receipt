@@ -66,7 +66,7 @@ type InvestigationRunAssessment = {
   readonly efficiency: InvestigationEfficiency;
   readonly controlChurn: InvestigationAssessmentLevel;
   readonly contractCriteriaCount: number;
-  readonly alignmentVerdict: "aligned" | "uncertain" | "drifted" | "not_reported";
+  readonly alignmentVerdict: "aligned" | "uncertain" | "drifted" | "not_reported" | "not_applicable";
   readonly correctiveSteerIssued: boolean;
   readonly alignedAfterCorrection: boolean;
   readonly recommendationApplied: boolean;
@@ -80,6 +80,7 @@ type InvestigationRunAssessment = {
 
 const VALIDATION_KEYWORD_RE = /\b(build|test|verify|lint|smoke|check|validat(?:e|ed|ion))\b/i;
 const VALIDATION_OUTCOME_RE = /\b(passed|failed|completed|captured|executed|ran|run|succeeded|successful)\b/i;
+const TERMINAL_OBJECTIVE_CLEANUP_REASON_RE = /^retired after terminal objective transition \([^)]+\)$/i;
 
 export type FactoryReceiptInvestigation = {
   readonly requestedId?: string;
@@ -410,7 +411,9 @@ const buildAssessment = (
   const helperCount = packetContext?.selectedHelpers.length ?? 0;
   const controlJobs = analysis?.jobs.filter((job) => job.payloadKind === "factory.objective.control").length ?? 0;
   const stalledJobs = analysis?.jobs.filter((job) => job.status === "stalled").length ?? 0;
-  const failedJobs = analysis?.jobs.filter((job) => job.status === "failed" || job.status === "canceled").length ?? 0;
+  const failedJobs = analysis?.jobs.filter((job) =>
+    job.status === "failed"
+    || (job.status === "canceled" && !TERMINAL_OBJECTIVE_CLEANUP_REASON_RE.test(job.canceledReason ?? ""))).length ?? 0;
   const leaseExpiredCount = analysis?.anomalies.filter((item) => item.summary.includes("lease expired")).length ?? 0;
   const budgetExceededCount = analysis?.anomalies.filter((item) => item.summary.includes("iteration budget exhausted")).length ?? 0;
   const dbLockedCount = analysis?.anomalies.filter((item) => item.summary.includes("database is locked")).length ?? 0;
@@ -420,10 +423,16 @@ const buildAssessment = (
   const terminal = success || blocked;
   const inFlight = !terminal;
   const objectiveMode = analysis?.objectiveMode ?? "unknown";
-  const proofPresent = proof.length > 0;
+  const proofPresent = proof.length > 0
+    || (
+      objectiveMode === "investigation"
+      && (evidenceCount > 0 || scriptCount > 0 || commandCount > 0)
+    );
   const repoDiffProduced = changed.length > 0;
   const contractCriteriaCount = packetContext?.contractCriteria.length ?? 0;
-  const alignmentVerdict = packetContext?.alignmentVerdict ?? "not_reported";
+  const alignmentVerdict = objectiveMode === "investigation"
+    ? packetContext?.alignmentVerdict ?? "not_applicable"
+    : packetContext?.alignmentVerdict ?? "not_reported";
   const correctiveSteerIssued = parsed.timeline.some((item) =>
     item.type === "objective.operator.noted"
     && item.summary.includes("Alignment correction for this objective"),

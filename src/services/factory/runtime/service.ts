@@ -476,6 +476,7 @@ const renderLiveOperatorGuidanceSection = (
   if (guidanceHistory.length === 0) return undefined;
   const lines = [
     "## Live Operator Guidance",
+    "Treat this section as highest priority. Apply it before any new inspection, parsing, or external command.",
     ...guidanceHistory.flatMap((item, index) => {
       const label =
         item.guidanceKind === "mixed"
@@ -905,18 +906,26 @@ export class FactoryService {
   private objectiveContractForState(
     state: FactoryState,
     planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now()),
+    opts?: {
+      readonly taskPhase?: FactoryTaskExecutionPhase;
+    },
   ): FactoryObjectiveContractRecord {
+    const synthOnlyInvestigation = state.objectiveMode === "investigation" && opts?.taskPhase === "synthesizing";
     return {
       acceptanceCriteria: planningReceipt.acceptanceCriteria,
       allowedScope: [
-        `Implement only what is needed to satisfy the accepted delivery objective for ${state.title}.`,
-        "Make the minimum adjacent validation or helper changes required to ship the requested behavior.",
+        `Implement only what is needed to satisfy the accepted ${state.objectiveMode} objective for ${state.title}.`,
+        state.objectiveMode === "investigation"
+          ? "Make the minimum adjacent evidence or helper changes required to answer the question credibly."
+          : "Make the minimum adjacent validation or helper changes required to ship the requested behavior.",
       ],
       disallowedScope: [
         "Do not broaden into unrelated refactors, formatting churn, or side quests outside the current objective.",
         "Do not claim downstream follow-up work as completed when it is only noted for handoff.",
       ],
-      requiredChecks: state.checks.length > 0 ? state.checks : planningReceipt.validationPlan,
+      requiredChecks: synthOnlyInvestigation
+        ? []
+        : state.checks.length > 0 ? state.checks : planningReceipt.validationPlan,
       proofExpectation: state.objectiveMode === "investigation"
         ? "Return concrete evidence and a clear conclusion with any uncertainty called out."
         : "Return concrete changed files, validation evidence, and no unresolved delivery work in completion.remaining.",
@@ -3867,10 +3876,25 @@ export class FactoryService {
         break;
       } catch (error) {
         if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") throw error;
-        if (parsed.taskPhase === "synthesizing") throw error;
         const guidance = parseFactoryLiveGuidance(error.signal);
         if (!guidance) throw error;
         guidanceHistory.push(guidance);
+        if (parsed.taskPhase === "synthesizing" && guidanceHistory.length >= 3) {
+          const fallbackResult = await this.buildFallbackInvestigationTaskResult(
+            parsed,
+            error.result,
+            new Error("Synthesizing restart limit reached before the worker emitted a structured result."),
+          );
+          await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
+          await this.applyTaskWorkerResult(parsed, fallbackResult);
+          await this.reactObjective(parsed.objectiveId);
+          return {
+            objectiveId: parsed.objectiveId,
+            taskId: parsed.taskId,
+            candidateId: parsed.candidateId,
+            status: "completed",
+          };
+        }
       }
     }
     const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
@@ -6347,7 +6371,9 @@ export class FactoryService {
       memoryTools: this.memoryTools,
       profileRoot: this.profileRoot,
       latestTaskCandidate: (inputState, taskId) => this.latestTaskCandidate(inputState, taskId),
-      objectiveContractForState: (inputState, planning) => this.objectiveContractForState(inputState, planning),
+      objectiveContractForState: (inputState, planning) => this.objectiveContractForState(inputState, planning, {
+        taskPhase,
+      }),
       compactCloudExecutionContextForPacket: (context) => this.compactCloudExecutionContextForPacket(context),
       buildContextSources: (inputState, repoSkills, sharedRefs) => this.buildContextSources(inputState, repoSkills, sharedRefs),
       objectiveProfileArtifactPath: (objectiveId) => this.objectiveProfileArtifactPath(objectiveId),
@@ -6356,7 +6382,9 @@ export class FactoryService {
       receiptTaskOrCandidateId: (event) => this.receiptTaskOrCandidateId(event),
       objectiveStream: (objectiveId) => objectiveStream(objectiveId),
     }, state, task, candidateId, workerProfile, cloudExecutionContext, repoSkillPaths, taskPrompt);
-    const objectiveContract = this.objectiveContractForState(state, contextPack.planning);
+    const objectiveContract = this.objectiveContractForState(state, contextPack.planning, {
+      taskPhase,
+    });
     const sourceTask = task.sourceTaskId ? state.workflow.tasksById[task.sourceTaskId] : undefined;
     const inheritedSourceArtifactRefs = task.sourceTaskId
       ? this.mergeArtifactRefs([
@@ -6850,7 +6878,9 @@ export class FactoryService {
     );
     const validationSection = renderFactoryTaskValidationSection(state, task);
     const planningReceipt = state.planning ?? this.buildPlanningReceipt(state, state.updatedAt || Date.now());
-    const objectiveContract = this.objectiveContractForState(state, planningReceipt);
+    const objectiveContract = this.objectiveContractForState(state, planningReceipt, {
+      taskPhase: payload.taskPhase,
+    });
     const manifestPathForPrompt = this.taskPromptPath(payload.workspacePath, payload.manifestPath);
     const contextSummaryPathForPrompt = payload.contextSummaryPath
       ? this.taskPromptPath(payload.workspacePath, payload.contextSummaryPath)

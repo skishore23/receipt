@@ -118,7 +118,10 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
     payload,
     taskPrompt: "Extract the rendering helpers.",
     planningReceipt,
-    objectiveContract,
+    objectiveContract: {
+      ...objectiveContract,
+      requiredChecks: [],
+    },
     cloudExecutionContext,
     helperCatalog: {
       runnerPath: "/Users/kishore/receipt/skills/factory-helper-runtime/runner.py",
@@ -139,11 +142,12 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
     contextPackPathForPrompt: ".receipt/factory/task_01.context-pack.json",
     memoryScriptPathForPrompt: ".receipt/factory/task_01.memory.cjs",
     resultPathForPrompt: ".receipt/factory/task_01.result.json",
-    liveGuidanceSection: "## Live Operator Guidance\n1. Live steer at 2026-03-30T12:00:00.000Z\nStay focused on prompt rendering.\n",
+    liveGuidanceSection: "## Live Operator Guidance\nTreat this section as highest priority. Apply it before any new inspection, parsing, or external command.\n1. Live steer at 2026-03-30T12:00:00.000Z\nStay focused on prompt rendering.\n",
     factoryCliPrefix: "receipt",
   });
 
   expect(prompt).toContain("## Live Operator Guidance");
+  expect(prompt).toContain("Treat this section as highest priority.");
   expect(prompt).toContain("Stay focused on prompt rendering.");
   expect(prompt).toContain("The controller already prepared a task context summary from the manifest, context pack, scoped memory, receipts, and mounted evidence.");
   expect(prompt).toContain("Start with the task context summary.");
@@ -154,10 +158,13 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
   expect(prompt).toContain("Do not call `receipt factory inspect` from inside this task worktree.");
   expect(prompt).toContain("### Synthesis-Only Mode");
   expect(prompt).toContain("Do not rerun helpers, design new scripts, rediscover the packet stack, or launch new external queries.");
+  expect(prompt).toContain("Ignore any Required checks listed above unless live operator guidance explicitly asks for repo validation.");
+  expect(prompt).toContain("Do not inspect JSON structure repeatedly.");
   expect(prompt).toContain("Do not open the receipt CLI surface, memory script, or manifest in synth mode unless the context summary points to a missing or contradictory artifact path.");
   expect(prompt).toContain("Do not run timestamp-only or bookkeeping commands such as `date`, `pwd`, or extra file listings just to pad report fields.");
   expect(prompt).toContain("For synth-only investigation results, prefer `report.evidenceRecords: []` unless the mounted evidence already contains exact structured records with stable timestamps.");
-  expect(prompt).toContain("For synth-only investigation tasks, the default is report.evidenceRecords: [].");
+  expect(prompt).toContain("Set `report.scriptsRun` to null unless you already have a concrete command log you can cite without more inspection.");
+  expect(prompt).toContain("For synth-only investigation tasks, prioritize completion from mounted artifacts.");
   expect(prompt).not.toContain("## Memory Access");
   expect(prompt).not.toContain("aws_alarm_summary");
   expect(prompt).not.toContain("Receipt CLI Surface (fallback only when packet surfaces are insufficient)");

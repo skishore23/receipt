@@ -1309,8 +1309,9 @@ test("factory investigation: prefers terminal job projection over stale receipt-
     warning.includes(taskJob.id) && warning.includes("projection status canceled") && warning.includes("local db cleanup"))).toBe(true);
 }, 120_000);
 
-test("factory investigation: synthesizing mode renders synth-only prompt and refuses restart guidance", async () => {
+test("factory investigation: synthesizing mode rerenders with live guidance and completes after a restart", async () => {
   let attempts = 0;
+  let guidancePending = true;
   const { service, queue } = await createFactoryService({
     codexRun: async (input, control) => {
       attempts += 1;
@@ -1367,22 +1368,28 @@ test("factory investigation: synthesizing mode renders synth-only prompt and ref
     ...(taskJob!.payload as FactoryTaskJobPayload),
     taskPhase: "synthesizing" as const,
   };
-  await expect(service.runTask(payload, {
-    pollSignal: async () => ({
-      kind: "restart",
-      note: "Use the existing evidence and finish now.",
-      meta: {
-        jobId: taskJob!.id,
-        guidance: "Use the existing evidence and finish now.",
-        guidanceKind: "steer",
-        sourceCommandIds: ["cmd_steer_01"],
-        appliedAt: 2_345,
-      },
-    }),
-  })).rejects.toBeInstanceOf(CodexControlSignalError);
+  await service.runTask(payload, {
+    pollSignal: async () => {
+      if (!guidancePending) return undefined;
+      guidancePending = false;
+      return {
+        kind: "restart" as const,
+        note: "Use the existing evidence and finish now.",
+        meta: {
+          jobId: taskJob!.id,
+          guidance: "Use the existing evidence and finish now.",
+          guidanceKind: "steer",
+          sourceCommandIds: ["cmd_steer_01"],
+          appliedAt: 2_345,
+        },
+      };
+    },
+  });
 
-  expect(attempts).toBe(1);
+  expect(attempts).toBe(2);
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("### Synthesis-Only Mode");
+  await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
+  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Synthesized the final investigation from existing evidence.");
 }, 120_000);
 
 test("factory investigation: stale synth recommendation is obsoleted after the task already reported", async () => {
