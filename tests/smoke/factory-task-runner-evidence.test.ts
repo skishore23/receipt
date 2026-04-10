@@ -76,7 +76,7 @@ test("factory task runner evidence: successful delivery requires proof, scriptsR
   })).toContain("alignment");
 });
 
-test("factory task runner evidence: successful investigation requires a structured report and scriptsRun", () => {
+test("factory task runner evidence: successful investigation can complete with proof plus scripts or a structured report", () => {
   expect(validateTaskEvidence({
     objectiveId: "objective_demo",
     taskId: "task_01",
@@ -90,7 +90,7 @@ test("factory task runner evidence: successful investigation requires a structur
     scriptsRun: [{ command: "aws sts get-caller-identity", summary: "identity", status: "ok" }],
     hasStructuredReport: false,
     reportIncludesEvidenceRecords: false,
-  })).toContain("structured investigation report");
+  })).toBeUndefined();
 
   expect(validateTaskEvidence({
     objectiveId: "objective_demo",
@@ -105,5 +105,20 @@ test("factory task runner evidence: successful investigation requires a structur
     scriptsRun: [],
     hasStructuredReport: true,
     reportIncludesEvidenceRecords: false,
-  })).toContain("scriptsRun");
+  })).toBeUndefined();
+
+  expect(validateTaskEvidence({
+    objectiveId: "objective_demo",
+    taskId: "task_01",
+    objectiveMode: "investigation",
+    outcome: "approved",
+    completion: {
+      changed: ["Collected evidence"],
+      proof: ["artifact-backed claim"],
+      remaining: [],
+    },
+    scriptsRun: [],
+    hasStructuredReport: false,
+    reportIncludesEvidenceRecords: false,
+  })).toContain("investigation proof or scripts");
 });

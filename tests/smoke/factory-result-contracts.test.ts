@@ -8,8 +8,11 @@ import {
   normalizeTaskPresentationRecord,
 } from "../../src/services/factory/result-contracts";
 
-test("factory result contracts: investigation evidence records use strict map entries for structured output", () => {
+test("factory result contracts: investigation evidence records stay strict and nullable", () => {
   expect(FACTORY_INVESTIGATION_REPORT_SCHEMA.required).toContain("evidenceRecords");
+  expect(FACTORY_INVESTIGATION_REPORT_SCHEMA.properties.evidenceRecords).toMatchObject({
+    type: ["array", "null"],
+  });
   const evidenceRecordItems = (
     FACTORY_INVESTIGATION_REPORT_SCHEMA.properties.evidenceRecords as {
       readonly items: {

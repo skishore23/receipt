@@ -237,7 +237,7 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
       },
     },
     evidenceRecords: {
-      type: "array",
+      type: ["array", "null"],
       items: {
         type: "object",
         properties: {
@@ -255,7 +255,7 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
       },
     },
     scriptsRun: {
-      type: "array",
+      type: ["array", "null"],
       items: FACTORY_TASK_SCRIPT_RUN_SCHEMA,
     },
     disagreements: {

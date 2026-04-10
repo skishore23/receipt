@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
-import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput } from "../../../adapters/codex-executor";
+import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
 import { HubGit } from "../../../adapters/hub-git";
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import {
@@ -2777,11 +2777,12 @@ export class FactoryService {
       throw new FactoryServiceError(400, "invalid factory control payload");
     }
     const objectiveId = requireNonEmpty(payload.objectiveId, "objectiveId required");
-    const reason = payload.reason === "admitted" || payload.reason === "reconcile"
+    const reason: FactoryObjectiveControlJobPayload["reason"] =
+      payload.reason === "admitted" || payload.reason === "reconcile"
       ? payload.reason
       : "startup";
     await this.ensureBootstrap();
-    let nextReason = reason;
+    let nextReason: FactoryObjectiveControlJobPayload["reason"] = reason;
     let passes = 0;
     while (passes < 2) {
       passes += 1;
@@ -6974,10 +6975,148 @@ export class FactoryService {
   }
 
   private async resolveTaskWorkerResult(
-    payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
-    execution: { readonly stdout: string; readonly lastMessage?: string; readonly tokensUsed?: number },
+    payload: FactoryTaskJobPayload,
+    execution: CodexRunResult,
   ): Promise<Record<string, unknown>> {
-    return resolveFactoryTaskWorkerResult(payload, execution);
+    try {
+      return await resolveFactoryTaskWorkerResult(payload, execution);
+    } catch (error) {
+      if (payload.objectiveMode !== "investigation") throw error;
+      return this.buildFallbackInvestigationTaskResult(payload, execution, error);
+    }
+  }
+
+  private async buildFallbackInvestigationTaskResult(
+    payload: Pick<
+      FactoryTaskJobPayload,
+      "objectiveId" | "taskId" | "workspacePath" | "resultPath" | "lastMessagePath" | "evidencePath"
+    >,
+    execution: CodexRunResult,
+    error: unknown,
+  ): Promise<Record<string, unknown>> {
+    const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
+    const command = clipText(optionalTrimmedString(telemetry?.command), 220) ?? "codex exec";
+    const exitCode = typeof telemetry?.exitCode === "number"
+      ? telemetry.exitCode
+      : execution.exitCode ?? 1;
+    const latestEventText = clipText(optionalTrimmedString(execution.latestEventText), 280);
+    const lastMessage = clipText(optionalTrimmedString(execution.lastMessage), 280);
+    const fallbackSummary = clipText(
+      latestEventText
+        ?? lastMessage
+        ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.",
+      280,
+    ) ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.";
+    const nextAction = "Review the preserved telemetry evidence and rerun with tighter steering if a structured report is required.";
+    const structuredResultError = clipText(error instanceof Error ? error.message : String(error), 500);
+    const telemetryProof = isRecord(telemetry?.proof) ? telemetry.proof : undefined;
+    const telemetryVerified = clipText(optionalTrimmedString(telemetryProof?.verified), 280);
+    const telemetryHow = clipText(optionalTrimmedString(telemetryProof?.how), 500);
+    const fallbackScriptsRun = [{
+      command,
+      summary: clipText(
+        exitCode === 0
+          ? "Codex exited without writing a valid investigation result; telemetry evidence was preserved."
+          : `Codex exited ${exitCode}; telemetry evidence was preserved for follow-up.`,
+        280,
+      ),
+      status: exitCode === 0 ? "warning" : "error",
+    }] satisfies ReadonlyArray<FactoryExecutionScriptRun>;
+    const resultMissingDetail = [
+      structuredResultError ? `Result parsing error: ${structuredResultError}` : undefined,
+      execution.latestEventType ? `Latest event type: ${execution.latestEventType}` : undefined,
+      latestEventText ? `Latest event: ${latestEventText}` : undefined,
+      lastMessage ? `Last message: ${lastMessage}` : undefined,
+    ].filter((item): item is string => Boolean(item)).join("\n");
+    const telemetryFiles = Array.isArray(telemetry?.files)
+      ? telemetry.files.filter((item): item is Record<string, unknown> => isRecord(item))
+      : [];
+    const telemetryDetail = [
+      `Command: ${command}`,
+      `Exit code: ${exitCode}`,
+      telemetryVerified ? `Verified: ${telemetryVerified}` : undefined,
+      telemetryHow ? `How: ${telemetryHow}` : undefined,
+      telemetryFiles.length > 0 ? `Files captured: ${telemetryFiles.length}` : undefined,
+    ].filter((item): item is string => Boolean(item)).join("\n");
+    const evidenceRecords = [{
+      objective_id: payload.objectiveId,
+      task_id: payload.taskId,
+      timestamp: typeof telemetry?.finishedAt === "number" ? telemetry.finishedAt : Date.now(),
+      tool_name: "codex",
+      command_or_api: command,
+      inputs: {
+        workspacePath: payload.workspacePath,
+        resultPath: payload.resultPath,
+        lastMessagePath: payload.lastMessagePath,
+      },
+      outputs: {
+        exitCode,
+        signal: execution.signal ?? null,
+        latestEventType: execution.latestEventType ?? null,
+        latestEventText: execution.latestEventText ?? null,
+      },
+      summary_metrics: {
+        structured_result_missing: true,
+        stdout_chars: execution.stdout.length,
+        stderr_chars: execution.stderr.length,
+        telemetry_files: telemetryFiles.length,
+      },
+    }];
+    const fallbackResult: Record<string, unknown> = {
+      outcome: "partial",
+      summary: fallbackSummary,
+      handoff: `${fallbackSummary}\n\nTelemetry evidence was preserved so the controller can inspect the raw stdout/stderr and task packet artifacts.`,
+      presentation: {
+        kind: "investigation_report",
+        renderHint: "report",
+        inlineBody: fallbackSummary,
+        primaryArtifactLabels: ["task evidence", "task stdout", "task stderr"],
+      },
+      artifacts: [],
+      completion: {
+        changed: [fallbackSummary],
+        proof: [
+          fallbackScriptsRun[0]?.summary ?? "Telemetry evidence was preserved.",
+          ...(telemetryVerified ? [telemetryVerified] : []),
+        ].filter((item): item is string => Boolean(item)),
+        remaining: [nextAction],
+      },
+      nextAction,
+      report: {
+        conclusion: fallbackSummary,
+        evidence: [
+          {
+            title: "Structured result missing",
+            summary: "Codex did not emit a valid structured investigation result.",
+            detail: resultMissingDetail || undefined,
+          },
+          {
+            title: "Telemetry evidence captured",
+            summary: telemetryVerified ?? "Execution telemetry was preserved for controller-side analysis.",
+            detail: telemetryDetail || undefined,
+          },
+        ],
+        evidenceRecords,
+        scriptsRun: fallbackScriptsRun,
+        disagreements: [],
+        nextSteps: [nextAction],
+      },
+    };
+    return execution.tokensUsed !== undefined
+      ? { ...fallbackResult, tokensUsed: execution.tokensUsed }
+      : fallbackResult;
+  }
+
+  private async readTaskTelemetryEvidence(
+    evidencePath: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      const raw = await fs.readFile(evidencePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async resolvePublishWorkerResult(

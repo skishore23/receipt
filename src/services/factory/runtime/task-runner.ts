@@ -52,14 +52,18 @@ export const validateTaskEvidence = (input: {
     if ((input.completion?.proof.length ?? 0) === 0) {
       return `factory task ${input.taskId} completed without proof items`;
     }
-    if ((input.scriptsRun?.length ?? 0) === 0) {
+    if (input.objectiveMode === "delivery" && (input.scriptsRun?.length ?? 0) === 0) {
       return `factory task ${input.taskId} completed without scriptsRun evidence`;
     }
     if (input.objectiveMode === "delivery" && input.hasAlignment === false) {
       return `factory task ${input.taskId} completed without an explicit alignment report`;
     }
-    if (input.objectiveMode === "investigation" && input.hasStructuredReport === false) {
-      return `factory task ${input.taskId} completed without a structured investigation report`;
+    if (
+      input.objectiveMode === "investigation"
+      && input.hasStructuredReport === false
+      && (input.scriptsRun?.length ?? 0) === 0
+    ) {
+      return `factory task ${input.taskId} completed without investigation proof or scripts`;
     }
   }
   if (!input.reportIncludesEvidenceRecords) return undefined;
