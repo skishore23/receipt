@@ -7070,7 +7070,7 @@ export class FactoryService {
     error: unknown,
   ): Promise<Record<string, unknown>> {
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
-    const helperEvidence = this.extractInvestigationHelperEvidence(telemetry);
+    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
     const command = clipText(optionalTrimmedString(telemetry?.command), 220) ?? "codex exec";
     const exitCode = typeof telemetry?.exitCode === "number"
       ? telemetry.exitCode
@@ -7194,72 +7194,106 @@ export class FactoryService {
       : fallbackResult;
   }
 
-  private extractInvestigationHelperEvidence(
+  private async extractInvestigationHelperEvidence(
+    workspacePath: string,
     telemetry: Record<string, unknown> | undefined,
-  ): {
+  ): Promise<{
     readonly summary?: string;
     readonly evidence: ReadonlyArray<{ readonly title: string; readonly summary: string; readonly detail?: string }>;
     readonly artifacts: ReadonlyArray<{ readonly label: string; readonly path: string | null; readonly summary: string | null }>;
     readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
-  } {
-    const stdout = optionalTrimmedString(telemetry?.stdout);
-    if (!stdout) {
-      return {
-        evidence: [],
-        artifacts: [],
-        scriptsRun: [],
-      };
-    }
-
+  }> {
     const evidence: Array<{ readonly title: string; readonly summary: string; readonly detail?: string }> = [];
     const artifacts: Array<{ readonly label: string; readonly path: string | null; readonly summary: string | null }> = [];
     const scriptsRun: Array<FactoryExecutionScriptRun> = [];
     let summary: string | undefined;
+    const seenStdout = new Set<string>();
+    const seenArtifacts = new Set<string>();
+    const seenScripts = new Set<string>();
+    const seenEvidence = new Set<string>();
 
-    for (const rawLine of stdout.split("\n")) {
-      const event = parseJsonObjectCandidate(rawLine);
-      if (!event) continue;
-      const item = isRecord(event.item) ? event.item : undefined;
-      const command = optionalTrimmedString(item?.command);
-      const aggregatedOutput = optionalTrimmedString(item?.aggregated_output);
-      if (!command || !aggregatedOutput) continue;
-      if (command.includes("factory-helper-runtime/runner.py run")) {
-        const helperOutput = parseJsonObjectCandidate(aggregatedOutput);
-        const helperSummary = optionalTrimmedString(helperOutput?.summary);
-        if (helperSummary && !summary) summary = helperSummary;
-        const helperData = isRecord(helperOutput?.data) ? helperOutput.data : undefined;
-        const metricSummary = helperData ? this.summarizeHelperMetricCollections(helperData) : undefined;
+    const addHelperOutput = (helperOutput: Record<string, unknown>, command: string): void => {
+      const helperSummary = optionalTrimmedString(helperOutput.summary);
+      if (helperSummary && !summary) summary = helperSummary;
+      const helperData = isRecord(helperOutput.data) ? helperOutput.data : undefined;
+      const metricSummary = helperData ? this.summarizeHelperMetricCollections(helperData) : undefined;
+      const evidenceKey = `${helperSummary ?? "helper"}::${metricSummary ?? ""}`;
+      if (!seenEvidence.has(evidenceKey)) {
+        seenEvidence.add(evidenceKey);
         evidence.push({
           title: "Checked-in helper output",
           summary: helperSummary ?? "Captured machine-readable helper output.",
           detail: metricSummary,
         });
+      }
+      const commandKey = clipText(command, 280) ?? command;
+      if (!seenScripts.has(commandKey)) {
+        seenScripts.add(commandKey);
         scriptsRun.push({
-          command: clipText(command, 280) ?? command,
+          command: commandKey,
           summary: helperSummary ?? "Checked-in helper produced investigation evidence.",
           status: "ok",
         });
-        const helperArtifacts = Array.isArray(helperOutput?.artifacts)
-          ? helperOutput.artifacts
-          : [];
-        for (const artifact of helperArtifacts) {
-          if (typeof artifact === "string") {
-            artifacts.push({
-              label: path.basename(artifact),
-              path: artifact,
-              summary: helperSummary ?? null,
-            });
-            continue;
-          }
-          if (!isRecord(artifact)) continue;
-          const artifactPath = optionalTrimmedString(artifact.path);
-          artifacts.push({
-            label: optionalTrimmedString(artifact.label) ?? path.basename(artifactPath ?? "artifact"),
-            path: artifactPath ?? null,
-            summary: optionalTrimmedString(artifact.summary) ?? helperSummary ?? null,
-          });
-        }
       }
+      const helperArtifacts = Array.isArray(helperOutput.artifacts)
+        ? helperOutput.artifacts
+        : [];
+      for (const artifact of helperArtifacts) {
+        if (typeof artifact === "string") {
+          if (seenArtifacts.has(artifact)) continue;
+          seenArtifacts.add(artifact);
+          artifacts.push({
+            label: path.basename(artifact),
+            path: artifact,
+            summary: helperSummary ?? null,
+          });
+          continue;
+        }
+        if (!isRecord(artifact)) continue;
+        const artifactPath = optionalTrimmedString(artifact.path);
+        const artifactKey = artifactPath ?? `${optionalTrimmedString(artifact.label) ?? "artifact"}::${optionalTrimmedString(artifact.summary) ?? ""}`;
+        if (seenArtifacts.has(artifactKey)) continue;
+        seenArtifacts.add(artifactKey);
+        artifacts.push({
+          label: optionalTrimmedString(artifact.label) ?? path.basename(artifactPath ?? "artifact"),
+          path: artifactPath ?? null,
+          summary: optionalTrimmedString(artifact.summary) ?? helperSummary ?? null,
+        });
+      }
+    };
+
+    const visitStdout = (stdout: string | undefined): void => {
+      const normalized = optionalTrimmedString(stdout);
+      if (!normalized || seenStdout.has(normalized)) return;
+      seenStdout.add(normalized);
+      for (const rawLine of normalized.split("\n")) {
+        const event = parseJsonObjectCandidate(rawLine);
+        if (!event) continue;
+        const item = isRecord(event.item) ? event.item : undefined;
+        const command = optionalTrimmedString(item?.command);
+        const aggregatedOutput = optionalTrimmedString(item?.aggregated_output);
+        if (command && aggregatedOutput && command.includes("factory-helper-runtime/runner.py run")) {
+          const helperOutput = parseJsonObjectCandidate(aggregatedOutput);
+          if (helperOutput) addHelperOutput(helperOutput, command);
+        }
+        const nestedStdout = optionalTrimmedString(event.stdout);
+        if (nestedStdout) visitStdout(nestedStdout);
+        const nestedAggregated = parseJsonObjectCandidate(aggregatedOutput ?? "");
+        const nestedAggregatedStdout = optionalTrimmedString(nestedAggregated?.stdout);
+        if (nestedAggregatedStdout) visitStdout(nestedAggregatedStdout);
+      }
+    };
+
+    visitStdout(optionalTrimmedString(telemetry?.stdout));
+
+    const packetDir = path.join(workspacePath, ".receipt", "factory");
+    const siblingEvidenceFiles = (await readdirIfPresent(packetDir))
+      .filter((entry) => /^task_\d+\.evidence\.json$/i.test(entry.name))
+      .map((entry) => path.join(packetDir, entry.name));
+    for (const evidencePath of siblingEvidenceFiles) {
+      const raw = await fs.readFile(evidencePath, "utf-8").catch(() => "");
+      const parsed = parseJsonObjectCandidate(raw);
+      visitStdout(optionalTrimmedString(parsed?.stdout));
     }
 
     return {

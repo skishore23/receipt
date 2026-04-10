@@ -1419,13 +1419,38 @@ test("factory investigation: synthesizing execution stall falls back to helper-b
             publicS3Buckets: [],
           },
         };
-        const stdout = `${JSON.stringify({
+        const helperStdout = `${JSON.stringify({
           type: "item.completed",
           item: {
             id: "item_0",
             type: "command_execution",
             command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory -- --profile default --all-regions --output-dir .receipt/factory/evidence",
             aggregated_output: JSON.stringify(helperOutput),
+            exit_code: 0,
+            status: "completed",
+          },
+        })}\n`;
+        const task01EvidencePath = path.join(path.dirname(input.evidencePath ?? input.stdoutPath), "task_01.evidence.json");
+        await fs.writeFile(task01EvidencePath, JSON.stringify({
+          command: "codex exec",
+          stdout: helperStdout,
+          stderr: "",
+          exitCode: 0,
+          startedAt: Date.now() - 10_000,
+          finishedAt: Date.now() - 9_000,
+          files: [],
+          proof: {
+            verified: "task step completed successfully",
+            how: "checked the codex child exit code and preserved the generated response files",
+          },
+        }), "utf-8");
+        const stdout = `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "command_execution",
+            command: "sed -n '1,320p' .receipt/factory/task_01.evidence.json",
+            aggregated_output: await fs.readFile(task01EvidencePath, "utf-8"),
             exit_code: 0,
             status: "completed",
           },
