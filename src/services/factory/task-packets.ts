@@ -139,6 +139,13 @@ export type FactoryContextPack = {
   readonly investigation: {
     readonly reports: ReadonlyArray<FactoryInvestigationTaskReport>;
     readonly synthesized?: FactoryInvestigationSynthesisRecord;
+    readonly finalization?: {
+      readonly question: string;
+      readonly stopCondition: string;
+      readonly primaryEvidencePath?: string;
+      readonly helperCommand?: string;
+      readonly cloudScopeSummary?: string;
+    };
   };
   readonly packetPaths: {
     readonly root: string;
@@ -265,9 +272,6 @@ export const buildTaskFilePaths = (
     receiptCliPath: path.join(root, `${taskId}${phaseSuffix}.receipt-cli.md`),
   };
 };
-
-const packetRelativePath = (filePath: string): string =>
-  path.posix.join(FACTORY_TASK_PACKET_DIR, path.basename(filePath));
 
 export const renderFactoryReceiptCliSurface = (input: {
   readonly objectiveId: string;
@@ -604,20 +608,25 @@ const renderBootstrapSeedLines = (
   }
   if (mountedReadableArtifacts.length > 0) {
     lines.push(`Primary evidence path: inspect ${mountedReadableArtifacts[0]!.path} (${mountedReadableArtifacts[0]!.label}) before new external queries.`);
-  } else if (primaryHelper && pack.task.taskPhase !== "synthesizing") {
+  } else if (primaryHelper) {
     lines.push(`Primary evidence path: run the selected helper ${primaryHelper.id} first.`);
     if (pack.helperCatalog?.runnerPath && helperCommand) {
       lines.push(`Primary evidence command: python3 ${pack.helperCatalog.runnerPath} run --provider ${primaryHelper.provider} --json ${primaryHelper.id} -- ${helperCommand}`);
     }
-  } else if (pack.task.taskPhase === "synthesizing") {
-    lines.push("Primary evidence path: use inherited artifact refs and mounted evidence only; if they are insufficient, return partial or blocked instead of gathering new evidence.");
   }
   if (pack.objectiveMode === "investigation") {
-    lines.push("Stop condition: once one helper run or a small number of direct CLI calls answers the question, emit the final JSON immediately.");
-    if (mountedReadableArtifacts.length > 0) {
-      lines.push("Synthesis reporting: if mounted evidence already answers the question, return final JSON directly and prefer report.evidenceRecords: [] over timestamp reconstruction.");
-      lines.push("Synthesis reporting: use mounted artifact paths and already-captured helper commands as proof; do not run timestamp-only bookkeeping commands.");
+    lines.push(`Stop condition: ${pack.investigation.finalization?.stopCondition ?? "once one helper run or a small number of direct CLI calls answers the question, emit the final JSON immediately."}`);
+    if (pack.investigation.finalization?.question) {
+      lines.push(`Question to answer: ${pack.investigation.finalization.question}`);
     }
+    if (pack.investigation.finalization?.helperCommand) {
+      lines.push(`Preferred helper command: ${pack.investigation.finalization.helperCommand}`);
+    }
+    if (pack.investigation.finalization?.cloudScopeSummary) {
+      lines.push(`Cloud scope: ${pack.investigation.finalization.cloudScopeSummary}`);
+    }
+    lines.push("Finalization rule: once evidence is sufficient, stop gathering and return the semantic JSON result immediately.");
+    lines.push("Do not run timestamp-only bookkeeping commands after helper success.");
   }
   return lines.map((line) => `- ${line}`);
 };

@@ -52,24 +52,16 @@ const renderTaskPromptBody = (input: {
   readonly factoryCliPrefix: string;
 }): string[] => {
   const checkedInSkillPaths = resolveCheckedInSkillPathsForPrompt(input.payload);
-  const synthMode = input.payload.taskPhase === "synthesizing";
-  const bootstrapTargets = synthMode
-    ? [
-        ...(input.contextSummaryPathForPrompt
-          ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
-          : []),
-        `Context Pack (exact artifact paths or contradictory fields only when needed): ${input.contextPackPathForPrompt}`,
-      ]
-    : [
-        ...(input.contextSummaryPathForPrompt
-          ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
-          : []),
-        `Context Pack (exact fields, refs, and artifact paths only when needed): ${input.contextPackPathForPrompt}`,
-        `Memory Script (fallback scoped recall only when the summary and packet are insufficient): ${input.memoryScriptPathForPrompt}`,
-        `Receipt CLI Surface (fallback only when packet surfaces are insufficient): ${input.receiptCliPathForPrompt}`,
-        `Manifest (only when reconciling a contract/path mismatch): ${input.manifestPathForPrompt}`,
-        `AGENTS.md and skills/factory-receipt-worker/SKILL.md when the packet does not already resolve the bootstrap question`,
-      ];
+  const bootstrapTargets = [
+    ...(input.contextSummaryPathForPrompt
+      ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
+      : []),
+    `Context Pack (exact fields, refs, artifact paths, and finalization hints only when needed): ${input.contextPackPathForPrompt}`,
+    `Memory Script (fallback scoped recall only when the summary and packet are insufficient): ${input.memoryScriptPathForPrompt}`,
+    `Receipt CLI Surface (fallback only when packet surfaces are insufficient): ${input.receiptCliPathForPrompt}`,
+    `Manifest (only when reconciling a contract/path mismatch): ${input.manifestPathForPrompt}`,
+    `AGENTS.md and skills/factory-receipt-worker/SKILL.md when the packet does not already resolve the bootstrap question`,
+  ];
   const cloudContextSection = input.cloudExecutionContext
     ? [
         `## Live Cloud Context`,
@@ -156,25 +148,6 @@ const renderTaskPromptBody = (input: {
           `Capture implementation and validation results precisely in the final JSON result.`,
           `If validation or evidence collection fails, report the failure directly instead of inferring success from missing output.`,
         ]),
-    ...(synthMode
-      ? [
-          ``,
-          `### Synthesis-Only Mode`,
-          `The controller has already moved this task into synthesize-only mode.`,
-          `Do not rerun helpers, design new scripts, rediscover the packet stack, or launch new external queries.`,
-          `Use the mounted evidence, context summary, and any already-captured command output to write the final JSON result now.`,
-          `Treat mounted evidence artifacts as sufficient proof for this pass unless the packet explicitly says evidence is missing or contradictory.`,
-          `Ignore any Required checks listed above unless live operator guidance explicitly asks for repo validation. Synth-only investigation passes should not stop to run build, verify, or broad repo checks.`,
-          `Do not open the receipt CLI surface, memory script, or manifest in synth mode unless the context summary points to a missing or contradictory artifact path.`,
-          `Do not inspect JSON structure repeatedly. Read the mounted artifact once, extract the answer, and emit the final JSON.`,
-          `Do not run timestamp-only or bookkeeping commands such as \`date\`, \`pwd\`, or extra file listings just to pad report fields.`,
-          `For synth-only investigation results, prefer \`report.evidenceRecords: []\` unless the mounted evidence already contains exact structured records with stable timestamps.`,
-          `Do not reconstruct or backfill evidence-record timestamps from scratch during synthesis.`,
-          `If live operator guidance gives you an acceptable answer shape or ranking, use it directly and finalize instead of re-deriving the same facts.`,
-          `Set \`report.scriptsRun\` to null unless you already have a concrete command log you can cite without more inspection.`,
-          `If the evidence is insufficient or contradictory, return "partial" or "blocked" and explain the missing evidence directly.`,
-        ]
-      : []),
     ``,
     `## Execution Discipline`,
     `Do not run \`${input.factoryCliPrefix} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
@@ -190,7 +163,7 @@ const renderTaskPromptBody = (input: {
     `Never print or persist raw secret, token, password, API key, or credential values in stdout, stderr, artifacts, or the final JSON. Report presence, source, and impact, but redact the value itself.`,
     ``,
     ...(input.infrastructureTaskGuidance.length > 0 ? [...input.infrastructureTaskGuidance, ``] : []),
-    ...(synthMode ? [] : renderFactoryHelperPromptSection(input.helperCatalog)),
+    ...(input.helperCatalog?.guidance ? renderFactoryHelperPromptSection(input.helperCatalog) : []),
     ...cloudContextSection,
     ...input.validationSection,
     ``,
@@ -213,43 +186,40 @@ const renderTaskPromptBody = (input: {
       ? `If the packet and memory script are still insufficient, say which evidence is missing in the result instead of probing live objective state from the task worktree.`
       : `If the packet and memory script are still insufficient, say which evidence is missing in the result instead of probing live objective state from the isolated runtime.`,
     ``,
-    ...(synthMode
-      ? []
-      : [
-          `## Memory Access`,
-          `Use the layered memory script at ${input.memoryScriptPathForPrompt} instead of raw memory dumps.`,
-          `Recommended commands:`,
-          `- bun ${input.memoryScriptPathForPrompt} context 2800`,
-          `- bun ${input.memoryScriptPathForPrompt} objective 1800`,
-          `- bun ${input.memoryScriptPathForPrompt} scope task "${input.task.title}" 1400`,
-          `- bun ${input.memoryScriptPathForPrompt} search repo "${input.task.title}" 6`,
-          `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
-          ``,
-        ]),
+    `## Memory Access`,
+    `Use the layered memory script at ${input.memoryScriptPathForPrompt} instead of raw memory dumps.`,
+    `Recommended commands:`,
+    `- bun ${input.memoryScriptPathForPrompt} context 2800`,
+    `- bun ${input.memoryScriptPathForPrompt} objective 1800`,
+    `- bun ${input.memoryScriptPathForPrompt} scope task "${input.task.title}" 1400`,
+    `- bun ${input.memoryScriptPathForPrompt} search repo "${input.task.title}" 6`,
+    `Only write a durable memory note after gathering evidence from the packet, receipts, or repo files.`,
+    ``,
     ...(input.liveGuidanceSection ? [input.liveGuidanceSection] : []),
     `## Result Contract`,
     `Return exactly one JSON object matching this schema:`,
     `Write JSON to ${input.resultPathForPrompt} with:`,
     input.state.objectiveMode === "investigation"
-      ? `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string | null, "presentation": { "kind": "inline" | "artifacts" | "investigation_report" | "generic", "inlineBody": string | null, "primaryArtifactLabels": string[] | null, "renderHint": "table" | "report" | "list" | "generic" }, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "nextAction": string | null, "report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "evidenceRecords": [{ "objective_id": string, "task_id": string, "timestamp": number, "tool_name": string, "command_or_api": string, "inputs": [{ "key": string, "value": string | number | boolean | null }], "outputs": [{ "key": string, "value": string | number | boolean | null }], "summary_metrics": [{ "key": string, "value": string | number | boolean | null }] }] | null, "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }] | null, "disagreements": string[], "nextSteps": string[] } | null }`
+      ? `{ "status": "answered" | "partial" | "blocked", "conclusion": string, "findings": [{ "title": string, "summary": string, "confidence": "confirmed" | "inferred" | "uncertain", "evidenceRefLabels": string[] }], "uncertainties": string[], "nextAction": string | null }`
       : `{ "outcome": "approved" | "changes_requested" | "blocked" | "partial", "summary": string, "handoff": string | null, "presentation": { "kind": "inline" | "artifacts" | "investigation_report" | "generic", "inlineBody": string | null, "primaryArtifactLabels": string[] | null, "renderHint": "table" | "report" | "list" | "generic" }, "artifacts": [{ "label": string, "path": string | null, "summary": string | null }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "completion": { "changed": string[], "proof": string[], "remaining": string[] }, "alignment": { "verdict": "aligned" | "uncertain" | "drifted", "satisfied": string[], "missing": string[], "outOfScope": string[], "rationale": string }, "nextAction": string | null }`,
     `Do not write this file yourself.`,
     `Do not write ${input.resultPathForPrompt} yourself. Return exactly that JSON object as your final response and the runtime will persist it there.`,
-    `Use presentation to tell the orchestrator how to render the terminal result. Keep summary short and operational rather than chat-ready prose.`,
-    `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
-    `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
+    input.state.objectiveMode === "investigation"
+      ? `Keep the semantic payload small. The controller will build presentation, artifact refs, completion, and the final investigation report from mounted evidence and telemetry.`
+      : `Use presentation to tell the orchestrator how to render the terminal result. Keep summary short and operational rather than chat-ready prose.`,
+    input.state.objectiveMode === "investigation"
+      ? `If you need a richer scratch report, keep it local in an artifact and point to it with evidenceRefLabels already present in the packet or command output.`
+      : `If you want to keep a richer markdown or JSON report, write it as a task artifact and reference it from artifacts. The final response itself must stay strict JSON.`,
+    input.state.objectiveMode === "investigation"
+      ? `Use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish; use "answered" when the evidence supports a complete answer.`
+      : `Use "changes_requested" only when more work is clearly needed; use "blocked" only for a hard blocker; use "partial" when you produced meaningful evidence but could not fully finish.`,
     input.state.objectiveMode === "investigation"
       ? `For investigation tasks, keep "partial" when primary evidence or access stayed incomplete even after good-faith evidence collection.`
       : `For delivery tasks, the controller reruns configured repo checks and ignores worktree-local .receipt artifacts. Do not use "partial" solely because .receipt cleanup or terminal output capture was noisy after the requested code change and proof were completed.`,
     `Before you return final JSON, sanity-check that any scripts you do include match actual command outcomes and that any artifact-level errors are reflected in outcome, summary, or next steps.`,
     input.state.objectiveMode === "investigation"
-      ? `For investigation tasks, completion matters more than bookkeeping. Always include presentation, artifacts, completion, and report. Use a report object whenever you gathered meaningful evidence; otherwise use null. Evidence-backed claims are required, but report.evidenceRecords and report.scriptsRun may be null when you do not have exact structured records or do not need to restate the command log. Prefer concise evidence items that point to mounted artifacts or concrete command output. Use [] for empty lists and null for detail, summary, status, nextAction, handoff, report, report.evidenceRecords, or report.scriptsRun when they do not apply. Legacy handoff is still read during migration, but presentation is the primary contract.`
+      ? `For investigation tasks, evidence-backed claims are required and bookkeeping is not. Every finding must reference one or more evidenceRefLabels already present in the packet, mounted artifacts, or command output. Use "answered" only when the evidence really answers the question. Use "partial" when evidence is incomplete or a key query failed. Use "blocked" only for a hard access or environment blocker.`
       : `For delivery tasks, keep the envelope small. Always include presentation, scriptsRun, completion, and alignment. Use the alignment block to map the result back to the objective contract before you return final JSON. Legacy handoff is still read during migration, but presentation is the primary contract.`,
-    ...(synthMode && input.state.objectiveMode === "investigation"
-      ? [
-          `For synth-only investigation tasks, prioritize completion from mounted artifacts. The default is report.evidenceRecords: [] or null, and report.scriptsRun may be null when the evidence bundle already proves the metrics or findings.`,
-        ]
-      : []),
     ``,
     `## Starting Hint`,
     input.memorySummary || "No durable task memory yet.",

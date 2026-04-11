@@ -36,7 +36,13 @@ test("factory result contracts: investigation evidence records stay strict and n
 
 test("factory result contracts: codex output schemas require handoff when the property is declared", () => {
   expect(FACTORY_TASK_RESULT_SCHEMA.required).toContain("handoff");
-  expect(FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA.required).toContain("handoff");
+  expect(FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA.required).toEqual([
+    "status",
+    "conclusion",
+    "findings",
+    "uncertainties",
+    "nextAction",
+  ]);
 });
 
 test("factory result contracts: investigation report normalizes evidence record maps from strict entries", () => {

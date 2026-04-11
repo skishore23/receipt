@@ -375,14 +375,13 @@ const buildInterventions = (
   parsed: FactoryParsedRun,
 ): Omit<InvestigationInterventions, "controllerCorrectionWorked"> => {
   const interventionTimeline = parsed.timeline
-    .filter((item) => item.type === "monitor.recommendation" || item.type === "task.synthesis.dispatched")
+    .filter((item) => item.type === "monitor.recommendation")
     .map((item) => `${item.type}: ${truncateInline(item.summary, 220) ?? item.summary}`);
   const recommendations = parsed.timeline.filter((item) => item.type === "monitor.recommendation");
-  const synthesisDispatches = parsed.timeline.filter((item) => item.type === "task.synthesis.dispatched");
   const latestRecommendation = interventionTimeline.at(-1);
   return {
     recommendationCount: recommendations.length,
-    synthesisDispatchCount: synthesisDispatches.length,
+    synthesisDispatchCount: 0,
     recommendationApplied: recommendations.length > 0,
     latestRecommendation,
     timeline: interventionTimeline,
@@ -513,7 +512,7 @@ const buildAssessment = (
   }
   if (interventions.recommendationApplied) {
     notes.push(
-      `Controller-consumed monitor recommendations were recorded ${interventions.recommendationCount} time(s); synthesis was dispatched ${interventions.synthesisDispatchCount} time(s).`,
+      `Controller-consumed monitor recommendations were recorded ${interventions.recommendationCount} time(s).`,
     );
   }
   if (inFlight) {
@@ -539,8 +538,8 @@ const buildAssessment = (
 
   const controlChurn: InvestigationAssessmentLevel =
     controlJobs >= 20 ? "high" : controlJobs >= 6 ? "medium" : "low";
-  const synthesisLoop = inFlight && interventions.synthesisDispatchCount > 1;
-  const severeSynthesisLoop = inFlight && interventions.synthesisDispatchCount >= 3;
+  const synthesisLoop = false;
+  const severeSynthesisLoop = false;
 
   const efficiency: InvestigationEfficiency =
     severeSynthesisLoop || stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
@@ -659,7 +658,7 @@ const buildWhatHappened = (
   }
   if (interventions.recommendationCount > 0 || interventions.synthesisDispatchCount > 0) {
     bullets.push(
-      `Monitor recommendations were recorded ${interventions.recommendationCount} time(s); synthesis was dispatched ${interventions.synthesisDispatchCount} time(s).`,
+      `Monitor recommendations were recorded ${interventions.recommendationCount} time(s).`,
     );
   }
   if (packetContext?.alignmentVerdict) {

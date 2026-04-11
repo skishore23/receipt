@@ -219,6 +219,21 @@ export const FACTORY_PUBLISH_RESULT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const FACTORY_INVESTIGATION_FINDING_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    summary: { type: "string" },
+    confidence: { type: "string", enum: ["confirmed", "inferred", "uncertain"] },
+    evidenceRefLabels: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["title", "summary", "confidence", "evidenceRefLabels"],
+  additionalProperties: false,
+} as const;
+
 export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
   type: "object",
   properties: {
@@ -274,21 +289,36 @@ export const FACTORY_INVESTIGATION_REPORT_SCHEMA = {
 export const FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA = {
   type: "object",
   properties: {
-    outcome: FACTORY_TASK_RESULT_SCHEMA.properties.outcome,
-    summary: FACTORY_TASK_RESULT_SCHEMA.properties.summary,
-    handoff: FACTORY_TASK_RESULT_SCHEMA.properties.handoff,
-    presentation: FACTORY_TASK_RESULT_SCHEMA.properties.presentation,
-    artifacts: FACTORY_TASK_RESULT_SCHEMA.properties.artifacts,
-    completion: FACTORY_TASK_RESULT_SCHEMA.properties.completion,
-    nextAction: FACTORY_TASK_RESULT_SCHEMA.properties.nextAction,
-    report: {
-      ...FACTORY_INVESTIGATION_REPORT_SCHEMA,
-      type: ["object", "null"],
+    status: { type: "string", enum: ["answered", "partial", "blocked"] },
+    conclusion: { type: "string" },
+    findings: {
+      type: "array",
+      items: FACTORY_INVESTIGATION_FINDING_SCHEMA,
     },
+    uncertainties: {
+      type: "array",
+      items: { type: "string" },
+    },
+    nextAction: FACTORY_TASK_RESULT_SCHEMA.properties.nextAction,
   },
-  required: ["outcome", "summary", "handoff", "presentation", "artifacts", "completion", "nextAction", "report"],
+  required: ["status", "conclusion", "findings", "uncertainties", "nextAction"],
   additionalProperties: false,
 } as const;
+
+export type FactoryInvestigationSemanticFinding = {
+  readonly title: string;
+  readonly summary: string;
+  readonly confidence: "confirmed" | "inferred" | "uncertain";
+  readonly evidenceRefLabels: ReadonlyArray<string>;
+};
+
+export type FactoryInvestigationSemanticResult = {
+  readonly status: "answered" | "partial" | "blocked";
+  readonly conclusion: string;
+  readonly findings: ReadonlyArray<FactoryInvestigationSemanticFinding>;
+  readonly uncertainties: ReadonlyArray<string>;
+  readonly nextAction?: string;
+};
 
 const normalizeArtifactLabels = (value: unknown): ReadonlyArray<string> => asReadonlyStringArray(value);
 
@@ -450,6 +480,42 @@ export const normalizeInvestigationReport = (
     scriptsRun,
     disagreements: asReadonlyStringArray(record.disagreements).map((item) => clipText(item, 280) ?? item),
     nextSteps: asReadonlyStringArray(record.nextSteps).map((item) => clipText(item, 280) ?? item),
+  };
+};
+
+export const normalizeInvestigationSemanticResult = (
+  value: unknown,
+): FactoryInvestigationSemanticResult | undefined => {
+  const record = isRecord(value) ? value : undefined;
+  if (!record) return undefined;
+  const status = record.status === "answered" || record.status === "partial" || record.status === "blocked"
+    ? record.status
+    : undefined;
+  const conclusion = clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400);
+  if (!status || !conclusion) return undefined;
+  const findings = Array.isArray(record.findings)
+    ? record.findings
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => ({
+        title: clipText(typeof item.title === "string" ? item.title : undefined, 140) ?? "Finding",
+        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280) ?? "Evidence-backed finding.",
+        confidence: item.confidence === "inferred" || item.confidence === "uncertain"
+          ? item.confidence
+          : "confirmed",
+        evidenceRefLabels: asReadonlyStringArray(item.evidenceRefLabels)
+          .map((label) => clipText(label, 140) ?? label),
+      } satisfies FactoryInvestigationSemanticFinding))
+    : [];
+  const uncertainties = asReadonlyStringArray(record.uncertainties)
+    .map((item) => clipText(item, 280) ?? item);
+  return {
+    status,
+    conclusion,
+    findings,
+    uncertainties,
+    ...(clipText(typeof record.nextAction === "string" ? record.nextAction : undefined, 280)
+      ? { nextAction: clipText(typeof record.nextAction === "string" ? record.nextAction : undefined, 280) }
+      : {}),
   };
 };
 

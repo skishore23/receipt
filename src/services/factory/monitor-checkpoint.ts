@@ -47,7 +47,7 @@ export const parseMonitorRecommendation = (
 const PROPORTIONALITY_RULES = [
   "Proportionality: for investigation tasks, the worker should answer the question as fast as possible.",
   "If the worker is building new scripts, helpers, or infrastructure instead of running existing tools or raw CLI commands, that is off_track.",
-  "If evidence artifacts already exist (evidencePresent=true) but the worker is still running commands instead of producing its final JSON result, recommend entering synthesizing immediately.",
+  "If evidence artifacts already exist (evidencePresent=true) but the worker is still running commands instead of producing its final JSON result, recommend immediate controller finalization from evidence.",
   "A worker that reads 3+ files or runs 5+ commands before attempting the primary evidence query is over-engineering.",
 ];
 
@@ -87,10 +87,10 @@ export const buildMonitorCheckpointPrompt = (input: {
     "- recommend_steer: Recommend a one-time control-owned correction with clear guidance. Use when the worker is off_track before evidence is sufficient.",
     "- recommend_split: Recommend splitting the task into 2-5 smaller subtasks. Use dependsOn with the subtask's index (\"0\", \"1\", etc.) to express ordering.",
     "- recommend_abort: Recommend stopping the worker because recovery appears impossible without operator intervention.",
-    "- recommend_enter_synthesizing: Evidence is already sufficient or likely sufficient; recommend that control stop evidence collection and dispatch a bounded synthesize-only pass.",
+    "- recommend_enter_synthesizing: Evidence is already sufficient or likely sufficient; recommend that control stop evidence collection and finalize directly from the captured evidence.",
     "",
     "Prefer recommend_enter_synthesizing over continue when the worker has evidence but is not finalizing.",
-    "If the task execution phase is already synthesizing, do not recommend another redirect just to repeat the same finish-now guidance.",
+    "Do not recommend repeated redirects that only restate the same finalize-now guidance.",
     "Prefer recommend_steer over recommend_split when the worker just needs redirection.",
     "Prefer recommend_split over recommend_abort when the task is decomposable.",
   ];
@@ -111,7 +111,7 @@ export const buildMonitorCheckpointPrompt = (input: {
       "## Evidence Status",
       "Evidence artifacts are PRESENT in the evidence directory. The worker has collected data.",
       isInvestigation
-        ? `If the worker is still running commands or building tooling, recommend entering synthesizing with: "${EVIDENCE_STEER_GUIDANCE}"`
+        ? `If the worker is still running commands or building tooling, recommend controller finalization with: "${EVIDENCE_STEER_GUIDANCE}"`
         : "The worker should be moving toward producing its final result.",
       "",
     );

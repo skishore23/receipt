@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
@@ -124,11 +125,13 @@ import {
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
+  type FactoryInvestigationSemanticResult,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
   normalizeExecutionScriptsRun,
   normalizeInvestigationReport,
+  normalizeInvestigationSemanticResult,
   normalizeTaskPresentationRecord,
   normalizeTaskAlignmentRecord,
   normalizeTaskCompletionRecord,
@@ -137,6 +140,7 @@ import {
 } from "../result-contracts";
 import {
   parseJsonObjectCandidate,
+  resolveFactoryInvestigationWorkerResult,
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
   type FactoryPublishResult,
@@ -359,6 +363,19 @@ const monitorRecommendationsEqual = (
         });
   }
 };
+
+const InvestigationSemanticSynthesisSchema = z.object({
+  status: z.enum(["answered", "partial", "blocked"]),
+  conclusion: z.string(),
+  findings: z.array(z.object({
+    title: z.string(),
+    summary: z.string(),
+    confidence: z.enum(["confirmed", "inferred", "uncertain"]),
+    evidenceRefLabels: z.array(z.string()),
+  })).max(8),
+  uncertainties: z.array(z.string()),
+  nextAction: z.string().nullable(),
+});
 const artifactKeyFromLabel = (label: string, index: number): string => {
   const normalized = label
     .trim()
@@ -3362,64 +3379,31 @@ export class FactoryService {
       case "continue":
         return false;
       case "recommend_enter_synthesizing": {
-        if (taskExecutionPhaseAtLeast(task, "synthesizing")) {
-          await this.emitObjective(state.objectiveId, {
-            type: "monitor.recommendation.obsoleted",
-            objectiveId: state.objectiveId,
-            recommendationId: recommendation.recommendationId,
-            taskId: recommendation.taskId,
-            candidateId: recommendation.candidateId,
-            reason: "task already entered synthesizing before control consumed the recommendation",
-            obsoletedAt: Date.now(),
-          }).catch(() => undefined);
-          return false;
-        }
-        await this.cancelTaskExecutionJob(
-          task,
-          `controller retired evidence collection after monitor recommendation for ${task.taskId}`,
-        );
-        const prefixEvents: FactoryEvent[] = [
+        await this.emitObjectiveBatch(state.objectiveId, [
           this.runtimeDecisionEvent(
             state,
-            `monitor_recommendation_${task.taskId}_enter_synthesizing`,
+            `monitor_recommendation_${task.taskId}_finalize_from_evidence`,
             recommendation.reasoning,
             { basedOn, frontierTaskIds: [task.taskId] },
           ),
-        ];
-        if (!taskExecutionPhaseAtLeast(task, "evidence_ready")) {
-          prefixEvents.push({
-            type: "task.phase.transitioned",
+          {
+            type: "objective.operator.noted",
             objectiveId: state.objectiveId,
-            taskId: task.taskId,
-            candidateId: recommendation.candidateId,
-            phase: "evidence_ready",
-            reason: recommendation.recommendation.reason,
-            changedAt: Date.now(),
-          });
-        }
-        const dispatchKey = factoryDispatchKey();
-        prefixEvents.push({
-          type: "task.synthesis.dispatched",
-          objectiveId: state.objectiveId,
-          taskId: task.taskId,
-          candidateId: recommendation.candidateId,
-          jobId: factoryTaskRunJobId(state.objectiveId, task.taskId, recommendation.candidateId, "synthesizing", dispatchKey),
-          detail: recommendation.recommendation.reason,
-          dispatchedAt: Date.now(),
-        });
-        await this.dispatchTask(state, task, {
-          expectedPrev: basedOn,
-          prefixEvents,
-          dispatchKey,
-          taskPhaseOverride: "synthesizing",
-        });
+            message: [
+              "Evidence is sufficient. Stop collecting and return the semantic investigation JSON immediately.",
+              "Do not rerun helpers, revisit bootstrap files, or add bookkeeping commands.",
+              recommendation.recommendation.reason,
+            ].filter(Boolean).join("\n"),
+            notedAt: Date.now(),
+          },
+        ], basedOn);
         await this.emitObjective(state.objectiveId, {
           type: "monitor.recommendation.consumed",
           objectiveId: state.objectiveId,
           recommendationId: recommendation.recommendationId,
           taskId: recommendation.taskId,
           candidateId: recommendation.candidateId,
-          outcome: "enter_synthesizing",
+          outcome: "follow_up",
           consumedAt: Date.now(),
         });
         return true;
@@ -3512,13 +3496,10 @@ export class FactoryService {
   }
 
   private shouldEmitMonitorRecommendation(
-    taskPhase: FactoryTaskExecutionPhase,
+    _taskPhase: FactoryTaskExecutionPhase,
     recommendation: MonitorRecommendation,
     priorRecommendation?: MonitorRecommendation,
   ): boolean {
-    if (taskPhase === "synthesizing" && recommendation.kind === "recommend_enter_synthesizing") {
-      return false;
-    }
     if (priorRecommendation && monitorRecommendationsEqual(priorRecommendation, recommendation)) {
       return false;
     }
@@ -3901,9 +3882,7 @@ export class FactoryService {
           completionQuietMs: 1_500,
           timeoutMs: investigationTimeoutMs,
           stallTimeoutMs: parsed.objectiveMode === "investigation"
-            ? parsed.taskPhase === "synthesizing"
-              ? 60_000
-              : 90_000
+            ? 90_000
             : undefined,
           reasoningEffort: severityWorkerReasoningEffort(
             parsed.profile.rootProfileId,
@@ -3956,22 +3935,6 @@ export class FactoryService {
         const guidance = parseFactoryLiveGuidance(error.signal);
         if (!guidance) throw error;
         guidanceHistory.push(guidance);
-        if (parsed.taskPhase === "synthesizing" && guidanceHistory.length >= 3) {
-          const fallbackResult = await this.buildFallbackInvestigationTaskResult(
-            parsed,
-            error.result,
-            new Error("Synthesizing restart limit reached before the worker emitted a structured result."),
-          );
-          await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
-          await this.applyTaskWorkerResult(parsed, fallbackResult);
-          await this.reactObjective(parsed.objectiveId);
-          return {
-            objectiveId: parsed.objectiveId,
-            taskId: parsed.taskId,
-            candidateId: parsed.candidateId,
-            status: "completed",
-          };
-        }
       }
     }
     const taskResult = await this.resolveTaskWorkerResult(parsed, execution);
@@ -4452,6 +4415,11 @@ export class FactoryService {
     const state = await this.getObjectiveState(payload.objectiveId);
     const task = state.workflow.tasksById[payload.taskId];
     if (!task) throw new FactoryServiceError(404, "factory task not found");
+    const completedAt = Date.now();
+    if (state.objectiveMode === "investigation") {
+      await this.applyInvestigationTaskWorkerResult(state, task, payload, rawResult, completedAt);
+      return;
+    }
     const summary = requireNonEmpty(rawResult.summary, "task result summary required");
     const workerArtifacts = Array.isArray(rawResult.artifacts)
       ? rawResult.artifacts
@@ -4469,12 +4437,6 @@ export class FactoryService {
       ).join("\n")}`
       : undefined;
     const scriptsRun = normalizeExecutionScriptsRun(rawResult.scriptsRun);
-    const completedAt = Date.now();
-    const isInvestigation = state.objectiveMode === "investigation";
-    const hasStructuredInvestigationReport = isInvestigation && isRecord(rawResult.report);
-    const normalizedStructuredInvestigationReport = hasStructuredInvestigationReport
-      ? normalizeInvestigationReport(rawResult.report, summary)
-      : undefined;
     let outcome: FactoryTaskResultOutcome;
     switch (optionalTrimmedString(rawResult.outcome)) {
       case "changes_requested":
@@ -4486,28 +4448,15 @@ export class FactoryService {
         outcome = "approved";
         break;
     }
-    const artifactIssues = isInvestigation
-      ? await this.detectArtifactIssues(payload.workspacePath, workerArtifacts)
-      : [];
-    const forcedPartialFromArtifacts = isInvestigation && outcome === "approved" && artifactIssues.length > 0;
-    if (forcedPartialFromArtifacts) outcome = "partial";
-    const artifactIssueSummary = artifactIssues.length > 0
-      ? `Captured artifact warnings:\n${artifactIssues.map((issue) =>
-        `- ${issue.summary}${issue.detail ? ` ${issue.detail}` : ""}`
-      ).join("\n")}`
-      : undefined;
-    const effectiveSummary = forcedPartialFromArtifacts
-      ? `${summary}${summary.endsWith(".") ? "" : "."} Captured evidence artifacts recorded command errors, so this investigation remains partial.`
-      : summary;
+    const effectiveSummary = summary;
     const explicitHandoff = optionalTrimmedString(rawResult.handoff) ?? nextAction ?? effectiveSummary;
     const presentation = normalizeTaskPresentationRecord({
       value: rawResult.presentation,
       handoff: explicitHandoff,
       summary: effectiveSummary,
       workerArtifacts,
-      report: normalizedStructuredInvestigationReport,
     });
-    const handoff = [explicitHandoff, workerArtifactSummary, artifactIssueSummary]
+    const handoff = [explicitHandoff, workerArtifactSummary]
       .filter(Boolean)
       .join("\n\n") || effectiveSummary;
     const workerHandoff = this.buildWorkerHandoffEvent({
@@ -4538,26 +4487,18 @@ export class FactoryService {
     const structuredEvidenceFailure = validateTaskEvidence({
       objectiveId: payload.objectiveId,
       taskId: payload.taskId,
-      objectiveMode: state.objectiveMode,
+      objectiveMode: "delivery",
       outcome,
       completion: initialCompletion,
-      scriptsRun: state.objectiveMode === "investigation"
-        ? normalizedStructuredInvestigationReport?.scriptsRun
-        : scriptsRun,
-      hasAlignment: state.objectiveMode === "delivery"
-        ? isRecord(rawResult.alignment)
-        : undefined,
-      hasStructuredReport: state.objectiveMode === "investigation"
-        ? hasStructuredInvestigationReport
-        : undefined,
-      reportIncludesEvidenceRecords: hasStructuredInvestigationReport && isRecord(rawResult.report)
-        ? Object.hasOwn(rawResult.report, "evidenceRecords")
-        : false,
-      reportEvidenceRecords: normalizedStructuredInvestigationReport?.evidenceRecords,
+      scriptsRun,
+      hasAlignment: isRecord(rawResult.alignment),
+      hasStructuredReport: undefined,
+      reportIncludesEvidenceRecords: false,
+      reportEvidenceRecords: undefined,
     });
     if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
 
-    if (outcome === "blocked" && !hasStructuredInvestigationReport) {
+    if (outcome === "blocked") {
       await commitFactoryTaskMemory(
         this.memoryTools,
         state,
@@ -4608,18 +4549,16 @@ export class FactoryService {
       executionMode: payload.executionMode,
       git: this.git,
     });
-    const checkResults = isInvestigation
-      ? []
-      : await runFactoryChecks({
-        commands: state.checks,
-        workspacePath: payload.workspacePath,
-        dataDir: this.dataDir,
-        repoRoot: this.git.repoRoot,
-        worktreesDir: this.git.worktreesDir,
-      });
+    const checkResults = await runFactoryChecks({
+      commands: state.checks,
+      workspacePath: payload.workspacePath,
+      dataDir: this.dataDir,
+      repoRoot: this.git.repoRoot,
+      worktreesDir: this.git.worktreesDir,
+    });
     const failedCheck = checkResults.find((check) => !check.ok);
 
-    if (payload.executionMode === "isolated" && !isInvestigation) {
+    if (payload.executionMode === "isolated") {
       const reason = `factory task ran in isolated runtime and cannot produce an integration commit: ${effectiveSummary}`;
       await commitFactoryTaskMemory(
         this.memoryTools,
@@ -4669,9 +4608,7 @@ export class FactoryService {
     const committed = status.dirty && payload.executionMode === "worktree"
       ? await this.git.commitWorkspace(
           payload.workspacePath,
-          isInvestigation
-            ? `[factory][investigation][${payload.objectiveId}] ${payload.taskId} ${state.title}`
-            : `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
+          `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
         )
       : undefined;
     const baseResultRefs = {
@@ -4697,147 +4634,6 @@ export class FactoryService {
         return [[artifactKeyFromLabel(item.label, index), artifactRef(resolvedPath, item.label)] as const];
       }),
     ) satisfies Readonly<Record<string, GraphRef>>;
-
-    if (isInvestigation) {
-      const report = normalizedStructuredInvestigationReport
-        ?? normalizeInvestigationReport(
-            {
-              conclusion: effectiveSummary,
-              evidence: workerArtifacts.map((item) => ({
-                title: item.label,
-                summary: item.summary ?? item.path ?? item.label,
-                detail: item.path ?? null,
-              })),
-              scriptsRun: [],
-              disagreements: [],
-              nextSteps: nextAction ? [nextAction] : [],
-            },
-            effectiveSummary,
-          );
-      const reportWithArtifactIssues: FactoryInvestigationReport = artifactIssues.length > 0
-        ? {
-            ...report,
-            evidence: [
-              ...report.evidence,
-              {
-                title: "Captured artifact warnings",
-                summary: clipText(artifactIssues.map((issue) => issue.summary).join(" "), 280)
-                  ?? "Captured evidence artifacts recorded command errors.",
-                detail: clipText(
-                  artifactIssues
-                    .map((issue) => issue.detail ?? issue.path)
-                    .filter(Boolean)
-                    .join("\n"),
-                  600,
-                ),
-              },
-            ],
-            scriptsRun: [
-              ...report.scriptsRun,
-              ...artifactIssues.map((issue) => ({
-                command: `artifact:${path.basename(issue.path)}`,
-                summary: issue.summary,
-                status: issue.status,
-              } satisfies FactoryInvestigationReport["scriptsRun"][number])),
-            ],
-          }
-        : report;
-      const reportWithChecks: FactoryInvestigationReport = checkResults.length > 0
-        ? {
-            ...reportWithArtifactIssues,
-            evidence: [
-              ...reportWithArtifactIssues.evidence,
-              ...checkResults.map((check) => ({
-                title: check.ok ? "Check passed" : "Check failed",
-                summary: `${check.command} exited ${String(check.exitCode ?? "unknown")}`,
-                detail: clipText((check.stderr || check.stdout).trim(), 600),
-              })),
-            ],
-            scriptsRun: [
-              ...reportWithArtifactIssues.scriptsRun,
-              ...checkResults.map((check) => ({
-                command: check.command,
-                summary: check.ok ? "Passed." : "Failed.",
-                status: check.ok ? "ok" : "error",
-              } satisfies FactoryInvestigationReport["scriptsRun"][number])),
-            ],
-          }
-        : reportWithArtifactIssues;
-      const investigationCompletion = normalizeTaskCompletionRecord(
-        rawResult.completion,
-        buildDefaultTaskCompletion({
-          summary: effectiveSummary,
-          workerArtifacts,
-          scriptsRun: reportWithChecks.scriptsRun,
-          report: reportWithChecks,
-          checkResults,
-        }),
-      );
-      const resultRefs = {
-        ...baseResultRefs,
-        ...workerArtifactRefs,
-        ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
-      } satisfies Readonly<Record<string, GraphRef>>;
-      const investigationEvents: FactoryEvent[] = [
-        workerHandoff,
-        ...(payload.taskPhase === "synthesizing"
-          ? [(
-              outcome === "blocked"
-                ? {
-                    type: "task.synthesis.blocked",
-                    objectiveId: payload.objectiveId,
-                    taskId: payload.taskId,
-                    candidateId: payload.candidateId,
-                    reason: effectiveSummary,
-                    blockedAt: completedAt,
-                  }
-                : {
-                    type: "task.synthesis.completed",
-                    objectiveId: payload.objectiveId,
-                    taskId: payload.taskId,
-                    candidateId: payload.candidateId,
-                    summary: effectiveSummary,
-                    completedAt,
-                  }
-            ) satisfies FactoryEvent]
-          : []),
-        {
-          type: "investigation.reported",
-          objectiveId: payload.objectiveId,
-          taskId: payload.taskId,
-          candidateId: payload.candidateId,
-          outcome,
-          summary: effectiveSummary,
-          handoff,
-          presentation,
-          completion: investigationCompletion,
-          report: reportWithChecks,
-          artifactRefs: resultRefs,
-          evidenceCommit: committed?.hash,
-          reportedAt: completedAt,
-        },
-      ];
-      await this.emitObjectiveBatch(payload.objectiveId, investigationEvents);
-      await commitFactoryTaskMemory(
-        this.memoryTools,
-        state,
-        task,
-        payload.candidateId,
-        renderInvestigationReportText(
-          effectiveSummary,
-          reportWithChecks,
-          investigationCompletion,
-          [resultRefs],
-          handoff,
-        ),
-        outcome === "blocked"
-          ? "investigation_reported_partial"
-          : outcome === "partial"
-            ? "investigation_reported_with_gaps"
-            : "investigation_reported",
-      );
-      return;
-    }
 
     const deliveryCompletion = normalizeTaskCompletionRecord(
       rawResult.completion,
@@ -7086,6 +6882,9 @@ export class FactoryService {
     execution: CodexRunResult,
   ): Promise<Record<string, unknown>> {
     try {
+      if (payload.objectiveMode === "investigation") {
+        return await resolveFactoryInvestigationWorkerResult(payload, execution);
+      }
       return await resolveFactoryTaskWorkerResult(payload, execution);
     } catch (error) {
       if (payload.objectiveMode !== "investigation") throw error;
@@ -7098,7 +6897,6 @@ export class FactoryService {
     error: unknown,
     guidanceHistory: ReadonlyArray<FactoryLiveGuidance>,
   ): Promise<FactoryLiveGuidance | undefined> {
-    if (payload.taskPhase === "synthesizing") return undefined;
     if (guidanceHistory.some((item) => item.sourceCommandIds.includes("auto_investigation_helper_retry"))) {
       return undefined;
     }
@@ -7152,6 +6950,333 @@ export class FactoryService {
     };
   }
 
+  private hasHelperEvidence(input: {
+    readonly summary?: string;
+    readonly evidence: ReadonlyArray<unknown>;
+    readonly artifacts: ReadonlyArray<unknown>;
+    readonly scriptsRun: ReadonlyArray<unknown>;
+  }): boolean {
+    return Boolean(
+      input.summary
+      || input.evidence.length > 0
+      || input.artifacts.length > 0
+      || input.scriptsRun.length > 0
+    );
+  }
+
+  private buildInvestigationTelemetryScriptsRun(
+    telemetry: Record<string, unknown> | undefined,
+  ): ReadonlyArray<FactoryExecutionScriptRun> {
+    const command = clipText(optionalTrimmedString(telemetry?.command), 220);
+    if (!command) return [];
+    const exitCode = typeof telemetry?.exitCode === "number" ? telemetry.exitCode : undefined;
+    return [{
+      command,
+      summary: clipText(
+        exitCode === undefined
+          ? "Preserved controller-side task telemetry."
+          : exitCode === 0
+            ? "Telemetry captured the task command successfully."
+            : `Telemetry captured task command exit ${exitCode}.`,
+        280,
+      ),
+      status: exitCode === undefined ? "warning" : exitCode === 0 ? "ok" : "error",
+    }];
+  }
+
+  private buildFallbackInvestigationSemanticResult(input: {
+    readonly helperEvidence: Awaited<ReturnType<FactoryService["extractInvestigationHelperEvidence"]>>;
+    readonly rawResult: Record<string, unknown>;
+    readonly errorDetail?: string;
+  }): FactoryInvestigationSemanticResult {
+    const fallbackRecord = isRecord(input.rawResult.controllerFallback)
+      ? input.rawResult.controllerFallback
+      : undefined;
+    const fallbackSummary = clipText(
+      optionalTrimmedString(fallbackRecord?.summary)
+        ?? input.helperEvidence.summary
+        ?? "Captured investigation evidence without a semantic worker result.",
+      400,
+    ) ?? "Captured investigation evidence without a semantic worker result.";
+    const fallbackNextAction = clipText(optionalTrimmedString(fallbackRecord?.nextAction), 280);
+    const helperLabels = input.helperEvidence.artifacts.map((item) => item.label);
+    return {
+      status: this.hasHelperEvidence(input.helperEvidence) ? "answered" : "partial",
+      conclusion: fallbackSummary,
+      findings: input.helperEvidence.evidence
+        .slice(0, 6)
+        .map((item) => ({
+          title: item.title,
+          summary: item.summary,
+          confidence: "confirmed" as const,
+          evidenceRefLabels: helperLabels.slice(0, 4),
+        })),
+      uncertainties: [
+        ...(input.errorDetail ? [input.errorDetail] : []),
+        ...(!this.hasHelperEvidence(input.helperEvidence)
+          ? ["No helper-backed evidence was captured before the worker stopped."]
+          : []),
+      ],
+      ...(fallbackNextAction ? { nextAction: fallbackNextAction } : {}),
+    };
+  }
+
+  private async synthesizeInvestigationSemanticResult(input: {
+    readonly state: FactoryState;
+    readonly task: FactoryTaskRecord;
+    readonly rawResult: Record<string, unknown>;
+    readonly helperEvidence: Awaited<ReturnType<FactoryService["extractInvestigationHelperEvidence"]>>;
+    readonly telemetry: Record<string, unknown> | undefined;
+  }): Promise<FactoryInvestigationSemanticResult> {
+    const errorDetail = clipText(
+      optionalTrimmedString(isRecord(input.rawResult.controllerFallback) ? input.rawResult.controllerFallback.error : undefined),
+      280,
+    );
+    const fallback = this.buildFallbackInvestigationSemanticResult({
+      helperEvidence: input.helperEvidence,
+      rawResult: input.rawResult,
+      errorDetail,
+    });
+    if (!this.hasHelperEvidence(input.helperEvidence)) return fallback;
+    try {
+      const llmResult = await llmStructured({
+        system: [
+          "You are finalizing an investigation from already-captured evidence.",
+          "Use only the supplied evidence. Do not invent metrics or identifiers.",
+          "Prefer concise findings tied to artifact labels or command labels already present in the evidence.",
+          "Use status=answered only when the evidence directly answers the question.",
+        ].join("\n"),
+        user: [
+          `Objective: ${input.state.title}`,
+          `Objective prompt: ${input.state.prompt}`,
+          `Task prompt: ${input.task.prompt}`,
+          `Helper summary: ${input.helperEvidence.summary ?? "none"}`,
+          `Evidence items:`,
+          ...input.helperEvidence.evidence.map((item) =>
+            `- ${item.title}: ${item.summary}${item.detail ? ` | ${item.detail}` : ""}`),
+          `Artifacts:`,
+          ...(input.helperEvidence.artifacts.length > 0
+            ? input.helperEvidence.artifacts.map((item) =>
+              `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`)
+            : ["- none"]),
+          `Commands:`,
+          ...(input.helperEvidence.scriptsRun.length > 0
+            ? input.helperEvidence.scriptsRun.map((item) =>
+              `- ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
+            : ["- none"]),
+          `Telemetry: ${clipText(optionalTrimmedString(input.telemetry?.command), 220) ?? "none"}`,
+        ].join("\n"),
+        schema: InvestigationSemanticSynthesisSchema,
+        schemaName: "FactoryInvestigationSemanticSynthesis",
+      });
+      const parsed = normalizeInvestigationSemanticResult({
+        ...llmResult.parsed,
+        nextAction: llmResult.parsed.nextAction,
+      });
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private async applyInvestigationTaskWorkerResult(
+    state: FactoryState,
+    task: FactoryTaskRecord,
+    payload: FactoryTaskJobPayload,
+    rawResult: Record<string, unknown>,
+    completedAt: number,
+  ): Promise<void> {
+    const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
+    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
+    const parsedSemantic = normalizeInvestigationSemanticResult(rawResult);
+    const semantic = parsedSemantic
+      ?? await this.synthesizeInvestigationSemanticResult({
+        state,
+        task,
+        rawResult,
+        helperEvidence,
+        telemetry,
+      });
+    const helperArtifacts = helperEvidence.artifacts;
+    const artifactIssues = await this.detectArtifactIssues(payload.workspacePath, helperArtifacts);
+    let outcome: FactoryTaskResultOutcome = semantic.status === "blocked"
+      ? "blocked"
+      : semantic.status === "partial"
+        ? "partial"
+        : "approved";
+    if (artifactIssues.length > 0 && outcome === "approved") outcome = "partial";
+
+    const telemetryScriptsRun = this.buildInvestigationTelemetryScriptsRun(telemetry);
+    const report: FactoryInvestigationReport = {
+      conclusion: semantic.conclusion,
+      evidence: [
+        ...semantic.findings.map((item) => ({
+          title: item.title,
+          summary: item.summary,
+          detail: item.evidenceRefLabels.length > 0
+            ? `Evidence refs: ${item.evidenceRefLabels.join(", ")}. Confidence: ${item.confidence}.`
+            : `Confidence: ${item.confidence}.`,
+        })),
+        ...helperEvidence.evidence.filter((item) =>
+          !semantic.findings.some((finding) => finding.title === item.title && finding.summary === item.summary)),
+        ...(artifactIssues.length > 0
+          ? [{
+              title: "Captured artifact warnings",
+              summary: clipText(artifactIssues.map((issue) => issue.summary).join(" "), 280)
+                ?? "Captured evidence artifacts recorded command errors.",
+              detail: clipText(
+                artifactIssues
+                  .map((issue) => issue.detail ?? issue.path)
+                  .filter(Boolean)
+                  .join("\n"),
+                600,
+              ),
+            }]
+          : []),
+      ],
+      scriptsRun: [
+        ...helperEvidence.scriptsRun,
+        ...telemetryScriptsRun.filter((item) =>
+          !helperEvidence.scriptsRun.some((existing) => existing.command === item.command)),
+        ...artifactIssues.map((issue) => ({
+          command: `artifact:${path.basename(issue.path)}`,
+          summary: issue.summary,
+          status: issue.status,
+        } satisfies FactoryInvestigationReport["scriptsRun"][number])),
+      ],
+      disagreements: [],
+      nextSteps: [
+        ...semantic.uncertainties,
+        ...(semantic.nextAction ? [semantic.nextAction] : []),
+      ],
+    };
+    const completion = buildDefaultTaskCompletion({
+      summary: semantic.conclusion,
+      workerArtifacts: helperArtifacts,
+      scriptsRun: report.scriptsRun,
+      report,
+    });
+    const normalizedCompletion = normalizeTaskCompletionRecord(undefined, completion);
+    const structuredEvidenceFailure = validateTaskEvidence({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      objectiveMode: "investigation",
+      outcome,
+      completion: normalizedCompletion,
+      scriptsRun: report.scriptsRun,
+      hasStructuredReport: true,
+      reportIncludesEvidenceRecords: Boolean(report.evidenceRecords?.length),
+      reportEvidenceRecords: report.evidenceRecords,
+    });
+    if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
+
+    const status = await factoryTaskWorkspaceStatus({
+      workspacePath: payload.workspacePath,
+      executionMode: payload.executionMode,
+      git: this.git,
+    });
+    const committed = status.dirty && payload.executionMode === "worktree"
+      ? await this.git.commitWorkspace(
+          payload.workspacePath,
+          `[factory][investigation][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
+        )
+      : undefined;
+    const baseResultRefs = {
+      manifest: fileRef(payload.manifestPath, "task manifest"),
+      prompt: fileRef(payload.promptPath, "task prompt"),
+      result: fileRef(payload.resultPath, "task result"),
+      stdout: fileRef(payload.stdoutPath, "task stdout"),
+      stderr: fileRef(payload.stderrPath, "task stderr"),
+      lastMessage: fileRef(payload.lastMessagePath, "task last message"),
+      evidence: fileRef(payload.evidencePath, "task evidence"),
+      ...(payload.contextSummaryPath ? { contextSummary: fileRef(payload.contextSummaryPath, "task context summary") } : {}),
+      contextPack: fileRef(payload.contextPackPath, "task recursive context pack"),
+      memoryScript: fileRef(payload.memoryScriptPath, "task memory script"),
+      memoryConfig: fileRef(payload.memoryConfigPath, "task memory config"),
+    } satisfies Readonly<Record<string, GraphRef>>;
+    const artifactRefs = Object.fromEntries(
+      helperArtifacts.flatMap((item, index) => {
+        const rawPath = optionalTrimmedString(item.path);
+        if (!rawPath) return [];
+        const resolvedPath = path.isAbsolute(rawPath)
+          ? rawPath
+          : path.resolve(payload.workspacePath, rawPath);
+        return [[artifactKeyFromLabel(item.label, index), artifactRef(resolvedPath, item.label)] as const];
+      }),
+    ) satisfies Readonly<Record<string, GraphRef>>;
+    const resultRefs = {
+      ...baseResultRefs,
+      ...artifactRefs,
+      ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
+    } satisfies Readonly<Record<string, GraphRef>>;
+    const handoffLines = [
+      semantic.conclusion,
+      ...(semantic.findings.length > 0
+        ? ["Findings:", ...semantic.findings.map((item) =>
+          `- ${item.title}: ${item.summary}${item.evidenceRefLabels.length > 0 ? ` [${item.evidenceRefLabels.join(", ")}]` : ""}`)]
+        : []),
+      ...(semantic.uncertainties.length > 0
+        ? ["Uncertainties:", ...semantic.uncertainties.map((item) => `- ${item}`)]
+        : []),
+      ...(semantic.nextAction ? [`Next: ${semantic.nextAction}`] : []),
+    ];
+    const handoff = handoffLines.join("\n");
+    const presentation = normalizeTaskPresentationRecord({
+      value: undefined,
+      handoff,
+      summary: semantic.conclusion,
+      workerArtifacts: helperArtifacts,
+      report,
+    });
+    const workerHandoff = this.buildWorkerHandoffEvent({
+      objectiveId: payload.objectiveId,
+      scope: "task",
+      workerType: task.workerType,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      outcome,
+      summary: semantic.conclusion,
+      handoff,
+      handedOffAt: completedAt,
+    });
+    await this.emitObjectiveBatch(payload.objectiveId, [
+      workerHandoff,
+      {
+        type: "investigation.reported",
+        objectiveId: payload.objectiveId,
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        outcome,
+        summary: semantic.conclusion,
+        handoff,
+        presentation,
+        completion: normalizedCompletion,
+        report,
+        artifactRefs: resultRefs,
+        evidenceCommit: committed?.hash,
+        reportedAt: completedAt,
+      },
+    ]);
+    await commitFactoryTaskMemory(
+      this.memoryTools,
+      state,
+      task,
+      payload.candidateId,
+      renderInvestigationReportText(
+        semantic.conclusion,
+        report,
+        normalizedCompletion,
+        [resultRefs],
+        handoff,
+      ),
+      outcome === "blocked"
+        ? "investigation_reported_partial"
+        : outcome === "partial"
+          ? "investigation_reported_with_gaps"
+          : "investigation_reported",
+    );
+  }
+
   private async buildFallbackInvestigationTaskResult(
     payload: Pick<
       FactoryTaskJobPayload,
@@ -7162,127 +7287,39 @@ export class FactoryService {
   ): Promise<Record<string, unknown>> {
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
     const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
-    const command = clipText(optionalTrimmedString(telemetry?.command), 220) ?? "codex exec";
-    const exitCode = typeof telemetry?.exitCode === "number"
-      ? telemetry.exitCode
-      : execution.exitCode ?? 1;
-    const latestEventText = clipText(optionalTrimmedString(execution.latestEventText), 280);
-    const lastMessage = clipText(optionalTrimmedString(execution.lastMessage), 280);
     const fallbackSummary = clipText(
       helperEvidence.summary
-        ?? latestEventText
-        ?? lastMessage
-        ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.",
+        ?? optionalTrimmedString(execution.latestEventText)
+        ?? optionalTrimmedString(execution.lastMessage)
+        ?? "Investigation did not emit a semantic result; controller finalization will use preserved evidence.",
       280,
-    ) ?? "Investigation did not emit the required structured JSON result; preserving raw evidence as a partial report.";
-    const nextAction = helperEvidence.summary
-      ? "Review the mounted helper evidence for deeper ranking or narrative polish if a richer handoff is required."
-      : "Review the preserved telemetry evidence and rerun with tighter steering if a structured report is required.";
-    const structuredResultError = clipText(error instanceof Error ? error.message : String(error), 500);
-    const telemetryProof = isRecord(telemetry?.proof) ? telemetry.proof : undefined;
-    const telemetryVerified = clipText(optionalTrimmedString(telemetryProof?.verified), 280);
-    const telemetryHow = clipText(optionalTrimmedString(telemetryProof?.how), 500);
-    const fallbackScriptsRun = [{
-      command,
-      summary: clipText(
-        exitCode === 0
-          ? "Codex exited without writing a valid investigation result; telemetry evidence was preserved."
-          : `Codex exited ${exitCode}; telemetry evidence was preserved for follow-up.`,
-        280,
-      ),
-      status: exitCode === 0 ? "warning" : "error",
-    }] satisfies ReadonlyArray<FactoryExecutionScriptRun>;
-    const resultMissingDetail = [
-      structuredResultError ? `Result parsing error: ${structuredResultError}` : undefined,
-      execution.latestEventType ? `Latest event type: ${execution.latestEventType}` : undefined,
-      latestEventText ? `Latest event: ${latestEventText}` : undefined,
-      lastMessage ? `Last message: ${lastMessage}` : undefined,
-    ].filter((item): item is string => Boolean(item)).join("\n");
-    const telemetryFiles = Array.isArray(telemetry?.files)
-      ? telemetry.files.filter((item): item is Record<string, unknown> => isRecord(item))
-      : [];
-    const telemetryDetail = [
-      `Command: ${command}`,
-      `Exit code: ${exitCode}`,
-      telemetryVerified ? `Verified: ${telemetryVerified}` : undefined,
-      telemetryHow ? `How: ${telemetryHow}` : undefined,
-      telemetryFiles.length > 0 ? `Files captured: ${telemetryFiles.length}` : undefined,
-      helperEvidence.summary ? `Helper summary: ${helperEvidence.summary}` : undefined,
-    ].filter((item): item is string => Boolean(item)).join("\n");
-    const evidenceRecords = [{
-      objective_id: payload.objectiveId,
-      task_id: payload.taskId,
-      timestamp: typeof telemetry?.finishedAt === "number" ? telemetry.finishedAt : Date.now(),
-      tool_name: "codex",
-      command_or_api: command,
-      inputs: {
-        workspacePath: payload.workspacePath,
-        resultPath: payload.resultPath,
-        lastMessagePath: payload.lastMessagePath,
+    ) ?? "Investigation did not emit a semantic result; controller finalization will use preserved evidence.";
+    const nextAction = this.hasHelperEvidence(helperEvidence)
+      ? "Finalize directly from the captured helper evidence."
+      : "Review the preserved telemetry evidence and rerun with tighter steering if the primary evidence path never executed.";
+    const semanticFallback = this.buildFallbackInvestigationSemanticResult({
+      helperEvidence,
+      rawResult: {
+        controllerFallback: {
+          summary: fallbackSummary,
+          nextAction,
+          error: clipText(error instanceof Error ? error.message : String(error), 500),
+        },
       },
-      outputs: {
-        exitCode,
-        signal: execution.signal ?? null,
+      errorDetail: clipText(error instanceof Error ? error.message : String(error), 280),
+    });
+    const fallbackResult: Record<string, unknown> = {
+      ...semanticFallback,
+      controllerFallback: {
+        summary: fallbackSummary,
+        nextAction,
+        error: clipText(error instanceof Error ? error.message : String(error), 500),
         latestEventType: execution.latestEventType ?? null,
         latestEventText: execution.latestEventText ?? null,
-      },
-      summary_metrics: {
-        structured_result_missing: true,
-        stdout_chars: execution.stdout.length,
-        stderr_chars: execution.stderr.length,
-        telemetry_files: telemetryFiles.length,
-      },
-    }];
-    const fallbackResult: Record<string, unknown> = {
-      outcome: "partial",
-      summary: fallbackSummary,
-      handoff: `${fallbackSummary}\n\nTelemetry evidence was preserved so the controller can inspect the raw stdout/stderr and task packet artifacts.`,
-      presentation: {
-        kind: "investigation_report",
-        renderHint: "report",
-        inlineBody: fallbackSummary,
-        primaryArtifactLabels: ["task evidence", "task stdout", "task stderr"],
-      },
-      artifacts: [],
-      completion: {
-        changed: [fallbackSummary],
-        proof: [
-          fallbackScriptsRun[0]?.summary ?? "Telemetry evidence was preserved.",
-          ...(telemetryVerified ? [telemetryVerified] : []),
-          ...(helperEvidence.summary ? [`Helper evidence summary: ${helperEvidence.summary}`] : []),
-        ].filter((item): item is string => Boolean(item)),
-        remaining: [nextAction],
-      },
-      nextAction,
-      report: {
-        conclusion: fallbackSummary,
-        evidence: [
-          ...helperEvidence.evidence,
-          {
-            title: "Structured result missing",
-            summary: "Codex did not emit a valid structured investigation result.",
-            detail: resultMissingDetail || undefined,
-          },
-          {
-            title: "Telemetry evidence captured",
-            summary: telemetryVerified ?? "Execution telemetry was preserved for controller-side analysis.",
-            detail: telemetryDetail || undefined,
-          },
-        ],
-        evidenceRecords,
-        scriptsRun: helperEvidence.scriptsRun.length > 0
-          ? [...helperEvidence.scriptsRun, ...fallbackScriptsRun]
-          : fallbackScriptsRun,
-        disagreements: [],
-        nextSteps: [nextAction],
+        exitCode: execution.exitCode ?? null,
       },
     };
-    if (helperEvidence.artifacts.length > 0) {
-      fallbackResult.artifacts = helperEvidence.artifacts;
-    }
-    return execution.tokensUsed !== undefined
-      ? { ...fallbackResult, tokensUsed: execution.tokensUsed }
-      : fallbackResult;
+    return execution.tokensUsed !== undefined ? { ...fallbackResult, tokensUsed: execution.tokensUsed } : fallbackResult;
   }
 
   private async extractInvestigationHelperEvidence(

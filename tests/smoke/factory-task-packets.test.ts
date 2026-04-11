@@ -247,8 +247,8 @@ test("factory task packets: context summary includes controller bootstrap seed a
   expect(summary).toContain("Checked-in profile skill path: /Users/kishore/receipt/skills/factory-infrastructure-aws/SKILL.md.");
   expect(summary).toContain("Primary evidence path: inspect /tmp/.receipt/factory/evidence/aws_cdn_charge_investigation.json (aws_cdn_charge_investigation.json) before new external queries.");
   expect(summary).toContain("Stop condition: once one helper run or a small number of direct CLI calls answers the question, emit the final JSON immediately.");
-  expect(summary).toContain("Synthesis reporting: if mounted evidence already answers the question, return final JSON directly and prefer report.evidenceRecords: [] over timestamp reconstruction.");
-  expect(summary).toContain("Synthesis reporting: use mounted artifact paths and already-captured helper commands as proof; do not run timestamp-only bookkeeping commands.");
+  expect(summary).toContain("Finalization rule: once evidence is sufficient, stop gathering and return the semantic JSON result immediately.");
+  expect(summary).toContain("Do not run timestamp-only bookkeeping commands after helper success.");
   expect(summary).toContain("- aws_cdn_charge_investigation.json: /tmp/.receipt/factory/evidence/aws_cdn_charge_investigation.json");
 });
 

@@ -509,6 +509,17 @@ export const buildFactoryTaskContextPack = async (
         .map((taskId) => state.investigation.reports[taskId])
         .filter((report) => Boolean(report)),
       synthesized: state.investigation.synthesized,
+      finalization: state.objectiveMode === "investigation"
+        ? {
+            question: taskPrompt,
+            stopCondition: "Once one helper run or a small number of direct CLI calls answers the question, return the semantic JSON result immediately.",
+            primaryEvidencePath: helperCatalog?.selectedHelpers[0]?.id,
+            helperCommand: helperCatalog?.runnerPath && helperCatalog?.selectedHelpers[0]
+              ? `python3 ${helperCatalog.runnerPath} run --provider ${helperCatalog.selectedHelpers[0].provider} --json ${helperCatalog.selectedHelpers[0].id}`
+              : undefined,
+            cloudScopeSummary: cloudExecutionContext?.summary,
+          }
+        : undefined,
     },
     packetPaths: {
       root: FACTORY_TASK_PACKET_DIR,

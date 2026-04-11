@@ -118,6 +118,16 @@ export const resolveFactoryTaskWorkerResult = async (
     : result;
 };
 
+export const resolveFactoryInvestigationWorkerResult = async (
+  payload: Pick<FactoryTaskJobPayload, "lastMessagePath" | "resultPath">,
+  execution: { readonly lastMessage?: string; readonly tokensUsed?: number },
+): Promise<Record<string, unknown>> => {
+  const result = await resolveFactoryTaskWorkerResult(payload, execution);
+  return execution.tokensUsed !== undefined && result.tokensUsed === undefined
+    ? { ...result, tokensUsed: execution.tokensUsed }
+    : result;
+};
+
 export const resolveFactoryPublishWorkerResult = async (
   payload: Pick<FactoryIntegrationPublishJobPayload, "lastMessagePath">,
   execution: { readonly lastMessage?: string },

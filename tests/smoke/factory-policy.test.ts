@@ -439,19 +439,14 @@ test("factory policy: investigation task schema keeps scriptsRun inside report a
     readonly properties?: Record<string, unknown>;
     readonly required?: ReadonlyArray<string>;
   };
-  const report = (schema.properties?.report ?? null) as { readonly properties?: Record<string, unknown> } | null;
 
-  expect(prompt).toContain(`"completion": { "changed": string[], "proof": string[], "remaining": string[] }`);
-  expect(prompt).toContain(`"report": { "conclusion": string, "evidence": [{ "title": string, "summary": string, "detail": string | null }], "evidenceRecords": [{ "objective_id": string, "task_id": string, "timestamp": number, "tool_name": string, "command_or_api": string, "inputs": [{ "key": string, "value": string | number | boolean | null }], "outputs": [{ "key": string, "value": string | number | boolean | null }], "summary_metrics": [{ "key": string, "value": string | number | boolean | null }] }], "scriptsRun": [{ "command": string, "summary": string | null, "status": "ok" | "warning" | "error" | null }], "disagreements": string[], "nextSteps": string[] } | null`);
-  expect(prompt).toContain("For investigation tasks, always include the report key and presentation.");
-  expect(prompt).toContain("Always include report.evidenceRecords, even when it is an empty array.");
-  expect(prompt).toContain("Legacy handoff is still read during migration, but presentation is the primary contract.");
-  expect(schema.properties?.scriptsRun).toBeUndefined();
-  expect(schema.required).toContain("presentation");
-  expect(schema.required).not.toContain("scriptsRun");
-  expect(schema.required).toContain("completion");
-  expect(report?.properties?.scriptsRun).toBeTruthy();
-  expect(report?.properties?.evidenceRecords).toBeTruthy();
+  expect(prompt).toContain(`{ "status": "answered" | "partial" | "blocked", "conclusion": string, "findings": [{ "title": string, "summary": string, "confidence": "confirmed" | "inferred" | "uncertain", "evidenceRefLabels": string[] }], "uncertainties": string[], "nextAction": string | null }`);
+  expect(prompt).toContain("Keep the semantic payload small. The controller will build presentation, artifact refs, completion, and the final investigation report from mounted evidence and telemetry.");
+  expect(prompt).toContain("Every finding must reference one or more evidenceRefLabels already present in the packet, mounted artifacts, or command output.");
+  expect(schema.properties?.status).toBeTruthy();
+  expect(schema.properties?.conclusion).toBeTruthy();
+  expect(schema.properties?.findings).toBeTruthy();
+  expect(schema.required).toEqual(["status", "conclusion", "findings", "uncertainties", "nextAction"]);
 }, 120_000);
 
 test("factory policy: objectives record a planning receipt and expose it on detail", async () => {

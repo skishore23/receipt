@@ -156,18 +156,11 @@ test("factory prompt rendering: task prompt keeps live guidance and worktree ins
   expect(prompt).toContain("/Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md");
   expect(prompt).toContain("Do not substitute CODEX_HOME, ~/.codex, or .receipt/codex-home-runtime skill paths");
   expect(prompt).toContain("Do not call `receipt factory inspect` from inside this task worktree.");
-  expect(prompt).toContain("### Synthesis-Only Mode");
-  expect(prompt).toContain("Do not rerun helpers, design new scripts, rediscover the packet stack, or launch new external queries.");
-  expect(prompt).toContain("Ignore any Required checks listed above unless live operator guidance explicitly asks for repo validation.");
-  expect(prompt).toContain("Do not inspect JSON structure repeatedly.");
-  expect(prompt).toContain("Do not open the receipt CLI surface, memory script, or manifest in synth mode unless the context summary points to a missing or contradictory artifact path.");
-  expect(prompt).toContain("Do not run timestamp-only or bookkeeping commands such as `date`, `pwd`, or extra file listings just to pad report fields.");
-  expect(prompt).toContain("For synth-only investigation results, prefer `report.evidenceRecords: []` unless the mounted evidence already contains exact structured records with stable timestamps.");
-  expect(prompt).toContain("Set `report.scriptsRun` to null unless you already have a concrete command log you can cite without more inspection.");
-  expect(prompt).toContain("For synth-only investigation tasks, prioritize completion from mounted artifacts.");
-  expect(prompt).not.toContain("## Memory Access");
-  expect(prompt).not.toContain("aws_alarm_summary");
-  expect(prompt).not.toContain("Receipt CLI Surface (fallback only when packet surfaces are insufficient)");
+  expect(prompt).not.toContain("### Synthesis-Only Mode");
+  expect(prompt).toContain("Keep the semantic payload small. The controller will build presentation, artifact refs, completion, and the final investigation report from mounted evidence and telemetry.");
+  expect(prompt).toContain(`{ "status": "answered" | "partial" | "blocked", "conclusion": string, "findings": [{ "title": string, "summary": string, "confidence": "confirmed" | "inferred" | "uncertain", "evidenceRefLabels": string[] }], "uncertainties": string[], "nextAction": string | null }`);
+  expect(prompt).toContain("Every finding must reference one or more evidenceRefLabels already present in the packet, mounted artifacts, or command output.");
+  expect(prompt).toContain("## Memory Access");
   expect(prompt).toContain("Return exactly one JSON object matching this schema:");
 });
 

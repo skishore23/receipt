@@ -1319,24 +1319,16 @@ test("factory investigation: synthesizing mode rerenders with live guidance and 
       const signal = await control?.pollSignal?.();
       if (signal) throw new CodexControlSignalError(signal);
       const structured = {
-        outcome: "approved",
-        summary: "Synthesized the final investigation from existing evidence.",
-        handoff: "Investigation is complete.",
-        artifacts: [],
-        completion: {
-          changed: ["Produced the final investigation summary from mounted evidence."],
-          proof: ["Used the existing evidence bundle without rerunning helpers."],
-          remaining: [],
-        },
+        status: "answered",
+        conclusion: "Synthesized the final investigation from existing evidence.",
+        findings: [{
+          title: "Mounted evidence",
+          summary: "Local evidence files were used for final synthesis.",
+          confidence: "confirmed",
+          evidenceRefLabels: ["task evidence"],
+        }],
+        uncertainties: [],
         nextAction: null,
-        report: {
-          conclusion: "The existing evidence was sufficient to finish the task.",
-          evidence: [{ title: "Mounted evidence", summary: "Local evidence files were used for synthesis.", detail: null }],
-          evidenceRecords: [],
-          scriptsRun: [{ command: "cat .receipt/factory/evidence/finding.json", summary: "Read the mounted evidence bundle for final synthesis.", status: "ok" }],
-          disagreements: [],
-          nextSteps: [],
-        },
       };
       const raw = JSON.stringify(structured);
       return { stdout: raw, stderr: "", lastMessage: raw };
@@ -1388,8 +1380,9 @@ test("factory investigation: synthesizing mode rerenders with live guidance and 
   });
 
   expect(attempts).toBe(2);
-  await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("### Synthesis-Only Mode");
+  await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.not.toContain("### Synthesis-Only Mode");
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
+  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("\"status\": \"answered\"");
   await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Synthesized the final investigation from existing evidence.");
 }, 120_000);
 
@@ -1511,9 +1504,8 @@ test("factory investigation: synthesizing execution stall falls back to helper-b
   await service.runTask(payload);
 
   const resultText = await fs.readFile(payload.resultPath, "utf-8");
-  expect(resultText).toContain("\"outcome\": \"partial\"");
+  expect(resultText).toContain("\"status\": \"answered\"");
   expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
-  expect(resultText).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
 }, 120_000);
@@ -1622,9 +1614,8 @@ test("factory investigation: evidence collection stall falls back to helper-back
   await service.runTask(payload);
 
   const resultText = await fs.readFile(payload.resultPath, "utf-8");
-  expect(resultText).toContain("\"outcome\": \"partial\"");
+  expect(resultText).toContain("\"status\": \"answered\"");
   expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
-  expect(resultText).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
 }, 120_000);
@@ -1668,42 +1659,16 @@ test("factory investigation: evidence collection stall without helper evidence r
         expect(input.prompt).toContain("Stop bootstrap and run the packet's primary evidence path now.");
         expect(input.prompt).toContain("Run the selected checked-in helper first.");
         const raw = JSON.stringify({
-          outcome: "approved",
-          summary: "Collected helper-backed internet exposure evidence after the forced helper-first retry.",
-          handoff: "The retry skipped bootstrap and finalized from the primary evidence path.",
-          presentation: {
-            kind: "investigation_report",
-            inlineBody: "Collected helper-backed internet exposure evidence after the forced helper-first retry.",
-            primaryArtifactLabels: ["internet exposure inventory"],
-            renderHint: "report",
-          },
-          artifacts: [{
-            label: "internet exposure inventory",
-            path: path.join(input.workspacePath, ".receipt", "factory", "evidence", "aws_internet_exposure_inventory.json"),
-            summary: "Structured helper output for the retry run.",
+          status: "answered",
+          conclusion: "Collected helper-backed internet exposure evidence after the forced helper-first retry.",
+          findings: [{
+            title: "Forced helper-first retry",
+            summary: "The second attempt applied live guidance and finished from the primary evidence path.",
+            confidence: "confirmed",
+            evidenceRefLabels: ["internet exposure inventory"],
           }],
-          completion: {
-            changed: ["Captured the helper-backed investigation result."],
-            proof: ["The retry prompt forced the primary evidence path before any more bootstrap reads."],
-            remaining: [],
-          },
+          uncertainties: [],
           nextAction: null,
-          report: {
-            conclusion: "The forced retry produced a complete investigation result.",
-            evidence: [{
-              title: "Forced helper-first retry",
-              summary: "The second attempt applied live guidance and finished from the primary evidence path.",
-              detail: null,
-            }],
-            evidenceRecords: [],
-            scriptsRun: [{
-              command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory",
-              summary: "Collected internet exposure evidence.",
-              status: "ok",
-            }],
-            disagreements: [],
-            nextSteps: [],
-          },
         });
         await fs.writeFile(input.stdoutPath, raw, "utf-8");
         await fs.writeFile(input.stderrPath, "", "utf-8");
@@ -1738,7 +1703,7 @@ test("factory investigation: evidence collection stall without helper evidence r
   expect(attempts).toBe(2);
   expect(reasoningEfforts).toEqual(["low", "low"]);
   const resultText = await fs.readFile(payload.resultPath, "utf-8");
-  expect(resultText).toContain("\"outcome\": \"approved\"");
+  expect(resultText).toContain("\"status\": \"answered\"");
   expect(resultText).toContain("forced helper-first retry");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
@@ -1836,7 +1801,7 @@ test("factory investigation: stale synth recommendation is obsoleted after the t
   expect(detail.tasks).toHaveLength(1);
 }, 120_000);
 
-test("factory investigation: repeated synthesis dispatch loops are scored weak and churn-heavy", async () => {
+test("factory investigation: repeated finalize recommendations without synth dispatch no longer score as synthesis churn", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService({
     codexRun: async () => ({ stdout: "", stderr: "" }),
   });
@@ -1875,21 +1840,12 @@ test("factory investigation: repeated synthesis dispatch loops are scored weak a
       reasoning: `Finish from evidence attempt ${index + 1}`,
       recommendedAt: ts,
     });
-    await emitObjective(payload.objectiveId, {
-      type: "task.synthesis.dispatched",
-      objectiveId: payload.objectiveId,
-      taskId: payload.taskId,
-      candidateId: payload.candidateId,
-      jobId: taskJob!.id,
-      dispatchedAt: ts + 100,
-    });
   }
 
   const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
-  expect(report.summary.status).toBe("synthesizing");
-  expect(report.assessment.efficiency).toBe("churn-heavy");
-  expect(report.assessment.verdict).toBe("weak");
-  expect(report.assessment.notes.some((note) => note.includes("Repeated synthesis dispatches occurred without terminal completion"))).toBe(true);
+  expect(report.interventions.synthesisDispatchCount).toBe(0);
+  expect(report.assessment.efficiency).toBe("efficient");
+  expect(report.assessment.notes.some((note) => note.includes("Repeated synthesis dispatches occurred without terminal completion"))).toBe(false);
 }, 120_000);
 
 test("factory investigation: stale queued execution is downgraded to stalled", async () => {
