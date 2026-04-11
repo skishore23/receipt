@@ -252,6 +252,146 @@ test("factory task packets: context summary includes controller bootstrap seed a
   expect(summary).toContain("- aws_cdn_charge_investigation.json: /tmp/.receipt/factory/evidence/aws_cdn_charge_investigation.json");
 });
 
+test("factory task packets: context summary surfaces recorded scripts and warns when validation is requested but missing", () => {
+  const summary = renderTaskContextSummary({
+    objectiveId: "objective_demo",
+    title: "Validate task packet",
+    prompt: "Record validation commands.",
+    objectiveMode: "delivery",
+    severity: 1,
+    contract: {
+      acceptanceCriteria: ["Implement the requested delivery objective."],
+      allowedScope: ["Keep it narrow."],
+      disallowedScope: [],
+      requiredChecks: ["bun run build"],
+      proofExpectation: "Return proof.",
+    },
+    profile: {
+      rootProfileId: "generalist",
+      rootProfileLabel: "Tech Lead",
+    },
+    task: {
+      taskId: "task_01",
+      title: "Validate task packet",
+      prompt: "Record validation commands.",
+      workerType: "codex",
+      executionMode: "worktree",
+      status: "running",
+      candidateId: "task_01_candidate_01",
+    },
+    integration: {
+      status: "idle",
+    },
+    dependencyTree: [],
+    relatedTasks: [],
+    candidateLineage: [
+      {
+        candidateId: "task_01_candidate_01",
+        status: "running",
+        scriptsRun: [
+          { command: "bun run build", summary: "Built the repo.", status: "ok" },
+        ],
+      },
+    ],
+    recentReceipts: [],
+    objectiveSlice: {
+      frontierTasks: [],
+      recentCompletedTasks: [],
+      integrationTasks: [],
+      recentObjectiveReceipts: [],
+    },
+    memory: {},
+    investigation: {
+      reports: [],
+    },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.context.md",
+      contextPackPath: ".receipt/factory/task_01.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
+    },
+    contextSources: {
+      repoSharedMemoryScope: "factory/repo/shared",
+      objectiveMemoryScope: "factory/objectives/objective_demo",
+      integrationMemoryScope: "factory/objectives/objective_demo/integration",
+      profileSkillRefs: [],
+      repoSkillPaths: ["/Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md"],
+      sharedArtifactRefs: [],
+    },
+  } as never);
+
+  expect(summary).toContain("## Scripts Run");
+  expect(summary).toContain("- ok: bun run build | Built the repo.");
+  expect(summary).not.toContain("validation was requested but no scriptsRun entries were recorded");
+
+  const warningSummary = renderTaskContextSummary({
+    objectiveId: "objective_demo",
+    title: "Validate task packet",
+    prompt: "Record validation commands.",
+    objectiveMode: "delivery",
+    severity: 1,
+    contract: {
+      acceptanceCriteria: ["Implement the requested delivery objective."],
+      allowedScope: ["Keep it narrow."],
+      disallowedScope: [],
+      requiredChecks: ["Run validation"],
+      proofExpectation: "Return proof.",
+    },
+    profile: {
+      rootProfileId: "generalist",
+      rootProfileLabel: "Tech Lead",
+    },
+    task: {
+      taskId: "task_01",
+      title: "Validate task packet",
+      prompt: "Record validation commands.",
+      workerType: "codex",
+      executionMode: "worktree",
+      status: "running",
+      candidateId: "task_01_candidate_01",
+    },
+    integration: {
+      status: "idle",
+    },
+    dependencyTree: [],
+    relatedTasks: [],
+    candidateLineage: [],
+    recentReceipts: [],
+    objectiveSlice: {
+      frontierTasks: [],
+      recentCompletedTasks: [],
+      integrationTasks: [],
+      recentObjectiveReceipts: [],
+    },
+    memory: {},
+    investigation: {
+      reports: [],
+    },
+    packetPaths: {
+      root: ".receipt/factory",
+      manifestPath: ".receipt/factory/task_01.manifest.json",
+      contextSummaryPath: ".receipt/factory/task_01.context.md",
+      contextPackPath: ".receipt/factory/task_01.context-pack.json",
+      memoryScriptPath: ".receipt/factory/task_01.memory.cjs",
+      receiptCliPath: ".receipt/factory/task_01.receipt-cli.md",
+      evidenceDir: ".receipt/factory/evidence",
+    },
+    contextSources: {
+      repoSharedMemoryScope: "factory/repo/shared",
+      objectiveMemoryScope: "factory/objectives/objective_demo",
+      integrationMemoryScope: "factory/objectives/objective_demo/integration",
+      profileSkillRefs: [],
+      repoSkillPaths: ["/Users/kishore/receipt/skills/factory-receipt-worker/SKILL.md"],
+      sharedArtifactRefs: [],
+    },
+  } as never);
+
+  expect(warningSummary).toContain("validation was requested but no scriptsRun entries were recorded");
+});
+
 test("factory task packets: resource inventory bootstrap command follows the task scope instead of generic s3 defaults", () => {
   const summary = renderTaskContextSummary({
     objectiveId: "objective_rds",
