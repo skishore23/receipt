@@ -816,6 +816,7 @@ test("factory policy: autoPromote false stops at ready_to_promote until promotio
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.integration.status).toBe("ready_to_promote");
@@ -848,6 +849,7 @@ test("factory policy: software delivery objectives auto-publish and expose PR me
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
 
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
@@ -894,6 +896,7 @@ test("factory policy: publish retries transient GitHub connectivity failures bef
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
 
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
@@ -924,6 +927,7 @@ test("factory policy: publish failures block the objective when PR metadata is m
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
   expect(publishResult.status).toBe("failed");
@@ -963,6 +967,7 @@ test("factory policy: publish failures preserve an explicit worker blocker summa
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   const publishResult = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
   expect(publishResult.status).toBe("failed");
@@ -992,6 +997,7 @@ test("factory policy: integration validation can pass through inherited failures
 
   const firstValidateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(firstValidateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
 
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.integration.status).toBe("ready_to_promote");

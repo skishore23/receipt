@@ -5367,10 +5367,102 @@ test("factory route: applying a self-improvement recommendation creates an auto-
   expect(payload.location).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_auto_fix_manual&inspectorTab=chat&detailTab=action");
   expect(createdInputs).toHaveLength(1);
   expect(createdInputs[0]?.channel).toBe("auto-fix");
-  expect(createdInputs[0]?.profileId).toBe("generalist");
+  expect(createdInputs[0]?.profileId).toBeUndefined();
   expect(createdInputs[0]?.prompt).toContain("Operator-applied self-improvement recommendation.");
   expect(createdInputs[0]?.prompt).toContain("## Source Objective\nobjective_live");
   expect(createdInputs[0]?.prompt).toContain("factory_auto_fix_key:");
+});
+
+test("factory route: applying a self-improvement recommendation from infrastructure does not reuse the investigation-only profile", async () => {
+  const dataDir = await createTempDir("factory-route-apply-self-improvement-infra");
+  const auditDir = path.join(dataDir, "factory", "artifacts", "objective_infra");
+  await fs.mkdir(auditDir, { recursive: true });
+  await fs.writeFile(path.join(auditDir, "objective.audit.json"), JSON.stringify({
+    audit: {
+      generatedAt: 17,
+      objectiveUpdatedAt: 17,
+      objectiveChannel: "trial",
+      recommendationStatus: "ready",
+      recommendations: [{
+        summary: "Promote infrastructure audit follow-ups through the delivery lane.",
+        anomalyPatterns: ["missing_manual_apply"],
+        scope: "factory/objectives/aws_audit/*",
+        confidence: "high",
+        suggestedFix: "Create the delivery follow-up without binding it to the infrastructure investigation profile.",
+      }],
+      recurringPatterns: [],
+    },
+  }, null, 2), "utf-8");
+
+  const liveObjective = {
+    ...makeRunningWorkbenchObjectiveDetail("objective_infra"),
+    profile: {
+      ...makeRunningWorkbenchObjectiveDetail("objective_infra").profile,
+      rootProfileId: "infrastructure",
+      rootProfileLabel: "Infrastructure",
+    },
+    selfImprovement: {
+      auditedAt: 17,
+      auditStatus: "ready",
+      stale: false,
+      recommendationStatus: "ready" as const,
+      recommendations: [{
+        summary: "Promote infrastructure audit follow-ups through the delivery lane.",
+        anomalyPatterns: ["missing_manual_apply"],
+        scope: "factory/objectives/aws_audit/*",
+        confidence: "high" as const,
+        suggestedFix: "Create the delivery follow-up without binding it to the infrastructure investigation profile.",
+      }],
+      recurringPatterns: [],
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const createdInputs: Array<Parameters<FactoryService["createObjective"]>[0]> = [];
+  const app = createRouteTestApp({
+    dataDir,
+    service: {
+      listObjectives: async () => [],
+      getObjective: async (objectiveId: string) => {
+        if (objectiveId === "objective_infra") return liveObjective;
+        return {
+          ...makeRunningWorkbenchObjectiveDetail(),
+          objectiveId,
+          title: "Auto-fix objective",
+          channel: "auto-fix",
+        } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+      },
+      createObjective: async (input) => {
+        createdInputs.push(input);
+        return {
+          ...makeRunningWorkbenchObjectiveDetail(),
+          objectiveId: "objective_auto_fix_infra",
+          title: input.title,
+          prompt: input.prompt,
+          channel: input.channel,
+        } as Awaited<ReturnType<FactoryService["createObjective"]>>;
+      },
+    },
+  });
+
+  const response = await app.request(
+    "http://receipt.test/factory/api/objectives/objective_infra/self-improvement/apply?profile=infrastructure&chat=chat_demo&objective=objective_infra",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ recommendationIndex: "0" }).toString(),
+    },
+  );
+  const payload = await response.json() as {
+    readonly location?: string;
+  };
+
+  expect(response.status).toBe(200);
+  expect(payload.location).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_auto_fix_infra&inspectorTab=chat&detailTab=action");
+  expect(createdInputs).toHaveLength(1);
+  expect(createdInputs[0]?.profileId).toBeUndefined();
+  expect(createdInputs[0]?.channel).toBe("auto-fix");
 });
 
 test("factory workbench route: selected objective stays visible when section caps would otherwise omit it", async () => {

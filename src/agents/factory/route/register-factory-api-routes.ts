@@ -496,7 +496,6 @@ export const registerFactoryApiRoutes = (input: {
         : await service.createObjective(buildAutoFixObjectiveInput({
           recommendation,
           sourceObjectiveId: objectiveId,
-          profileId: sourceObjective.profile.rootProfileId,
           patternCounts: new Map(
             auditMetadata.recurringPatterns.map((entry) => [entry.pattern, entry.count] as const),
           ),
