@@ -1278,6 +1278,7 @@ export const createFactoryWorkerHandlers = (
           || job.payload.kind === "factory.integration.validate"
           || job.payload.kind === "factory.integration.publish"
         )
+        && result?.status !== "skipped_terminal_state"
         ? async () => {
             await service.reactObjective(objectiveId);
           }

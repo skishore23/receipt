@@ -5354,6 +5354,13 @@ export class FactoryService {
   async runIntegrationPublish(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
     const parsed = this.parseIntegrationPublishPayload(payload);
     const state = await this.getObjectiveState(parsed.objectiveId);
+    if (this.isTerminalObjectiveStatus(state.status)) {
+      return {
+        objectiveId: parsed.objectiveId,
+        status: "skipped_terminal_state",
+        message: "publish skipped because objective is already terminal",
+      };
+    }
     const candidate = state.candidates[parsed.candidateId];
     const candidateTask = candidate ? state.workflow.tasksById[candidate.taskId] : undefined;
     const chain = await this.runtime.chain(objectiveStream(parsed.objectiveId));
@@ -5596,6 +5603,9 @@ export class FactoryService {
     },
   ): Promise<void> {
     const candidate = state.candidates[candidateId];
+    if (this.isTerminalObjectiveStatus(state.status)) {
+      return;
+    }
     const workspace = await this.git.ensureIntegrationWorkspace(state.objectiveId, state.integration.headCommit ?? state.baseHash);
     const status = await this.git.worktreeStatus(workspace.path);
     const commit = status.head ?? state.integration.headCommit;
