@@ -571,10 +571,12 @@ const severityWorkerReasoningEffort = (
   _profileId: string | undefined,
   objectiveMode: FactoryObjectiveMode,
   severity: FactoryObjectiveSeverity,
+  taskPhase: FactoryTaskExecutionPhase,
   _taskKind: FactoryTaskRecord["taskKind"],
 ): "low" | "medium" | "high" | "xhigh" => {
   if (objectiveMode === "investigation") {
-    return severity === 1 ? "medium" : "high";
+    if (taskPhase === "synthesizing") return severity >= 4 ? "medium" : "low";
+    return severity >= 4 ? "medium" : "low";
   }
   return "low";
 };
@@ -3881,6 +3883,9 @@ export class FactoryService {
           jobId,
           prompt,
         });
+        const investigationTimeoutMs = parsed.objectiveMode === "investigation"
+          ? 180_000
+          : undefined;
         execution = await this.codexExecutor.run({
           prompt,
           workspacePath: parsed.workspacePath,
@@ -3894,10 +3899,19 @@ export class FactoryService {
           outputSchemaPath: resultSchemaPath,
           completionSignalPath: parsed.lastMessagePath,
           completionQuietMs: 1_500,
-          stallTimeoutMs: parsed.objectiveMode === "investigation" && parsed.taskPhase === "synthesizing"
-            ? 60_000
+          timeoutMs: investigationTimeoutMs,
+          stallTimeoutMs: parsed.objectiveMode === "investigation"
+            ? parsed.taskPhase === "synthesizing"
+              ? 60_000
+              : 90_000
             : undefined,
-          reasoningEffort: severityWorkerReasoningEffort(parsed.profile.rootProfileId, parsed.objectiveMode, parsed.severity, task.taskKind),
+          reasoningEffort: severityWorkerReasoningEffort(
+            parsed.profile.rootProfileId,
+            parsed.objectiveMode,
+            parsed.severity,
+            parsed.taskPhase,
+            task.taskKind,
+          ),
           sandboxMode: sandboxModeForTask(),
           isolateCodexHome: true,
           objectiveId: parsed.objectiveId,
@@ -3916,7 +3930,15 @@ export class FactoryService {
         break;
       } catch (error) {
         if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") {
-          if (parsed.objectiveMode === "investigation" && parsed.taskPhase === "synthesizing") {
+          if (
+            parsed.objectiveMode === "investigation"
+            && !(error instanceof CodexControlSignalError)
+          ) {
+            const retryGuidance = await this.buildInvestigationEvidenceRetryGuidance(parsed, error, guidanceHistory);
+            if (retryGuidance) {
+              guidanceHistory.push(retryGuidance);
+              continue;
+            }
             const fallbackExecution = await this.fallbackExecutionForTaskError(parsed, error);
             const fallbackResult = await this.buildFallbackInvestigationTaskResult(parsed, fallbackExecution, error);
             await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
@@ -7069,6 +7091,39 @@ export class FactoryService {
       if (payload.objectiveMode !== "investigation") throw error;
       return this.buildFallbackInvestigationTaskResult(payload, execution, error);
     }
+  }
+
+  private async buildInvestigationEvidenceRetryGuidance(
+    payload: Pick<FactoryTaskJobPayload, "workspacePath" | "evidencePath" | "taskPhase">,
+    error: unknown,
+    guidanceHistory: ReadonlyArray<FactoryLiveGuidance>,
+  ): Promise<FactoryLiveGuidance | undefined> {
+    if (payload.taskPhase === "synthesizing") return undefined;
+    if (guidanceHistory.some((item) => item.sourceCommandIds.includes("auto_investigation_helper_retry"))) {
+      return undefined;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/\b(stalled|timed out)\b/i.test(message)) return undefined;
+    const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
+    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
+    const hasHelperEvidence = Boolean(
+      helperEvidence.summary
+      || helperEvidence.evidence.length > 0
+      || helperEvidence.artifacts.length > 0
+      || helperEvidence.scriptsRun.length > 0,
+    );
+    if (hasHelperEvidence) return undefined;
+    return {
+      guidance: [
+        "Stop bootstrap and run the packet's primary evidence path now.",
+        "Do not reread the manifest, context pack, memory script, or skill files unless the selected helper or primary evidence command fails with a concrete missing-input error.",
+        "Run the selected checked-in helper first. If no helper is selected, run the primary raw CLI command path directly.",
+        "After the first evidence-producing command, emit the final JSON immediately. If the primary evidence path errors, return partial with the exact failure instead of continuing exploration.",
+      ].join("\n"),
+      guidanceKind: "steer",
+      sourceCommandIds: ["auto_investigation_helper_retry"],
+      appliedAt: Date.now(),
+    };
   }
 
   private async fallbackExecutionForTaskError(

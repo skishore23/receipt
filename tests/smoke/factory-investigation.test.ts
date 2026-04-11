@@ -799,7 +799,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   };
   expect(capturedSandboxMode).toBeUndefined();
   expect(capturedCompletionSignalPath).toBe(payload.lastMessagePath);
-  expect(capturedReasoningEffort).toBe("high");
+  expect(capturedReasoningEffort).toBe("low");
   expect(prompt).toContain("## Helper-First Execution");
   expect(prompt).toContain("Profile Cloud Provider: aws");
   expect(prompt).toContain("prefer a checked-in helper over ad hoc one-off commands or a task-local script");
@@ -1514,6 +1514,232 @@ test("factory investigation: synthesizing execution stall falls back to helper-b
   expect(resultText).toContain("\"outcome\": \"partial\"");
   expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
   expect(resultText).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory");
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+}, 120_000);
+
+test("factory investigation: evidence collection stall falls back to helper-backed partial completion", async () => {
+  const dataDir = await createTempDir("receipt-factory-investigation");
+  const repoRoot = await createSourceRepo();
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async (input) => {
+        const helperOutput = {
+          status: "ok",
+          summary: "Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s), 0 public RDS instance(s), and 0 public S3 bucket(s).",
+          artifacts: [{
+            label: "internet exposure inventory",
+            path: path.join(input.workspacePath, ".receipt", "factory", "evidence", "aws_internet_exposure_inventory.json"),
+            summary: "Structured internet exposure helper output.",
+          }],
+          data: {
+            publicNetworkInterfaces: new Array(14).fill({}),
+            internetFacingLoadBalancers: new Array(6).fill({}),
+            openSecurityGroups: new Array(10).fill({}),
+            publicRdsInstances: [],
+            publicS3Buckets: [],
+          },
+        };
+        const helperStdout = `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_0",
+            type: "command_execution",
+            command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory -- --profile default --all-regions --output-dir .receipt/factory/evidence",
+            aggregated_output: JSON.stringify(helperOutput),
+            exit_code: 0,
+            status: "completed",
+          },
+        })}\n`;
+        const task01EvidencePath = path.join(path.dirname(input.evidencePath ?? input.stdoutPath), "task_01.evidence.json");
+        await fs.writeFile(task01EvidencePath, JSON.stringify({
+          command: "codex exec",
+          stdout: helperStdout,
+          stderr: "",
+          exitCode: 0,
+          startedAt: Date.now() - 10_000,
+          finishedAt: Date.now() - 9_000,
+          files: [],
+          proof: {
+            verified: "helper evidence captured before the worker stalled",
+            how: "preserved helper stdout in the telemetry evidence record",
+          },
+        }), "utf-8");
+        const stdout = `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "command_execution",
+            command: "sed -n '1,320p' .receipt/factory/task_01.evidence.json",
+            aggregated_output: await fs.readFile(task01EvidencePath, "utf-8"),
+            exit_code: 0,
+            status: "completed",
+          },
+        })}\n`;
+        const stderr = "bootstrap complete\n";
+        await fs.writeFile(input.stdoutPath, stdout, "utf-8");
+        await fs.writeFile(input.stderrPath, stderr, "utf-8");
+        if (input.evidencePath) {
+          await fs.writeFile(input.evidencePath, JSON.stringify({
+            command: "codex exec",
+            stdout,
+            stderr,
+            exitCode: 1,
+            startedAt: Date.now() - 5_000,
+            finishedAt: Date.now(),
+            files: [],
+            proof: {
+              verified: "helper evidence captured before the collecting-evidence worker stalled",
+              how: "preserved helper stdout in the telemetry evidence record",
+            },
+          }), "utf-8");
+        }
+        throw new Error("codex exec stalled after 1000ms without output or completion updates");
+      },
+    },
+    repoRoot,
+    profileRoot: process.cwd(),
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate evidence-phase stall fallback",
+    prompt: "Collect helper evidence and finish even if the worker stalls before synthesis.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  expect(payload.taskPhase).toBe("collecting_evidence");
+  await service.runTask(payload);
+
+  const resultText = await fs.readFile(payload.resultPath, "utf-8");
+  expect(resultText).toContain("\"outcome\": \"partial\"");
+  expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
+  expect(resultText).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory");
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+}, 120_000);
+
+test("factory investigation: evidence collection stall without helper evidence retries once with helper-first guidance", async () => {
+  const dataDir = await createTempDir("receipt-factory-investigation");
+  const repoRoot = await createSourceRepo();
+  const queue = sqliteQueue({ runtime: createJobRuntime(dataDir), stream: "jobs" });
+  let attempts = 0;
+  const reasoningEfforts: Array<CodexExecutorInput["reasoningEffort"]> = [];
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime: createJobRuntime(dataDir),
+    sse: new SseHub(),
+    codexExecutor: {
+      run: async (input) => {
+        attempts += 1;
+        reasoningEfforts.push(input.reasoningEffort);
+        if (attempts === 1) {
+          await fs.writeFile(input.stdoutPath, "bootstrap only\n", "utf-8");
+          await fs.writeFile(input.stderrPath, "", "utf-8");
+          if (input.evidencePath) {
+            await fs.writeFile(input.evidencePath, JSON.stringify({
+              command: "codex exec",
+              stdout: "bootstrap only\n",
+              stderr: "",
+              exitCode: 1,
+              startedAt: Date.now() - 5_000,
+              finishedAt: Date.now(),
+              files: [],
+              proof: {
+                verified: "worker stalled before helper evidence was captured",
+                how: "only bootstrap output was preserved in telemetry",
+              },
+            }), "utf-8");
+          }
+          throw new Error("codex exec stalled after 1000ms without output or completion updates");
+        }
+        expect(input.prompt).toContain("## Live Operator Guidance");
+        expect(input.prompt).toContain("Stop bootstrap and run the packet's primary evidence path now.");
+        expect(input.prompt).toContain("Run the selected checked-in helper first.");
+        const raw = JSON.stringify({
+          outcome: "approved",
+          summary: "Collected helper-backed internet exposure evidence after the forced helper-first retry.",
+          handoff: "The retry skipped bootstrap and finalized from the primary evidence path.",
+          presentation: {
+            kind: "investigation_report",
+            inlineBody: "Collected helper-backed internet exposure evidence after the forced helper-first retry.",
+            primaryArtifactLabels: ["internet exposure inventory"],
+            renderHint: "report",
+          },
+          artifacts: [{
+            label: "internet exposure inventory",
+            path: path.join(input.workspacePath, ".receipt", "factory", "evidence", "aws_internet_exposure_inventory.json"),
+            summary: "Structured helper output for the retry run.",
+          }],
+          completion: {
+            changed: ["Captured the helper-backed investigation result."],
+            proof: ["The retry prompt forced the primary evidence path before any more bootstrap reads."],
+            remaining: [],
+          },
+          nextAction: null,
+          report: {
+            conclusion: "The forced retry produced a complete investigation result.",
+            evidence: [{
+              title: "Forced helper-first retry",
+              summary: "The second attempt applied live guidance and finished from the primary evidence path.",
+              detail: null,
+            }],
+            evidenceRecords: [],
+            scriptsRun: [{
+              command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_internet_exposure_inventory",
+              summary: "Collected internet exposure evidence.",
+              status: "ok",
+            }],
+            disagreements: [],
+            nextSteps: [],
+          },
+        });
+        await fs.writeFile(input.stdoutPath, raw, "utf-8");
+        await fs.writeFile(input.stderrPath, "", "utf-8");
+        await fs.writeFile(input.lastMessagePath, raw, "utf-8");
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: raw,
+          stderr: "",
+          lastMessage: raw,
+        };
+      },
+    },
+    repoRoot,
+    profileRoot: process.cwd(),
+  });
+
+  const created = await service.createObjective({
+    title: "Investigate forced helper-first retry",
+    prompt: "Answer the AWS exposure question quickly from the primary helper evidence path.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  await service.runTask(payload);
+
+  expect(attempts).toBe(2);
+  expect(reasoningEfforts).toEqual(["low", "low"]);
+  const resultText = await fs.readFile(payload.resultPath, "utf-8");
+  expect(resultText).toContain("\"outcome\": \"approved\"");
+  expect(resultText).toContain("forced helper-first retry");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
 }, 120_000);
