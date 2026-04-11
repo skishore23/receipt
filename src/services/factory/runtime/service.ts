@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { z } from "zod";
 
+import { createLocalDurableBackend, type DurableBackend } from "@receipt/durable";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
 import { CodexControlSignalError, CodexExecutionError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
@@ -65,6 +65,10 @@ import {
   type FactoryChatCodexArtifactPaths,
 } from "../../factory-codex-artifacts";
 import {
+  investigationEvidenceBundlePath,
+  writeInvestigationEvidenceBundle,
+} from "../../factory-evidence-bundle";
+import {
   archiveFactoryTaskPacketArtifacts,
   archiveFactoryTaskPrompt,
 } from "../../factory-task-packet-archive";
@@ -94,7 +98,6 @@ import {
 } from "./objective-lifecycle";
 import {
   buildObjectiveSelfImprovement as buildObjectiveControlSelfImprovement,
-  controlJobCancelReason as deriveControlJobCancelReason,
   objectiveConsumesRepoSlot as consumesObjectiveRepoSlot,
   releasesObjectiveProjectionSlot as releasesProjectedObjectiveSlot,
   releasesObjectiveSlot as releasesLiveObjectiveSlot,
@@ -118,14 +121,13 @@ import {
 } from "../planning";
 import { monitorCheckpointIntervalMs, monitorDetectEvidence, runMonitorCheckpoint } from "../monitor-job";
 import { MonitorCheckpointResultSchema, parseMonitorRecommendation } from "../monitor-checkpoint";
-import { llmStructured, llmText } from "../../../adapters/openai";
+import { llmStructured } from "../../../adapters/openai";
 import {
   factoryPromotionGateBlockedReason,
   factoryTaskCompletionForTask,
 } from "../promotion-gate";
 import {
   buildDefaultTaskCompletion,
-  type FactoryInvestigationSemanticResult,
   FACTORY_INVESTIGATION_TASK_RESULT_SCHEMA,
   FACTORY_PUBLISH_RESULT_SCHEMA,
   FACTORY_TASK_RESULT_SCHEMA,
@@ -139,7 +141,6 @@ import {
   renderInvestigationReportText,
 } from "../result-contracts";
 import {
-  parseJsonObjectCandidate,
   resolveFactoryInvestigationWorkerResult,
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
@@ -151,6 +152,14 @@ import {
   readdirIfPresent,
   type FactoryArtifactIssue,
 } from "../artifact-inspection";
+import {
+  buildFallbackInvestigationSemanticResult,
+  buildInvestigationReport,
+  extractInvestigationHelperEvidence,
+  hasHelperEvidence,
+  synthesizeInvestigationSemanticResult,
+} from "./investigation-results";
+import { renderFactoryObjectiveHandoff } from "./objective-handoff-renderer";
 import { inferObjectiveLiveOutputFocusFromDetail } from "../live-output";
 import {
   processObjectiveReconcileControl,
@@ -364,18 +373,6 @@ const monitorRecommendationsEqual = (
   }
 };
 
-const InvestigationSemanticSynthesisSchema = z.object({
-  status: z.enum(["answered", "partial", "blocked"]),
-  conclusion: z.string(),
-  findings: z.array(z.object({
-    title: z.string(),
-    summary: z.string(),
-    confidence: z.enum(["confirmed", "inferred", "uncertain"]),
-    evidenceRefLabels: z.array(z.string()),
-  })).max(8),
-  uncertainties: z.array(z.string()),
-  nextAction: z.string().nullable(),
-});
 const artifactKeyFromLabel = (label: string, index: number): string => {
   const normalized = label
     .trim()
@@ -664,6 +661,12 @@ import {
   type FactoryObjectiveReceiptQuery,
   FACTORY_PROFILE_SUMMARY,
 } from "../../factory-types";
+import {
+  codexActivityKey,
+  hasActiveJobForWorkflow,
+  listPendingObjectiveControlWorkflowIds,
+  objectiveControlWorkflowKey,
+} from "../../../lib/durable-execution";
 
 export {
   FactoryServiceError,
@@ -728,6 +731,7 @@ const objectiveStream = (objectiveId: string): string => `${FACTORY_STREAM_PREFI
 export class FactoryService {
   readonly dataDir: string;
   readonly queue: SqliteQueue;
+  readonly durable?: DurableBackend;
   readonly jobRuntime: Runtime<JobCmd, JobEvent, JobState>;
   readonly sse: SseHub;
   readonly codexExecutor: CodexExecutor;
@@ -770,6 +774,9 @@ export class FactoryService {
   constructor(opts: FactoryServiceOptions) {
     this.dataDir = opts.dataDir;
     this.queue = opts.queue;
+    this.durable = opts.durable ?? createLocalDurableBackend({
+      dbPath: path.join(opts.dataDir, "receipt.db"),
+    });
     this.jobRuntime = opts.jobRuntime;
     this.sse = opts.sse;
     this.codexExecutor = opts.codexExecutor;
@@ -2218,62 +2225,60 @@ export class FactoryService {
     return buildObjectiveControlSelfImprovement(state, auditMetadata, auditJob);
   }
 
-  private controlJobCancelReason(
-    state: Pick<FactoryState, "archivedAt" | "status"> | Pick<StoredObjectiveProjectionSummary, "archivedAt" | "status"> | undefined,
-  ): string | undefined {
-    return deriveControlJobCancelReason(state);
-  }
-
-  private shouldRedriveQueuedControlJob(job: QueueJob, now: number): boolean {
-    return shouldRequeueObjectiveControlJob(job, now, OBJECTIVE_CONTROL_REDRIVE_AGE_MS);
-  }
-
   private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
-    const active = (await this.queue.listJobs({ limit: 2000 }))
+    const activeJobs = (await this.queue.listJobs({ limit: 2000 }))
       .filter((job) => this.isObjectiveControlJob(job) && isActiveQueueJobStatus(job.status));
-    if (active.length === 0) return;
-
-    const summaries = await this.listObjectiveProjectionSummaries();
-    const summariesById = new Map(summaries.map((summary) => [summary.objectiveId, summary] as const));
     const grouped = new Map<string, QueueJob[]>();
-    for (const job of active) {
+    for (const job of activeJobs) {
       const key = job.sessionKey?.trim() || `factory:objective:${job.payload.objectiveId}`;
       const bucket = grouped.get(key) ?? [];
       bucket.push(job);
       grouped.set(key, bucket);
     }
-
-    const now = Date.now();
     for (const jobs of grouped.values()) {
       const ranked = [...jobs].sort((left, right) => this.compareRecentQueueJobs(left, right));
       const current = ranked[0];
       if (!current) continue;
-
-      for (const duplicate of ranked.slice(1)) {
-        await this.queue.cancel(duplicate.id, "superseded duplicate objective control job", "factory.resume");
-      }
-
       const objectiveId = typeof current.payload.objectiveId === "string" ? current.payload.objectiveId : "";
-      const summary = summariesById.get(objectiveId);
-      const cancelReason = this.controlJobCancelReason(summary);
-      if (cancelReason) {
-        await this.queue.cancel(current.id, cancelReason, "factory.resume");
-        continue;
-      }
-
       const state = objectiveId
         ? await this.getObjectiveState(objectiveId).catch(() => undefined)
         : undefined;
+      const cancelReason = state && (state.archivedAt || this.isTerminalObjectiveStatus(state.status) || state.status === "blocked")
+        ? this.objectiveCleanupReason(state)
+        : undefined;
+      if (cancelReason) {
+        for (const job of ranked) {
+          await this.queue.cancel(job.id, cancelReason, "factory.resume");
+        }
+        continue;
+      }
+      for (const duplicate of ranked.slice(1)) {
+        await this.queue.cancel(duplicate.id, "superseded duplicate objective control job", "factory.resume");
+      }
       if (
         current.status === "queued"
         && this.redriveQueuedJob
-        && (
-          (state ? this.hasPendingObjectiveControlWake(state) : false)
-          || this.shouldRedriveQueuedControlJob(current, now)
-        )
+        && this.shouldRedriveQueuedControlJob(current, Date.now())
       ) {
         await this.redriveQueuedJob(current);
       }
+    }
+    if (!this.durable) return;
+    const pending = await listPendingObjectiveControlWorkflowIds(this.durable);
+    for (const item of pending) {
+      const exists = await hasActiveJobForWorkflow(this.queue, item.workflow.key);
+      if (exists) continue;
+      const state = await this.getObjectiveState(item.objectiveId).catch(() => undefined);
+      if (!state || state.archivedAt || this.isTerminalObjectiveStatus(state.status) || state.status === "blocked") {
+        await this.durable.cancelWorkflow(item.workflow.key, "objective retired before durable recovery");
+        continue;
+      }
+      const input = item.workflow.input;
+      const reason = input && typeof input.reason === "string"
+        && (input.reason === "startup" || input.reason === "admitted" || input.reason === "reconcile")
+        ? input.reason
+        : "startup";
+      await this.enqueueObjectiveControl(item.objectiveId, reason);
     }
   }
 
@@ -2285,22 +2290,34 @@ export class FactoryService {
     } catch {
       return false;
     }
-    let rawResult: Record<string, unknown>;
-    try {
-      const raw = await fs.readFile(parsed.resultPath, "utf-8");
-      const parsedResult = JSON.parse(raw);
-      if (!isRecord(parsedResult)) return false;
-      rawResult = parsedResult;
-    } catch {
-      return false;
+    let recoveredOutput: Record<string, unknown> | undefined;
+    let recoveredFromDurableActivity = false;
+    if (this.durable) {
+      const activity = await this.durable.getActivity(codexActivityKey(job.id)).catch(() => undefined);
+      if (activity?.status === "completed" && activity.output) {
+        recoveredOutput = activity.output;
+        recoveredFromDurableActivity = true;
+      }
     }
-    await this.applyTaskWorkerResult(parsed, rawResult);
+    if (!recoveredOutput && await pathExists(parsed.resultPath)) {
+      try {
+        const raw = JSON.parse(await fs.readFile(parsed.resultPath, "utf-8"));
+        if (isRecord(raw)) {
+          recoveredOutput = raw;
+        }
+      } catch {
+        recoveredOutput = undefined;
+      }
+    }
+    if (!recoveredOutput) return false;
+    await this.applyTaskWorkerResult(parsed, recoveredOutput);
     const completed = await this.queue.complete(job.id, job.leaseOwner ?? "factory.resume", {
       objectiveId: parsed.objectiveId,
       taskId: parsed.taskId,
       candidateId: parsed.candidateId,
       status: "completed",
       recoveredFromPersistedResult: true,
+      ...(recoveredFromDurableActivity ? { recoveredFromDurableActivity: true } : {}),
     });
     if (completed) {
       await this.enqueueObjectiveControl(parsed.objectiveId, "reconcile");
@@ -2310,39 +2327,23 @@ export class FactoryService {
 
   private async reconcileStaleObjectiveExecutionJobs(now = Date.now()): Promise<void> {
     const jobs = await this.queue.listJobs({ limit: 2000 });
-    const summaries = await this.listObjectiveProjectionSummaries();
-    const summariesById = new Map(summaries.map((summary) => [summary.objectiveId, summary] as const));
-    const reconciledObjectiveIds = new Set<string>();
-
     for (const job of jobs) {
       if (!isActiveQueueJobStatus(job.status) || !isFactoryExecutionQueueJob(job)) continue;
-      const objectiveId = objectiveIdForQueueJob(job);
-      if (!objectiveId) continue;
-      const summary = summariesById.get(objectiveId);
-      if (!summary || summary.archivedAt || this.isTerminalObjectiveStatus(summary.status)) {
-        await this.queue.cancel(
-          job.id,
-          summary ? this.objectiveCleanupReason(summary) : "objective execution job retired during startup reconciliation",
-          "factory.resume",
-        );
-        continue;
-      }
       const staleAt = liveJobStaleAt(job);
       if (typeof staleAt !== "number" || staleAt > now) continue;
-      if (job.status === "queued" && this.redriveQueuedJob) {
-        await this.redriveQueuedJob(job);
-        continue;
-      }
       if (await this.recoverPersistedStaleTaskResult(job)) {
         continue;
       }
-      await this.queue.cancel(job.id, "stale active objective job reconciled during startup recovery", "factory.resume");
-      reconciledObjectiveIds.add(objectiveId);
+      const objectiveId = objectiveIdForQueueJob(job);
+      await this.queue.cancel(job.id, "stale execution recovered during startup reconciliation", "factory.resume");
+      if (objectiveId) {
+        await this.enqueueObjectiveControl(objectiveId, "reconcile");
+      }
     }
+  }
 
-    for (const objectiveId of reconciledObjectiveIds) {
-      await this.enqueueObjectiveControl(objectiveId, "reconcile");
-    }
+  private shouldRedriveQueuedControlJob(job: QueueJob, now: number): boolean {
+    return shouldRequeueObjectiveControlJob(job, now, OBJECTIVE_CONTROL_REDRIVE_AGE_MS);
   }
 
   private async queueJobCommand(
@@ -2781,6 +2782,19 @@ export class FactoryService {
     reason: FactoryObjectiveControlJobPayload["reason"],
   ): Promise<void> {
     await this.withObjectiveControlEnqueueLock(objectiveId, async () => {
+      if (this.durable) {
+        await this.durable.startOrResumeWorkflow({
+          key: objectiveControlWorkflowKey(objectiveId),
+          input: {
+            objectiveId,
+            reason,
+          },
+          metadata: {
+            objectiveId,
+            kind: "factory.objective.control",
+          },
+        });
+      }
       const wakeRequested = await this.requestObjectiveControlWake(objectiveId, reason);
       const sessionKey = `factory:objective:${objectiveId}`;
       const now = Date.now();
@@ -2835,10 +2849,28 @@ export class FactoryService {
       throw new FactoryServiceError(400, "invalid factory control payload");
     }
     const objectiveId = requireNonEmpty(payload.objectiveId, "objectiveId required");
+    const workflowKey = this.durable ? objectiveControlWorkflowKey(objectiveId) : undefined;
     const reason: FactoryObjectiveControlJobPayload["reason"] =
       payload.reason === "admitted" || payload.reason === "reconcile"
       ? payload.reason
       : "startup";
+    if (workflowKey && this.durable) {
+      await this.durable.startOrResumeWorkflow({
+        key: workflowKey,
+        input: {
+          objectiveId,
+          reason,
+        },
+        metadata: {
+          objectiveId,
+          kind: "factory.objective.control",
+        },
+      });
+      await this.durable.setWorkflowStatus({
+        key: workflowKey,
+        status: "running",
+      });
+    }
     await this.ensureBootstrap();
     let nextReason: FactoryObjectiveControlJobPayload["reason"] = reason;
     let passes = 0;
@@ -2848,6 +2880,17 @@ export class FactoryService {
       if (state.archivedAt || this.isTerminalObjectiveStatus(state.status)) {
         await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(state));
         await this.rebalanceObjectiveSlots();
+        if (workflowKey && this.durable) {
+          await this.durable.setWorkflowStatus({
+            key: workflowKey,
+            status: "completed",
+            output: {
+              objectiveId,
+              status: "completed",
+              reason: nextReason,
+            },
+          });
+        }
         return {
           objectiveId,
           status: "completed",
@@ -2891,6 +2934,17 @@ export class FactoryService {
             }),
           ]);
           await this.rebalanceObjectiveSlots();
+          if (workflowKey && this.durable) {
+            await this.durable.setWorkflowStatus({
+              key: workflowKey,
+              status: "completed",
+              output: {
+                objectiveId,
+                status: "completed",
+                reason: effectiveReason,
+              },
+            });
+          }
           return {
             objectiveId,
             status: "completed",
@@ -2903,6 +2957,17 @@ export class FactoryService {
       if (refreshed.archivedAt || this.isTerminalObjectiveStatus(refreshed.status)) {
         await this.retireObjectiveScopedLiveJobs(objectiveId, this.objectiveCleanupReason(refreshed));
         await this.rebalanceObjectiveSlots();
+        if (workflowKey && this.durable) {
+          await this.durable.setWorkflowStatus({
+            key: workflowKey,
+            status: "completed",
+            output: {
+              objectiveId,
+              status: "completed",
+              reason: effectiveReason,
+            },
+          });
+        }
         return {
           objectiveId,
           status: "completed",
@@ -2910,6 +2975,17 @@ export class FactoryService {
         };
       }
       if (!this.hasPendingObjectiveControlWake(refreshed)) {
+        if (workflowKey && this.durable) {
+          await this.durable.setWorkflowStatus({
+            key: workflowKey,
+            status: "completed",
+            output: {
+              objectiveId,
+              status: "completed",
+              reason: effectiveReason,
+            },
+          });
+        }
         return {
           objectiveId,
           status: "completed",
@@ -2917,6 +2993,17 @@ export class FactoryService {
         };
       }
       nextReason = "reconcile";
+    }
+    if (workflowKey && this.durable) {
+      await this.durable.setWorkflowStatus({
+        key: workflowKey,
+        status: "completed",
+        output: {
+          objectiveId,
+          status: "completed",
+          reason: nextReason,
+        },
+      });
     }
     return {
       objectiveId,
@@ -3525,10 +3612,13 @@ export class FactoryService {
   }
 
   private shouldEmitMonitorRecommendation(
-    _taskPhase: FactoryTaskExecutionPhase,
+    taskPhase: FactoryTaskExecutionPhase,
     recommendation: MonitorRecommendation,
     priorRecommendation?: MonitorRecommendation,
   ): boolean {
+    if (taskPhase === "synthesizing" && recommendation.kind === "recommend_enter_synthesizing") {
+      return false;
+    }
     if (priorRecommendation && monitorRecommendationsEqual(priorRecommendation, recommendation)) {
       return false;
     }
@@ -4095,7 +4185,6 @@ export class FactoryService {
     readonly renderedBody?: string;
     readonly renderSourceHash?: string;
     readonly renderedAt?: number;
-    readonly renderedBy?: "orchestrator_llm" | "fallback";
     readonly output?: string;
     readonly sourceUpdatedAt: number;
     readonly blocker?: string;
@@ -4195,44 +4284,6 @@ export class FactoryService {
     return undefined;
   }
 
-  private buildObjectiveHandoffFallbackBody(input: {
-    readonly status: FactoryObjectiveHandoffStatus;
-    readonly summary: string;
-    readonly blocker?: string;
-    readonly nextAction?: string;
-    readonly candidate?: FactoryCandidateRecord;
-    readonly presentation?: FactoryTaskPresentationRecord;
-    readonly report?: FactoryInvestigationReport;
-    readonly artifacts: ReadonlyArray<FactoryTerminalRenderArtifact>;
-  }): string {
-    const lines: string[] = [];
-    const inlineBody = optionalTrimmedString(input.presentation?.inlineBody)
-      ?? optionalTrimmedString(input.candidate?.handoff);
-    const normalizedInline = inlineBody?.trim();
-    if (normalizedInline && normalizedInline !== input.summary.trim()) {
-      lines.push(normalizedInline);
-    } else {
-      lines.push(input.summary);
-    }
-    const reportConclusion = optionalTrimmedString(input.report?.conclusion);
-    if (reportConclusion && reportConclusion !== input.summary.trim() && reportConclusion !== normalizedInline) {
-      lines.push(reportConclusion);
-    }
-    if (input.artifacts.length > 0) {
-      lines.push([
-        "Artifacts:",
-        ...input.artifacts.map((artifact) => `- ${artifact.label}: ${artifact.ref.ref}`),
-      ].join("\n"));
-    }
-    if (input.status === "blocked" && input.blocker) {
-      lines.push(`Blocker: ${input.blocker}`);
-    }
-    if (input.nextAction) {
-      lines.push(`Next action: ${input.nextAction}`);
-    }
-    return lines.filter(Boolean).join("\n\n").trim() || input.summary;
-  }
-
   private async loadTerminalRenderArtifacts(input: {
     readonly artifactRefs: Readonly<Record<string, GraphRef>>;
     readonly presentation?: FactoryTaskPresentationRecord;
@@ -4278,35 +4329,6 @@ export class FactoryService {
     return artifacts;
   }
 
-  private async defaultTerminalRenderer(input: FactoryTerminalRenderInput): Promise<string> {
-    const system = [
-      input.profile.promptBody?.trim(),
-      input.profile.soulBody?.trim(),
-      "Render the final user-facing factory objective handoff.",
-      "Use the task presentation, report, and artifact previews as source of truth.",
-      "Keep summary metadata terse and focus on the actual returned result.",
-      "If an artifact preview already contains a markdown table or report that directly answers the objective, preserve it rather than rephrasing it.",
-      "Do not mention internal controller/runtime mechanics unless they materially affect the outcome.",
-      "Return markdown only. Do not wrap the response in code fences.",
-    ].filter((part): part is string => Boolean(part && part.trim())).join("\n\n");
-    const user = JSON.stringify({
-      objectiveId: input.objectiveId,
-      title: input.title,
-      objectiveMode: input.objectiveMode,
-      status: input.status,
-      summary: input.summary,
-      blocker: input.blocker,
-      nextAction: input.nextAction,
-      task: input.task,
-      report: input.report,
-      artifacts: input.artifacts,
-    }, null, 2);
-    return llmText({
-      system,
-      user,
-    });
-  }
-
   private async buildRenderedObjectiveHandoffEvent(input: {
     readonly state: FactoryState;
     readonly status: FactoryObjectiveHandoffStatus;
@@ -4347,16 +4369,6 @@ export class FactoryService {
       artifactRefs,
       presentation,
     });
-    const fallbackBody = this.buildObjectiveHandoffFallbackBody({
-      status: input.status,
-      summary: input.summary,
-      blocker: input.blocker,
-      nextAction: input.nextAction,
-      candidate,
-      presentation,
-      report: investigationReport,
-      artifacts,
-    });
     const renderInput: FactoryTerminalRenderInput = {
       objectiveId: input.state.objectiveId,
       title: input.state.title,
@@ -4378,7 +4390,7 @@ export class FactoryService {
       ...(candidate || investigationTask
         ? {
             task: {
-              taskId: candidate?.taskId ?? investigationTask?.taskId ?? "task",
+              taskId: candidate?.taskId ?? investigationTask?.taskId ?? input.state.objectiveId,
               candidateId: candidate?.candidateId ?? investigationTask?.candidateId,
               summary: candidate?.summary ?? investigationTask?.summary,
               handoff: candidate?.handoff ?? investigationTask?.handoff,
@@ -4388,7 +4400,29 @@ export class FactoryService {
         : {}),
       ...(investigationReport ? { report: investigationReport } : {}),
       artifacts,
-      fallbackBody,
+      fallbackBody: renderFactoryObjectiveHandoff({
+        objectiveId: input.state.objectiveId,
+        title: input.state.title,
+        objectiveMode: input.state.objectiveMode,
+        status: input.status,
+        summary: input.summary,
+        blocker: input.blocker,
+        nextAction: input.nextAction,
+        sourceUpdatedAt: input.sourceUpdatedAt,
+        ...(candidate || investigationTask
+          ? {
+              task: {
+                taskId: candidate?.taskId ?? investigationTask?.taskId ?? input.state.objectiveId,
+                candidateId: candidate?.candidateId ?? investigationTask?.candidateId,
+                summary: candidate?.summary ?? investigationTask?.summary,
+                handoff: candidate?.handoff ?? investigationTask?.handoff,
+                presentation,
+              },
+            }
+          : {}),
+        ...(investigationReport ? { report: investigationReport } : {}),
+        artifacts,
+      }),
     };
     const renderSourceHash = createHash("sha1")
       .update(JSON.stringify(renderInput))
@@ -4403,29 +4437,20 @@ export class FactoryService {
         renderedBody: input.state.latestHandoff.renderedBody,
         renderSourceHash,
         renderedAt: input.state.latestHandoff.renderedAt ?? input.sourceUpdatedAt,
-        renderedBy: input.state.latestHandoff.renderedBy ?? "fallback",
         output: input.state.latestHandoff.renderedBody,
       });
     }
-    let renderedBody = fallbackBody;
-    let renderedBy: "orchestrator_llm" | "fallback" = "fallback";
-    try {
-      const renderer = this.terminalRenderer ?? ((terminalInput: FactoryTerminalRenderInput) => this.defaultTerminalRenderer(terminalInput));
-      const rendered = trimmedString(await renderer(renderInput));
-      if (rendered) {
-        renderedBody = rendered;
-        renderedBy = "orchestrator_llm";
-      }
-    } catch {
-      renderedBody = fallbackBody;
-      renderedBy = "fallback";
+    const renderer = this.terminalRenderer
+      ?? ((terminalInput: FactoryTerminalRenderInput) => Promise.resolve(renderFactoryObjectiveHandoff(terminalInput)));
+    const renderedBody = trimmedString(await renderer(renderInput));
+    if (!renderedBody) {
+      throw new FactoryServiceError(500, `factory objective handoff renderer returned empty output for ${input.state.objectiveId}`);
     }
     return this.buildObjectiveHandoffEvent({
       ...input,
       renderedBody,
       renderSourceHash,
       renderedAt: Date.now(),
-      renderedBy,
       output: renderedBody,
     });
   }
@@ -4905,6 +4930,7 @@ export class FactoryService {
             tags: ["integration", "validated", "inherited_failures"],
           },
         );
+        await this.reactObjective(parsed.objectiveId);
         return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
       }
       const conflictedAt = Date.now();
@@ -4980,6 +5006,7 @@ export class FactoryService {
       handoff: `${summary} Controller may continue toward promotion.`,
       tags: ["integration", "validated"],
     });
+    await this.reactObjective(parsed.objectiveId);
     return { objectiveId: parsed.objectiveId, candidateId: parsed.candidateId, status: "completed" };
   }
 
@@ -6942,10 +6969,15 @@ export class FactoryService {
     const message = error instanceof Error ? error.message : String(error);
     if (!/\b(stalled|timed out)\b/i.test(message)) return undefined;
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
-    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
+    const helperEvidence = await extractInvestigationHelperEvidence({
+      workspacePath: payload.workspacePath,
+      telemetry,
+      strictHelperEvidence: false,
+    });
     const hasHelperEvidence = Boolean(
       helperEvidence.summary
       || helperEvidence.evidence.length > 0
+      || helperEvidence.evidenceRecords.length > 0
       || helperEvidence.artifacts.length > 0
       || helperEvidence.scriptsRun.length > 0,
     );
@@ -6989,135 +7021,6 @@ export class FactoryService {
     };
   }
 
-  private hasHelperEvidence(input: {
-    readonly summary?: string;
-    readonly evidence: ReadonlyArray<unknown>;
-    readonly artifacts: ReadonlyArray<unknown>;
-    readonly scriptsRun: ReadonlyArray<unknown>;
-  }): boolean {
-    return Boolean(
-      input.summary
-      || input.evidence.length > 0
-      || input.artifacts.length > 0
-      || input.scriptsRun.length > 0
-    );
-  }
-
-  private buildInvestigationTelemetryScriptsRun(
-    telemetry: Record<string, unknown> | undefined,
-  ): ReadonlyArray<FactoryExecutionScriptRun> {
-    const command = clipText(optionalTrimmedString(telemetry?.command), 220);
-    if (!command) return [];
-    const exitCode = typeof telemetry?.exitCode === "number" ? telemetry.exitCode : undefined;
-    return [{
-      command,
-      summary: clipText(
-        exitCode === undefined
-          ? "Preserved controller-side task telemetry."
-          : exitCode === 0
-            ? "Telemetry captured the task command successfully."
-            : `Telemetry captured task command exit ${exitCode}.`,
-        280,
-      ),
-      status: exitCode === undefined ? "warning" : exitCode === 0 ? "ok" : "error",
-    }];
-  }
-
-  private buildFallbackInvestigationSemanticResult(input: {
-    readonly helperEvidence: Awaited<ReturnType<FactoryService["extractInvestigationHelperEvidence"]>>;
-    readonly rawResult: Record<string, unknown>;
-    readonly errorDetail?: string;
-  }): FactoryInvestigationSemanticResult {
-    const fallbackRecord = isRecord(input.rawResult.controllerFallback)
-      ? input.rawResult.controllerFallback
-      : undefined;
-    const fallbackSummary = clipText(
-      optionalTrimmedString(fallbackRecord?.summary)
-        ?? input.helperEvidence.summary
-        ?? "Captured investigation evidence without a semantic worker result.",
-      400,
-    ) ?? "Captured investigation evidence without a semantic worker result.";
-    const fallbackNextAction = clipText(optionalTrimmedString(fallbackRecord?.nextAction), 280);
-    const helperLabels = input.helperEvidence.artifacts.map((item) => item.label);
-    return {
-      status: this.hasHelperEvidence(input.helperEvidence) ? "answered" : "partial",
-      conclusion: fallbackSummary,
-      findings: input.helperEvidence.evidence
-        .slice(0, 6)
-        .map((item) => ({
-          title: item.title,
-          summary: item.summary,
-          confidence: "confirmed" as const,
-          evidenceRefLabels: helperLabels.slice(0, 4),
-        })),
-      uncertainties: [
-        ...(input.errorDetail ? [input.errorDetail] : []),
-        ...(!this.hasHelperEvidence(input.helperEvidence)
-          ? ["No helper-backed evidence was captured before the worker stopped."]
-          : []),
-      ],
-      ...(fallbackNextAction ? { nextAction: fallbackNextAction } : {}),
-    };
-  }
-
-  private async synthesizeInvestigationSemanticResult(input: {
-    readonly state: FactoryState;
-    readonly task: FactoryTaskRecord;
-    readonly rawResult: Record<string, unknown>;
-    readonly helperEvidence: Awaited<ReturnType<FactoryService["extractInvestigationHelperEvidence"]>>;
-    readonly telemetry: Record<string, unknown> | undefined;
-  }): Promise<FactoryInvestigationSemanticResult> {
-    const errorDetail = clipText(
-      optionalTrimmedString(isRecord(input.rawResult.controllerFallback) ? input.rawResult.controllerFallback.error : undefined),
-      280,
-    );
-    const fallback = this.buildFallbackInvestigationSemanticResult({
-      helperEvidence: input.helperEvidence,
-      rawResult: input.rawResult,
-      errorDetail,
-    });
-    if (!this.hasHelperEvidence(input.helperEvidence)) return fallback;
-    try {
-      const llmResult = await llmStructured({
-        system: [
-          "You are finalizing an investigation from already-captured evidence.",
-          "Use only the supplied evidence. Do not invent metrics or identifiers.",
-          "Prefer concise findings tied to artifact labels or command labels already present in the evidence.",
-          "Use status=answered only when the evidence directly answers the question.",
-        ].join("\n"),
-        user: [
-          `Objective: ${input.state.title}`,
-          `Objective prompt: ${input.state.prompt}`,
-          `Task prompt: ${input.task.prompt}`,
-          `Helper summary: ${input.helperEvidence.summary ?? "none"}`,
-          `Evidence items:`,
-          ...input.helperEvidence.evidence.map((item) =>
-            `- ${item.title}: ${item.summary}${item.detail ? ` | ${item.detail}` : ""}`),
-          `Artifacts:`,
-          ...(input.helperEvidence.artifacts.length > 0
-            ? input.helperEvidence.artifacts.map((item) =>
-              `- ${item.label}${item.path ? ` (${item.path})` : ""}${item.summary ? `: ${item.summary}` : ""}`)
-            : ["- none"]),
-          `Commands:`,
-          ...(input.helperEvidence.scriptsRun.length > 0
-            ? input.helperEvidence.scriptsRun.map((item) =>
-              `- ${item.command}${item.summary ? ` | ${item.summary}` : ""}`)
-            : ["- none"]),
-          `Telemetry: ${clipText(optionalTrimmedString(input.telemetry?.command), 220) ?? "none"}`,
-        ].join("\n"),
-        schema: InvestigationSemanticSynthesisSchema,
-        schemaName: "FactoryInvestigationSemanticSynthesis",
-      });
-      const parsed = normalizeInvestigationSemanticResult({
-        ...llmResult.parsed,
-        nextAction: llmResult.parsed.nextAction,
-      });
-      return parsed ?? fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
   private async applyInvestigationTaskWorkerResult(
     state: FactoryState,
     task: FactoryTaskRecord,
@@ -7126,10 +7029,54 @@ export class FactoryService {
     completedAt: number,
   ): Promise<void> {
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
-    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
-    const parsedSemantic = normalizeInvestigationSemanticResult(rawResult);
+    const helperEvidence = await extractInvestigationHelperEvidence({
+      workspacePath: payload.workspacePath,
+      telemetry,
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      strictHelperEvidence: payload.profile.rootProfileId === "infrastructure",
+    });
+    const legacySemantic = (() => {
+      if (typeof rawResult.outcome !== "string") return undefined;
+      const legacyReport = isRecord(rawResult.report) ? rawResult.report : undefined;
+      const legacyEvidence = Array.isArray(legacyReport?.evidence) ? legacyReport.evidence : [];
+      const legacyDisagreements = Array.isArray(legacyReport?.disagreements)
+        ? legacyReport.disagreements.filter((item): item is string => typeof item === "string")
+        : [];
+      const legacyNextSteps = Array.isArray(legacyReport?.nextSteps)
+        ? legacyReport.nextSteps.filter((item): item is string => typeof item === "string")
+        : [];
+      return normalizeInvestigationSemanticResult({
+        status: rawResult.outcome === "blocked"
+          ? "blocked"
+          : rawResult.outcome === "approved"
+            ? "answered"
+            : "partial",
+        conclusion:
+          (typeof legacyReport?.conclusion === "string" && legacyReport.conclusion)
+          || (typeof rawResult.summary === "string" && rawResult.summary)
+          || "Converted legacy investigation result.",
+        findings: legacyEvidence.map((item, index) => {
+          const record = isRecord(item) ? item : {};
+          return {
+            title: typeof record.title === "string" && record.title ? record.title : `Finding ${index + 1}`,
+            summary:
+              (typeof record.summary === "string" && record.summary)
+              || (typeof record.detail === "string" && record.detail)
+              || "Legacy investigation evidence.",
+            confidence: "confirmed",
+            evidenceRefLabels: [],
+          };
+        }),
+        uncertainties: [...legacyDisagreements, ...legacyNextSteps],
+        nextAction: typeof rawResult.nextAction === "string"
+          ? rawResult.nextAction
+          : legacyNextSteps[0] ?? null,
+      });
+    })();
+    const parsedSemantic = normalizeInvestigationSemanticResult(rawResult) ?? legacySemantic;
     const semantic = parsedSemantic
-      ?? await this.synthesizeInvestigationSemanticResult({
+      ?? await synthesizeInvestigationSemanticResult({
         state,
         task,
         rawResult,
@@ -7145,57 +7092,53 @@ export class FactoryService {
         : "approved";
     if (artifactIssues.length > 0 && outcome === "approved") outcome = "partial";
 
-    const telemetryScriptsRun = this.buildInvestigationTelemetryScriptsRun(telemetry);
-    const report: FactoryInvestigationReport = {
-      conclusion: semantic.conclusion,
-      evidence: [
-        ...semantic.findings.map((item) => ({
-          title: item.title,
-          summary: item.summary,
-          detail: item.evidenceRefLabels.length > 0
-            ? `Evidence refs: ${item.evidenceRefLabels.join(", ")}. Confidence: ${item.confidence}.`
-            : `Confidence: ${item.confidence}.`,
-        })),
-        ...helperEvidence.evidence.filter((item) =>
-          !semantic.findings.some((finding) => finding.title === item.title && finding.summary === item.summary)),
-        ...(artifactIssues.length > 0
-          ? [{
-              title: "Captured artifact warnings",
-              summary: clipText(artifactIssues.map((issue) => issue.summary).join(" "), 280)
-                ?? "Captured evidence artifacts recorded command errors.",
-              detail: clipText(
-                artifactIssues
-                  .map((issue) => issue.detail ?? issue.path)
-                  .filter(Boolean)
-                  .join("\n"),
-                600,
-              ),
-            }]
-          : []),
-      ],
-      scriptsRun: [
-        ...helperEvidence.scriptsRun,
-        ...telemetryScriptsRun.filter((item) =>
-          !helperEvidence.scriptsRun.some((existing) => existing.command === item.command)),
-        ...artifactIssues.map((issue) => ({
-          command: `artifact:${path.basename(issue.path)}`,
-          summary: issue.summary,
-          status: issue.status,
-        } satisfies FactoryInvestigationReport["scriptsRun"][number])),
-      ],
-      disagreements: [],
-      nextSteps: [
-        ...semantic.uncertainties,
-        ...(semantic.nextAction ? [semantic.nextAction] : []),
-      ],
-    };
+    const legacyReport = isRecord(rawResult.report)
+      ? normalizeInvestigationReport(rawResult.report, semantic.conclusion)
+      : undefined;
+    const baseReport: FactoryInvestigationReport = buildInvestigationReport({
+      semantic,
+      helperEvidence,
+      telemetry,
+      artifactIssues,
+    });
+    const report: FactoryInvestigationReport = legacyReport
+      ? {
+          conclusion: legacyReport.conclusion || baseReport.conclusion,
+          evidence: [
+            ...legacyReport.evidence,
+            ...baseReport.evidence.filter((item) =>
+              !legacyReport.evidence.some((existing) =>
+                existing.title === item.title
+                && existing.summary === item.summary
+                && existing.detail === item.detail)),
+          ],
+          ...(legacyReport.evidenceRecords?.length
+            ? { evidenceRecords: legacyReport.evidenceRecords }
+            : baseReport.evidenceRecords?.length
+              ? { evidenceRecords: baseReport.evidenceRecords }
+              : {}),
+          scriptsRun: [
+            ...legacyReport.scriptsRun,
+            ...baseReport.scriptsRun.filter((item) =>
+              !legacyReport.scriptsRun.some((existing) => existing.command === item.command)),
+          ],
+          disagreements: [...new Set([...legacyReport.disagreements, ...baseReport.disagreements])],
+          nextSteps: [...new Set([...legacyReport.nextSteps, ...baseReport.nextSteps])],
+        }
+      : baseReport;
     const completion = buildDefaultTaskCompletion({
       summary: semantic.conclusion,
       workerArtifacts: helperArtifacts,
       scriptsRun: report.scriptsRun,
       report,
     });
-    const normalizedCompletion = normalizeTaskCompletionRecord(undefined, completion);
+    const normalizedCompletion = normalizeTaskCompletionRecord(rawResult.completion, completion);
+    const requiresStrictInvestigationEvidence = payload.profile.rootProfileId === "infrastructure" && (
+      helperEvidence.evidenceRecords.length > 0
+      || helperEvidence.scriptsRun.some((item) => item.command.includes("factory-helper-runtime/runner.py"))
+      || Boolean(legacyReport?.evidenceRecords?.length)
+      || Boolean(legacyReport?.scriptsRun.some((item) => item.command.includes("factory-helper-runtime/runner.py")))
+    );
     const structuredEvidenceFailure = validateTaskEvidence({
       objectiveId: payload.objectiveId,
       taskId: payload.taskId,
@@ -7206,6 +7149,8 @@ export class FactoryService {
       hasStructuredReport: true,
       reportIncludesEvidenceRecords: Boolean(report.evidenceRecords?.length),
       reportEvidenceRecords: report.evidenceRecords,
+      requireStructuredEvidenceRecords: requiresStrictInvestigationEvidence,
+      requireInvestigationScriptsRun: requiresStrictInvestigationEvidence,
     });
     if (structuredEvidenceFailure) throw new FactoryServiceError(400, structuredEvidenceFailure);
 
@@ -7243,9 +7188,33 @@ export class FactoryService {
         return [[artifactKeyFromLabel(item.label, index), artifactRef(resolvedPath, item.label)] as const];
       }),
     ) satisfies Readonly<Record<string, GraphRef>>;
+    const canonicalEvidenceBundlePath = investigationEvidenceBundlePath(payload.resultPath);
+    const canonicalEvidenceBundle = await writeInvestigationEvidenceBundle({
+      bundlePath: canonicalEvidenceBundlePath,
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      report,
+      artifactPaths: helperArtifacts.flatMap((item) => {
+        const rawPath = optionalTrimmedString(item.path);
+        if (!rawPath) return [];
+        return [{
+          label: item.label,
+          path: path.isAbsolute(rawPath) ? rawPath : path.resolve(payload.workspacePath, rawPath),
+        }];
+      }),
+      createdAt: completedAt,
+      updatedAt: completedAt,
+    });
+    const canonicalReport: FactoryInvestigationReport = {
+      ...report,
+      evidenceRecords: canonicalEvidenceBundle.evidence_records,
+      scriptsRun: canonicalEvidenceBundle.scripts_run,
+    };
     const resultRefs = {
       ...baseResultRefs,
       ...artifactRefs,
+      evidenceBundle: fileRef(canonicalEvidenceBundlePath, "task evidence bundle"),
       ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
     const handoffLines = [
@@ -7259,13 +7228,13 @@ export class FactoryService {
         : []),
       ...(semantic.nextAction ? [`Next: ${semantic.nextAction}`] : []),
     ];
-    const handoff = handoffLines.join("\n");
+    const handoff = optionalTrimmedString(rawResult.handoff) ?? handoffLines.join("\n");
     const presentation = normalizeTaskPresentationRecord({
       value: undefined,
       handoff,
       summary: semantic.conclusion,
       workerArtifacts: helperArtifacts,
-      report,
+      report: canonicalReport,
     });
     const workerHandoff = this.buildWorkerHandoffEvent({
       objectiveId: payload.objectiveId,
@@ -7290,7 +7259,7 @@ export class FactoryService {
         handoff,
         presentation,
         completion: normalizedCompletion,
-        report,
+        report: canonicalReport,
         artifactRefs: resultRefs,
         evidenceCommit: committed?.hash,
         reportedAt: completedAt,
@@ -7303,7 +7272,7 @@ export class FactoryService {
       payload.candidateId,
       renderInvestigationReportText(
         semantic.conclusion,
-        report,
+        canonicalReport,
         normalizedCompletion,
         [resultRefs],
         handoff,
@@ -7325,7 +7294,13 @@ export class FactoryService {
     error: unknown,
   ): Promise<Record<string, unknown>> {
     const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
-    const helperEvidence = await this.extractInvestigationHelperEvidence(payload.workspacePath, telemetry);
+    const helperEvidence = await extractInvestigationHelperEvidence({
+      workspacePath: payload.workspacePath,
+      telemetry,
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      strictHelperEvidence: false,
+    });
     const fallbackSummary = clipText(
       helperEvidence.summary
         ?? optionalTrimmedString(execution.latestEventText)
@@ -7333,10 +7308,10 @@ export class FactoryService {
         ?? "Investigation did not emit a semantic result; controller finalization will use preserved evidence.",
       280,
     ) ?? "Investigation did not emit a semantic result; controller finalization will use preserved evidence.";
-    const nextAction = this.hasHelperEvidence(helperEvidence)
+    const nextAction = hasHelperEvidence(helperEvidence)
       ? "Finalize directly from the captured helper evidence."
       : "Review the preserved telemetry evidence and rerun with tighter steering if the primary evidence path never executed.";
-    const semanticFallback = this.buildFallbackInvestigationSemanticResult({
+    const semanticFallback = buildFallbackInvestigationSemanticResult({
       helperEvidence,
       rawResult: {
         controllerFallback: {
@@ -7359,125 +7334,6 @@ export class FactoryService {
       },
     };
     return execution.tokensUsed !== undefined ? { ...fallbackResult, tokensUsed: execution.tokensUsed } : fallbackResult;
-  }
-
-  private async extractInvestigationHelperEvidence(
-    workspacePath: string,
-    telemetry: Record<string, unknown> | undefined,
-  ): Promise<{
-    readonly summary?: string;
-    readonly evidence: ReadonlyArray<{ readonly title: string; readonly summary: string; readonly detail?: string }>;
-    readonly artifacts: ReadonlyArray<{ readonly label: string; readonly path: string | null; readonly summary: string | null }>;
-    readonly scriptsRun: ReadonlyArray<FactoryExecutionScriptRun>;
-  }> {
-    const evidence: Array<{ readonly title: string; readonly summary: string; readonly detail?: string }> = [];
-    const artifacts: Array<{ readonly label: string; readonly path: string | null; readonly summary: string | null }> = [];
-    const scriptsRun: Array<FactoryExecutionScriptRun> = [];
-    let summary: string | undefined;
-    const seenStdout = new Set<string>();
-    const seenArtifacts = new Set<string>();
-    const seenScripts = new Set<string>();
-    const seenEvidence = new Set<string>();
-
-    const addHelperOutput = (helperOutput: Record<string, unknown>, command: string): void => {
-      const helperSummary = optionalTrimmedString(helperOutput.summary);
-      if (helperSummary && !summary) summary = helperSummary;
-      const helperData = isRecord(helperOutput.data) ? helperOutput.data : undefined;
-      const metricSummary = helperData ? this.summarizeHelperMetricCollections(helperData) : undefined;
-      const evidenceKey = `${helperSummary ?? "helper"}::${metricSummary ?? ""}`;
-      if (!seenEvidence.has(evidenceKey)) {
-        seenEvidence.add(evidenceKey);
-        evidence.push({
-          title: "Checked-in helper output",
-          summary: helperSummary ?? "Captured machine-readable helper output.",
-          detail: metricSummary,
-        });
-      }
-      const commandKey = clipText(command, 280) ?? command;
-      if (!seenScripts.has(commandKey)) {
-        seenScripts.add(commandKey);
-        scriptsRun.push({
-          command: commandKey,
-          summary: helperSummary ?? "Checked-in helper produced investigation evidence.",
-          status: "ok",
-        });
-      }
-      const helperArtifacts = Array.isArray(helperOutput.artifacts)
-        ? helperOutput.artifacts
-        : [];
-      for (const artifact of helperArtifacts) {
-        if (typeof artifact === "string") {
-          if (seenArtifacts.has(artifact)) continue;
-          seenArtifacts.add(artifact);
-          artifacts.push({
-            label: path.basename(artifact),
-            path: artifact,
-            summary: helperSummary ?? null,
-          });
-          continue;
-        }
-        if (!isRecord(artifact)) continue;
-        const artifactPath = optionalTrimmedString(artifact.path);
-        const artifactKey = artifactPath ?? `${optionalTrimmedString(artifact.label) ?? "artifact"}::${optionalTrimmedString(artifact.summary) ?? ""}`;
-        if (seenArtifacts.has(artifactKey)) continue;
-        seenArtifacts.add(artifactKey);
-        artifacts.push({
-          label: optionalTrimmedString(artifact.label) ?? path.basename(artifactPath ?? "artifact"),
-          path: artifactPath ?? null,
-          summary: optionalTrimmedString(artifact.summary) ?? helperSummary ?? null,
-        });
-      }
-    };
-
-    const visitStdout = (stdout: string | undefined): void => {
-      const normalized = optionalTrimmedString(stdout);
-      if (!normalized || seenStdout.has(normalized)) return;
-      seenStdout.add(normalized);
-      for (const rawLine of normalized.split("\n")) {
-        const event = parseJsonObjectCandidate(rawLine);
-        if (!event) continue;
-        const item = isRecord(event.item) ? event.item : undefined;
-        const command = optionalTrimmedString(item?.command);
-        const aggregatedOutput = optionalTrimmedString(item?.aggregated_output);
-        if (command && aggregatedOutput && command.includes("factory-helper-runtime/runner.py run")) {
-          const helperOutput = parseJsonObjectCandidate(aggregatedOutput);
-          if (helperOutput) addHelperOutput(helperOutput, command);
-        }
-        const nestedStdout = optionalTrimmedString(event.stdout);
-        if (nestedStdout) visitStdout(nestedStdout);
-        const nestedAggregated = parseJsonObjectCandidate(aggregatedOutput ?? "");
-        const nestedAggregatedStdout = optionalTrimmedString(nestedAggregated?.stdout);
-        if (nestedAggregatedStdout) visitStdout(nestedAggregatedStdout);
-      }
-    };
-
-    visitStdout(optionalTrimmedString(telemetry?.stdout));
-
-    const packetDir = path.join(workspacePath, ".receipt", "factory");
-    const siblingEvidenceFiles = (await readdirIfPresent(packetDir))
-      .filter((entry) => /^task_\d+\.evidence\.json$/i.test(entry.name))
-      .map((entry) => path.join(packetDir, entry.name));
-    for (const evidencePath of siblingEvidenceFiles) {
-      const raw = await fs.readFile(evidencePath, "utf-8").catch(() => "");
-      const parsed = parseJsonObjectCandidate(raw);
-      visitStdout(optionalTrimmedString(parsed?.stdout));
-    }
-
-    return {
-      summary,
-      evidence,
-      artifacts,
-      scriptsRun,
-    };
-  }
-
-  private summarizeHelperMetricCollections(data: Record<string, unknown>): string | undefined {
-    const metrics = Object.entries(data)
-      .filter(([, value]) => Array.isArray(value))
-      .slice(0, 8)
-      .map(([key, value]) => `${key}=${String(value.length)}`);
-    if (metrics.length === 0) return undefined;
-    return clipText(`Captured collections: ${metrics.join(", ")}`, 500);
   }
 
   private async readTaskTelemetryEvidence(

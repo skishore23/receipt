@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,120 @@ from typing import Any
 RUNTIME_ROOT = Path(__file__).resolve().parent
 CATALOG_ROOT = RUNTIME_ROOT / "catalog"
 REQUIRED_RESULT_KEYS = {"status", "summary", "artifacts", "data", "capturedAt", "errors"}
+
+
+def script_status(helper_status: Any, returncode: int) -> str:
+    if returncode != 0 or str(helper_status).strip().lower() == "error":
+        return "error"
+    if str(helper_status).strip().lower() in {"warning", "partial"}:
+        return "warning"
+    return "ok"
+
+
+def stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def compact_map(payload: dict[str, Any]) -> dict[str, str | int | float | bool | None]:
+    compact: dict[str, str | int | float | bool | None] = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            compact[key] = value
+        elif isinstance(value, list):
+            compact[key] = len(value)
+        elif isinstance(value, dict):
+            compact[key] = stringify(value)
+        else:
+            compact[key] = stringify(value)
+    return compact
+
+
+def result_summary_metrics(result: dict[str, Any]) -> dict[str, str | int | float | bool | None]:
+    metrics: dict[str, str | int | float | bool | None] = {
+        "artifact_count": len(result.get("artifacts", [])) if isinstance(result.get("artifacts"), list) else 0,
+        "error_count": len(result.get("errors", [])) if isinstance(result.get("errors"), list) else 0,
+        "status": str(result.get("status", "")).strip() or None,
+    }
+    data = result.get("data")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, list):
+                metrics[key] = len(value)
+            elif isinstance(value, (str, int, float, bool)) or value is None:
+                metrics[key] = value
+    return metrics
+
+
+def required_runtime_identity(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ValueError(f"missing required runtime identity: {name}")
+    return value
+
+
+def attach_execution_records(
+    result: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    entry: dict[str, Any],
+    passthrough: list[str],
+    returncode: int,
+) -> dict[str, Any]:
+    command = shlex.join([
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "run",
+        "--domain",
+        args.domain,
+        "--provider",
+        args.provider,
+        "--json",
+        args.helper_id,
+        "--",
+        *passthrough,
+    ])
+    run_status = script_status(result.get("status"), returncode)
+    helper_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    outputs = compact_map({
+        "status": result.get("status"),
+        "summary": result.get("summary"),
+        "capturedAt": result.get("capturedAt"),
+        "profile": helper_data.get("profile"),
+        "region": helper_data.get("region"),
+        "account_id": helper_data.get("callerIdentity", {}).get("Account") if isinstance(helper_data.get("callerIdentity"), dict) else None,
+        "caller_arn": helper_data.get("callerIdentity", {}).get("Arn") if isinstance(helper_data.get("callerIdentity"), dict) else None,
+    })
+    evidence_record = {
+        "objective_id": required_runtime_identity("RECEIPT_FACTORY_OBJECTIVE_ID"),
+        "task_id": required_runtime_identity("RECEIPT_FACTORY_TASK_ID"),
+        "timestamp": int(os.getenv("RECEIPT_FACTORY_EVIDENCE_TS", "0") or "0") or int(time.time() * 1000),
+        "tool_name": "factory_helper_runner",
+        "command_or_api": command,
+        "inputs": compact_map({
+            "helper_id": args.helper_id,
+            "provider": args.provider,
+            "domain": args.domain,
+            "helper_args": shlex.join(passthrough),
+            "manifest_path": entry.get("manifestPath"),
+            "entrypoint_path": entry.get("entrypointPath"),
+        }),
+        "outputs": outputs,
+        "summary_metrics": result_summary_metrics(result),
+    }
+    scripts_run = [{
+        "command": command,
+        "summary": str(result.get("summary", "")).strip() or f"Ran checked-in helper {args.helper_id}.",
+        "status": run_status,
+    }]
+    return {
+        **result,
+        "evidenceRecords": result.get("evidenceRecords") if isinstance(result.get("evidenceRecords"), list) else [evidence_record],
+        "scriptsRun": result.get("scriptsRun") if isinstance(result.get("scriptsRun"), list) else scripts_run,
+    }
 
 
 def load_manifest(manifest_path: Path, domain: str) -> dict[str, Any] | None:
@@ -104,23 +221,30 @@ def command_run(args: argparse.Namespace) -> int:
     passthrough = list(args.helper_args or [])
     if passthrough[:1] == ["--"]:
         passthrough = passthrough[1:]
-    completed = subprocess.run(
-        ["python3", entry["entrypointPath"], *passthrough],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    stdout = completed.stdout.strip()
     try:
+        completed = subprocess.run(
+            ["python3", entry["entrypointPath"], *passthrough],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        stdout = completed.stdout.strip()
         result = validate_result(stdout)
+        result = attach_execution_records(
+            result,
+            args=args,
+            entry=entry,
+            passthrough=passthrough,
+            returncode=completed.returncode,
+        )
     except Exception as error:
         payload = {
             "status": "error",
-            "summary": f"Helper {args.helper_id} returned malformed JSON output",
+            "summary": f"Helper {args.helper_id} failed before emitting runtime-validated output",
             "artifacts": [],
             "data": {
-                "stdout": stdout,
-                "stderr": completed.stderr.strip(),
+                "stdout": stdout if "stdout" in locals() else "",
+                "stderr": completed.stderr.strip() if "completed" in locals() else "",
             },
             "capturedAt": "",
             "errors": [str(error)],

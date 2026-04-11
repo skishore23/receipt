@@ -1,4 +1,5 @@
 import type { GraphRef } from "@receipt/core/graph";
+import type { DurableBackend } from "@receipt/durable";
 import type { QueueCommandRecord, QueueJob } from "../adapters/sqlite-queue";
 import type { AuditRecommendation } from "../factory-cli/analyze";
 import type {
@@ -96,6 +97,7 @@ export type FactoryTerminalRenderer = (
 export type FactoryServiceOptions = {
   readonly dataDir: string;
   readonly queue: import("../adapters/sqlite-queue").SqliteQueue;
+  readonly durable?: DurableBackend;
   readonly jobRuntime: import("@receipt/core/runtime").Runtime<
     import("../modules/job").JobCmd,
     import("../modules/job").JobEvent,

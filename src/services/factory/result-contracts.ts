@@ -37,16 +37,6 @@ const normalizeEvidencePrimitive = (
 const normalizeEvidenceRecordMap = (
   value: unknown,
 ): Record<string, string | number | boolean | null> => {
-  if (Array.isArray(value)) {
-    const entries = value
-      .filter((item): item is Record<string, unknown> => isRecord(item))
-      .flatMap((item) => {
-        const key = clipText(typeof item.key === "string" ? item.key : undefined, 140);
-        const normalizedValue = normalizeEvidencePrimitive(item.value);
-        return key && normalizedValue !== undefined ? [[key, normalizedValue] as const] : [];
-      });
-    return Object.fromEntries(entries);
-  }
   if (!isRecord(value)) return {};
   return Object.fromEntries(
     Object.entries(value).flatMap(([key, entryValue]) => {
@@ -167,19 +157,9 @@ export const FACTORY_EVIDENCE_RECORD_VALUE_SCHEMA = {
   type: ["string", "number", "boolean", "null"],
 } as const;
 
-export const FACTORY_EVIDENCE_RECORD_ENTRY_SCHEMA = {
-  type: "object",
-  properties: {
-    key: { type: "string" },
-    value: FACTORY_EVIDENCE_RECORD_VALUE_SCHEMA,
-  },
-  required: ["key", "value"],
-  additionalProperties: false,
-} as const;
-
 export const FACTORY_EVIDENCE_RECORD_MAP_SCHEMA = {
-  type: "array",
-  items: FACTORY_EVIDENCE_RECORD_ENTRY_SCHEMA,
+  type: "object",
+  additionalProperties: FACTORY_EVIDENCE_RECORD_VALUE_SCHEMA,
 } as const;
 
 export const FACTORY_TASK_RESULT_SCHEMA = {
@@ -396,13 +376,17 @@ export const normalizeExecutionScriptsRun = (
   Array.isArray(value)
     ? value
       .filter((item): item is Record<string, unknown> => isRecord(item))
-      .map((item) => ({
-        command: clipText(typeof item.command === "string" ? item.command : undefined, 220) ?? "command",
-        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
-        status: item.status === "ok" || item.status === "warning" || item.status === "error"
-          ? item.status
-          : undefined,
-      } satisfies FactoryExecutionScriptRun))
+      .flatMap((item) => {
+        const command = clipText(typeof item.command === "string" ? item.command : undefined, 220);
+        if (!command) return [];
+        return [{
+          command,
+          summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280),
+          status: item.status === "ok" || item.status === "warning" || item.status === "error"
+            ? item.status
+            : undefined,
+        } satisfies FactoryExecutionScriptRun];
+      })
     : [];
 
 export const normalizeTaskCompletionRecord = (
@@ -461,16 +445,33 @@ export const normalizeInvestigationReport = (
   const evidenceRecords: ReadonlyArray<FactoryEvidenceRecord> = Array.isArray(record.evidenceRecords)
     ? record.evidenceRecords
       .filter((item): item is Record<string, unknown> => isRecord(item))
-      .map((item) => ({
-        objective_id: clipText(typeof item.objective_id === "string" ? item.objective_id : undefined, 140) ?? "objective",
-        task_id: clipText(typeof item.task_id === "string" ? item.task_id : undefined, 140) ?? "task",
-        timestamp: typeof item.timestamp === "number" ? item.timestamp : Date.now(),
-        tool_name: clipText(typeof item.tool_name === "string" ? item.tool_name : undefined, 140) ?? "tool",
-        command_or_api: clipText(typeof item.command_or_api === "string" ? item.command_or_api : undefined, 280) ?? "command",
-        inputs: normalizeEvidenceRecordMap(item.inputs),
-        outputs: normalizeEvidenceRecordMap(item.outputs),
-        summary_metrics: normalizeEvidenceRecordMap(item.summary_metrics),
-      }))
+      .flatMap((item) => {
+        const objective_id = clipText(typeof item.objective_id === "string" ? item.objective_id : undefined, 140);
+        const task_id = clipText(typeof item.task_id === "string" ? item.task_id : undefined, 140);
+        const timestamp = typeof item.timestamp === "number" ? item.timestamp : undefined;
+        const tool_name = clipText(typeof item.tool_name === "string" ? item.tool_name : undefined, 140);
+        const command_or_api = clipText(typeof item.command_or_api === "string" ? item.command_or_api : undefined, 280);
+        if (
+          !objective_id
+          || !task_id
+          || timestamp === undefined
+          || !tool_name
+          || !command_or_api
+          || !isRecord(item.inputs)
+          || !isRecord(item.outputs)
+          || !isRecord(item.summary_metrics)
+        ) return [];
+        return [{
+          objective_id,
+          task_id,
+          timestamp,
+          tool_name,
+          command_or_api,
+          inputs: normalizeEvidenceRecordMap(item.inputs),
+          outputs: normalizeEvidenceRecordMap(item.outputs),
+          summary_metrics: normalizeEvidenceRecordMap(item.summary_metrics),
+        }];
+      })
     : [];
   const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);
   return {

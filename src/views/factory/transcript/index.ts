@@ -485,6 +485,7 @@ export const renderFactoryTranscriptSection = (
       <div class="text-[11px] text-muted-foreground">${esc(`${content.count}`)}</div>
     </div>
     ${content.body}
+    <div id="factory-chat-streaming-content" class="hidden" aria-hidden="true"></div>
   </section>`;
 };
 

@@ -16,11 +16,12 @@ const resolveCheckedInSkillPathsForPrompt = (
   payload: FactoryTaskJobPayload,
 ): ReadonlyArray<string> => {
   const selected = new Set(
-    payload.profile.selectedSkills
+    (payload.profile.selectedSkills ?? [])
       .map((item) => item.replace(/\\/g, "/").trim())
       .filter((item) => item.length > 0),
   );
-  const skillPaths = payload.repoSkillPaths.filter((skillPath) => {
+  const repoSkillPaths = payload.repoSkillPaths ?? payload.profile.selectedSkills ?? [];
+  const skillPaths = repoSkillPaths.filter((skillPath) => {
     const normalized = skillPath.replace(/\\/g, "/");
     if (normalized.endsWith("/skills/factory-receipt-worker/SKILL.md")) return true;
     return [...selected].some((relativePath) => normalized.endsWith(relativePath));
@@ -56,7 +57,7 @@ const renderTaskPromptBody = (input: {
     ...(input.contextSummaryPathForPrompt
       ? [`Task Context Summary (controller-precomputed bootstrap digest): ${input.contextSummaryPathForPrompt}`]
       : []),
-    `Context Pack (exact fields, refs, artifact paths, and finalization hints only when needed): ${input.contextPackPathForPrompt}`,
+    `Context Pack (exact fields, refs, and artifact paths only when needed): ${input.contextPackPathForPrompt}`,
     `Memory Script (fallback scoped recall only when the summary and packet are insufficient): ${input.memoryScriptPathForPrompt}`,
     `Receipt CLI Surface (fallback only when packet surfaces are insufficient): ${input.receiptCliPathForPrompt}`,
     `Manifest (only when reconciling a contract/path mismatch): ${input.manifestPathForPrompt}`,
@@ -169,6 +170,7 @@ const renderTaskPromptBody = (input: {
     ``,
     `## Bootstrap Context`,
     `The prompt is bootstrap only. The controller already prepared a task context summary from the manifest, context pack, scoped memory, receipts, and mounted evidence.`,
+    `Follow the checked-in worker bootstrap order: manifest, context pack, then memory script.`,
     `Start with the task context summary. Do not reread the full bootstrap stack unless that summary leaves an exact field, path, or contradiction unresolved.`,
     `If the summary already points at mounted evidence or a selected helper, follow that evidence path before more packet reads or new external queries.`,
     `The JSON context pack remains part of the primary worker interface, but use it only when you need exact raw fields, refs, or artifact paths.`,

@@ -443,7 +443,6 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
           renderedBody: event.renderedBody ?? event.output ?? event.summary,
           renderSourceHash: event.renderSourceHash,
           renderedAt: event.renderedAt,
-          renderedBy: event.renderedBy,
           output: event.output,
           blocker: event.blocker,
           nextAction: event.nextAction,

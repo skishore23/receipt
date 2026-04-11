@@ -122,3 +122,77 @@ test("factory task runner evidence: successful investigation can complete with p
     reportIncludesEvidenceRecords: false,
   })).toContain("investigation proof or scripts");
 });
+
+test("factory task runner evidence: infrastructure investigations can require scriptsRun and structured evidence", () => {
+  expect(validateTaskEvidence({
+    objectiveId: "objective_demo",
+    taskId: "task_01",
+    objectiveMode: "investigation",
+    outcome: "approved",
+    completion: {
+      changed: ["Collected evidence"],
+      proof: ["artifact-backed claim"],
+      remaining: [],
+    },
+    scriptsRun: [],
+    hasStructuredReport: true,
+    reportIncludesEvidenceRecords: true,
+    reportEvidenceRecords: [{
+      objective_id: "objective_demo",
+      task_id: "task_01",
+      timestamp: 123,
+      tool_name: "factory_helper_runner",
+      command_or_api: "python3 skills/factory-helper-runtime/runner.py run helper",
+      inputs: {},
+      outputs: {},
+      summary_metrics: {},
+    }],
+    requireInvestigationScriptsRun: true,
+    requireStructuredEvidenceRecords: true,
+  })).toContain("scriptsRun");
+
+  expect(validateTaskEvidence({
+    objectiveId: "objective_demo",
+    taskId: "task_01",
+    objectiveMode: "investigation",
+    outcome: "approved",
+    completion: {
+      changed: ["Collected evidence"],
+      proof: ["artifact-backed claim"],
+      remaining: [],
+    },
+    scriptsRun: [{ command: "python3 skills/factory-helper-runtime/runner.py run helper", summary: "helper", status: "ok" }],
+    hasStructuredReport: true,
+    reportIncludesEvidenceRecords: false,
+    reportEvidenceRecords: [],
+    requireInvestigationScriptsRun: true,
+    requireStructuredEvidenceRecords: true,
+  })).toContain("structured evidence records");
+
+  expect(validateTaskEvidence({
+    objectiveId: "objective_demo",
+    taskId: "task_01",
+    objectiveMode: "investigation",
+    outcome: "approved",
+    completion: {
+      changed: ["Collected evidence"],
+      proof: ["artifact-backed claim"],
+      remaining: [],
+    },
+    scriptsRun: [{ command: "python3 skills/factory-helper-runtime/runner.py run helper", summary: "helper", status: "ok" }],
+    hasStructuredReport: true,
+    reportIncludesEvidenceRecords: true,
+    reportEvidenceRecords: [{
+      objective_id: "objective_demo",
+      task_id: "task_01",
+      timestamp: 123,
+      tool_name: "factory_helper_runner",
+      command_or_api: "python3 skills/factory-helper-runtime/runner.py run helper",
+      inputs: {},
+      outputs: {},
+      summary_metrics: {},
+    }],
+    requireInvestigationScriptsRun: true,
+    requireStructuredEvidenceRecords: true,
+  })).toBeUndefined();
+});

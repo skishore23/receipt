@@ -5,22 +5,12 @@ import { CodexControlSignalError, type CodexExecutor, type CodexRunControl, type
 import type { FactoryService } from "../../../services/factory-service";
 import { factoryChatCodexArtifactPaths, readTextTail } from "../../../services/factory-codex-artifacts";
 import { buildEvidenceBundle, writeAlignmentMarkdown } from "../../../services/factory-evidence-bundle";
-import { createDisposableProbeWorkspace, diffGitChangedSnapshots, gitChangedFileSnapshots, gitChangedFiles, asString, summarizeChildProgress } from "./input";
+import { diffGitChangedSnapshots, gitChangedFileSnapshots, gitChangedFiles, asString, summarizeChildProgress } from "./input";
 
 const DIRECT_CODEX_MUTATION_MESSAGE = "Direct Codex probes are read-only. This work needs code changes; create or react a Factory objective instead.";
-const SANDBOX_BOOTSTRAP_COMPATIBILITY_RE = /\bbwrap:\s*Unknown option --argv0\b/i;
 
 const looksLikeReadOnlyMutationFailure = (message: string): boolean =>
   /\bread[- ]only\b|\bpermission denied\b|\bcannot write\b|\bwrite access\b|\bsandbox\b/i.test(message);
-
-const isSandboxBootstrapCompatibilityError = (error: unknown): boolean => {
-  const message = error instanceof Error ? error.message : String(error);
-  if (SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(message)) return true;
-  if (!error || typeof error !== "object" || !("result" in error)) return false;
-  const result = (error as { readonly result?: { readonly stderr?: string; readonly stdout?: string } }).result;
-  return SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stderr ?? "")
-    || SANDBOX_BOOTSTRAP_COMPATIBILITY_RE.test(result?.stdout ?? "");
-};
 
 const tail = (value: string | undefined, max = 400): string | undefined => {
   const text = value?.trim();
@@ -41,7 +31,6 @@ export const runFactoryCodexJob = async (input: {
 }, control?: CodexRunControl): Promise<Record<string, unknown>> => {
   const artifacts = factoryChatCodexArtifactPaths(input.dataDir, input.jobId);
   await fs.mkdir(artifacts.root, { recursive: true });
-  const commandsRunPath = path.join(artifacts.root, "commands_run.jsonl");
   const evidenceRoot = path.join(artifacts.root, "artifacts");
   await fs.mkdir(evidenceRoot, { recursive: true });
   const alignmentPath = await writeAlignmentMarkdown({
@@ -54,11 +43,10 @@ export const runFactoryCodexJob = async (input: {
     ],
     definitionOfDone: [
       "alignment.md exists for every run.",
-      "commands_run.jsonl is captured when available.",
       "evidence bundle is attached to the terminal job result.",
     ],
     assumptions: [
-      "The execution harness may not always produce commands_run.jsonl.",
+      "The execution harness may not always emit reusable script records.",
     ],
   });
 
@@ -123,11 +111,8 @@ export const runFactoryCodexJob = async (input: {
   };
 
   let workspacePath = input.repoRoot;
-  let workspaceCleanup: (() => Promise<void>) | undefined;
   let sandboxMode: CodexRunInput["sandboxMode"] = readOnly ? "read-only" : "workspace-write";
   let mutationPolicy: NonNullable<CodexRunInput["mutationPolicy"]> = readOnly ? "read_only_probe" : "workspace_edit";
-  let disableSandboxModeInference = false;
-  let sandboxCompatibilityFallbackUsed = false;
   let initialChangedFileSnapshot = readOnly
     ? await gitChangedFileSnapshots(workspacePath)
     : undefined;
@@ -143,29 +128,10 @@ export const runFactoryCodexJob = async (input: {
     env,
     sandboxMode,
     mutationPolicy,
-    disableSandboxModeInference,
   }, control);
 
   try {
-    let result;
-    try {
-      result = await runExecutor();
-    } catch (err) {
-      if (!readOnly || !isSandboxBootstrapCompatibilityError(err)) throw err;
-      const fallbackWorkspace = await createDisposableProbeWorkspace(input.repoRoot, input.jobId);
-      workspacePath = fallbackWorkspace.workspacePath;
-      workspaceCleanup = fallbackWorkspace.cleanup;
-      sandboxMode = undefined;
-      disableSandboxModeInference = true;
-      sandboxCompatibilityFallbackUsed = true;
-      initialChangedFileSnapshot = await gitChangedFileSnapshots(workspacePath);
-      await fs.appendFile(
-        artifacts.stderrPath,
-        "[factory] sandbox compatibility fallback: host sandbox startup failed; retrying read-only probe in a disposable workspace without Codex sandboxing.\n",
-        "utf-8",
-      ).catch(() => undefined);
-      result = await runExecutor();
-    }
+    const result = await runExecutor();
     progressStopped = true;
     await progressLoop;
     await emitProgress();
@@ -195,7 +161,7 @@ export const runFactoryCodexJob = async (input: {
           proof: [alignmentPath, artifacts.resultPath],
           remaining: [],
         },
-        commandsRunPath,
+        scriptsRun: [],
         artifactPaths: [
           { label: "prompt", path: artifacts.promptPath },
           { label: "last message", path: artifacts.lastMessagePath },
@@ -216,7 +182,6 @@ export const runFactoryCodexJob = async (input: {
         ...(typeof result.tokensUsed === "number" ? { tokensUsed: result.tokensUsed } : {}),
         changedFiles,
         ...(readOnly ? { repoChangedFiles } : {}),
-        ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
         artifacts,
         evidence_attached: true,
         alignment_reported: true,
@@ -243,7 +208,7 @@ export const runFactoryCodexJob = async (input: {
         proof: [alignmentPath, artifacts.resultPath],
         remaining: [],
       },
-      commandsRunPath,
+      scriptsRun: [],
       artifactPaths: [
         { label: "prompt", path: artifacts.promptPath },
         { label: "last message", path: artifacts.lastMessagePath },
@@ -264,7 +229,6 @@ export const runFactoryCodexJob = async (input: {
       ...(typeof result.tokensUsed === "number" ? { tokensUsed: result.tokensUsed } : {}),
       changedFiles,
       ...(readOnly ? { repoChangedFiles } : {}),
-      ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
       evidence_attached: true,
       alignment_reported: true,
@@ -306,7 +270,6 @@ export const runFactoryCodexJob = async (input: {
       stderrTail,
       changedFiles,
       ...(readOnly ? { repoChangedFiles } : {}),
-      ...(sandboxCompatibilityFallbackUsed ? { sandboxCompatibilityFallbackUsed: true } : {}),
       artifacts,
       evidence_attached: true,
       alignment_reported: true,
@@ -318,7 +281,7 @@ export const runFactoryCodexJob = async (input: {
         alignment: {
           verdict: "uncertain",
           satisfied: ["alignment.md emitted", "terminal result captured"],
-          missing: ["no structured commands_run.jsonl available"],
+          missing: [],
           outOfScope: [],
           rationale: "The job failed and was captured as minimally populated evidence.",
         },
@@ -327,7 +290,7 @@ export const runFactoryCodexJob = async (input: {
           proof: [alignmentPath],
           remaining: [],
         },
-        commandsRunPath,
+        scriptsRun: [],
         artifactPaths: [
           { label: "prompt", path: artifacts.promptPath },
           { label: "last message", path: artifacts.lastMessagePath },
@@ -339,8 +302,6 @@ export const runFactoryCodexJob = async (input: {
     });
     throw new Error(message);
   } finally {
-    if (workspaceCleanup) {
-      await workspaceCleanup().catch(() => undefined);
-    }
+    // no-op
   }
 };

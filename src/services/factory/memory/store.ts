@@ -166,11 +166,17 @@ export const commitFactoryInvestigationSynthesisMemory = async (
   reports: ReadonlyArray<FactoryInvestigationTaskReport>,
 ): Promise<void> => {
   if (!memoryTools) return;
+  const handoff = [...new Set(
+    reports
+      .map((report) => report.handoff.trim())
+      .filter((value) => value.length > 0),
+  )].join("\n\n");
   const text = renderInvestigationReportText(
     synthesis.summary,
     synthesis.report,
     undefined,
     reports.map((report) => report.artifactRefs),
+    handoff || undefined,
   );
   try {
     await memoryTools.commit({

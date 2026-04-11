@@ -14,8 +14,10 @@ import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
 import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
+import { writeInvestigationEvidenceBundle } from "../../src/services/factory-evidence-bundle";
 import { FACTORY_MONITOR_AGENT_ID, FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
 import type { FactoryCloudExecutionContext } from "../../src/services/factory-cloud-context";
+import { extractInvestigationHelperEvidence } from "../../src/services/factory/runtime/investigation-results";
 
 const execFileAsync = promisify(execFile);
 
@@ -197,6 +199,158 @@ const objectiveTaskJobs = async (
     .filter((job) => job.payload.kind === "factory.task.run" && job.payload.objectiveId === objectiveId)
     .sort((a, b) => a.createdAt - b.createdAt);
 };
+
+test("factory investigation: canonical evidence bundle drives assessment when the worker result is semantic-only", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    codexRun: async () => {
+      const semantic = {
+        status: "answered",
+        conclusion: "Evidence was gathered and the investigation answered.",
+        findings: [{
+          title: "Semantic result only",
+          summary: "The worker returned the small semantic payload.",
+          confidence: "confirmed",
+          evidenceRefLabels: ["helper output"],
+        }],
+        uncertainties: [],
+        nextAction: null,
+      };
+      const raw = JSON.stringify(semantic);
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Investigation canonical bundle scoring",
+    prompt: "Use the canonical evidence bundle as the only scoring source.",
+    objectiveMode: "investigation",
+    severity: 1,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const initial = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(initial.packetContext?.evidenceBundlePath).toBeTruthy();
+  if (!initial.packetContext?.evidenceBundlePath) throw new Error("expected evidence bundle path");
+
+  await writeInvestigationEvidenceBundle({
+    bundlePath: initial.packetContext.evidenceBundlePath,
+    objectiveId: created.objectiveId,
+    taskId: "task_01",
+    candidateId: "task_01_candidate_01",
+    report: {
+      conclusion: "Evidence bundle is canonical.",
+      evidence: [],
+      evidenceRecords: [{
+        objective_id: created.objectiveId,
+        task_id: "task_01",
+        timestamp: Date.now(),
+        tool_name: "factory_helper_runner",
+        command_or_api: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_account_scope -- --profile default",
+        inputs: { helper_id: "aws_account_scope" },
+        outputs: { status: "ok" },
+        summary_metrics: { artifact_count: 1 },
+      }],
+      scriptsRun: [{
+        command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_account_scope -- --profile default",
+        summary: "Collected helper evidence.",
+        status: "ok",
+      }],
+      disagreements: [],
+      nextSteps: [],
+    },
+    artifactPaths: [],
+  });
+
+  const reloaded = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
+  expect(reloaded.canonicalEvidenceBundle?.evidence_records).toHaveLength(1);
+  expect(reloaded.assessment.notes.some((note) =>
+    note.includes("canonical evidence bundle is missing structured evidence records."))).toBe(false);
+  expect(reloaded.assessment.notes.some((note) => note.includes("1 evidence item(s)"))).toBe(true);
+}, 120_000);
+
+test("factory investigation: helper evidence extraction parses multiple helper payloads from a single command output", async () => {
+  const workspacePath = await createTempDir("receipt-factory-multi-helper");
+  await fs.mkdir(path.join(workspacePath, ".receipt", "factory"), { recursive: true });
+
+  const helperOutputOne = {
+    status: "ok",
+    summary: "Captured 0 RDS DB instances.",
+    artifacts: [{
+      label: "rds/db-instances inventory",
+      path: ".receipt/factory/evidence/aws_resource_inventory_rds_db-instances.json",
+      summary: "Captured 0 resources.",
+    }],
+    data: { totalCount: 0 },
+    capturedAt: "2026-04-11T19:58:00.000Z",
+    errors: [],
+    evidenceRecords: [{
+      objective_id: "objective_demo",
+      task_id: "task_01",
+      timestamp: 1,
+      tool_name: "factory_helper_runner",
+      command_or_api: "python3 runner.py run aws_resource_inventory db-instances",
+      inputs: { helper_id: "aws_resource_inventory" },
+      outputs: { status: "ok" },
+      summary_metrics: { totalCount: 0 },
+    }],
+    scriptsRun: [{
+      command: "python3 runner.py run aws_resource_inventory db-instances",
+      summary: "Captured 0 RDS DB instances.",
+      status: "ok",
+    }],
+  };
+  const helperOutputTwo = {
+    status: "ok",
+    summary: "Summarized CloudWatch alarms across 17 regions.",
+    artifacts: [{
+      label: "CloudWatch alarm summary",
+      path: ".receipt/factory/evidence/aws_alarm_summary.json",
+      summary: "Summarized alarms.",
+    }],
+    data: { regions: Array.from({ length: 17 }, (_, index) => `region-${index}`) },
+    capturedAt: "2026-04-11T19:58:10.000Z",
+    errors: [],
+    evidenceRecords: [{
+      objective_id: "objective_demo",
+      task_id: "task_01",
+      timestamp: 2,
+      tool_name: "factory_helper_runner",
+      command_or_api: "python3 runner.py run aws_alarm_summary",
+      inputs: { helper_id: "aws_alarm_summary" },
+      outputs: { status: "ok" },
+      summary_metrics: { regions: 17 },
+    }],
+    scriptsRun: [{
+      command: "python3 runner.py run aws_alarm_summary",
+      summary: "Summarized CloudWatch alarms across 17 regions.",
+      status: "ok",
+    }],
+  };
+
+  const event = {
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      command: "/bin/zsh -lc \"python3 /Users/kishore/receipt/skills/factory-helper-runtime/runner.py run --provider aws --json aws_resource_inventory -- --service rds --resource db-instances --all-regions --output-dir .receipt/factory/evidence && printf '\\n---ALARM---\\n' && python3 /Users/kishore/receipt/skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary -- --all-regions --output-dir .receipt/factory/evidence\"",
+      aggregated_output: `${JSON.stringify(helperOutputOne, null, 2)}\n---ALARM---\n${JSON.stringify(helperOutputTwo, null, 2)}`,
+    },
+  };
+
+  const helperEvidence = await extractInvestigationHelperEvidence({
+    workspacePath,
+    telemetry: { stdout: JSON.stringify(event) },
+    objectiveId: "objective_demo",
+    taskId: "task_01",
+  });
+
+  expect(helperEvidence.evidenceRecords).toHaveLength(2);
+  expect(helperEvidence.scriptsRun).toHaveLength(2);
+  expect(helperEvidence.artifacts).toHaveLength(2);
+}, 120_000);
 
 test("factory investigation: no-diff reports complete without integration and synthesize a final report", async () => {
   const { service, queue } = await createFactoryService({
@@ -1496,6 +1650,21 @@ test("factory investigation: synthesizing execution stall falls back to helper-b
             publicRdsInstances: [],
             publicS3Buckets: [],
           },
+          evidenceRecords: [{
+            objective_id: input.objectiveId!,
+            task_id: input.taskId!,
+            timestamp: 123,
+            tool_name: "factory_helper_runner",
+            command_or_api: "python3 skills/factory-helper-runtime/runner.py run aws_internet_exposure_inventory",
+            inputs: { helper_id: "aws_internet_exposure_inventory" },
+            outputs: { status: "ok" },
+            summary_metrics: { internetFacingLoadBalancers: 6, publicNetworkInterfaces: 14, openSecurityGroups: 10 },
+          }],
+          scriptsRun: [{
+            command: "python3 skills/factory-helper-runtime/runner.py run aws_internet_exposure_inventory",
+            summary: "Collected internet exposure inventory.",
+            status: "ok",
+          }],
         };
         const helperStdout = `${JSON.stringify({
           type: "item.completed",
@@ -1592,6 +1761,8 @@ test("factory investigation: synthesizing execution stall falls back to helper-b
   expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
+  expect(detail.investigation.reports[0]?.report.scriptsRun.length).toBeGreaterThan(0);
+  expect(detail.investigation.reports[0]?.report.evidenceRecords?.length).toBeGreaterThan(0);
 }, 120_000);
 
 test("factory investigation: evidence collection stall falls back to helper-backed partial completion", async () => {
@@ -1620,6 +1791,21 @@ test("factory investigation: evidence collection stall falls back to helper-back
             publicRdsInstances: [],
             publicS3Buckets: [],
           },
+          evidenceRecords: [{
+            objective_id: input.objectiveId!,
+            task_id: input.taskId!,
+            timestamp: 123,
+            tool_name: "factory_helper_runner",
+            command_or_api: "python3 skills/factory-helper-runtime/runner.py run aws_internet_exposure_inventory",
+            inputs: { helper_id: "aws_internet_exposure_inventory" },
+            outputs: { status: "ok" },
+            summary_metrics: { internetFacingLoadBalancers: 6, publicNetworkInterfaces: 14, openSecurityGroups: 10 },
+          }],
+          scriptsRun: [{
+            command: "python3 skills/factory-helper-runtime/runner.py run aws_internet_exposure_inventory",
+            summary: "Collected internet exposure inventory.",
+            status: "ok",
+          }],
         };
         const helperStdout = `${JSON.stringify({
           type: "item.completed",
@@ -1702,6 +1888,8 @@ test("factory investigation: evidence collection stall falls back to helper-back
   expect(resultText).toContain("Inventory captured 6 internet-facing ELBv2 load balancer(s), 14 public ENI(s), 10 open security group(s)");
   const detail = await service.getObjective(created.objectiveId);
   expect(detail.status).toBe("completed");
+  expect(detail.investigation.reports[0]?.report.scriptsRun.length).toBeGreaterThan(0);
+  expect(detail.investigation.reports[0]?.report.evidenceRecords?.length).toBeGreaterThan(0);
 }, 120_000);
 
 test("factory investigation: evidence collection stall without helper evidence retries once with helper-first guidance", async () => {

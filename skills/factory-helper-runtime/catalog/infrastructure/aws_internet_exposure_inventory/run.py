@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+from hashlib import sha1
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,11 +44,78 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines.append("Warnings:")
         for warning in summary["warnings"][:25]:
             lines.append(f"- {warning}")
+    if summary.get("evidenceItems"):
+        lines.append("")
+        lines.append("## Proof")
+        for item in summary["evidenceItems"][:25]:
+            lines.append(f"### {item['claim_ref']}")
+            lines.append(f"- SG ID: {item['parsed'].get('groupId')}")
+            lines.append(f"- Region: {item.get('region')}")
+            lines.append(f"- Command: {item.get('command')}")
+            for rule in item.get("parsed", {}).get("offendingIpPermissions", []):
+                cidrs = ", ".join(rule.get("cidrs", [])) or "none"
+                lines.append(
+                    f"- Rule: {rule.get('ipProtocol')} {rule.get('fromPort')}->{rule.get('toPort')} cidr={cidrs}"
+                )
     return "\n".join(lines) + "\n"
 
 
 def quoted(value: str) -> str:
     return shlex.quote(value)
+
+
+def evidence_id(seed: str) -> str:
+    return f"evidence-{sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+
+
+def build_security_group_evidence(
+    *,
+    profile: str | None,
+    account_id: str | None,
+    region: str,
+    group: dict[str, Any],
+    output_dir: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    group_id = str(group.get("GroupId") or "").strip()
+    command = f"aws ec2 describe-security-groups --group-ids {quoted(group_id)} --region {quoted(region)}"
+    raw = aws_cli_json(["ec2", "describe-security-groups", "--group-ids", group_id], profile=profile, region=region)
+    offending: list[dict[str, Any]] = []
+    for permission in group.get("IpPermissions", []):
+        ipv4 = [item.get("CidrIp") for item in permission.get("IpRanges", []) if item.get("CidrIp") == "0.0.0.0/0"]
+        ipv6 = [item.get("CidrIpv6") for item in permission.get("Ipv6Ranges", []) if item.get("CidrIpv6") == "::/0"]
+        if not ipv4 and not ipv6:
+            continue
+        offending.append({
+            "ipProtocol": permission.get("IpProtocol"),
+            "fromPort": permission.get("FromPort"),
+            "toPort": permission.get("ToPort"),
+            "cidrs": [*ipv4, *ipv6],
+        })
+    evidence = {
+        "id": evidence_id(f"{region}:{group_id}"),
+        "type": "cli_output",
+        "claim_ref": f"sg:{group_id}",
+        "timestamp": build_result("ok", "", {})["capturedAt"],
+        "collection_method": "aws ec2 describe-security-groups",
+        "command": command,
+        "raw": raw,
+        "parsed": {
+            "groupId": group_id,
+            "groupArn": f"arn:aws:ec2:{region}:*:security-group/{group_id}",
+            "offendingIpPermissions": offending,
+        },
+        "resource_arns": [f"arn:aws:ec2:{region}:*:security-group/{group_id}"],
+        "region": region,
+        "account_id": account_id,
+    }
+    artifact = write_json_artifact(
+        output_dir,
+        f"{evidence['id']}.json",
+        evidence,
+        label=f"Security group evidence {group_id}",
+        summary=f"Structured proof for security group {group_id} in {region}.",
+    )
+    return evidence, artifact
 
 
 def main() -> int:
@@ -85,8 +153,10 @@ def main() -> int:
     internet_facing_load_balancers: list[dict[str, Any]] = []
     internet_facing_classic_elbs: list[dict[str, Any]] = []
     open_security_groups: list[dict[str, Any]] = []
+    security_group_evidence_items: list[dict[str, Any]] = []
     public_rds_instances: list[dict[str, Any]] = []
     public_s3_buckets: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
 
     try:
         buckets = aws_cli_json(["s3api", "list-buckets"], profile=args.profile).get("Buckets", [])
@@ -149,6 +219,7 @@ def main() -> int:
             groups = aws_cli_json(["ec2", "describe-security-groups"], profile=args.profile, region=region).get("SecurityGroups", [])
             for group in groups:
                 open_rules: list[dict[str, Any]] = []
+                evidence_item: dict[str, Any] | None = None
                 for permission in group.get("IpPermissions", []):
                     ipv4 = [item.get("CidrIp") for item in permission.get("IpRanges", []) if item.get("CidrIp") == "0.0.0.0/0"]
                     ipv6 = [item.get("CidrIpv6") for item in permission.get("Ipv6Ranges", []) if item.get("CidrIpv6") == "::/0"]
@@ -162,12 +233,23 @@ def main() -> int:
                         "ipv6": ipv6,
                     })
                 if open_rules:
+                    evidence_item, evidence_artifact = build_security_group_evidence(
+                        profile=args.profile,
+                        account_id=str(account.get("Account") or "").strip() or None,
+                        region=region,
+                        group=group,
+                        output_dir=args.output_dir,
+                    )
+                    if evidence_artifact:
+                        artifacts.append(evidence_artifact)
+                    security_group_evidence_items.append(evidence_item)
                     open_security_groups.append({
                         "region": region,
                         "groupId": group.get("GroupId"),
                         "groupName": group.get("GroupName"),
                         "vpcId": group.get("VpcId"),
                         "openRules": open_rules,
+                        "evidenceId": evidence_item["id"] if evidence_item else None,
                     })
         except AwsCliError as error:
             warnings.append(f"{region} security-group query failed: {summarize_errors(error)}")
@@ -241,10 +323,10 @@ def main() -> int:
             "publicS3Buckets": unique_rows(public_s3_buckets),
         },
         "warnings": warnings,
+        "evidenceItems": unique_rows(security_group_evidence_items),
         "capturedAt": account and build_result("ok", "", {})["capturedAt"],
     }
 
-    artifacts = []
     json_artifact = write_json_artifact(
         args.output_dir,
         "aws_internet_exposure_inventory.json",
@@ -270,6 +352,8 @@ def main() -> int:
         f"{summary['counts']['publicRdsInstances']} public RDS instance(s), and "
         f"{summary['counts']['publicS3Buckets']} public S3 bucket(s) across {len(regions)} region(s)."
     )
+    if summary["evidenceItems"]:
+        summary_line += f" Evidence IDs: {', '.join(item['id'] for item in summary['evidenceItems'][:10])}."
     emit_result(build_result("ok", summary_line, summary, artifacts=artifacts))
     return 0
 

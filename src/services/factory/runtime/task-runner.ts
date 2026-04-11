@@ -46,6 +46,8 @@ export const validateTaskEvidence = (input: {
   readonly hasStructuredReport?: boolean;
   readonly reportIncludesEvidenceRecords: boolean;
   readonly reportEvidenceRecords?: ReadonlyArray<FactoryEvidenceRecord>;
+  readonly requireInvestigationScriptsRun?: boolean;
+  readonly requireStructuredEvidenceRecords?: boolean;
 }): string | undefined => {
   const successOutcome = input.outcome === "approved";
   if (successOutcome) {
@@ -64,6 +66,12 @@ export const validateTaskEvidence = (input: {
       && (input.scriptsRun?.length ?? 0) === 0
     ) {
       return `factory task ${input.taskId} completed without investigation proof or scripts`;
+    }
+    if (input.objectiveMode === "investigation" && input.requireInvestigationScriptsRun && (input.scriptsRun?.length ?? 0) === 0) {
+      return `factory task ${input.taskId} completed without investigation scriptsRun evidence`;
+    }
+    if (input.objectiveMode === "investigation" && input.requireStructuredEvidenceRecords && (input.reportEvidenceRecords?.length ?? 0) === 0) {
+      return `factory task ${input.taskId} completed without structured evidence records`;
     }
   }
   if (!input.reportIncludesEvidenceRecords) return undefined;
@@ -111,7 +119,6 @@ export const buildObjectiveHandoffEvent = (input: {
   readonly renderedBody?: string;
   readonly renderSourceHash?: string;
   readonly renderedAt?: number;
-  readonly renderedBy?: "orchestrator_llm" | "fallback";
   readonly output?: string;
   readonly sourceUpdatedAt: number;
   readonly blocker?: string;
@@ -127,7 +134,6 @@ export const buildObjectiveHandoffEvent = (input: {
       renderedBody: input.renderedBody ?? input.output ?? input.summary,
       renderSourceHash: input.renderSourceHash,
       renderedAt: input.renderedAt ?? input.sourceUpdatedAt,
-      renderedBy: input.renderedBy,
       blocker: input.blocker,
       nextAction: effectiveNextAction,
       sourceUpdatedAt: input.sourceUpdatedAt,
@@ -143,7 +149,6 @@ export const buildObjectiveHandoffEvent = (input: {
     renderedBody: input.renderedBody ?? input.output ?? input.summary,
     ...(input.renderSourceHash ? { renderSourceHash: input.renderSourceHash } : {}),
     ...(input.renderedAt ? { renderedAt: input.renderedAt } : {}),
-    ...(input.renderedBy ? { renderedBy: input.renderedBy } : {}),
     ...(input.output ? { output: input.output } : {}),
     ...(input.blocker ? { blocker: input.blocker } : {}),
     ...(effectiveNextAction ? { nextAction: effectiveNextAction } : {}),

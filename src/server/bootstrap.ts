@@ -85,6 +85,14 @@ import {
 } from "../db/client";
 import { resolveObjectiveChatBinding } from "../db/projectors";
 import { writeObjectiveHandoffToSession } from "../agents/factory/session-handoff";
+import {
+  codexActivityKey,
+  createAppDurableBackend,
+  createDurableQueueBackend,
+  markDurableJobRunning,
+  recoverPersistedJsonResult,
+} from "../lib/durable-execution";
+import { factoryChatCodexArtifactPaths } from "../services/factory-codex-artifacts";
 
 // ============================================================================
 // Config
@@ -275,7 +283,11 @@ const baseQueue = sqliteQueue({
     sse.publish("receipt");
   },
 });
-queueImpl = baseQueue;
+const durable = createAppDurableBackend({
+  dataDir: DATA_DIR,
+  mode: JOB_BACKEND === "resonate" ? "resonate" : "local",
+});
+queueImpl = createDurableQueueBackend(baseQueue, durable);
 const queue: JobBackend = {
   enqueue: (input) => queueImpl!.enqueue(input),
   leaseNext: (opts) => queueImpl!.leaseNext(opts),
@@ -558,6 +570,7 @@ const redriveQueuedJobRef =
 const { service: factoryService } = createFactoryServiceRuntime({
   dataDir: DATA_DIR,
   queue,
+  durable,
   jobRuntime,
   sse,
   repoRoot: WORKSPACE_ROOT,
@@ -992,6 +1005,7 @@ const handleDelegates = async (
 const createWorkerHandler =
   (spec: WorkerHandlerSpec): JobHandler =>
   async (job, ctx) => {
+    await markDurableJobRunning(durable, job).catch(() => undefined);
     const commands = await ctx.pullCommands(["steer", "follow_up"]);
     const merged = { ...job.payload } as Record<string, unknown>;
     if (typeof merged.stream !== "string" || !merged.stream.trim())
@@ -1062,6 +1076,7 @@ const jobHandlers = {
     if (job.payload.kind !== "factory.codex.run") {
       return factoryWorkerHandlers.codex(job, ctx);
     }
+    await markDurableJobRunning(durable, job).catch(() => undefined);
     await ctx.pullCommands(["steer", "follow_up"]);
     const payload = job.payload as Record<string, unknown>;
     const prompt =
@@ -1112,36 +1127,52 @@ const jobHandlers = {
       });
     };
     try {
-      const result = await runFactoryCodexJob(
-        {
-          dataDir: DATA_DIR,
-          repoRoot: factoryService.git.repoRoot,
+      const runCodex = async (): Promise<Record<string, unknown>> =>
+        runFactoryCodexJob(
+          {
+            dataDir: DATA_DIR,
+            repoRoot: factoryService.git.repoRoot,
+            jobId: job.id,
+            prompt,
+            timeoutMs,
+            executor: factoryService.codexExecutor,
+            factoryService,
+            payload,
+            onProgress: async (update) => {
+              await queue.progress(job.id, ctx.workerId, update);
+              const summary =
+                typeof update.summary === "string" ? update.summary : "";
+              await emitCodexMerged(summary);
+            },
+          },
+          {
+            shouldAbort,
+            onChildSpawn: async (update) => {
+              ctx.registerLeaseProcess({
+                pid: update.pid,
+                label: "codex child",
+              });
+            },
+            onChildExit: async () => {
+              ctx.clearLeaseProcess();
+            },
+          },
+        );
+      const result = await durable.runDurableActivity({
+        key: codexActivityKey(job.id),
+        input: {
           jobId: job.id,
-          prompt,
-          timeoutMs,
-          executor: factoryService.codexExecutor,
-          factoryService,
           payload,
-          onProgress: async (update) => {
-            await queue.progress(job.id, ctx.workerId, update);
-            const summary =
-              typeof update.summary === "string" ? update.summary : "";
-            await emitCodexMerged(summary);
-          },
         },
-        {
-          shouldAbort,
-          onChildSpawn: async (update) => {
-            ctx.registerLeaseProcess({
-              pid: update.pid,
-              label: "codex child",
-            });
-          },
-          onChildExit: async () => {
-            ctx.clearLeaseProcess();
-          },
+        metadata: {
+          kind: String(job.payload.kind ?? "factory.codex.run"),
         },
-      );
+        recover: async () =>
+          recoverPersistedJsonResult(
+            factoryChatCodexArtifactPaths(DATA_DIR, job.id).resultPath,
+          ),
+        run: runCodex,
+      }).then((activity) => activity.result);
       await emitCodexMerged(
         typeof result.summary === "string"
           ? result.summary
@@ -1245,13 +1276,13 @@ if (JOB_BACKEND === "resonate" && PROCESS_ROLE === "worker-chat") {
   registerResonateAgentActionWorker(resonateRoleRuntime!.client, DATA_DIR);
 }
 if (JOB_BACKEND === "resonate") {
-  queueImpl = resonateJobBackend({
+  queueImpl = createDurableQueueBackend(resonateJobBackend({
     base: baseQueue,
     startDriver: startResonateDriver!,
     onDispatchError: (error, job) => {
       console.error(`[resonate dispatch ${job.id}]`, error);
     },
-  });
+  }), durable);
 }
 const startRuntimeWorkers = async (): Promise<void> => {
   if (JOB_BACKEND === "local") {

@@ -21,16 +21,8 @@ test("factory result contracts: investigation evidence records stay strict and n
     }
   ).items;
   expect(evidenceRecordItems.properties.inputs).toEqual({
-    type: "array",
-    items: {
-      type: "object",
-      properties: {
-        key: { type: "string" },
-        value: { type: ["string", "number", "boolean", "null"] },
-      },
-      required: ["key", "value"],
-      additionalProperties: false,
-    },
+    type: "object",
+    additionalProperties: { type: ["string", "number", "boolean", "null"] },
   });
 });
 
@@ -45,7 +37,7 @@ test("factory result contracts: codex output schemas require handoff when the pr
   ]);
 });
 
-test("factory result contracts: investigation report normalizes evidence record maps from strict entries", () => {
+test("factory result contracts: investigation report normalizes strict object evidence records", () => {
   const report = normalizeInvestigationReport({
     conclusion: "done",
     evidence: [],
@@ -55,18 +47,9 @@ test("factory result contracts: investigation report normalizes evidence record 
       timestamp: 123,
       tool_name: "shell",
       command_or_api: "./slow-check.sh",
-      inputs: [
-        { key: "cwd", value: "/tmp/demo" },
-        { key: "timeout_sec", value: 30 },
-      ],
-      outputs: [
-        { key: "stdout", value: "slow-check:end" },
-        { key: "success", value: true },
-      ],
-      summary_metrics: [
-        { key: "regions_scanned", value: 1 },
-        { key: "instance_inventory", value: 0 },
-      ],
+      inputs: { cwd: "/tmp/demo", timeout_sec: 30 },
+      outputs: { stdout: "slow-check:end", success: true },
+      summary_metrics: { regions_scanned: 1, instance_inventory: 0 },
     }],
     scriptsRun: [],
     disagreements: [],
@@ -93,7 +76,7 @@ test("factory result contracts: investigation report normalizes evidence record 
   }]);
 });
 
-test("factory result contracts: investigation report still accepts legacy object evidence record maps", () => {
+test("factory result contracts: investigation report rejects legacy array evidence record maps", () => {
   const report = normalizeInvestigationReport({
     conclusion: "done",
     evidence: [],
@@ -103,20 +86,15 @@ test("factory result contracts: investigation report still accepts legacy object
       timestamp: 123,
       tool_name: "shell",
       command_or_api: "./slow-check.sh",
-      inputs: { cwd: "/tmp/demo" },
-      outputs: { ok: true },
-      summary_metrics: { regions_scanned: 1, instance_inventory: 0 },
+      inputs: [{ key: "cwd", value: "/tmp/demo" }],
+      outputs: [{ key: "ok", value: true }],
+      summary_metrics: [{ key: "regions_scanned", value: 1 }],
     }],
     scriptsRun: [],
     disagreements: [],
     nextSteps: [],
   }, "fallback");
-  expect(report.evidenceRecords?.[0]?.inputs).toEqual({ cwd: "/tmp/demo" });
-  expect(report.evidenceRecords?.[0]?.outputs).toEqual({ ok: true });
-  expect(report.evidenceRecords?.[0]?.summary_metrics).toEqual({
-    regions_scanned: 1,
-    instance_inventory: 0,
-  });
+  expect(report.evidenceRecords).toBeUndefined();
 });
 
 test("factory result contracts: normalizeTaskPresentationRecord accepts the new presentation payload", () => {

@@ -47,7 +47,8 @@
     "build:ci": "bun run build 2>&1 | tee build.log",
     "typecheck:root": "bun x tsc --noEmit",
     "typecheck:core": "bun x tsc --noEmit -p packages/core/tsconfig.json",
-    "typecheck": "bun run typecheck:root && bun run typecheck:core",
+    "typecheck:durable": "bun x tsc --noEmit -p packages/durable/tsconfig.json",
+    "typecheck": "bun run typecheck:root && bun run typecheck:core && bun run typecheck:durable",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
@@ -56,6 +57,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@receipt/durable": "workspace:*",
     "@clack/prompts": "^1.1.0",
     "@hono/zod-validator": "^0.7.6",
     "@inkjs/ui": "^2.0.0",

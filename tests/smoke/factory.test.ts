@@ -5266,6 +5266,11 @@ test("factory workbench route: overview renders apply button for actionable self
 
   expect(response.status).toBe(200);
   expect(body).toContain('action="/factory/api/objectives/objective_live/self-improvement/apply?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live');
+  expect(body).toContain('data-factory-inline-submit="true"');
+  expect(body).toContain('data-factory-inline-pending-label="Applying..."');
+  expect(body).toContain('data-factory-inline-pending-status="Applying self-improvement recommendation..."');
+  expect(body).toContain('data-factory-inline-status="true"');
+  expect(body).toContain('id="factory-chat-streaming-content"');
   expect(body).toContain('name="recommendationIndex" value="0"');
   expect(body).toContain(">Apply</button>");
 });
@@ -7270,6 +7275,61 @@ test("factory workbench route: /follow-up queues a follow-up command for the act
     jobId: "job_active",
     message: "Include the exact run id in the summary.",
     by: "factory.workbench",
+  });
+});
+
+test("factory workbench route: /follow-up resumes a blocked objective when no active job exists", async () => {
+  let reacted: { readonly objectiveId: string; readonly message?: string } | undefined;
+  const blockedObjective = {
+    ...makeStubObjectiveDetail("objective_blocked", undefined),
+    status: "blocked",
+    phase: "blocked",
+    latestSummary: "Waiting for operator guidance.",
+    blockedReason: "Need the missing CLI contract before retrying.",
+  };
+  const app = createRouteTestApp({
+    service: {
+      getObjective: async () => blockedObjective,
+      reactObjectiveWithNote: async (objectiveId: string, message?: string) => {
+        reacted = { objectiveId, message };
+        return {
+          ...blockedObjective,
+          objectiveId,
+          status: "executing",
+          phase: "collecting_evidence",
+          latestSummary: message ?? "Resumed in place.",
+        };
+      },
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory/compose?profile=generalist&chat=chat_demo&objective=objective_blocked", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "accept": "application/json",
+    },
+    body: new URLSearchParams({
+      prompt: "/follow-up Use the CLI contract for the next pass.",
+    }).toString(),
+  });
+
+  expect(response.status).toBe(200);
+  const body = await response.json() as {
+    readonly location?: string;
+    readonly chat?: { readonly chatId?: string };
+    readonly selection?: {
+      readonly objectiveId?: string;
+      readonly focusKind?: string;
+      readonly focusId?: string;
+    };
+  };
+  expect(body.location).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_blocked&detailTab=action");
+  expect(body.chat).toEqual({ chatId: "chat_demo" });
+  expect(body.selection).toEqual({ objectiveId: "objective_blocked" });
+  expect(reacted).toEqual({
+    objectiveId: "objective_blocked",
+    message: "Use the CLI contract for the next pass.",
   });
 });
 

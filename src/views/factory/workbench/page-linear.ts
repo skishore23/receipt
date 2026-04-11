@@ -619,6 +619,7 @@ export const factoryWorkbenchLinearChatBody = (
       </div>
       <div class="mx-auto w-full max-w-[720px] px-2 pb-6 lg:px-0">
         <div id="factory-chat-ephemeral" class="mt-4 space-y-3" aria-live="polite"></div>
+        <div id="factory-chat-streaming-content" class="hidden" aria-hidden="true"></div>
       </div>
     </section>
   </div>

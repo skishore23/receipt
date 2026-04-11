@@ -862,9 +862,10 @@ const renderObjectiveSelfImprovementSnapshot = (
         ${recommendation.anomalyPatterns.length > 0 ? `<div class="mt-2 flex flex-wrap gap-2">
           ${recommendation.anomalyPatterns.slice(0, compact ? 2 : 4).map((pattern) => `<span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground">${esc(pattern)}</span>`).join("")}
         </div>` : ""}
-        ${canApplyRecommendations ? `<form class="mt-3" action="${esc(`${routeContext.shellBase}/api/objectives/${encodeURIComponent(objective.objectiveId)}/self-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post">
+        ${canApplyRecommendations ? `<form class="mt-3" data-factory-inline-submit="true" data-factory-inline-pending-label="Applying..." data-factory-inline-pending-status="Applying self-improvement recommendation..." action="${esc(`${routeContext.shellBase}/api/objectives/${encodeURIComponent(objective.objectiveId)}/self-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post">
           <input type="hidden" name="recommendationIndex" value="${esc(String(index))}" />
           <button type="submit" class="${workbenchPrimaryActionClass}">Apply</button>
+          <div data-factory-inline-status="true" class="mt-2 hidden border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
         </form>` : ""}
       </div>`).join("")}
     </div>` : `<div class="mt-3 text-sm leading-6 text-muted-foreground">${esc(
@@ -1602,6 +1603,7 @@ export const factoryWorkbenchChatBody = (
         ${factoryWorkbenchChatIsland(chat, routeContext)}
       </div>
       <div id="factory-chat-ephemeral" class="mt-4 space-y-3" aria-live="polite"></div>
+      <div id="factory-chat-streaming-content" class="hidden" aria-hidden="true"></div>
     </section>
   </div>
 </div>`;

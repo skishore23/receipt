@@ -236,9 +236,6 @@ const normalizeObjectiveHandoff = (value: unknown): FactoryObjectiveHandoffRecor
     renderedAt: typeof value.renderedAt === "number" && Number.isFinite(value.renderedAt)
       ? value.renderedAt
       : sourceUpdatedAt,
-    renderedBy: value.renderedBy === "orchestrator_llm" || value.renderedBy === "fallback"
-      ? value.renderedBy
-      : renderedBody === summary ? "fallback" : undefined,
     output: typeof value.output === "string" && value.output.trim().length > 0 ? value.output.trim() : undefined,
     blocker: typeof value.blocker === "string" && value.blocker.trim().length > 0 ? value.blocker.trim() : undefined,
     nextAction: typeof value.nextAction === "string" && value.nextAction.trim().length > 0 ? value.nextAction.trim() : undefined,

@@ -53,11 +53,13 @@ test("factory helper runtime skills: document helper-first execution and ship se
   expect(runtimeSkill).toContain("Prefer a checked-in helper over a new `.receipt/factory/*.sh` script.");
   expect(runtimeSkill).toContain("author or extend a checked-in helper");
   expect(runtimeSkill).toContain("python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_account_scope");
+  expect(runtimeSkill).toContain("evidenceRecords");
   expect(authoringSkill).toContain("catalog/<domain>/<helper_id>/");
   expect(authoringSkill).toContain("Emit the canonical result envelope");
   expect(cookbookSkill).toContain("aws sts get-caller-identity --output json");
   expect(cookbookSkill).toContain("aws <service> <operation> help");
   expect(runner).toContain("Factory helper runner");
+  expect(runner).toContain("evidenceRecords");
   expect(accountManifest.id).toBe("aws_account_scope");
   expect(accountManifest.provider).toBe("aws");
   expect(accountManifest.entrypoint).toBe("run.py");

@@ -90,7 +90,7 @@ export const buildMonitorCheckpointPrompt = (input: {
     "- recommend_enter_synthesizing: Evidence is already sufficient or likely sufficient; recommend that control stop evidence collection and finalize directly from the captured evidence.",
     "",
     "Prefer recommend_enter_synthesizing over continue when the worker has evidence but is not finalizing.",
-    "Do not recommend repeated redirects that only restate the same finalize-now guidance.",
+    "If the worker is already synthesizing, do not recommend another redirect that only restates finalize-now guidance.",
     "Prefer recommend_steer over recommend_split when the worker just needs redirection.",
     "Prefer recommend_split over recommend_abort when the task is decomposable.",
   ];

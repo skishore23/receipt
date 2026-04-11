@@ -1,0 +1,14 @@
+{
+  "name": "@receipt/durable",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract": "./src/contract.ts",
+    "./local": "./src/local.ts",
+    "./resonate": "./src/resonate.ts"
+  },
+  "dependencies": {
+    "@resonatehq/sdk": "^0.9.6"
+  }
+}

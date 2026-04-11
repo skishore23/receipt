@@ -96,7 +96,6 @@ export const isObjectiveContinuationBoundary = (input: {
   readonly archivedAt?: unknown;
 }): boolean =>
   Boolean(input.archivedAt)
-  || input.status === "blocked"
   || input.status === "completed"
   || input.status === "failed"
   || input.status === "canceled";

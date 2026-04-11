@@ -496,6 +496,9 @@ export class LocalCodexExecutor implements CodexExecutor {
       ...mergedEnv,
       PATH: prependPaths(runtimeBunPathEntries(mergedEnv), mergedEnv.PATH),
     };
+    if (input.objectiveId) childEnv.RECEIPT_FACTORY_OBJECTIVE_ID = input.objectiveId;
+    if (input.taskId) childEnv.RECEIPT_FACTORY_TASK_ID = input.taskId;
+    if (input.candidateId) childEnv.RECEIPT_FACTORY_CANDIDATE_ID = input.candidateId;
     if (input.isolateCodexHome) {
       isolatedCodexHome = await prepareIsolatedCodexHome(childEnv, input.workspacePath, input.repoSkillPaths);
       if (isolatedCodexHome) childEnv.CODEX_HOME = isolatedCodexHome;

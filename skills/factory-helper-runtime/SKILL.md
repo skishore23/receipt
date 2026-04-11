@@ -45,6 +45,8 @@ Result fields:
 - `data`
 - `capturedAt`
 - `errors`
+- `scriptsRun` (runtime-populated execution record)
+- `evidenceRecords` (runtime-populated structured proof)
 
 ## Rules
 

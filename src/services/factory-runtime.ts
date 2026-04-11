@@ -1,5 +1,7 @@
+import path from "node:path";
 import fs from "node:fs/promises";
 
+import type { DurableBackend } from "@receipt/durable";
 import {
   CodexControlSignalError,
   LocalCodexExecutor,
@@ -45,6 +47,11 @@ import {
   findExistingAutoFixObjective,
 } from "./factory/objective-audit-autofix";
 import { isSqliteLockError } from "../db/client";
+import {
+  codexActivityKey,
+  markDurableJobRunning,
+  recoverPersistedJsonResult,
+} from "../lib/durable-execution";
 
 export type FactoryQueue = JobBackend;
 export type FactoryJobRuntime = ReturnType<
@@ -54,6 +61,7 @@ export type FactoryJobRuntime = ReturnType<
 type FactoryServiceRuntimeOptions = {
   readonly dataDir: string;
   readonly queue: FactoryQueue;
+  readonly durable?: DurableBackend;
   readonly jobRuntime: FactoryJobRuntime;
   readonly sse: SseHub;
   readonly repoRoot: string;
@@ -206,6 +214,11 @@ const appendLiveOperatorGuidance = (
   return `${normalizedPrompt}\n\n${section}\n`;
 };
 
+const directCodexResultPath = (
+  dataDir: string,
+  jobId: string,
+): string => path.join(dataDir, "factory", "codex", jobId, "result.json");
+
 const AUTOFIX_PATTERN_THRESHOLD = 5;
 const RECENT_AUDIT_PATTERN_WINDOW = 20;
 const DEFAULT_AUTO_FIX_SOURCE_CHANNELS = ["trial"] as const;
@@ -229,10 +242,26 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
 const asArray = (value: unknown): ReadonlyArray<unknown> =>
   Array.isArray(value) ? value : [];
 
+const asRecordArray = (value: unknown): ReadonlyArray<Record<string, unknown>> =>
+  Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
+
+const reportStructuredEvidenceStats = (report: FactoryReceiptInvestigation): {
+  readonly evidenceCount: number;
+  readonly scriptCount: number;
+} => {
+  const scriptsRun = report.canonicalEvidenceBundle?.scripts_run.map((item) => ({
+    command: item.command,
+  })) ?? [];
+  return {
+    evidenceCount: report.canonicalEvidenceBundle?.evidence_records.length ?? 0,
+    scriptCount: scriptsRun.filter((item) => Boolean(asString(item.command))).length,
+  };
+};
 
 const normalizeAuditChannel = (
   value: string | undefined,
@@ -275,6 +304,7 @@ const deriveRecommendationPatternsFromReport = (
 ): ReadonlyArray<string> => {
   const patterns = new Set<string>();
   const isDelivery = report.objectiveMode === "delivery";
+  const structuredEvidence = reportStructuredEvidenceStats(report);
   for (const anomaly of report.anomalies) {
     if (anomaly.kind) patterns.add(normalizeAuditPattern(anomaly.kind));
     const summarized = categorizeAuditSummary(anomaly.summary);
@@ -282,8 +312,6 @@ const deriveRecommendationPatternsFromReport = (
   }
   for (const note of report.assessment.notes) {
     const normalized = note.toLowerCase();
-    if (normalized.includes("without structured evidence entries"))
-      patterns.add("missing_structured_evidence");
     if (
       normalized.includes("scriptsrun") ||
       normalized.includes("captured command logs")
@@ -292,6 +320,12 @@ const deriveRecommendationPatternsFromReport = (
     if (normalized.includes("proof items")) patterns.add("missing_proof");
     if (isDelivery && normalized.includes("alignment report"))
       patterns.add("alignment_not_reported");
+  }
+  if (report.objectiveMode === "investigation" && structuredEvidence.evidenceCount === 0) {
+    patterns.add("missing_structured_evidence");
+  }
+  if (report.objectiveMode === "investigation" && structuredEvidence.scriptCount === 0) {
+    patterns.add("missing_scripts_run");
   }
   if (isDelivery && report.assessment.alignmentVerdict === "not_reported")
     patterns.add("alignment_not_reported");
@@ -463,6 +497,14 @@ const readPersistedAuditPatterns = async (
     const notes = asArray(assessment?.notes)
       .map((note) => asString(note))
       .filter((note): note is string => Boolean(note));
+    const outputs = asRecord(raw.outputs);
+    const result = asRecord(outputs?.result);
+    const report = asRecord(result?.report);
+    const scriptCount = [
+      ...asRecordArray(result?.scriptsRun),
+      ...asRecordArray(report?.scriptsRun),
+    ].filter((item) => Boolean(asString(item.command))).length;
+    const evidenceCount = asRecordArray(report?.evidenceRecords).length;
     const patterns = new Set<string>();
     for (const entry of anomalies) {
       const anomaly = asRecord(entry);
@@ -476,8 +518,6 @@ const readPersistedAuditPatterns = async (
     }
     for (const note of notes) {
       const normalized = note.toLowerCase();
-      if (normalized.includes("without structured evidence entries"))
-        patterns.add("missing_structured_evidence");
       if (
         normalized.includes("scriptsrun") ||
         normalized.includes("captured command logs")
@@ -487,6 +527,10 @@ const readPersistedAuditPatterns = async (
       if (objectiveMode === "delivery" && normalized.includes("alignment report"))
         patterns.add("alignment_not_reported");
     }
+    if (objectiveMode === "investigation" && evidenceCount === 0)
+      patterns.add("missing_structured_evidence");
+    if (objectiveMode === "investigation" && scriptCount === 0)
+      patterns.add("missing_scripts_run");
     const alignmentVerdict = asString(assessment?.alignmentVerdict);
     if (objectiveMode === "delivery" && alignmentVerdict === "not_reported")
       patterns.add("alignment_not_reported");
@@ -726,6 +770,7 @@ export const createFactoryServiceRuntime = (
   const service = new FactoryService({
     dataDir: opts.dataDir,
     queue: opts.queue,
+    durable: opts.durable,
     jobRuntime: opts.jobRuntime,
     sse: opts.sse,
     codexExecutor: new LocalCodexExecutor({ bin: opts.codexBin }),
@@ -980,6 +1025,7 @@ export const createFactoryWorkerHandlers = (
   [FACTORY_CONTROL_AGENT_ID]: async (job, ctx) => {
     await ctx.pullCommands(["abort", "steer"]);
     try {
+      if (service.durable) await markDurableJobRunning(service.durable, job);
       const auditMemoryTools = service.memoryTools;
       const result =
         job.payload.kind === "factory.objective.audit"
@@ -1020,6 +1066,7 @@ export const createFactoryWorkerHandlers = (
   },
   [FACTORY_MONITOR_AGENT_ID]: async (job, ctx) => {
     try {
+      if (service.durable) await markDurableJobRunning(service.durable, job);
       const result = await withFactoryJobKeepalive(
         service,
         job.id,
@@ -1058,12 +1105,90 @@ export const createFactoryWorkerHandlers = (
   },
   codex: async (job, ctx) => {
     try {
+      if (service.durable) await markDurableJobRunning(service.durable, job);
       const result = await withFactoryJobKeepalive(
         service,
         job.id,
         ctx.workerId,
         async () => job.payload.kind === "factory.task.run"
-          ? await service.runTask(job.payload, {
+          ? await (service.durable
+              ? service.durable.runDurableActivity({
+                  key: codexActivityKey(job.id),
+                  input: {
+                    jobId: job.id,
+                    payload: { ...(job.payload as Record<string, unknown>) },
+                  },
+                  metadata: {
+                    kind: String(job.payload.kind ?? "factory.task.run"),
+                    objectiveId: typeof job.payload.objectiveId === "string" ? job.payload.objectiveId : undefined,
+                  },
+                  recover: async () => {
+                    const payload = job.payload as Record<string, unknown>;
+                    return recoverPersistedJsonResult(
+                      typeof payload.resultPath === "string" ? payload.resultPath : undefined,
+                    );
+                  },
+                  run: async () => service.runTask(job.payload, {
+                    shouldAbort: async () => {
+                      const latest = await service.queue.getJob(job.id);
+                      return (
+                        latest?.abortRequested === true ||
+                        isTerminalJobStatus(latest?.status)
+                      );
+                    },
+                    pollSignal: async () => {
+                      const commands = await ctx.pullCommands([
+                        "abort",
+                        "steer",
+                        "follow_up",
+                      ]);
+                      if (commands.some((command) => command.command === "abort"))
+                        return { kind: "abort" as const };
+                      const restart = coalesceLiveGuidanceSignal(
+                        job.id,
+                        commands
+                          .filter(
+                            (
+                              command,
+                            ): command is typeof command & {
+                              readonly command: "steer" | "follow_up";
+                            } =>
+                              command.command === "steer" ||
+                              command.command === "follow_up",
+                          )
+                          .map((command) => ({
+                            id: command.id,
+                            command: command.command,
+                            payload: command.payload,
+                          })),
+                      );
+                      if (restart) return restart;
+                      const latest = await service.queue.getJob(job.id);
+                      if (
+                        latest?.abortRequested === true ||
+                        isTerminalJobStatus(latest?.status)
+                      )
+                        return { kind: "abort" };
+                      return undefined;
+                    },
+                    onProgress: async (update) => {
+                      await service.queue.progress(job.id, ctx.workerId, {
+                        worker: "codex",
+                        ...update,
+                      });
+                    },
+                    onChildSpawn: async (update) => {
+                      ctx.registerLeaseProcess({
+                        pid: update.pid,
+                        label: "codex child",
+                      });
+                    },
+                    onChildExit: async () => {
+                      ctx.clearLeaseProcess();
+                    },
+                  }).then((outcome) => outcome as Record<string, unknown>),
+                }).then((activity) => activity.result)
+              : service.runTask(job.payload, {
               shouldAbort: async () => {
                 const latest = await service.queue.getJob(job.id);
                 return (
@@ -1121,7 +1246,7 @@ export const createFactoryWorkerHandlers = (
               onChildExit: async () => {
                 ctx.clearLeaseProcess();
               },
-            })
+            }))
           : job.payload.kind === "factory.codex.run" ||
               job.payload.kind === "codex.run"
             ? await (async () => {
@@ -1148,85 +1273,104 @@ export const createFactoryWorkerHandlers = (
                 const guidanceHistory: string[] = [];
                 while (true) {
                   try {
-                    return await runFactoryCodexJob(
-                      {
-                        dataDir: service.dataDir,
-                        repoRoot: service.git.repoRoot,
-                        jobId: job.id,
-                        prompt: appendLiveOperatorGuidance(
-                          basePrompt,
-                          guidanceHistory,
-                        ),
-                        timeoutMs,
-                        executor: service.codexExecutor,
-                        factoryService: service,
-                        payload,
-                        onProgress: async (update) => {
-                          await service.queue.progress(
-                            job.id,
-                            ctx.workerId,
-                            update,
-                          );
+                    const runCodex = (): Promise<Record<string, unknown>> =>
+                      runFactoryCodexJob(
+                        {
+                          dataDir: service.dataDir,
+                          repoRoot: service.git.repoRoot,
+                          jobId: job.id,
+                          prompt: appendLiveOperatorGuidance(
+                            basePrompt,
+                            guidanceHistory,
+                          ),
+                          timeoutMs,
+                          executor: service.codexExecutor,
+                          factoryService: service,
+                          payload,
+                          onProgress: async (update) => {
+                            await service.queue.progress(
+                              job.id,
+                              ctx.workerId,
+                              update,
+                            );
+                          },
                         },
-                      },
-                      {
-                        shouldAbort: async () => {
-                          const latest = await service.queue.getJob(job.id);
-                          return (
-                            latest?.abortRequested === true ||
-                            isTerminalJobStatus(latest?.status)
-                          );
-                        },
-                        pollSignal: async () => {
-                          const commands = await ctx.pullCommands([
-                            "abort",
-                            "steer",
-                            "follow_up",
-                          ]);
-                          if (
-                            commands.some(
-                              (command) => command.command === "abort",
-                            )
-                          )
-                            return { kind: "abort" as const };
-                          const restart = coalesceLiveGuidanceSignal(
-                            job.id,
-                            commands
-                              .filter(
-                                (
-                                  command,
-                                ): command is typeof command & {
-                                  readonly command: "steer" | "follow_up";
-                                } =>
-                                  command.command === "steer" ||
-                                  command.command === "follow_up",
+                        {
+                          shouldAbort: async () => {
+                            const latest = await service.queue.getJob(job.id);
+                            return (
+                              latest?.abortRequested === true ||
+                              isTerminalJobStatus(latest?.status)
+                            );
+                          },
+                          pollSignal: async () => {
+                            const commands = await ctx.pullCommands([
+                              "abort",
+                              "steer",
+                              "follow_up",
+                            ]);
+                            if (
+                              commands.some(
+                                (command) => command.command === "abort",
                               )
-                              .map((command) => ({
-                                id: command.id,
-                                command: command.command,
-                                payload: command.payload,
-                              })),
-                          );
-                          if (restart) return restart;
-                          const latest = await service.queue.getJob(job.id);
-                          if (
-                            latest?.abortRequested === true ||
-                            isTerminalJobStatus(latest?.status)
-                          )
-                            return { kind: "abort" };
-                          return undefined;
+                            )
+                              return { kind: "abort" as const };
+                            const restart = coalesceLiveGuidanceSignal(
+                              job.id,
+                              commands
+                                .filter(
+                                  (
+                                    command,
+                                  ): command is typeof command & {
+                                    readonly command: "steer" | "follow_up";
+                                  } =>
+                                    command.command === "steer" ||
+                                    command.command === "follow_up",
+                                )
+                                .map((command) => ({
+                                  id: command.id,
+                                  command: command.command,
+                                  payload: command.payload,
+                                })),
+                            );
+                            if (restart) return restart;
+                            const latest = await service.queue.getJob(job.id);
+                            if (
+                              latest?.abortRequested === true ||
+                              isTerminalJobStatus(latest?.status)
+                            )
+                              return { kind: "abort" };
+                            return undefined;
+                          },
+                          onChildSpawn: async (update) => {
+                            ctx.registerLeaseProcess({
+                              pid: update.pid,
+                              label: "codex child",
+                            });
+                          },
+                          onChildExit: async () => {
+                            ctx.clearLeaseProcess();
+                          },
                         },
-                        onChildSpawn: async (update) => {
-                          ctx.registerLeaseProcess({
-                            pid: update.pid,
-                            label: "codex child",
-                          });
-                        },
-                        onChildExit: async () => {
-                          ctx.clearLeaseProcess();
-                        },
+                      );
+                    if (!service.durable) {
+                      return await runCodex();
+                    }
+                    return await service.durable.runDurableActivity({
+                      key: codexActivityKey(job.id),
+                      input: {
+                        jobId: job.id,
+                        payload,
                       },
-                    );
+                      metadata: {
+                        kind: String(job.payload.kind ?? "factory.codex.run"),
+                      },
+                      recover: async () =>
+                        recoverPersistedJsonResult(
+                          directCodexResultPath(service.dataDir, job.id),
+                        ),
+                      run: runCodex,
+                    }).then((activity) => activity.result);
                   } catch (error) {
                     if (
                       !(error instanceof CodexControlSignalError) ||

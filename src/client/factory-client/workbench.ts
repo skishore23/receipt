@@ -1418,6 +1418,92 @@ export const initFactoryWorkbenchBrowser = () => {
     setComposerBusy(false);
   };
 
+  const inlineSubmitButton = (form: HTMLFormElement): HTMLButtonElement | null => {
+    const button = form.querySelector('button[type="submit"],input[type="submit"]');
+    return button instanceof HTMLButtonElement
+      ? button
+      : null;
+  };
+
+  const inlineSubmitStatus = (form: HTMLFormElement): HTMLElement | null => {
+    const node = form.querySelector("[data-factory-inline-status]");
+    return node instanceof HTMLElement ? node : null;
+  };
+
+  const setInlineSubmitStatus = (form: HTMLFormElement, message: string) => {
+    const status = inlineSubmitStatus(form);
+    if (!status) return;
+    status.textContent = message;
+    if (message.trim()) {
+      status.classList.remove("hidden");
+    } else {
+      status.classList.add("hidden");
+    }
+  };
+
+  const setInlineSubmitBusy = (form: HTMLFormElement, busy: boolean) => {
+    const button = inlineSubmitButton(form);
+    if (!button) return;
+    if (!("factoryLabel" in button.dataset) || !button.dataset.factoryLabel) {
+      button.dataset.factoryLabel = button.textContent || button.getAttribute("value") || "";
+    }
+    const pendingLabel = form.getAttribute("data-factory-inline-pending-label") || "Working...";
+    button.disabled = busy;
+    if (busy) {
+      if (button instanceof HTMLButtonElement) {
+        button.textContent = pendingLabel;
+      }
+      return;
+    }
+    const originalLabel = button.dataset.factoryLabel || "Submit";
+    if (button instanceof HTMLButtonElement) {
+      button.textContent = originalLabel;
+    }
+  };
+
+  const submitInlineWorkbenchForm = (form: HTMLFormElement) => {
+    const pendingStatus = form.getAttribute("data-factory-inline-pending-status") || "Working...";
+    let keepBusyForNavigation = false;
+    setInlineSubmitBusy(form, true);
+    setInlineSubmitStatus(form, pendingStatus);
+    const formData = new window.FormData(form);
+    window.fetch(form.action, {
+      method: form.method || "POST",
+      body: formData,
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    }).then((response: FactoryFetchResponse) => {
+      const contentType = response.headers.get("content-type") || "";
+      const bodyPromise = contentType.indexOf("application/json") >= 0
+        ? response.json().catch(() => ({}))
+        : response.text().catch(() => "Request failed.").then((text) => ({ error: text }));
+      return bodyPromise.then((payloadBody) => {
+        const body = parseComposeResponse(payloadBody);
+        if (!response.ok) {
+          setInlineSubmitStatus(form, body.error || "Request failed.");
+          return;
+        }
+        if (body.location) {
+          keepBusyForNavigation = true;
+          return applyInlineLocation(body.location, "push").then((handledInline) => {
+            if (!handledInline) return;
+            keepBusyForNavigation = false;
+          });
+        }
+        keepBusyForNavigation = true;
+        if (typeof window.location.reload === "function") {
+          window.location.reload();
+          return;
+        }
+        throw new Error("Request failed.");
+      });
+    }).catch((error: unknown) => {
+      setInlineSubmitStatus(form, error instanceof Error ? error.message : "Request failed.");
+    }).finally(() => {
+      if (!keepBusyForNavigation) setInlineSubmitBusy(form, false);
+    });
+  };
+
   const input = chatInput();
   if (input) {
     input.addEventListener("input", autoResizeInput, { passive: true });
@@ -1549,6 +1635,15 @@ export const initFactoryWorkbenchBrowser = () => {
       });
     });
   }
+
+  document.addEventListener("submit", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLFormElement)) return;
+    if (target === composerForm()) return;
+    if (target.getAttribute("data-factory-inline-submit") !== "true") return;
+    event.preventDefault();
+    submitInlineWorkbenchForm(target);
+  });
 
   const scroll = chatScroll();
   if (scroll) {

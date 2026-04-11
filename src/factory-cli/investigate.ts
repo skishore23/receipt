@@ -3,6 +3,11 @@ import path from "node:path";
 
 import { readFactoryParsedRun, type FactoryParsedRun } from "./parse";
 import type { AuditRecommendation } from "./analyze";
+import {
+  investigationEvidenceBundlePath,
+  readInvestigationEvidenceBundle,
+  type FactoryInvestigationEvidenceBundle,
+} from "../services/factory-evidence-bundle";
 import { readPersistedObjectiveAuditMetadata } from "../services/factory/objective-audit-artifacts";
 
 type InvestigationFocusTaskRun = FactoryParsedRun["taskRuns"][number];
@@ -19,6 +24,7 @@ type InvestigationPacketContext = {
   readonly manifestPath?: string;
   readonly contextPackPath?: string;
   readonly resultPath?: string;
+  readonly evidenceBundlePath?: string;
   readonly lastMessagePath?: string;
   readonly stdoutPath?: string;
   readonly stderrPath?: string;
@@ -94,6 +100,7 @@ export type FactoryReceiptInvestigation = {
   readonly window: FactoryParsedRun["window"];
   readonly inputs: FactoryParsedRun["inputs"];
   readonly outputs: FactoryParsedRun["outputs"];
+  readonly canonicalEvidenceBundle?: FactoryInvestigationEvidenceBundle;
   readonly dag: InvestigationDag;
   readonly packetContext?: InvestigationPacketContext;
   readonly timeline: ReadonlyArray<InvestigationTimelineItem>;
@@ -164,11 +171,6 @@ const excerptBlock = (value: string | undefined, input: {
 
 const uniqueStrings = (values: ReadonlyArray<string | undefined>): ReadonlyArray<string> =>
   [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
-
-const asRecordArray = (value: unknown): ReadonlyArray<Record<string, unknown>> =>
-  asArray(value)
-    .map((item) => asRecord(item))
-    .filter((item): item is Record<string, unknown> => Boolean(item));
 
 const asStringArray = (value: unknown): ReadonlyArray<string> =>
   asArray(value)
@@ -288,6 +290,7 @@ const summarizeContextPack = async (taskRun: InvestigationFocusTaskRun | undefin
   const manifestPath = taskRun.manifest.resolvedPath ?? taskRun.manifest.originalPath;
   const contextPackPath = taskRun.contextPack.resolvedPath ?? taskRun.contextPack.originalPath;
   const resultPath = taskRun.resultFile.resolvedPath ?? taskRun.resultFile.originalPath;
+  const evidenceBundlePath = resultPath ? investigationEvidenceBundlePath(resultPath) : undefined;
   const lastMessagePath = taskRun.lastMessage.resolvedPath ?? taskRun.lastMessage.originalPath;
   const stdoutPath = taskRun.stdout.resolvedPath ?? taskRun.stdout.originalPath;
   const stderrPath = taskRun.stderr.resolvedPath ?? taskRun.stderr.originalPath;
@@ -338,6 +341,7 @@ const summarizeContextPack = async (taskRun: InvestigationFocusTaskRun | undefin
     manifestPath,
     contextPackPath,
     resultPath,
+    evidenceBundlePath,
     lastMessagePath,
     stdoutPath,
     stderrPath,
@@ -393,20 +397,23 @@ const buildAssessment = (
   packetContext: InvestigationPacketContext | undefined,
   focusTaskRun: InvestigationFocusTaskRun | undefined,
   interventions: Omit<InvestigationInterventions, "controllerCorrectionWorked">,
+  canonicalEvidenceBundle: FactoryInvestigationEvidenceBundle | undefined,
 ): InvestigationRunAssessment => {
   const analysis = parsed.objectiveAnalysis;
   const result = asRecord(parsed.outputs.result);
   const completion = asRecord(result?.completion);
-  const report = asRecord(result?.report);
   const changed = asStringArray(completion?.changed);
   const proof = asStringArray(completion?.proof);
-  const scriptsRun = [
-    ...asRecordArray(result?.scriptsRun),
-    ...asRecordArray(report?.scriptsRun),
-  ];
+  const scriptsRun = canonicalEvidenceBundle
+    ? canonicalEvidenceBundle.scripts_run.map((item) => ({
+      command: item.command,
+      summary: item.summary,
+      status: item.status,
+    }))
+    : [];
   const scriptCount = scriptsRun.filter((item) => asString(item.command)).length;
   const commandCount = focusTaskRun?.stdout.commands.length ?? 0;
-  const evidenceCount = asRecordArray(report?.evidence).length;
+  const evidenceCount = canonicalEvidenceBundle?.evidence_records.length ?? 0;
   const helperCount = packetContext?.selectedHelpers.length ?? 0;
   const controlJobs = analysis?.jobs.filter((job) => job.payloadKind === "factory.objective.control").length ?? 0;
   const stalledJobs = analysis?.jobs.filter((job) => job.status === "stalled").length ?? 0;
@@ -496,9 +503,9 @@ const buildAssessment = (
   }
 
   if (objectiveMode === "investigation" && success) {
-    if (evidenceCount === 0) {
+    if (evidenceCount === 0 && helperCount > 0) {
       easyRouteScore += 2;
-      notes.push("Investigation completed without structured evidence entries.");
+      notes.push("Invalid investigation artifact: canonical evidence bundle is missing structured evidence records.");
     }
     if (scriptCount === 0 && commandCount === 0 && helperCount === 0) {
       easyRouteScore += 2;
@@ -667,6 +674,9 @@ const buildWhatHappened = (
   if (packetContext?.summaryPath) {
     bullets.push(`Worker packet summary available at ${packetContext.summaryPath}.`);
   }
+  if (packetContext?.evidenceBundlePath) {
+    bullets.push(`Canonical evidence bundle available at ${packetContext.evidenceBundlePath}.`);
+  }
   return uniqueStrings(bullets);
 };
 
@@ -699,8 +709,24 @@ export const readFactoryReceiptInvestigation = async (
   }
   const focusTaskRun = selectFocusTaskRun(parsed);
   const packetContext = await summarizeContextPack(focusTaskRun);
+  let canonicalEvidenceBundle: FactoryInvestigationEvidenceBundle | undefined;
+  if (packetContext?.evidenceBundlePath) {
+    try {
+      canonicalEvidenceBundle = await readInvestigationEvidenceBundle(packetContext.evidenceBundlePath);
+    } catch (error) {
+      warnings.push(
+        `Invalid canonical evidence bundle at ${packetContext.evidenceBundlePath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   const interventionSignals = buildInterventions(parsed);
-  const assessment = buildAssessment(parsed, packetContext, focusTaskRun, interventionSignals);
+  const assessment = buildAssessment(
+    parsed,
+    packetContext,
+    focusTaskRun,
+    interventionSignals,
+    canonicalEvidenceBundle,
+  );
   return {
     requestedId,
     resolved: parsed.resolved,
@@ -714,6 +740,7 @@ export const readFactoryReceiptInvestigation = async (
     window: parsed.window,
     inputs: parsed.inputs,
     outputs: parsed.outputs,
+    canonicalEvidenceBundle,
     dag: buildDag(parsed),
     packetContext,
     timeline: parsed.timeline,

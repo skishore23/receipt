@@ -171,9 +171,12 @@ const helperRuntimeBunPathEntries = (): ReadonlyArray<string> => {
   return [...new Set(candidates.filter((entry): entry is string => Boolean(entry)))];
 };
 
-const helperRuntimeEnv = (): NodeJS.ProcessEnv => ({
+const helperRuntimeEnv = (
+  overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv => ({
   ...process.env,
   PATH: prependPaths(helperRuntimeBunPathEntries(), process.env.PATH),
+  ...overrides,
 });
 
 const readdirIfPresent = async (targetPath: string): Promise<ReadonlyArray<Dirent>> => {
@@ -460,7 +463,10 @@ export const runFactoryHelper = async (input: {
       cwd: input.profileRoot,
       encoding: "utf-8",
       maxBuffer: 16 * 1024 * 1024,
-      env: helperRuntimeEnv(),
+      env: helperRuntimeEnv({
+        RECEIPT_FACTORY_OBJECTIVE_ID: process.env.RECEIPT_FACTORY_OBJECTIVE_ID ?? "factory_cli_helper",
+        RECEIPT_FACTORY_TASK_ID: process.env.RECEIPT_FACTORY_TASK_ID ?? `helper_${input.helperId}`,
+      }),
     });
     return JSON.parse(stdout) as FactoryHelperResult;
   } catch (error) {

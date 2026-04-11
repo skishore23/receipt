@@ -170,7 +170,6 @@ export type FactoryEvent =
       readonly renderedBody?: string;
       readonly renderSourceHash?: string;
       readonly renderedAt?: number;
-      readonly renderedBy?: "orchestrator_llm" | "fallback";
       readonly output?: string;
       readonly blocker?: string;
       readonly nextAction?: string;

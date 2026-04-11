@@ -392,24 +392,44 @@ export const registerFactoryApiRoutes = (input: {
             });
           }
           case "follow-up": {
-            const job = await resolveComposerJob(request.objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
-            const queued = await service.queueJobFollowUp(job.id, command.message ?? "", "factory.workbench");
-            return workbenchNavigationResponse(req, workbenchLink({
-              profileId: request.profileId,
-              chatId: request.chatId,
-              objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
-              inspectorTab: request.inspectorTab,
-              detailTab: request.detailTab,
-              page: request.page,
-              filter: request.filter,
-              focusKind: "job",
-              focusId: queued.job.id,
-            }), {
-              chatId: request.chatId,
-              objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
-              focusKind: "job",
-              focusId: queued.job.id,
-            });
+            try {
+              const job = await resolveComposerJob(request.objectiveId, optionalTrimmedString(body.currentJobId) ?? requestedJobId(req));
+              const queued = await service.queueJobFollowUp(job.id, command.message ?? "", "factory.workbench");
+              return workbenchNavigationResponse(req, workbenchLink({
+                profileId: request.profileId,
+                chatId: request.chatId,
+                objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
+                inspectorTab: request.inspectorTab,
+                detailTab: request.detailTab,
+                page: request.page,
+                filter: request.filter,
+                focusKind: "job",
+                focusId: queued.job.id,
+              }), {
+                chatId: request.chatId,
+                objectiveId: jobObjectiveId(queued.job) ?? request.objectiveId,
+                focusKind: "job",
+                focusId: queued.job.id,
+              });
+            } catch (err) {
+              if (!(err instanceof FactoryServiceError) || err.status !== 409 || !request.objectiveId) throw err;
+              const detail = await service.getObjective(request.objectiveId);
+              if (detail.status !== "blocked") throw err;
+              const resumed = await service.reactObjectiveWithNote(request.objectiveId, command.message ?? "");
+              ctx.sse.publish("factory", resumed.objectiveId);
+              return workbenchNavigationResponse(req, workbenchLink({
+                profileId: request.profileId,
+                chatId: request.chatId,
+                objectiveId: resumed.objectiveId,
+                inspectorTab: request.inspectorTab,
+                detailTab: request.detailTab,
+                page: request.page,
+                filter: request.filter,
+              }), {
+                chatId: request.chatId,
+                objectiveId: resumed.objectiveId,
+              });
+            }
           }
         }
       }

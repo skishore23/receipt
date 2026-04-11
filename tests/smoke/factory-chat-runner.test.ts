@@ -4380,6 +4380,121 @@ test("factory chat runner: canonical follow-up note reacts the active bound obje
   });
 });
 
+test("factory chat runner: blocked bound objectives react in place instead of creating a follow-up objective", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-dispatch-blocked-react-note");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Generalist",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let createdInput: Record<string, unknown> | undefined;
+  let reacted: { readonly objectiveId: string; readonly message?: string } | undefined;
+  const factoryService = createFactoryServiceStub({
+    getObjective: async (objectiveId: string) => ({
+      objectiveId,
+      title: "Blocked objective",
+      status: "blocked",
+      phase: "blocked",
+      objectiveMode: "delivery",
+      severity: 3,
+      latestSummary: "Waiting for operator guidance.",
+      blockedExplanation: {
+        summary: "The objective needs a concrete operator note before the next attempt.",
+      },
+      nextAction: "React with the missing contract guidance.",
+      integration: { status: "idle", queuedCandidateIds: [] },
+      latestDecision: undefined,
+      evidenceCards: [],
+      tasks: [],
+    }),
+    createObjective: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return {
+        objectiveId: "objective_followup",
+        title: String(input.title ?? "follow-up"),
+        status: "queued",
+        phase: "queued",
+        latestSummary: "Created the follow-up objective.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+    reactObjectiveWithNote: async (objectiveId: string, message?: string) => {
+      reacted = { objectiveId, message };
+      return {
+        objectiveId,
+        title: "Blocked objective",
+        status: "executing",
+        phase: "collecting_evidence",
+        latestSummary: message ?? "Reacted in place.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+      };
+    },
+  });
+  const actions = [
+    {
+      thought: "resume the blocked objective with the operator note",
+      action: {
+        type: "tool",
+        name: "factory.dispatch",
+        input: JSON.stringify({ note: "Use the CLI contract for the next pass." }),
+        text: null,
+      },
+    },
+    {
+      thought: "reply",
+      action: {
+        type: "final",
+        name: null,
+        input: "{}",
+        text: "Resuming the blocked objective.",
+      },
+    },
+  ];
+
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_dispatch_blocked_react_note",
+    problem: "Resume the blocked objective with the operator note.",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: scriptedLlm(actions),
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: factoryService as never,
+    repoRoot,
+    profileRoot,
+    chatId: "chat_demo",
+    objectiveId: "objective_blocked",
+  });
+
+  expect(result.status).toBe("completed");
+  expect(createdInput).toBeUndefined();
+  expect(reacted).toEqual({
+    objectiveId: "objective_blocked",
+    message: "Use the CLI contract for the next pass.",
+  });
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_blocked_react_note"));
+  const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
+  expect(observed && "output" in observed ? observed.output : "").toContain('"action": "react"');
+  const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
+  const latestBound = boundEvents.at(-1);
+  expect(latestBound && "objectiveId" in latestBound ? latestBound.objectiveId : "").toBe("objective_blocked");
+  expect(latestBound && "reason" in latestBound ? latestBound.reason : "").toBe("dispatch_update");
+});
+
 test("factory chat runner: canonical completed-objective follow-up fields create and bind a new objective", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-dispatch-followup");
   const repoRoot = await createTempDir("receipt-factory-chat-repo");
@@ -5156,13 +5271,11 @@ test("factory chat runner: direct codex probes fail explicitly if they mutate tr
   await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_mutation", "result.json"), "utf-8")).resolves.toContain("\"status\": \"failed\"");
 });
 
-test("factory chat runner: direct codex probes retry in a disposable workspace when sandbox startup is incompatible", async () => {
+test("factory chat runner: direct codex probes fail immediately when sandbox startup is incompatible", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-direct-fallback");
   const repoRoot = await createGitRepo("receipt-factory-chat-direct-fallback-repo");
   const captured: Array<Record<string, unknown>> = [];
-  let fallbackWorkspacePath = "";
-
-  const result = await runFactoryCodexJob({
+  await expect(runFactoryCodexJob({
     dataDir,
     repoRoot,
     jobId: "job_direct_fallback",
@@ -5207,42 +5320,21 @@ test("factory chat runner: direct codex probes retry in a disposable workspace w
           workspacePath: execInput.workspacePath,
           sandboxMode: execInput.sandboxMode,
           mutationPolicy: execInput.mutationPolicy,
-          disableSandboxModeInference: execInput.disableSandboxModeInference,
         });
-        if (captured.length === 1) {
-          await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
-          throw new Error("bwrap: Unknown option --argv0");
-        }
-        fallbackWorkspacePath = execInput.workspacePath;
-        await fs.writeFile(execInput.lastMessagePath, "Read-only inspection complete.", "utf-8");
-        await fs.writeFile(execInput.stdoutPath, "Scanned files\n", "utf-8");
-        return {
-          exitCode: 0,
-          signal: null,
-          stdout: "Scanned files\n",
-          stderr: "",
-          lastMessage: "Read-only inspection complete.",
-        };
+        await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
+        throw new Error("bwrap: Unknown option --argv0");
       },
     },
-  });
+  })).rejects.toThrow("bwrap: Unknown option --argv0");
 
-  expect(result.status).toBe("completed");
-  expect(result.readOnly).toBe(true);
-  expect(result.sandboxCompatibilityFallbackUsed).toBe(true);
-  expect(captured).toHaveLength(2);
+  expect(captured).toHaveLength(1);
   expect(captured[0]?.workspacePath).toBe(repoRoot);
   expect(captured[0]?.sandboxMode).toBe("read-only");
-  expect(captured[1]?.workspacePath).not.toBe(repoRoot);
-  expect(captured[1]?.sandboxMode).toBeUndefined();
-  expect(captured[1]?.mutationPolicy).toBe("read_only_probe");
-  expect(captured[1]?.disableSandboxModeInference).toBe(true);
-  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback", "stderr.log"), "utf-8")).resolves.toContain("sandbox compatibility fallback");
-  await expect(fs.stat(fallbackWorkspacePath)).rejects.toThrow();
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback", "result.json"), "utf-8")).resolves.toContain("\"status\": \"failed\"");
   await expect(fs.readFile(path.join(repoRoot, "README.md"), "utf-8")).resolves.toBe("# demo\n");
 });
 
-test("factory chat runner: disposable fallback still rejects read-only probe mutations", async () => {
+test("factory chat runner: sandbox startup failure does not retry into a mutable fallback workspace", async () => {
   const dataDir = await createTempDir("receipt-factory-chat-direct-fallback-mutation");
   const repoRoot = await createGitRepo("receipt-factory-chat-direct-fallback-mutation-repo");
 
@@ -5287,23 +5379,12 @@ test("factory chat runner: disposable fallback still rejects read-only probe mut
     } as never,
     executor: {
       run: async (execInput) => {
-        if (execInput.sandboxMode === "read-only") {
-          await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
-          throw new Error("bwrap: Unknown option --argv0");
-        }
-        await fs.writeFile(path.join(execInput.workspacePath, "README.md"), "# changed in fallback\n", "utf-8");
-        await fs.writeFile(execInput.lastMessagePath, "Attempted to change files.", "utf-8");
-        return {
-          exitCode: 0,
-          signal: null,
-          stdout: "",
-          stderr: "",
-          lastMessage: "Attempted to change files.",
-        };
+        await fs.writeFile(execInput.stderrPath, "bwrap: Unknown option --argv0\n", "utf-8");
+        throw new Error("bwrap: Unknown option --argv0");
       },
     },
-  })).rejects.toThrow("Direct Codex probes are read-only");
+  })).rejects.toThrow("bwrap: Unknown option --argv0");
 
   await expect(fs.readFile(path.join(repoRoot, "README.md"), "utf-8")).resolves.toBe("# demo\n");
-  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback_mutation", "result.json"), "utf-8")).resolves.toContain("\"sandboxCompatibilityFallbackUsed\": true");
+  await expect(fs.readFile(path.join(dataDir, "factory-chat", "codex", "job_direct_fallback_mutation", "result.json"), "utf-8")).resolves.toContain("\"status\": \"failed\"");
 });
