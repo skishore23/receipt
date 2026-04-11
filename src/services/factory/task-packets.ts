@@ -679,6 +679,11 @@ export const renderTaskContextSummary = (
   const candidateLineage = pack.candidateLineage
     .slice(-6)
     .map((candidate) => `- ${candidate.candidateId} [${candidate.status}]${candidate.summary ? ` · ${candidate.summary}` : ""}${candidate.handoff && candidate.handoff !== candidate.summary ? ` · handoff ${candidate.handoff}` : ""}`);
+  const scriptsRun = pack.candidateLineage
+    .flatMap((candidate) => candidate.scriptsRun ?? [])
+    .map((item) => `- ${item.status ?? "ok"}: ${item.command}${item.summary ? ` | ${item.summary}` : ""}`);
+  const validationRequested = pack.contract.requiredChecks
+    .some((check) => /\bvalidation\b/i.test(check) || /\bvalidate\b/i.test(check));
   const recentReceipts = pack.recentReceipts
     .slice(-10)
     .map((receipt) => `- ${receipt.type}: ${clipText(receipt.summary, 240) ?? receipt.summary}`);
@@ -742,6 +747,10 @@ export const renderTaskContextSummary = (
     "",
     candidateLineage.length > 0 ? "## Candidate Lineage" : "",
     ...candidateLineage,
+    "",
+    scriptsRun.length > 0 ? "## Scripts Run" : "",
+    ...scriptsRun,
+    validationRequested && scriptsRun.length === 0 ? "- warning: validation was requested but no scriptsRun entries were recorded." : "",
     "",
     recentReceipts.length > 0 ? "## Recent Receipts" : "",
     ...recentReceipts,
