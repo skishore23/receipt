@@ -927,6 +927,9 @@ test("factory policy: terminal publish jobs exit with skipped_terminal_state", a
   await runObjectiveReconcile(service, created.objectiveId);
 
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  const firstRun = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+  expect(firstRun.status).toBe("completed");
+
   const skipped = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
 
   expect(skipped.status).toBe("skipped_terminal_state");
