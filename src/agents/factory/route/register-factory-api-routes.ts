@@ -20,6 +20,11 @@ import {
   type FactoryLiveOutputTargetKind,
   type FactoryService,
 } from "../../../services/factory-service";
+import { readPersistedObjectiveAuditMetadata } from "../../../services/factory/objective-audit-artifacts";
+import {
+  buildAutoFixObjectiveInput,
+  findExistingAutoFixObjective,
+} from "../../../services/factory/objective-audit-autofix";
 import {
   inferExplicitDeliveryObjectiveMode,
   parseComposerDraft,
@@ -450,6 +455,71 @@ export const registerFactoryApiRoutes = (input: {
           runId,
           jobId: created.id,
         },
+      });
+    } catch (err) {
+      if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);
+      const message = err instanceof Error ? err.message : "factory server error";
+      console.error(err);
+      return navigationError(req, 500, message);
+    }
+  });
+
+  app.post(`${basePath}/api/objectives/:id/self-improvement/apply`, async (c) => {
+    const req = c.req.raw;
+    try {
+      if (!dataDir) throw new FactoryServiceError(503, "Objective audit artifacts are not configured.");
+      const request = readWorkbenchRequest(req);
+      const workbenchLink = (input: Parameters<typeof buildWorkbenchLink>[0]): string =>
+        buildWorkbenchLink({
+          ...input,
+          basePath: request.shellBase,
+        });
+      const objectiveId = c.req.param("id");
+      const body = await readRecordBody(req, (message) => new FactoryServiceError(400, message));
+      const rawIndex = optionalTrimmedString(body.recommendationIndex);
+      const recommendationIndex = rawIndex ? Number.parseInt(rawIndex, 10) : Number.NaN;
+      if (!Number.isInteger(recommendationIndex) || recommendationIndex < 0) {
+        throw new FactoryServiceError(400, "Provide a valid recommendation index.");
+      }
+      const auditMetadata = await readPersistedObjectiveAuditMetadata(dataDir, objectiveId);
+      if (!auditMetadata || auditMetadata.recommendationStatus !== "ready") {
+        throw new FactoryServiceError(409, "A fresh self-improvement recommendation snapshot is not available.");
+      }
+      const recommendation = auditMetadata.recommendations[recommendationIndex];
+      if (!recommendation) {
+        throw new FactoryServiceError(404, "That self-improvement recommendation no longer exists.");
+      }
+      const sourceObjective = await service.getObjective(objectiveId);
+      const existingObjectiveId = await findExistingAutoFixObjective(service, recommendation);
+      const autoFixObjective = existingObjectiveId
+        ? await service.getObjective(existingObjectiveId).catch(() => undefined)
+        : await service.createObjective(buildAutoFixObjectiveInput({
+          recommendation,
+          sourceObjectiveId: objectiveId,
+          profileId: sourceObjective.profile.rootProfileId,
+          patternCounts: new Map(
+            auditMetadata.recurringPatterns.map((entry) => [entry.pattern, entry.count] as const),
+          ),
+          triggerLabel: "Operator-applied self-improvement recommendation.",
+        }));
+      const targetObjectiveId = autoFixObjective?.objectiveId ?? existingObjectiveId;
+      if (!targetObjectiveId) {
+        throw new FactoryServiceError(500, "Failed to create or locate the auto-fix objective.");
+      }
+      const targetProfileId = autoFixObjective?.profile.rootProfileId ?? sourceObjective.profile.rootProfileId;
+      ctx.sse.publish("factory", objectiveId);
+      ctx.sse.publish("factory", targetObjectiveId);
+      return workbenchNavigationResponse(req, workbenchLink({
+        profileId: targetProfileId,
+        chatId: request.chatId,
+        objectiveId: targetObjectiveId,
+        inspectorTab: "chat",
+        detailTab: "action",
+        page: request.page,
+        filter: request.filter,
+      }), {
+        chatId: request.chatId,
+        objectiveId: targetObjectiveId,
       });
     } catch (err) {
       if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);

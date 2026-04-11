@@ -60,6 +60,14 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
   });
 };
 
+const runObjectiveReconcile = async (service: FactoryService, objectiveId: string): Promise<void> => {
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId,
+    reason: "reconcile",
+  });
+};
+
 const createJobRuntime = (dataDir: string) =>
   createRuntime<JobCmd, JobEvent, JobState>(
     sqliteReceiptStore<JobEvent>(dataDir),
@@ -449,6 +457,36 @@ test("factory policy: investigation task schema keeps scriptsRun inside report a
   expect(schema.required).toEqual(["status", "conclusion", "findings", "uncertainties", "nextAction"]);
 }, 120_000);
 
+test("factory policy: investigation objectives created from generalist default to evidence validation", async () => {
+  const { service, queue } = await createFactoryService();
+
+  const created = await service.createObjective({
+    title: "Generalist investigation validation policy",
+    prompt: "Investigate the mounted AWS account and summarize the findings.",
+    objectiveMode: "investigation",
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.checks).toEqual([]);
+  expect(detail.planning?.constraints).toContain("Validation is evidence-based for this investigation objective.");
+  expect(detail.planning?.validationPlan).toEqual([
+    "Capture reproducible evidence with scripts, receipts, or structured artifacts.",
+    "Summarize what proved the conclusion and what remains uncertain.",
+  ]);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const prompt = await fs.readFile(String(taskJob.payload.promptPath), "utf-8");
+
+  expect(prompt).toContain("Required checks:\n- none");
+  expect(prompt).toContain("This is a CLI investigation task. Do not run the broad repo validation suite unless you changed repo files or this task explicitly owns validation.");
+  expect(prompt).not.toContain("Required checks:\n- bun run build");
+  expect(prompt).not.toContain("Required checks:\n- bun run verify");
+  expect(prompt).not.toContain("Reserved full-suite commands if later evidence requires them:");
+}, FACTORY_POLICY_TIMEOUT_MS);
+
 test("factory policy: objectives record a planning receipt and expose it on detail", async () => {
   const { service } = await createFactoryService();
 
@@ -529,6 +567,7 @@ test("factory policy: promotion gate blocks when task completion reports remaini
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validationJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validationJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
 
   const detail = await service.getObjective(created.objectiveId);
 
@@ -569,6 +608,7 @@ test("factory policy: controller can clear delivery partials when repo checks re
   await service.runTask(taskJob.payload as FactoryTaskJobPayload);
   const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
   await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
   const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
   await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
 
@@ -725,8 +765,7 @@ test("factory objective detail: blocked explanations stay focused on the current
 
   const created = await service.createObjective({
     title: "Blocked dependency summary objective",
-    prompt: "Investigate AWS spend drivers and summarize the blockers.",
-    objectiveMode: "investigation",
+    prompt: "Apply a small delivery change and surface the current blocker clearly.",
     checks: ["git status --short"],
   });
   await runObjectiveStartup(service, created.objectiveId);

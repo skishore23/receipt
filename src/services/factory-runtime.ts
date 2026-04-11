@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 
 import {
@@ -41,6 +40,10 @@ import {
   objectiveAuditArtifactPaths,
   readPersistedObjectiveAuditMetadata,
 } from "./factory/objective-audit-artifacts";
+import {
+  buildAutoFixObjectiveInput,
+  findExistingAutoFixObjective,
+} from "./factory/objective-audit-autofix";
 import { isSqliteLockError } from "../db/client";
 
 export type FactoryQueue = JobBackend;
@@ -313,63 +316,6 @@ type AuditRecommendationRun = {
   readonly error?: string;
 };
 
-const AUTO_FIX_KEY_PREFIX = "factory_auto_fix_key:";
-
-const autoFixRecommendationKey = (
-  recommendation: AuditRecommendation,
-): string =>
-  createHash("sha1")
-    .update(
-      JSON.stringify({
-        summary: recommendation.summary
-          .trim()
-          .toLowerCase()
-          .replace(/\s+/g, " "),
-        scope: recommendation.scope.trim().toLowerCase().replace(/\s+/g, " "),
-        anomalyPatterns: [
-          ...new Set(
-            recommendation.anomalyPatterns
-              .map(normalizeAuditPattern)
-              .filter(Boolean),
-          ),
-        ].sort(),
-      }),
-    )
-    .digest("hex")
-    .slice(0, 16);
-
-const autoFixPromptMarker = (key: string): string =>
-  `${AUTO_FIX_KEY_PREFIX}${key}`;
-
-const isOpenObjectiveStatus = (status: string): boolean =>
-  status !== "completed" && status !== "failed" && status !== "canceled";
-
-const findExistingAutoFixObjective = async (
-  factoryService: FactoryService,
-  recommendation: AuditRecommendation,
-): Promise<string | undefined> => {
-  const key = autoFixRecommendationKey(recommendation);
-  const activeObjectives = (await factoryService.listObjectives()).filter(
-    (objective) => isOpenObjectiveStatus(objective.status),
-  );
-  for (const objective of activeObjectives) {
-    const state = await factoryService
-      .getObjectiveState(objective.objectiveId)
-      .catch(() => undefined);
-    if (
-      !state ||
-      state.archivedAt ||
-      state.channel !== "auto-fix" ||
-      !isOpenObjectiveStatus(state.status)
-    )
-      continue;
-    if (state.prompt.includes(autoFixPromptMarker(key))) {
-      return state.objectiveId;
-    }
-  }
-  return undefined;
-};
-
 const runAuditRecommendationGenerator = async (
   recommendationGenerator: (
     report: FactoryReceiptInvestigation,
@@ -511,6 +457,7 @@ const readPersistedAuditPatterns = async (
     const raw = JSON.parse(
       await fs.readFile(artifact.jsonPath, "utf-8"),
     ) as Record<string, unknown>;
+    const objectiveMode = asString(raw.objectiveMode);
     const anomalies = asArray(raw.anomalies);
     const assessment = asRecord(raw.assessment);
     const notes = asArray(assessment?.notes)
@@ -537,11 +484,11 @@ const readPersistedAuditPatterns = async (
       )
         patterns.add("missing_scripts_run");
       if (normalized.includes("proof items")) patterns.add("missing_proof");
-      if (normalized.includes("alignment report"))
+      if (objectiveMode === "delivery" && normalized.includes("alignment report"))
         patterns.add("alignment_not_reported");
     }
     const alignmentVerdict = asString(assessment?.alignmentVerdict);
-    if (alignmentVerdict === "not_reported")
+    if (objectiveMode === "delivery" && alignmentVerdict === "not_reported")
       patterns.add("alignment_not_reported");
     return [...patterns];
   } catch {
@@ -893,32 +840,14 @@ export const runFactoryObjectiveAudit = async (input: {
         if (existingObjectiveId) {
           autoFixObjectiveId = existingObjectiveId;
         } else {
-          const autoFixKey = autoFixRecommendationKey(autoFixRec);
-          const objective = await input.factoryService.createObjective({
-            title: autoFixRec.summary.slice(0, 96),
-            prompt: [
-              "Auto-fix triggered by recurring audit recommendation.",
-              "",
-              "## Recommendation",
-              autoFixRec.suggestedFix,
-              "",
-              "## Scope",
-              autoFixRec.scope,
-              "",
-              `## Recurring Patterns (${autoFixRec.anomalyPatterns.join(", ")})`,
-              ...autoFixRec.anomalyPatterns.map(
-                (pattern) =>
-                  `- ${normalizeAuditPattern(pattern)}: ${patternCounts.get(normalizeAuditPattern(pattern)) ?? 0} occurrence(s)`,
-              ),
-              "",
-              "## Audit Deduplication",
-              autoFixPromptMarker(autoFixKey),
-            ].join("\n"),
-            objectiveMode: "delivery",
-            severity: 1,
-            channel: "auto-fix",
-            startImmediately: true,
-          });
+          const objective = await input.factoryService.createObjective(
+            buildAutoFixObjectiveInput({
+              recommendation: autoFixRec,
+              patternCounts,
+              triggerLabel:
+                "Auto-fix triggered by recurring audit recommendation.",
+            }),
+          );
           autoFixObjectiveId = objective.objectiveId;
         }
       } catch {
@@ -1342,14 +1271,15 @@ export const createFactoryWorkerHandlers = (
                     );
                   })(),
       );
-      const afterComplete = typeof result.objectiveId === "string"
+      const objectiveId = typeof result.objectiveId === "string" ? result.objectiveId : undefined;
+      const afterComplete = objectiveId !== undefined
         && (
           job.payload.kind === "factory.task.run"
           || job.payload.kind === "factory.integration.validate"
           || job.payload.kind === "factory.integration.publish"
         )
         ? async () => {
-            await service.reactObjective(result.objectiveId);
+            await service.reactObjective(objectiveId);
           }
         : undefined;
       return { ok: true, result, afterComplete };

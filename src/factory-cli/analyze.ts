@@ -298,6 +298,9 @@ const truncateInline = (value: string | undefined, max = 180): string | undefine
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}\u2026`;
 };
 
+const TERMINAL_OBJECTIVE_CLEANUP_REASON_RE = /^retired after terminal objective transition \([^)]+\)$/i;
+const STALE_OBJECTIVE_CONTROL_FAILURE_RE = /^Expected prev hash .* but head is /i;
+
 const isTerminalJobStatus = (status: string | undefined): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
@@ -1059,6 +1062,12 @@ export const readObjectiveAnalysis = async (
       });
     }
     if (job.status === "failed") {
+      if (
+        job.payloadKind === "factory.objective.control"
+        && STALE_OBJECTIVE_CONTROL_FAILURE_RE.test(job.lastError ?? "")
+      ) {
+        continue;
+      }
       addAnomaly(anomalies, {
         kind: "job_failed",
         severity: "high",
@@ -1068,6 +1077,9 @@ export const readObjectiveAnalysis = async (
       });
     }
     if (job.status === "canceled") {
+      if (TERMINAL_OBJECTIVE_CLEANUP_REASON_RE.test(job.canceledReason ?? "")) {
+        continue;
+      }
       addAnomaly(anomalies, {
         kind: "job_canceled",
         severity: job.abortRequested ? "medium" : "low",

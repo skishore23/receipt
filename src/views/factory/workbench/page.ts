@@ -798,6 +798,9 @@ const renderObjectiveSelfImprovementSnapshot = (
   const recommendations = selfImprovement.recommendations.slice(0, compact ? 1 : 3);
   const hiddenRecommendationCount = Math.max(0, selfImprovement.recommendations.length - recommendations.length);
   const recurringPatterns = selfImprovement.recurringPatterns.slice(0, compact ? 2 : 4);
+  const canApplyRecommendations = !compact
+    && selfImprovement.recommendationStatus === "ready"
+    && !selfImprovement.autoFixObjectiveId;
   const autoFixHref = selfImprovement.autoFixObjectiveId
     ? objectiveHref(routeContext, selfImprovement.autoFixObjectiveId)
     : undefined;
@@ -847,7 +850,7 @@ const renderObjectiveSelfImprovementSnapshot = (
       Recommendation generation failed${selfImprovement.recommendationError ? `: ${esc(selfImprovement.recommendationError)}` : "."}
     </div>` : ""}
     ${recommendations.length > 0 ? `<div class="mt-3 space-y-2">
-      ${recommendations.map((recommendation) => `<div class="border border-border bg-background px-3 py-3">
+      ${recommendations.map((recommendation, index) => `<div class="border border-border bg-background px-3 py-3">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0 flex-1">
             <div class="text-sm font-semibold leading-6 text-foreground">${esc(recommendation.summary)}</div>
@@ -859,6 +862,10 @@ const renderObjectiveSelfImprovementSnapshot = (
         ${recommendation.anomalyPatterns.length > 0 ? `<div class="mt-2 flex flex-wrap gap-2">
           ${recommendation.anomalyPatterns.slice(0, compact ? 2 : 4).map((pattern) => `<span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground">${esc(pattern)}</span>`).join("")}
         </div>` : ""}
+        ${canApplyRecommendations ? `<form class="mt-3" action="${esc(`${routeContext.shellBase}/api/objectives/${encodeURIComponent(objective.objectiveId)}/self-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post">
+          <input type="hidden" name="recommendationIndex" value="${esc(String(index))}" />
+          <button type="submit" class="${workbenchPrimaryActionClass}">Apply</button>
+        </form>` : ""}
       </div>`).join("")}
     </div>` : `<div class="mt-3 text-sm leading-6 text-muted-foreground">${esc(
       selfImprovement.recommendationStatus === "failed"

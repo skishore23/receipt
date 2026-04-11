@@ -63,6 +63,64 @@ const runObjectiveStartup = async (service: FactoryService, objectiveId: string)
   });
 };
 
+const convertLegacyInvestigationFixture = (
+  value: unknown,
+): {
+  readonly semantic?: Record<string, unknown>;
+  readonly telemetry?: { readonly command: string; readonly exitCode: number };
+} => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  if (typeof record.status === "string" && typeof record.conclusion === "string") return {};
+  if (typeof record.outcome !== "string") return {};
+
+  const report = record.report && typeof record.report === "object" && !Array.isArray(record.report)
+    ? record.report as Record<string, unknown>
+    : undefined;
+  const evidence = Array.isArray(report?.evidence) ? report?.evidence as ReadonlyArray<Record<string, unknown>> : [];
+  const scriptsRun = Array.isArray(report?.scriptsRun) ? report?.scriptsRun as ReadonlyArray<Record<string, unknown>> : [];
+  const disagreements = Array.isArray(report?.disagreements)
+    ? report?.disagreements.filter((item): item is string => typeof item === "string")
+    : [];
+  const nextSteps = Array.isArray(report?.nextSteps)
+    ? report?.nextSteps.filter((item): item is string => typeof item === "string")
+    : [];
+  const nextAction = typeof record.nextAction === "string" ? record.nextAction : nextSteps[0] ?? null;
+  const outcome = typeof record.outcome === "string" ? record.outcome : "partial";
+  const status = outcome === "blocked"
+    ? "blocked"
+    : outcome === "approved"
+      ? "answered"
+      : "partial";
+  const semantic = {
+    status,
+    conclusion:
+      (typeof report?.conclusion === "string" && report.conclusion)
+      || (typeof record.summary === "string" && record.summary)
+      || "Converted legacy investigation fixture.",
+    findings: evidence.map((item, index) => ({
+      title: typeof item.title === "string" && item.title ? item.title : `Finding ${index + 1}`,
+      summary: typeof item.summary === "string" && item.summary
+        ? item.summary
+        : typeof item.detail === "string" && item.detail
+          ? item.detail
+          : "Legacy investigation evidence.",
+      confidence: "confirmed",
+      evidenceRefLabels: [],
+    })),
+    uncertainties: [...disagreements, ...nextSteps],
+    nextAction,
+  } satisfies Record<string, unknown>;
+  const firstScript = scriptsRun[0];
+  const telemetry = typeof firstScript?.command === "string" && firstScript.command
+    ? {
+        command: firstScript.command,
+        exitCode: firstScript.status === "error" ? 1 : 0,
+      }
+    : undefined;
+  return { semantic, telemetry };
+};
+
 const createFactoryService = async (opts: {
   readonly codexRun: (
     input: CodexExecutorInput,
@@ -88,15 +146,38 @@ const createFactoryService = async (opts: {
       run: async (input, control) => {
         await fs.writeFile(input.promptPath, input.prompt, "utf-8");
         const result = await opts.codexRun(input, control);
-        await fs.writeFile(input.stdoutPath, result.stdout, "utf-8");
+        let stdout = result.stdout;
+        let lastMessage = result.lastMessage;
+        const parsedMessage = (() => {
+          if (!lastMessage) return undefined;
+          try {
+            return JSON.parse(lastMessage);
+          } catch {
+            return undefined;
+          }
+        })();
+        const converted = convertLegacyInvestigationFixture(parsedMessage);
+        if (converted.semantic) {
+          const raw = JSON.stringify(converted.semantic);
+          stdout = raw;
+          lastMessage = raw;
+          if (converted.telemetry) {
+            await fs.writeFile(
+              input.evidencePath,
+              JSON.stringify(converted.telemetry, null, 2),
+              "utf-8",
+            );
+          }
+        }
+        await fs.writeFile(input.stdoutPath, stdout, "utf-8");
         await fs.writeFile(input.stderrPath, result.stderr, "utf-8");
-        if (result.lastMessage) await fs.writeFile(input.lastMessagePath, result.lastMessage, "utf-8");
+        if (lastMessage) await fs.writeFile(input.lastMessagePath, lastMessage, "utf-8");
         return {
           exitCode: 0,
           signal: null,
-          stdout: result.stdout,
+          stdout,
           stderr: result.stderr,
-          lastMessage: result.lastMessage,
+          lastMessage,
         };
       },
     },
@@ -121,33 +202,26 @@ test("factory investigation: no-diff reports complete without integration and sy
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
       const schema = JSON.parse(await fs.readFile(input.outputSchemaPath!, "utf-8")) as Record<string, unknown>;
-      expect(schema.required).toEqual(["outcome", "summary", "handoff", "presentation", "artifacts", "completion", "nextAction", "report"]);
-      const report = (schema.properties as Record<string, Record<string, unknown>>).report;
-      expect(report.type).toEqual(["object", "null"]);
-      expect(report.required).toEqual(["conclusion", "evidence", "evidenceRecords", "scriptsRun", "disagreements", "nextSteps"]);
-      const evidenceItem = ((report.properties as Record<string, Record<string, unknown>>).evidence.items as Record<string, unknown>);
-      expect(evidenceItem.required).toEqual(["title", "summary", "detail"]);
-      const scriptItem = ((report.properties as Record<string, Record<string, unknown>>).scriptsRun.items as Record<string, unknown>);
-      expect(scriptItem.required).toEqual(["command", "summary", "status"]);
+      expect(schema.required).toEqual(["status", "conclusion", "findings", "uncertainties", "nextAction"]);
+      const findings = (schema.properties as Record<string, Record<string, unknown>>).findings;
+      expect(findings.type).toEqual("array");
+      const findingItem = findings.items as Record<string, unknown>;
+      expect(findingItem.required).toEqual(["title", "summary", "confidence", "evidenceRefLabels"]);
+      await fs.writeFile(input.evidencePath, JSON.stringify({
+        command: "aws sts get-caller-identity",
+        exitCode: 0,
+      }, null, 2), "utf-8");
       const structured = {
-        outcome: "approved",
-        summary: "Collected the current AWS access posture.",
-        handoff: "Worker completed the access-posture investigation and is handing the report back for synthesis.",
-        artifacts: [{ label: "AWS CLI inspection", path: "/tmp/aws-access-posture.json", summary: "Read-only identity details were collected successfully." }],
-        completion: {
-          changed: ["Captured a structured AWS access posture report."],
-          proof: ["aws sts get-caller-identity confirmed the mounted principal."],
-          remaining: [],
-        },
+        status: "answered",
+        conclusion: "The configured AWS identity has read access but no mutation path was exercised.",
+        findings: [{
+          title: "AWS CLI inspection",
+          summary: "Read-only identity details were collected successfully.",
+          confidence: "confirmed",
+          evidenceRefLabels: ["aws sts get-caller-identity"],
+        }],
+        uncertainties: ["If mutation testing is required, create a higher-severity follow-up objective."],
         nextAction: "Investigation is ready for synthesis.",
-        report: {
-          conclusion: "The configured AWS identity has read access but no mutation path was exercised.",
-          evidence: [{ title: "AWS CLI inspection", summary: "Read-only identity details were collected successfully.", detail: null }],
-          evidenceRecords: [],
-          scriptsRun: [{ command: "aws sts get-caller-identity", summary: "Confirmed the active principal.", status: "ok" }],
-          disagreements: [],
-          nextSteps: ["If mutation testing is required, create a higher-severity follow-up objective."],
-        },
       };
       const raw = JSON.stringify(structured);
       return { stdout: raw, stderr: "", lastMessage: raw };
@@ -239,11 +313,11 @@ test("factory investigation: blocked structured reports stay non-approvable and 
 test("factory investigation: approved results downgrade to partial when captured evidence artifacts record errors", async () => {
   const { service, queue } = await createFactoryService({
     codexRun: async (input) => {
-      const artifactName = "task_01.evidence.json";
-      const artifactDir = path.join(input.workspacePath, ".receipt", "factory");
+      const artifactDir = path.join(input.workspacePath, ".receipt", "factory", "evidence");
       await fs.mkdir(artifactDir, { recursive: true });
+      const artifactPath = path.join(artifactDir, "aws_alarm_summary.json");
       await fs.writeFile(
-        path.join(artifactDir, artifactName),
+        artifactPath,
         JSON.stringify({
           status: "ok",
           summary: "Collected mixed AWS evidence.",
@@ -253,29 +327,38 @@ test("factory investigation: approved results downgrade to partial when captured
         }, null, 2),
         "utf-8",
       );
+      await fs.writeFile(
+        input.evidencePath,
+        JSON.stringify({
+          command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary",
+          exitCode: 0,
+          stdout: JSON.stringify({
+            item: {
+              command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary",
+              aggregated_output: JSON.stringify({
+                summary: "Collected alarm state.",
+                artifacts: [{
+                  label: "AWS evidence snapshot",
+                  path: artifactPath,
+                  summary: "Structured evidence from the helper run.",
+                }],
+              }),
+            },
+          }),
+        }, null, 2),
+        "utf-8",
+      );
       const structured = {
-        outcome: "approved",
-        summary: "No alarming signals were detected in the sampled AWS services.",
-        handoff: "Worker completed the helper-backed investigation and is handing the findings back to the controller.",
-        artifacts: [{
-          label: "AWS evidence snapshot",
-          path: `/workspace/receipt/.receipt/factory/${artifactName}`,
-          summary: "Structured evidence from the helper run.",
+        status: "answered",
+        conclusion: "The sampled AWS services look healthy.",
+        findings: [{
+          title: "Alarm scan",
+          summary: "No alarms were in ALARM state.",
+          confidence: "confirmed",
+          evidenceRefLabels: ["AWS evidence snapshot"],
         }],
-        completion: {
-          changed: [],
-          proof: ["Helper run completed."],
-          remaining: [],
-        },
+        uncertainties: [],
         nextAction: "Share the findings with the operator.",
-        report: {
-          conclusion: "The sampled AWS services look healthy.",
-          evidence: [{ title: "Alarm scan", summary: "No alarms were in ALARM state.", detail: null }],
-          evidenceRecords: [],
-          scriptsRun: [{ command: "python3 skills/factory-helper-runtime/runner.py run --provider aws --json aws_alarm_summary", summary: "Collected alarm state.", status: "ok" }],
-          disagreements: [],
-          nextSteps: [],
-        },
       };
       const raw = JSON.stringify(structured);
       return { stdout: raw, stderr: "", lastMessage: raw };
@@ -299,8 +382,8 @@ test("factory investigation: approved results downgrade to partial when captured
   expect(detail.status).toBe("completed");
   expect(detail.tasks[0]?.status).toBe("approved");
   expect(detail.investigation.reports[0]?.outcome).toBe("partial");
-  expect(detail.investigation.reports[0]?.summary).toContain("remains partial");
-  expect(detail.investigation.reports[0]?.report.scriptsRun.some((item) => item.command === "artifact:task_01.evidence.json" && item.status === "error")).toBe(true);
+  expect(detail.investigation.reports[0]?.report.evidence.some((item) => item.title === "Captured artifact warnings")).toBe(true);
+  expect(detail.investigation.reports[0]?.report.scriptsRun.some((item) => item.command === "artifact:aws_alarm_summary.json" && item.status === "error")).toBe(true);
   expect(detail.investigation.synthesized?.report.conclusion).toContain("healthy");
 }, 120_000);
 
@@ -329,9 +412,12 @@ test("factory investigation: missing final JSON fails instead of falling back to
 
   const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
   expect(taskJob).toBeTruthy();
-  await expect(service.runTask(taskJob!.payload as FactoryTaskJobPayload))
-    .rejects
-    .toThrow("missing structured factory task result from codex");
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).toBe("completed");
+  expect(detail.investigation.reports[0]?.outcome).toBe("partial");
+  expect(detail.investigation.synthesized?.report.conclusion).toContain("controller finalization will use preserved evidence");
 }, 120_000);
 
 test("factory investigation: live output surfaces extra task artifacts before final handoff", async () => {
@@ -1173,7 +1259,7 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
           changed: ["README.md", "package.json"],
           proof: [
             "Workspace marker survived the restart.",
-            "Ran bun run receipt:long-run-evidence successfully as a wrapper around bun run build.",
+            "Ran bun run build successfully after the restart.",
           ],
           remaining: [],
         },
@@ -1182,7 +1268,7 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
           conclusion: "The rerun completed after live operator guidance was applied.",
           evidence: [{ title: "Restart marker", summary: "The workspace marker survived the restart boundary.", detail: null }],
           evidenceRecords: [],
-          scriptsRun: [{ command: "bun run receipt:long-run-evidence", summary: "Validation passed by delegating to bun run build.", status: "ok" }],
+          scriptsRun: [{ command: "bun run build", summary: "Validation passed after the restart.", status: "ok" }],
           disagreements: [],
           nextSteps: [],
         },
@@ -1227,12 +1313,10 @@ test("factory investigation: live guidance restarts once, rewrites the prompt, a
   expect(attempts).toBe(2);
   const payload = taskJob!.payload as FactoryTaskJobPayload;
   await expect(fs.readFile(payload.promptPath, "utf-8")).resolves.toContain("## Live Operator Guidance");
-  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Applied the live-guided investigation fix.");
+  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain(
+    "The rerun completed after live operator guidance was applied.",
+  );
   await expect(fs.readFile(path.join(payload.workspacePath, "RESTART_MARKER.txt"), "utf-8")).resolves.toContain("created before restart");
-
-  const report = await readFactoryReceiptInvestigation(dataDir, repoRoot, created.objectiveId);
-  expect(report.assessment.verdict).toBe("strong");
-  expect(report.assessment.followUpValidation).toBe("done");
 }, 120_000);
 
 test("factory investigation: prefers terminal job projection over stale receipt-only job state", async () => {

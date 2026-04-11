@@ -325,10 +325,13 @@ export const readFactoryReceiptAudit = async (
   const objectives = reports.map((report) => {
     const stalled = report.anomalies.some((anomaly) => anomaly.kind === "job_stalled");
     const activeStatus = new Set(["active", "executing", "collecting_evidence", "evidence_ready", "synthesizing"]);
+    const summaryStatus = report.summary.status;
     return {
       objectiveId: report.links.objectiveId ?? report.resolved.id,
       title: report.summary.title,
-      status: stalled && activeStatus.has(report.summary.status) ? "stalled" : report.summary.status,
+      status: stalled && typeof summaryStatus === "string" && activeStatus.has(summaryStatus)
+        ? "stalled"
+        : summaryStatus,
       verdict: report.assessment.verdict,
       easyRouteRisk: report.assessment.easyRouteRisk,
       efficiency: report.assessment.efficiency,

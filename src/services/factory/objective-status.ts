@@ -15,7 +15,7 @@ import type {
 
 type ObjectiveStateSlice = Pick<
   FactoryState,
-  "archivedAt" | "candidates" | "integration" | "scheduler" | "status" | "workflow"
+  "archivedAt" | "candidates" | "integration" | "scheduler" | "status" | "wait" | "workflow"
 >;
 
 export type FactoryObjectiveOperationalState = {

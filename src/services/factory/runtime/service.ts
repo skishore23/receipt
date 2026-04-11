@@ -598,6 +598,38 @@ const severityWorkerReasoningEffort = (
   return "low";
 };
 
+const resolveObjectiveChecks = (
+  explicitChecks: ReadonlyArray<string> | undefined,
+  objectiveMode: FactoryObjectiveMode,
+  profileDefaultValidationMode: "repo_profile" | "none",
+): {
+  readonly checks: ReadonlyArray<string>;
+  readonly checksSource: "explicit" | "profile" | "default";
+} => {
+  if (explicitChecks && explicitChecks.length > 0) {
+    return {
+      checks: uniqueChecks(explicitChecks),
+      checksSource: "explicit",
+    };
+  }
+  if (objectiveMode === "investigation") {
+    return {
+      checks: [],
+      checksSource: "profile",
+    };
+  }
+  if (profileDefaultValidationMode === "none") {
+    return {
+      checks: [],
+      checksSource: "profile",
+    };
+  }
+  return {
+    checks: uniqueChecks(undefined),
+    checksSource: "default",
+  };
+};
+
 import {
   FactoryServiceError,
   type FactoryServiceOptions,
@@ -945,7 +977,9 @@ export class FactoryService {
       ],
       requiredChecks: synthOnlyInvestigation
         ? []
-        : state.checks.length > 0 ? state.checks : planningReceipt.validationPlan,
+        : state.objectiveMode === "investigation"
+          ? state.checks
+          : state.checks.length > 0 ? state.checks : planningReceipt.validationPlan,
       proofExpectation: state.objectiveMode === "investigation"
         ? "Return concrete evidence and a clear conclusion with any uncertainty called out."
         : "Return concrete changed files, validation evidence, and no unresolved delivery work in completion.remaining.",
@@ -1289,16 +1323,11 @@ export class FactoryService {
     }
     this.assertObjectiveProfileDispatchActionAllowed(profile, "create");
     this.assertObjectiveProfileCreateModeAllowed(profile, objectiveMode);
-    const checks = input.checks?.length
-      ? uniqueChecks(input.checks)
-      : profile.objectivePolicy.defaultValidationMode === "none"
-        ? []
-        : uniqueChecks(undefined);
-    const checksSource = input.checks?.length
-      ? "explicit"
-      : profile.objectivePolicy.defaultValidationMode === "none"
-        ? "profile"
-        : "default";
+    const { checks, checksSource } = resolveObjectiveChecks(
+      input.checks,
+      objectiveMode,
+      profile.objectivePolicy.defaultValidationMode,
+    );
     const normalizedPolicy = normalizeFactoryObjectivePolicy(input.policy);
     const policy = objectiveMode === "investigation"
       ? {

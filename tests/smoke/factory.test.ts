@@ -5231,6 +5231,148 @@ test("factory workbench route: overview renders self-improvement recommendations
   expect(body).toContain('data-factory-href="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_auto_fix&amp;inspectorTab=chat&amp;detailTab=action"');
 });
 
+test("factory workbench route: overview renders apply button for actionable self-improvement recommendations", async () => {
+  const liveObjective = {
+    ...makeRunningWorkbenchObjectiveDetail(),
+    selfImprovement: {
+      auditedAt: 17,
+      auditStatus: "ready",
+      stale: false,
+      recommendationStatus: "ready" as const,
+      recommendations: [{
+        summary: "Add a one-click apply path for self-improvement recommendations.",
+        anomalyPatterns: ["missing_manual_apply"],
+        scope: "src/views/factory/workbench/page.ts",
+        confidence: "high" as const,
+        suggestedFix: "Render an Apply button and post it to a manual auto-fix objective endpoint.",
+      }],
+      recurringPatterns: [],
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [
+        {
+          ...liveObjective,
+          section: "active" as const,
+        } as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => liveObjective,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_live");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain('action="/factory/api/objectives/objective_live/self-improvement/apply?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live');
+  expect(body).toContain('name="recommendationIndex" value="0"');
+  expect(body).toContain(">Apply</button>");
+});
+
+test("factory route: applying a self-improvement recommendation creates an auto-fix objective and redirects to it", async () => {
+  const dataDir = await createTempDir("factory-route-apply-self-improvement");
+  const auditDir = path.join(dataDir, "factory", "artifacts", "objective_live");
+  await fs.mkdir(auditDir, { recursive: true });
+  await fs.writeFile(path.join(auditDir, "objective.audit.json"), JSON.stringify({
+    audit: {
+      generatedAt: 17,
+      objectiveUpdatedAt: 17,
+      objectiveChannel: "trial",
+      recommendationStatus: "ready",
+      recommendations: [{
+        summary: "Add a first-class manual apply flow for audit recommendations.",
+        anomalyPatterns: ["missing_manual_apply"],
+        scope: "src/agents/factory/route/register-factory-api-routes.ts",
+        confidence: "high",
+        suggestedFix: "Create an endpoint that turns a recommendation into an auto-fix objective.",
+      }],
+      recurringPatterns: [{
+        pattern: "missing_manual_apply",
+        count: 2,
+      }],
+    },
+  }, null, 2), "utf-8");
+
+  const liveObjective = {
+    ...makeRunningWorkbenchObjectiveDetail(),
+    objectiveId: "objective_live",
+    selfImprovement: {
+      auditedAt: 17,
+      auditStatus: "ready",
+      stale: false,
+      recommendationStatus: "ready" as const,
+      recommendations: [{
+        summary: "Add a first-class manual apply flow for audit recommendations.",
+        anomalyPatterns: ["missing_manual_apply"],
+        scope: "src/agents/factory/route/register-factory-api-routes.ts",
+        confidence: "high" as const,
+        suggestedFix: "Create an endpoint that turns a recommendation into an auto-fix objective.",
+      }],
+      recurringPatterns: [{
+        pattern: "missing_manual_apply",
+        count: 2,
+      }],
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const createdInputs: Array<Parameters<FactoryService["createObjective"]>[0]> = [];
+  const app = createRouteTestApp({
+    dataDir,
+    service: {
+      listObjectives: async () => [],
+      getObjective: async (objectiveId: string) => {
+        if (objectiveId === "objective_live") return liveObjective;
+        return {
+          ...makeRunningWorkbenchObjectiveDetail(),
+          objectiveId,
+          title: "Manual auto-fix objective",
+          channel: "auto-fix",
+          prompt: "operator-applied self-improvement",
+        } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+      },
+      createObjective: async (input) => {
+        createdInputs.push(input);
+        return {
+          ...makeRunningWorkbenchObjectiveDetail(),
+          objectiveId: "objective_auto_fix_manual",
+          title: input.title,
+          prompt: input.prompt,
+          channel: input.channel,
+          profile: {
+            ...makeRunningWorkbenchObjectiveDetail().profile,
+            rootProfileId: input.profileId ?? makeRunningWorkbenchObjectiveDetail().profile.rootProfileId,
+          },
+        } as Awaited<ReturnType<FactoryService["createObjective"]>>;
+      },
+    },
+  });
+
+  const body = new URLSearchParams({ recommendationIndex: "0" });
+  const response = await app.request(
+    "http://receipt.test/factory/api/objectives/objective_live/self-improvement/apply?profile=generalist&chat=chat_demo&objective=objective_live",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    },
+  );
+  const payload = await response.json() as {
+    readonly location?: string;
+  };
+
+  expect(response.status).toBe(200);
+  expect(payload.location).toBe("/factory?profile=generalist&chat=chat_demo&objective=objective_auto_fix_manual&inspectorTab=chat&detailTab=action");
+  expect(createdInputs).toHaveLength(1);
+  expect(createdInputs[0]?.channel).toBe("auto-fix");
+  expect(createdInputs[0]?.profileId).toBe("generalist");
+  expect(createdInputs[0]?.prompt).toContain("Operator-applied self-improvement recommendation.");
+  expect(createdInputs[0]?.prompt).toContain("## Source Objective\nobjective_live");
+  expect(createdInputs[0]?.prompt).toContain("factory_auto_fix_key:");
+});
+
 test("factory workbench route: selected objective stays visible when section caps would otherwise omit it", async () => {
   const selectedObjective = {
     ...makeStubObjectiveDetail("objective_selected"),
