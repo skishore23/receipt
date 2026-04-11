@@ -878,6 +878,62 @@ test("factory policy: software delivery objectives auto-publish and expose PR me
   expect(debug.prNumber).toBe(17);
 }, 20_000);
 
+test("factory policy: terminal objectives do not enqueue publish jobs", async () => {
+  const { service, queue } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Terminal publish enqueue guard objective",
+    prompt: "Complete the objective before any publish enqueue can run.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
+
+  const publishJobsBefore = (await queue.listJobs({ limit: 40 }))
+    .filter((job) => job.payload.kind === "factory.integration.publish" && job.payload.objectiveId === created.objectiveId);
+  expect(publishJobsBefore).toHaveLength(1);
+
+  const state = await service.getObjectiveState(created.objectiveId);
+  await (service as unknown as {
+    promoteIntegration: (input: typeof state, candidateId: string) => Promise<void>;
+  }).promoteIntegration(state, "task_01_candidate_01");
+
+  const publishJobsAfter = (await queue.listJobs({ limit: 40 }))
+    .filter((job) => job.payload.kind === "factory.integration.publish" && job.payload.objectiveId === created.objectiveId);
+  expect(publishJobsAfter).toHaveLength(1);
+}, FACTORY_POLICY_TIMEOUT_MS);
+
+test("factory policy: terminal publish jobs exit with skipped_terminal_state", async () => {
+  const { service, queue, publishRuns } = await createFactoryService({ codexOutcome: "approved" });
+
+  const created = await service.createObjective({
+    title: "Terminal publish execution guard objective",
+    prompt: "Skip publish execution once the objective has already completed.",
+    profileId: "software",
+    checks: ["git status --short"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const taskJob = await latestFactoryJob(queue, created.objectiveId, "factory.task.run");
+  await service.runTask(taskJob.payload as FactoryTaskJobPayload);
+  const validateJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.validate");
+  await service.runIntegrationValidation(validateJob.payload as FactoryIntegrationJobPayload);
+  await runObjectiveReconcile(service, created.objectiveId);
+
+  const publishJob = await latestFactoryJob(queue, created.objectiveId, "factory.integration.publish");
+  const skipped = await service.runIntegrationPublish(publishJob.payload as FactoryIntegrationPublishJobPayload);
+
+  expect(skipped.status).toBe("skipped_terminal_state");
+  expect(publishRuns.count).toBe(1);
+  expect((await service.getObjective(created.objectiveId)).status).toBe("completed");
+}, FACTORY_POLICY_TIMEOUT_MS);
+
 test("factory policy: publish retries transient GitHub connectivity failures before blocking", async () => {
   const { service, queue, publishRuns } = await createFactoryService({
     codexOutcome: "approved",
