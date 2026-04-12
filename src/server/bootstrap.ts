@@ -1216,6 +1216,9 @@ const workers = [
     onLeaseRenewal: (event) => {
       console.info(JSON.stringify({ type: "job.lease_renewed", scope: "chat", ...event }));
     },
+    onLeaseLifecycle: (event) => {
+      console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "chat", ...event }));
+    },
   }),
   new JobWorker({
     queue,
@@ -1235,6 +1238,9 @@ const workers = [
     onLeaseRenewal: (event) => {
       console.info(JSON.stringify({ type: "job.lease_renewed", scope: "orchestration", ...event }));
     },
+    onLeaseLifecycle: (event) => {
+      console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "orchestration", ...event }));
+    },
   }),
   new JobWorker({
     queue,
@@ -1253,6 +1259,9 @@ const workers = [
     },
     onLeaseRenewal: (event) => {
       console.info(JSON.stringify({ type: "job.lease_renewed", scope: "codex", ...event }));
+    },
+    onLeaseLifecycle: (event) => {
+      console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "codex", ...event }));
     },
   }),
 ];

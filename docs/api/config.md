@@ -9,6 +9,7 @@
 | `JOB_WORKER_ID` | `worker_<pid>` | Worker identity for leasing and heartbeats. |
 | `JOB_POLL_MS` | `100` | Queue polling interval in milliseconds. |
 | `JOB_LEASE_MS` | `30000` | Lease duration for worker-owned jobs. |
+| `JOB_LEASE_GRACE_MS` | unset | Optional grace window before a missed lease is treated as terminal; workers retry one renewal before hard expiry. |
 | `JOB_CONCURRENCY` | `2` | Max concurrent job executions per worker. |
 | `SUBJOB_WAIT_MS` | `1500` | Delegate wait timeout when summarizing a sub-job inline. |
 | `SUBJOB_WAIT_POLL_MS` | `250` | Poll interval while waiting on sub-jobs. |
