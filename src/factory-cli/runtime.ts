@@ -231,6 +231,9 @@ export const createFactoryCliRuntime = (
     onLeaseRenewal: (event) => {
       console.info(JSON.stringify({ type: "job.lease_renewed", scope: "factory-cli", ...event }));
     },
+    onLeaseLifecycle: (event) => {
+      console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "factory-cli", ...event }));
+    },
     onError: (error) => {
       notify({
         type: "worker_error",

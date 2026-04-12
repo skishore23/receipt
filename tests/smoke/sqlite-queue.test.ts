@@ -858,6 +858,68 @@ test("sqlite queue: long-running job renews its lease before expiry", async () =
   }
 });
 
+test("sqlite queue: delayed heartbeat retry preserves a single execution and resumes the lease", async () => {
+  const dir = await mkTmp("receipt-queue-heartbeat-grace-resume");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const baseQueue = sqliteQueue({ runtime, stream: "jobs" });
+    let failHeartbeatOnce = true;
+    const queue: typeof baseQueue = {
+      ...baseQueue,
+      heartbeat: async (jobId, workerId, leaseMs) => {
+        if (failHeartbeatOnce) {
+          failHeartbeatOnce = false;
+          throw new Error("simulated transient heartbeat miss");
+        }
+        return baseQueue.heartbeat(jobId, workerId, leaseMs);
+      },
+    };
+    const lifecycle: string[] = [];
+    const handled: string[] = [];
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_grace_resume",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async (job) => {
+          handled.push(job.id);
+          await new Promise((resolve) => setTimeout(resolve, 6_500));
+          return { ok: true, result: { ok: true } };
+        },
+      },
+      onLeaseLifecycle: (event) => {
+        lifecycle.push(event.kind);
+      },
+    });
+
+    worker.start();
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_heartbeat_grace_resume" },
+      maxAttempts: 1,
+    });
+    const settled = await queue.waitForJob(job.id, 10_000);
+    worker.stop();
+
+    expect(settled?.status).toBe("completed");
+    expect(handled).toEqual([job.id]);
+    expect(lifecycle).toContain("missed");
+    expect(lifecycle).toContain("reconciled");
+    expect(lifecycle).not.toContain("grace_expired");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite queue: waitForWork performs at most one refresh per idle timeout window", async () => {
   const dir = await mkTmp("receipt-queue-idle-refresh");
   try {
