@@ -38,6 +38,14 @@ export type JobWorkerOptions = {
   readonly leaseMs?: number;
   readonly concurrency?: number;
   readonly onTick?: () => void;
+  readonly onLeaseRenewal?: (event: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+    readonly lagMs: number;
+    readonly remainingMs: number;
+    readonly startup: boolean;
+  }) => void;
   readonly onError?: (error: Error) => void;
 };
 
@@ -61,6 +69,7 @@ export class JobWorker {
   private readonly leasePollMs: number;
   private readonly concurrency: number;
   private readonly onTick?: () => void;
+  private readonly onLeaseRenewal?: JobWorkerOptions["onLeaseRenewal"];
   private readonly onError?: (error: Error) => void;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeLeases = new Map<string, ActiveLeaseState>();
@@ -80,6 +89,7 @@ export class JobWorker {
     this.leasePollMs = Math.min(1_000, Math.max(250, Math.floor(this.leaseHeartbeatMs / 4)));
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
+    this.onLeaseRenewal = opts.onLeaseRenewal;
     this.onError = opts.onError;
   }
 
@@ -95,6 +105,9 @@ export class JobWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
+    void this.reconcileStartupLeases().catch((err) => {
+      this.reportError(err);
+    });
     void this.leaseLoop().catch((err) => {
       this.reportError(err);
     });
@@ -149,12 +162,46 @@ export class JobWorker {
   }
 
   private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
+    const startedAt = Date.now();
     const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
+    const lagMs = Date.now() - startedAt;
     if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
       this.clearActiveLease(state.jobId);
       return;
     }
+    const remainingMs = typeof current.leaseUntil === "number" ? current.leaseUntil - Date.now() : 0;
+    this.onLeaseRenewal?.({
+      jobId: state.jobId,
+      workerId: this.workerId,
+      leaseMs: this.leaseMs,
+      lagMs,
+      remainingMs,
+      startup: false,
+    });
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
+  }
+
+  private async reconcileStartupLeases(): Promise<void> {
+    const activeJobs = [
+      ...(await this.queue.listJobs({ status: "leased", limit: 2000 })),
+      ...(await this.queue.listJobs({ status: "running", limit: 2000 })),
+    ];
+    const now = Date.now();
+    for (const job of activeJobs) {
+      if (job.leaseOwner !== this.workerId) continue;
+      const remainingMs = typeof job.leaseUntil === "number" ? job.leaseUntil - now : 0;
+      if (remainingMs > this.leaseHeartbeatMs) continue;
+      const renewed = await this.queue.heartbeat(job.id, this.workerId, this.leaseMs);
+      if (!renewed) continue;
+      this.onLeaseRenewal?.({
+        jobId: job.id,
+        workerId: this.workerId,
+        leaseMs: this.leaseMs,
+        lagMs: 0,
+        remainingMs: typeof renewed.leaseUntil === "number" ? renewed.leaseUntil - Date.now() : 0,
+        startup: true,
+      });
+    }
   }
 
   private async noteDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {

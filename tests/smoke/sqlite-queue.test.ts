@@ -810,6 +810,54 @@ test("sqlite queue: afterComplete hooks run only after the job is marked complet
   }
 });
 
+test("sqlite queue: long-running job renews its lease before expiry", async () => {
+  const dir = await mkTmp("receipt-queue-long-running-renewal");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob,
+    );
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
+    const renewals: Array<{ startup: boolean; remainingMs: number }> = [];
+
+    const worker = new JobWorker({
+      queue,
+      workerId: "worker_long_running",
+      idleResyncMs: 20_000,
+      leaseMs: 5_000,
+      concurrency: 1,
+      handlers: {
+        writer: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 6_500));
+          return { ok: true, result: { ok: true } };
+        },
+      },
+      onLeaseRenewal: (event) => {
+        renewals.push({ startup: event.startup, remainingMs: event.remainingMs });
+      },
+    });
+
+    worker.start();
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_long_running" },
+      maxAttempts: 1,
+    });
+    const settled = await queue.waitForJob(job.id, 10_000);
+    worker.stop();
+
+    expect(settled?.status).toBe("completed");
+    expect(renewals.length).toBeGreaterThanOrEqual(1);
+    expect(renewals.some((renewal) => renewal.remainingMs > 0)).toBe(true);
+    expect(settled?.lastError).toBeUndefined();
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite queue: waitForWork performs at most one refresh per idle timeout window", async () => {
   const dir = await mkTmp("receipt-queue-idle-refresh");
   try {

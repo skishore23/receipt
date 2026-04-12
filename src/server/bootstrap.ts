@@ -1204,7 +1204,7 @@ const workers = [
     leaseAgentIds: ["factory"],
     leaseLanes: ["chat"],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: jobLeaseMs,
+    leaseMs: Math.max(jobLeaseMs, 120_000),
     concurrency: chatJobConcurrency,
     onTick: () => {
       markLocalWorkerTick("chat");
@@ -1213,6 +1213,9 @@ const workers = [
       markLocalWorkerError("chat", error);
       console.error(`[job-worker ${jobWorkerId}:chat]`, error);
     },
+    onLeaseRenewal: (event) => {
+      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "chat", ...event }));
+    },
   }),
   new JobWorker({
     queue,
@@ -1220,7 +1223,7 @@ const workers = [
     workerId: localWorkerStates.get("orchestration")!.workerId,
     leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID, FACTORY_MONITOR_AGENT_ID],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: jobLeaseMs,
+    leaseMs: Math.max(jobLeaseMs, 120_000),
     concurrency: orchestrationJobConcurrency,
     onTick: () => {
       markLocalWorkerTick("orchestration");
@@ -1229,6 +1232,9 @@ const workers = [
       markLocalWorkerError("orchestration", error);
       console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
     },
+    onLeaseRenewal: (event) => {
+      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "orchestration", ...event }));
+    },
   }),
   new JobWorker({
     queue,
@@ -1236,7 +1242,7 @@ const workers = [
     workerId: localWorkerStates.get("codex")!.workerId,
     leaseAgentIds: ["codex"],
     idleResyncMs: jobIdleResyncMs,
-    leaseMs: codexJobLeaseMs,
+    leaseMs: Math.max(codexJobLeaseMs, 120_000),
     concurrency: codexJobConcurrency,
     onTick: () => {
       markLocalWorkerTick("codex");
@@ -1244,6 +1250,9 @@ const workers = [
     onError: (error) => {
       markLocalWorkerError("codex", error);
       console.error(`[job-worker ${jobWorkerId}:codex]`, error);
+    },
+    onLeaseRenewal: (event) => {
+      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "codex", ...event }));
     },
   }),
 ];
