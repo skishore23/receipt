@@ -46,6 +46,15 @@ export type JobWorkerOptions = {
     readonly remainingMs: number;
     readonly startup: boolean;
   }) => void;
+  readonly onLeaseLifecycle?: (event: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+    readonly kind: "acquired" | "renewed" | "missed" | "grace_expired" | "reconciled";
+    readonly startup?: boolean;
+    readonly lagMs?: number;
+    readonly remainingMs?: number;
+  }) => void;
   readonly onError?: (error: Error) => void;
 };
 
@@ -70,6 +79,7 @@ export class JobWorker {
   private readonly concurrency: number;
   private readonly onTick?: () => void;
   private readonly onLeaseRenewal?: JobWorkerOptions["onLeaseRenewal"];
+  private readonly onLeaseLifecycle?: JobWorkerOptions["onLeaseLifecycle"];
   private readonly onError?: (error: Error) => void;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeLeases = new Map<string, ActiveLeaseState>();
@@ -90,6 +100,7 @@ export class JobWorker {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
     this.onTick = opts.onTick;
     this.onLeaseRenewal = opts.onLeaseRenewal;
+    this.onLeaseLifecycle = opts.onLeaseLifecycle;
     this.onError = opts.onError;
   }
 
@@ -163,8 +174,35 @@ export class JobWorker {
 
   private async heartbeatLease(state: ActiveLeaseState): Promise<void> {
     const startedAt = Date.now();
-    const current = await this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
+    const attemptHeartbeat = async () => this.queue.heartbeat(state.jobId, this.workerId, this.leaseMs);
+    let current = await attemptHeartbeat().catch(() => undefined);
     const lagMs = Date.now() - startedAt;
+    if (!current) {
+      this.onLeaseLifecycle?.({
+        jobId: state.jobId,
+        workerId: this.workerId,
+        leaseMs: this.leaseMs,
+        kind: "missed",
+      });
+      await new Promise((resolve) => setTimeout(resolve, Math.max(250, Math.floor(this.leaseHeartbeatMs / 2))));
+      current = await attemptHeartbeat().catch(() => undefined);
+      if (!current) {
+        this.onLeaseLifecycle?.({
+          jobId: state.jobId,
+          workerId: this.workerId,
+          leaseMs: this.leaseMs,
+          kind: "grace_expired",
+        });
+        return;
+      }
+      this.onLeaseLifecycle?.({
+        jobId: state.jobId,
+        workerId: this.workerId,
+        leaseMs: this.leaseMs,
+        kind: "reconciled",
+        remainingMs: typeof current.leaseUntil === "number" ? current.leaseUntil - Date.now() : 0,
+      });
+    }
     if (!current || current.status === "completed" || current.status === "failed" || current.status === "canceled") {
       this.clearActiveLease(state.jobId);
       return;
@@ -174,6 +212,15 @@ export class JobWorker {
       jobId: state.jobId,
       workerId: this.workerId,
       leaseMs: this.leaseMs,
+      lagMs,
+      remainingMs,
+      startup: false,
+    });
+    this.onLeaseLifecycle?.({
+      jobId: state.jobId,
+      workerId: this.workerId,
+      leaseMs: this.leaseMs,
+      kind: state.nextHeartbeatAt === 0 ? "acquired" : "renewed",
       lagMs,
       remainingMs,
       startup: false,
@@ -200,6 +247,14 @@ export class JobWorker {
         lagMs: 0,
         remainingMs: typeof renewed.leaseUntil === "number" ? renewed.leaseUntil - Date.now() : 0,
         startup: true,
+      });
+      this.onLeaseLifecycle?.({
+        jobId: job.id,
+        workerId: this.workerId,
+        leaseMs: this.leaseMs,
+        kind: "reconciled",
+        startup: true,
+        remainingMs: typeof renewed.leaseUntil === "number" ? renewed.leaseUntil - Date.now() : 0,
       });
     }
   }
