@@ -224,10 +224,13 @@ export const createFactoryCliRuntime = (
         process.env.JOB_IDLE_RESYNC_MS ?? process.env.JOB_POLL_MS ?? 5_000,
       ),
     ),
-    leaseMs: Math.max(5_000, Number(process.env.JOB_LEASE_MS ?? 30_000)),
+    leaseMs: Math.max(120_000, Number(process.env.JOB_LEASE_MS ?? 120_000)),
     concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 12)),
     leaseAgentIds: Object.keys(handlers),
     handlers,
+    onLeaseRenewal: (event) => {
+      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "factory-cli", ...event }));
+    },
     onError: (error) => {
       notify({
         type: "worker_error",

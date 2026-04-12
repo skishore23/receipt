@@ -273,10 +273,13 @@ const runQueueProbe = async (
     queue,
     workerId: `factory_codex_probe_${process.pid}`,
     idleResyncMs: Math.max(250, opts.pollMs),
-    leaseMs: Math.max(5_000, Math.min(opts.timeoutMs, 30_000)),
+    leaseMs: Math.max(120_000, Math.min(opts.timeoutMs, 120_000)),
     concurrency: 1,
     leaseAgentIds: Object.keys(handlers),
     handlers,
+    onLeaseRenewal: (event) => {
+      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "codex-probe", ...event }));
+    },
   });
   const snapshots: CodexProbeSnapshot[] = [];
   const seen = new Set<string>();
