@@ -778,6 +778,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         filter: input.filter,
       }),
       objective: selectedObjective,
+      systemImprovement: input.board.systemImprovement,
       currentRun: input.activeRun,
       focus: focus
         ? {
@@ -1014,11 +1015,17 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const selectedBoardObjective = resolvedObjectiveId
       ? board.objectives.find((objective) => objective.objectiveId === resolvedObjectiveId)
       : undefined;
-    const selectedObjective = detail
+    const selectedObjectiveBase = detail
       ? toFactorySelectedObjectiveCard(detail)
       : selectedBoardObjective
         ? toFactorySelectedObjectiveCard(selectedBoardObjective)
         : undefined;
+    const selectedObjective = selectedObjectiveBase
+      ? {
+          ...selectedObjectiveBase,
+          systemImprovement: board.systemImprovement,
+        }
+      : undefined;
     const objectiveChatBindings = await readObjectiveChatBindings([
       ...board.objectives.map((objective) => objective.objectiveId),
       ...(resolvedObjectiveId ? [resolvedObjectiveId] : []),

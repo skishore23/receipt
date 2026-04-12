@@ -785,6 +785,78 @@ const recommendationConfidenceTone = (
   }
 };
 
+const systemHealthTone = (
+  healthStatus: NonNullable<FactorySelectedObjectiveCard["systemImprovement"]>["healthStatus"],
+): "neutral" | "info" | "success" | "warning" | "danger" => {
+  switch (healthStatus) {
+    case "action_needed":
+      return "danger";
+    case "watch":
+      return "warning";
+    default:
+      return "success";
+  }
+};
+
+const renderSystemImprovementSnapshot = (
+  systemImprovement: FactorySelectedObjectiveCard["systemImprovement"] | FactoryWorkbenchSummarySectionModel["systemImprovement"],
+  routeContext: FactoryWorkbenchRouteContext,
+  options?: {
+    readonly compact?: boolean;
+  },
+): string => {
+  if (!systemImprovement) return "";
+  const compact = options?.compact ?? false;
+  const recommendation = systemImprovement.selectedRecommendation ?? systemImprovement.recommendations[0];
+  const anomalyPreview = systemImprovement.auditSummary.topAnomalies.slice(0, compact ? 2 : 4);
+  return `<section class="border border-border bg-muted/25 px-4 py-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">System Improvement</div>
+      ${badge(displayLabel(systemImprovement.healthStatus) ?? systemImprovement.healthStatus, systemHealthTone(systemImprovement.healthStatus))}
+    </div>
+    <div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(`Updated ${formatTs(systemImprovement.generatedAt)} · audit ${systemImprovement.auditSummary.weakObjectives}/${systemImprovement.auditSummary.objectivesAudited} weak`)}</div>
+    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      ${renderSummaryTextCard("Base DST", `integrity ${systemImprovement.dstSummary.integrityFailures} · replay ${systemImprovement.dstSummary.replayFailures} · deterministic ${systemImprovement.dstSummary.deterministicFailures}`)}
+      ${renderSummaryTextCard("Context DST", `hard ${systemImprovement.contextSummary.hardFailureCount} · warnings ${systemImprovement.contextSummary.compatibilityWarningCount}`)}
+      ${renderSummaryTextCard("Audit Window", `${systemImprovement.auditSummary.objectivesAudited} objectives · ${systemImprovement.auditSummary.strongObjectives} strong`)}
+      ${renderSummaryTextCard("Top Goal", recommendation?.summary ?? "No repo-wide recommendation recorded yet.")}
+    </div>
+    ${recommendation ? `<div class="mt-3 border border-border bg-background px-3 py-3">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold leading-6 text-foreground">${esc(recommendation.summary)}</div>
+          <div class="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(recommendation.scope)}</div>
+        </div>
+        ${badge(displayLabel(recommendation.confidence) ?? recommendation.confidence, recommendationConfidenceTone(recommendation.confidence))}
+      </div>
+      ${compact ? "" : `<div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(recommendation.suggestedFix)}</div>`}
+      ${recommendation.successMetrics.length > 0 ? `<div class="mt-3 space-y-2">
+        ${recommendation.successMetrics.slice(0, compact ? 1 : 3).map((metric) => `<div class="border border-border bg-muted/25 px-3 py-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">${esc(metric.label)}</div>
+            ${badge(metric.severity === "hard_defect" ? "Hard Defect" : "Warning", metric.severity === "hard_defect" ? "danger" : "warning")}
+          </div>
+          <div class="mt-1 text-sm leading-6 text-foreground">${esc(`Baseline: ${metric.baseline}`)}</div>
+          <div class="text-sm leading-6 text-muted-foreground">${esc(`Target: ${metric.target}`)}</div>
+          ${compact || metric.verification.length === 0 ? "" : `<div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(`Verify: ${metric.verification.join(" | ")}`)}</div>`}
+        </div>`).join("")}
+      </div>` : ""}
+      ${recommendation.acceptanceChecks.length > 0 && !compact ? `<div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(`Acceptance: ${recommendation.acceptanceChecks.join(" | ")}`)}</div>` : ""}
+      ${!compact && !systemImprovement.autoFixObjectiveId ? `<form class="mt-3" data-factory-inline-submit="true" data-factory-inline-pending-label="Applying..." data-factory-inline-pending-status="Applying repo-wide system recommendation..." action="${esc(`${routeContext.shellBase}/api/system-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post">
+        <button type="submit" class="${workbenchPrimaryActionClass}">Apply</button>
+        <div data-factory-inline-status="true" class="mt-2 hidden border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
+      </form>` : ""}
+    </div>` : `<div class="mt-3 text-sm leading-6 text-muted-foreground">No repo-wide recommendation recorded yet.</div>`}
+    ${anomalyPreview.length > 0 ? `<div class="mt-3 flex flex-wrap gap-2">
+      ${anomalyPreview.map((item) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground">${esc(`${item.category} ×${item.count}`)}</span>`).join("")}
+    </div>` : ""}
+    ${systemImprovement.autoFixObjectiveId ? `<div class="mt-3 border border-info/20 bg-info/10 px-3 py-2 text-sm leading-6 text-foreground">
+      Repo-wide auto-fix objective:
+      <a href="${esc(objectiveHref(routeContext, systemImprovement.autoFixObjectiveId))}" data-factory-href="${esc(objectiveHref(routeContext, systemImprovement.autoFixObjectiveId))}" class="font-semibold text-primary underline-offset-2 hover:underline">${esc(systemImprovement.autoFixObjectiveId)}</a>
+    </div>` : ""}
+  </section>`;
+};
+
 const renderObjectiveSelfImprovementSnapshot = (
   objective: FactoryWorkbenchSummarySectionModel["objective"],
   routeContext: FactoryWorkbenchRouteContext,
@@ -971,6 +1043,7 @@ const renderSummarySection = (
       : section.message;
     return `<section class="space-y-4 border border-border bg-card px-5 py-5">
       ${currentRunCard}
+      ${renderSystemImprovementSnapshot(section.systemImprovement, routeContext)}
       <section class="border border-border bg-background px-4 py-4">
         <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected Objective</div>
         <div class="mt-2 text-lg font-semibold text-foreground">${esc(emptyTitle)}</div>
@@ -1046,6 +1119,7 @@ const renderSummarySection = (
     <div class="space-y-3">
       ${showHandoffOutput ? renderObjectiveHandoffOutputCard(handoffOutput) : ""}
       ${secondarySummaryCards.map((card) => renderSummaryTextCard(card.label, card.value)).join("")}
+      ${renderSystemImprovementSnapshot(section.systemImprovement, routeContext)}
       ${renderObjectiveSelfImprovementSnapshot(objective, routeContext)}
     </div>
   </section>`;
@@ -1394,6 +1468,7 @@ const renderEmployeeOverviewPanel = (
         <div class="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Next Operator Action</div>
         <div class="mt-1 text-sm leading-6 text-foreground">${esc(objective.nextAction ?? "Ask chat for the next step.")}</div>
       </div>
+      ${renderSystemImprovementSnapshot(objective.systemImprovement, routeContext, { compact: true })}
       ${renderObjectiveSelfImprovementSnapshot(objective, routeContext, { compact: true })}
       <div class="mt-3 text-xs leading-5 text-muted-foreground">${esc(overviewNote)}</div>
       <div class="mt-4 flex flex-wrap gap-2">${actions}</div>

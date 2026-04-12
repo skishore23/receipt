@@ -21,6 +21,11 @@ import {
   type FactoryService,
 } from "../../../services/factory-service";
 import { readPersistedObjectiveAuditMetadata } from "../../../services/factory/objective-audit-artifacts";
+import { readPersistedSystemImprovementReport } from "../../../services/factory/system-improvement-artifacts";
+import {
+  buildSystemAutoFixObjectiveInput,
+  findExistingSystemAutoFixObjective,
+} from "../../../services/factory/system-improvement-autofix";
 import {
   buildAutoFixObjectiveInput,
   findExistingAutoFixObjective,
@@ -528,6 +533,58 @@ export const registerFactoryApiRoutes = (input: {
       const targetProfileId = autoFixObjective?.profile.rootProfileId ?? sourceObjective.profile.rootProfileId;
       ctx.sse.publish("factory", objectiveId);
       ctx.sse.publish("factory", targetObjectiveId);
+      return workbenchNavigationResponse(req, workbenchLink({
+        profileId: targetProfileId,
+        chatId: request.chatId,
+        objectiveId: targetObjectiveId,
+        inspectorTab: "chat",
+        detailTab: "action",
+        page: request.page,
+        filter: request.filter,
+      }), {
+        chatId: request.chatId,
+        objectiveId: targetObjectiveId,
+      });
+    } catch (err) {
+      if (err instanceof FactoryServiceError) return navigationError(req, err.status, err.message);
+      const message = err instanceof Error ? err.message : "factory server error";
+      console.error(err);
+      return navigationError(req, 500, message);
+    }
+  });
+
+  app.post(`${basePath}/api/system-improvement/apply`, async (c) => {
+    const req = c.req.raw;
+    try {
+      if (!dataDir) throw new FactoryServiceError(503, "System improvement artifacts are not configured.");
+      const request = readWorkbenchRequest(req);
+      const workbenchLink = (input: Parameters<typeof buildWorkbenchLink>[0]): string =>
+        buildWorkbenchLink({
+          ...input,
+          basePath: request.shellBase,
+        });
+      const systemImprovement = await readPersistedSystemImprovementReport(dataDir);
+      const recommendation = systemImprovement?.selectedRecommendation ?? systemImprovement?.recommendations[0];
+      if (!systemImprovement || !recommendation) {
+        throw new FactoryServiceError(409, "A fresh repo-wide system improvement snapshot is not available.");
+      }
+      const existingObjectiveId = await findExistingSystemAutoFixObjective(service, recommendation);
+      const autoFixObjective = existingObjectiveId
+        ? await service.getObjective(existingObjectiveId).catch(() => undefined)
+        : await service.createObjective(buildSystemAutoFixObjectiveInput({
+          recommendation,
+          audit: systemImprovement.auditSummary,
+          dst: systemImprovement.dstSummary,
+          context: systemImprovement.contextSummary,
+          triggerLabel: "Operator-applied repo-wide system improvement recommendation.",
+        }));
+      const targetObjectiveId = autoFixObjective?.objectiveId ?? existingObjectiveId;
+      if (!targetObjectiveId) {
+        throw new FactoryServiceError(500, "Failed to create or locate the repo-wide auto-fix objective.");
+      }
+      const targetProfileId = autoFixObjective?.profile.rootProfileId ?? "software";
+      ctx.sse.publish("factory", targetObjectiveId);
+      if (request.objectiveId) ctx.sse.publish("factory", request.objectiveId);
       return workbenchNavigationResponse(req, workbenchLink({
         profileId: targetProfileId,
         chatId: request.chatId,

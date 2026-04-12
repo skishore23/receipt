@@ -5595,6 +5595,207 @@ test("factory workbench route: overview renders self-improvement recommendations
   expect(body).toContain('data-factory-href="/factory?profile=generalist&amp;chat=chat_demo&amp;objective=objective_auto_fix&amp;inspectorTab=chat&amp;detailTab=action"');
 });
 
+test("factory workbench route: overview renders repo-wide system improvement summary and mirrored objective snapshot", async () => {
+  const liveObjective = {
+    ...makeRunningWorkbenchObjectiveDetail(),
+    systemImprovement: {
+      generatedAt: 42,
+      healthStatus: "action_needed" as const,
+      auditSummary: {
+        objectivesAudited: 12,
+        weakObjectives: 8,
+        strongObjectives: 4,
+        topAnomalies: [{
+          category: "alignment_not_reported",
+          count: 6,
+        }],
+      },
+      dstSummary: {
+        streamCount: 123,
+        integrityFailures: 0,
+        replayFailures: 0,
+        deterministicFailures: 0,
+      },
+      contextSummary: {
+        runCount: 15,
+        hardFailureCount: 3,
+        compatibilityWarningCount: 7,
+        replayFailures: 0,
+        deterministicFailures: 0,
+      },
+      recommendations: [{
+        summary: "Stabilize alignment reporting across the worker finalization path.",
+        anomalyPatterns: ["alignment_not_reported"],
+        scope: "src/services/factory/runtime/service.ts",
+        confidence: "high" as const,
+        suggestedFix: "Persist a deterministic alignment artifact before job completion.",
+        successMetrics: [{
+          label: "context_dst",
+          baseline: "3 hard failures",
+          target: "0 hard failures",
+          verification: ["bun src/cli.ts dst --context --json"],
+          severity: "hard_defect" as const,
+        }],
+        acceptanceChecks: ["bun src/cli.ts dst --context --json"],
+      }],
+      selectedRecommendation: {
+        summary: "Stabilize alignment reporting across the worker finalization path.",
+        anomalyPatterns: ["alignment_not_reported"],
+        scope: "src/services/factory/runtime/service.ts",
+        confidence: "high" as const,
+        suggestedFix: "Persist a deterministic alignment artifact before job completion.",
+        successMetrics: [{
+          label: "context_dst",
+          baseline: "3 hard failures",
+          target: "0 hard failures",
+          verification: ["bun src/cli.ts dst --context --json"],
+          severity: "hard_defect" as const,
+        }],
+        acceptanceChecks: ["bun src/cli.ts dst --context --json"],
+      },
+      autoFixObjectiveId: "objective_system_auto_fix",
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [
+        {
+          ...liveObjective,
+          section: "active" as const,
+        } as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => liveObjective,
+      buildBoardProjection: async () => ({
+        objectives: [{
+          ...liveObjective,
+          section: "active" as const,
+        }],
+        sections: {
+          needs_attention: [],
+          active: [{
+            ...liveObjective,
+            section: "active" as const,
+          }],
+          queued: [],
+          completed: [],
+        },
+        selectedObjectiveId: liveObjective.objectiveId,
+        systemImprovement: liveObjective.systemImprovement,
+      }),
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_live");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain("System Improvement");
+  expect(body).toContain("Stabilize alignment reporting across the worker finalization path.");
+  expect(body).toContain("Repo-wide auto-fix objective");
+  expect(body).toContain("objective_system_auto_fix");
+  expect(body).toContain("alignment_not_reported ×6");
+  expect(body).toContain("Baseline: 3 hard failures");
+  expect(body).toContain("Target: 0 hard failures");
+});
+
+test("factory workbench route: overview renders apply button for actionable repo-wide system recommendations", async () => {
+  const liveObjective = {
+    ...makeRunningWorkbenchObjectiveDetail(),
+    systemImprovement: {
+      generatedAt: 42,
+      healthStatus: "action_needed" as const,
+      auditSummary: {
+        objectivesAudited: 12,
+        weakObjectives: 8,
+        strongObjectives: 4,
+        topAnomalies: [{
+          category: "lease expired",
+          count: 6,
+        }],
+      },
+      dstSummary: {
+        streamCount: 123,
+        integrityFailures: 0,
+        replayFailures: 0,
+        deterministicFailures: 0,
+      },
+      contextSummary: {
+        runCount: 15,
+        hardFailureCount: 3,
+        compatibilityWarningCount: 7,
+        replayFailures: 0,
+        deterministicFailures: 0,
+      },
+      recommendations: [{
+        summary: "Stabilize lease renewal in the runtime.",
+        anomalyPatterns: ["lease_expired"],
+        scope: "src/services/factory/runtime/service.ts",
+        confidence: "high" as const,
+        suggestedFix: "Add a shared LeaseManager and wire it into long-running workers.",
+        successMetrics: [{
+          label: "factory_audit",
+          baseline: "6 lease expiries",
+          target: "0 lease expiries",
+          verification: ["bun src/cli.ts factory audit --limit 12 --json"],
+          severity: "hard_defect" as const,
+        }],
+        acceptanceChecks: ["bun src/cli.ts factory audit --limit 12 --json"],
+      }],
+      selectedRecommendation: {
+        summary: "Stabilize lease renewal in the runtime.",
+        anomalyPatterns: ["lease_expired"],
+        scope: "src/services/factory/runtime/service.ts",
+        confidence: "high" as const,
+        suggestedFix: "Add a shared LeaseManager and wire it into long-running workers.",
+        successMetrics: [{
+          label: "factory_audit",
+          baseline: "6 lease expiries",
+          target: "0 lease expiries",
+          verification: ["bun src/cli.ts factory audit --limit 12 --json"],
+          severity: "hard_defect" as const,
+        }],
+        acceptanceChecks: ["bun src/cli.ts factory audit --limit 12 --json"],
+      },
+    },
+  } as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const app = createRouteTestApp({
+    service: {
+      listObjectives: async () => [
+        {
+          ...liveObjective,
+          section: "active" as const,
+        } as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => liveObjective,
+      buildBoardProjection: async () => ({
+        objectives: [{
+          ...liveObjective,
+          section: "active" as const,
+        }],
+        sections: {
+          needs_attention: [],
+          active: [{
+            ...liveObjective,
+            section: "active" as const,
+          }],
+          queued: [],
+          completed: [],
+        },
+        selectedObjectiveId: liveObjective.objectiveId,
+        systemImprovement: liveObjective.systemImprovement,
+      }),
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_live");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain('action="/factory/api/system-improvement/apply?profile=generalist&amp;chat=chat_demo&amp;objective=objective_live');
+  expect(body).toContain('data-factory-inline-pending-status="Applying repo-wide system recommendation..."');
+  expect(body).toContain(">Apply</button>");
+});
+
 test("factory workbench route: overview renders apply button for actionable self-improvement recommendations", async () => {
   const liveObjective = {
     ...makeRunningWorkbenchObjectiveDetail(),
@@ -5740,6 +5941,124 @@ test("factory route: applying a self-improvement recommendation creates an auto-
   expect(createdInputs[0]?.prompt).toContain("Operator-applied self-improvement recommendation.");
   expect(createdInputs[0]?.prompt).toContain("## Source Objective\nobjective_live");
   expect(createdInputs[0]?.prompt).toContain("factory_auto_fix_key:");
+});
+
+test("factory route: applying a repo-wide system recommendation creates a software auto-fix objective and redirects to it", async () => {
+  const dataDir = await createTempDir("factory-route-apply-system-improvement");
+  const systemDir = path.join(dataDir, "factory", "artifacts", "repo");
+  await fs.mkdir(systemDir, { recursive: true });
+  await fs.writeFile(path.join(systemDir, "system-improvement.json"), JSON.stringify({
+    generatedAt: 42,
+    healthStatus: "action_needed",
+    auditSummary: {
+      objectivesAudited: 12,
+      weakObjectives: 8,
+      strongObjectives: 4,
+      topAnomalies: [{
+        category: "lease expired",
+        count: 6,
+      }],
+    },
+    dstSummary: {
+      streamCount: 123,
+      integrityFailures: 0,
+      replayFailures: 0,
+      deterministicFailures: 0,
+    },
+    contextSummary: {
+      runCount: 15,
+      hardFailureCount: 3,
+      compatibilityWarningCount: 7,
+      replayFailures: 0,
+      deterministicFailures: 0,
+    },
+    recommendations: [{
+      summary: "Stabilize lease renewal in the runtime.",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory/runtime/service.ts",
+      confidence: "high",
+      suggestedFix: "Add a shared LeaseManager and wire it into long-running workers.",
+      successMetrics: [{
+        label: "factory_audit",
+        baseline: "6 lease expiries",
+        target: "0 lease expiries",
+        verification: ["bun src/cli.ts factory audit --limit 12 --json"],
+        severity: "hard_defect",
+      }],
+      acceptanceChecks: ["bun src/cli.ts factory audit --limit 12 --json"],
+    }],
+    selectedRecommendation: {
+      summary: "Stabilize lease renewal in the runtime.",
+      anomalyPatterns: ["lease_expired"],
+      scope: "src/services/factory/runtime/service.ts",
+      confidence: "high",
+      suggestedFix: "Add a shared LeaseManager and wire it into long-running workers.",
+      successMetrics: [{
+        label: "factory_audit",
+        baseline: "6 lease expiries",
+        target: "0 lease expiries",
+        verification: ["bun src/cli.ts factory audit --limit 12 --json"],
+        severity: "hard_defect",
+      }],
+      acceptanceChecks: ["bun src/cli.ts factory audit --limit 12 --json"],
+    },
+  }, null, 2), "utf-8");
+
+  const createdInputs: Array<Parameters<FactoryService["createObjective"]>[0]> = [];
+  const app = createRouteTestApp({
+    dataDir,
+    service: {
+      listObjectives: async () => [],
+      getObjective: async (objectiveId: string) => ({
+        ...makeRunningWorkbenchObjectiveDetail(),
+        objectiveId,
+        title: "Repo-wide auto-fix objective",
+        channel: "auto-fix",
+        prompt: "operator-applied repo-wide system improvement",
+        profile: {
+          ...makeRunningWorkbenchObjectiveDetail().profile,
+          rootProfileId: "software",
+        },
+      } as Awaited<ReturnType<FactoryService["getObjective"]>>),
+      createObjective: async (input) => {
+        createdInputs.push(input);
+        return {
+          ...makeRunningWorkbenchObjectiveDetail(),
+          objectiveId: "objective_system_auto_fix_manual",
+          title: input.title,
+          prompt: input.prompt,
+          channel: input.channel,
+          profile: {
+            ...makeRunningWorkbenchObjectiveDetail().profile,
+            rootProfileId: input.profileId ?? "software",
+          },
+        } as Awaited<ReturnType<FactoryService["createObjective"]>>;
+      },
+    },
+  });
+
+  const response = await app.request(
+    "http://receipt.test/factory/api/system-improvement/apply?profile=generalist&chat=chat_demo&objective=objective_live",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: "",
+    },
+  );
+  const payload = await response.json() as {
+    readonly location?: string;
+  };
+
+  expect(response.status).toBe(200);
+  expect(payload.location).toBe("/factory?profile=software&chat=chat_demo&objective=objective_system_auto_fix_manual&inspectorTab=chat&detailTab=action");
+  expect(createdInputs).toHaveLength(1);
+  expect(createdInputs[0]?.channel).toBe("auto-fix");
+  expect(createdInputs[0]?.profileId).toBe("software");
+  expect(createdInputs[0]?.prompt).toContain("Operator-applied repo-wide system improvement recommendation.");
+  expect(createdInputs[0]?.prompt).toContain("factory_system_auto_fix_key:");
 });
 
 test("factory route: applying a self-improvement recommendation from infrastructure does not reuse the investigation-only profile", async () => {

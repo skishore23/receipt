@@ -104,6 +104,7 @@ import {
   releasesObjectiveSlot as releasesLiveObjectiveSlot,
   shouldRedriveQueuedControlJob as shouldRequeueObjectiveControlJob,
 } from "./objective-control";
+import { readPersistedSystemImprovementReport } from "../system-improvement-artifacts";
 import {
   buildObjectiveHandoffEvent as buildTaskRunnerObjectiveHandoffEvent,
   buildWorkerHandoffEvent as buildTaskRunnerWorkerHandoffEvent,
@@ -682,6 +683,7 @@ import {
   type FactoryComposeModel,
   type FactoryBoardSection,
   type FactoryBoardProjection,
+  type FactorySystemImprovementReport,
   type FactoryLiveProjection,
   type FactoryLiveOutputTargetKind,
   type FactoryLiveOutputSnapshot,
@@ -1837,22 +1839,27 @@ export class FactoryService {
   }): Promise<FactoryBoardProjection> {
     const selectedObjectiveId = typeof query === "string" ? query : query?.selectedObjectiveId;
     const profileId = typeof query === "string" ? undefined : query?.profileId;
-    const objectives = (await this.listObjectives(profileId ? { profileId } : undefined))
+    const [objectives, systemImprovement] = await Promise.all([
+      this.listObjectives(profileId ? { profileId } : undefined),
+      readPersistedSystemImprovementReport(this.dataDir).catch(() => undefined),
+    ]);
+    const sectionedObjectives = objectives
       .filter((objective) => !objective.archivedAt)
       .map((objective) => ({
         ...objective,
         section: boardSectionForObjective(objective),
       }));
-    const resolvedSelectedObjectiveId = this.resolveSelectedObjectiveId(objectives, selectedObjectiveId);
+    const resolvedSelectedObjectiveId = this.resolveSelectedObjectiveId(sectionedObjectives, selectedObjectiveId);
     return {
-      objectives,
+      objectives: sectionedObjectives,
       sections: {
-        needs_attention: objectives.filter((objective) => objective.section === "needs_attention"),
-        active: objectives.filter((objective) => objective.section === "active"),
-        queued: objectives.filter((objective) => objective.section === "queued"),
-        completed: objectives.filter((objective) => objective.section === "completed"),
+        needs_attention: sectionedObjectives.filter((objective) => objective.section === "needs_attention"),
+        active: sectionedObjectives.filter((objective) => objective.section === "active"),
+        queued: sectionedObjectives.filter((objective) => objective.section === "queued"),
+        completed: sectionedObjectives.filter((objective) => objective.section === "completed"),
       },
       selectedObjectiveId: resolvedSelectedObjectiveId,
+      systemImprovement: systemImprovement as FactorySystemImprovementReport | undefined,
     };
   }
 

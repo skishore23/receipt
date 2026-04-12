@@ -6,6 +6,7 @@ import type {
   FactoryObjectiveDetail,
   FactoryObjectivePhaseDetail,
   FactoryObjectiveSelfImprovement,
+  FactorySystemImprovementReport,
   FactoryObjectiveStatusAuthority,
 } from "../services/factory-types";
 import type { FactoryWorkbenchModel } from "./factory-workbench";
@@ -130,6 +131,7 @@ export type FactorySelectedObjectiveCard = {
   readonly prUrl?: string;
   readonly prNumber?: number;
   readonly selfImprovement?: FactoryObjectiveSelfImprovement;
+  readonly systemImprovement?: FactorySystemImprovementReport;
   readonly contract?: {
     readonly acceptanceCriteria: ReadonlyArray<string>;
     readonly allowedScope: ReadonlyArray<string>;
@@ -455,6 +457,7 @@ export type FactoryWorkbenchSummarySectionModel = {
   readonly tokenCount?: string;
   readonly stats: ReadonlyArray<FactoryWorkbenchStatModel>;
   readonly objective?: FactorySelectedObjectiveCard;
+  readonly systemImprovement?: FactorySystemImprovementReport;
   readonly currentRun?: FactoryLiveRunCard;
   readonly focus?: {
     readonly title: string;

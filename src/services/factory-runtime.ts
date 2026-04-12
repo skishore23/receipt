@@ -43,15 +43,30 @@ import {
   readPersistedObjectiveAuditMetadata,
 } from "./factory/objective-audit-artifacts";
 import {
+  systemImprovementArtifactPaths,
+} from "./factory/system-improvement-artifacts";
+import {
+  buildSystemAutoFixObjectiveInput,
+  findExistingSystemAutoFixObjective,
+  shouldCreateSystemAutoFixObjective,
+} from "./factory/system-improvement-autofix";
+import {
   buildAutoFixObjectiveInput,
   findExistingAutoFixObjective,
 } from "./factory/objective-audit-autofix";
+import { readFactoryReceiptAudit } from "../factory-cli/audit";
+import { runReceiptContextDstAudit, type ReceiptDstContextAuditReport } from "../cli/dst-context";
+import { runReceiptDstAudit, type ReceiptDstAuditReport } from "../cli/dst";
 import { isSqliteLockError } from "../db/client";
 import {
   codexActivityKey,
   markDurableJobRunning,
   recoverPersistedJsonResult,
 } from "../lib/durable-execution";
+import type {
+  FactorySystemImprovementRecommendation,
+  FactorySystemImprovementReport,
+} from "./factory-types";
 
 export type FactoryQueue = JobBackend;
 export type FactoryJobRuntime = ReturnType<
@@ -417,8 +432,38 @@ const AuditRecommendationSchema = z.object({
   ),
 });
 
+const SYSTEM_IMPROVEMENT_AUDIT_LIMIT = 12;
+
+const FactorySystemImprovementRecommendationSchema = z.object({
+  recommendations: z.array(
+    z.object({
+      summary: z.string(),
+      anomalyPatterns: z.array(z.string()),
+      scope: z.string(),
+      confidence: z.enum(["low", "medium", "high"]),
+      suggestedFix: z.string(),
+      successMetrics: z.array(
+        z.object({
+          label: z.string(),
+          baseline: z.string(),
+          target: z.string(),
+          verification: z.array(z.string()),
+          severity: z.enum(["warning", "hard_defect"]),
+        }),
+      ),
+      acceptanceChecks: z.array(z.string()),
+    }),
+  ),
+});
+
 type AuditRecommendationRun = {
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
+  readonly status: "ready" | "failed";
+  readonly error?: string;
+};
+
+type FactorySystemImprovementRecommendationRun = {
+  readonly recommendations: ReadonlyArray<FactorySystemImprovementRecommendation>;
   readonly status: "ready" | "failed";
   readonly error?: string;
 };
@@ -533,6 +578,278 @@ const generateAuditRecommendations = async (
       .filter(Boolean),
     scope: recommendation.scope.trim() || "unknown",
   }));
+};
+
+const compactDstSummary = (
+  report: ReceiptDstAuditReport,
+): FactorySystemImprovementReport["dstSummary"] => ({
+  streamCount: report.streamCount,
+  integrityFailures: report.integrityFailures,
+  replayFailures: report.replayFailures,
+  deterministicFailures: report.deterministicFailures,
+});
+
+const compactContextDstSummary = (
+  report: ReceiptDstContextAuditReport,
+): FactorySystemImprovementReport["contextSummary"] => {
+  const compatibilityWarningCount = report.runs.reduce(
+    (sum, run) => sum + run.warnings.length,
+    0,
+  );
+  const hardFailureCount = report.runs.filter(
+    (run) => run.issues.length > 0 || !run.integrity.ok,
+  ).length;
+  return {
+    runCount: report.runCount,
+    hardFailureCount,
+    compatibilityWarningCount,
+    replayFailures: report.replayFailures,
+    deterministicFailures: report.deterministicFailures,
+  };
+};
+
+const compactAuditSummary = (
+  report: Awaited<ReturnType<typeof readFactoryReceiptAudit>>,
+): FactorySystemImprovementReport["auditSummary"] => ({
+  objectivesAudited: report.summary.objectivesAudited,
+  weakObjectives: report.summary.verdicts.weak ?? 0,
+  strongObjectives: report.summary.verdicts.strong ?? 0,
+  topAnomalies: report.anomalyCategories.slice(0, 8).map((item) => ({
+    category: item.category,
+    count: item.count,
+  })),
+});
+
+const deriveSystemHealthStatus = (input: {
+  readonly dst: FactorySystemImprovementReport["dstSummary"];
+  readonly context: FactorySystemImprovementReport["contextSummary"];
+  readonly audit: FactorySystemImprovementReport["auditSummary"];
+}): FactorySystemImprovementReport["healthStatus"] => {
+  if (
+    input.dst.integrityFailures > 0
+    || input.dst.replayFailures > 0
+    || input.dst.deterministicFailures > 0
+    || input.context.hardFailureCount > 0
+    || input.context.replayFailures > 0
+    || input.context.deterministicFailures > 0
+  ) {
+    return "action_needed";
+  }
+  if (
+    input.audit.weakObjectives > 0
+    || input.context.compatibilityWarningCount > 0
+    || input.audit.topAnomalies.length > 0
+  ) {
+    return "watch";
+  }
+  return "healthy";
+};
+
+const renderSystemImprovementInput = (input: {
+  readonly audit: FactorySystemImprovementReport["auditSummary"];
+  readonly dst: FactorySystemImprovementReport["dstSummary"];
+  readonly context: FactorySystemImprovementReport["contextSummary"];
+}): string => {
+  const anomalyLines = input.audit.topAnomalies.length > 0
+    ? input.audit.topAnomalies.map((item) => `- ${item.category}: ${item.count}`).join("\n")
+    : "none";
+  return [
+    "## Repo Audit Summary",
+    `Objectives audited: ${input.audit.objectivesAudited}`,
+    `Weak objectives: ${input.audit.weakObjectives}`,
+    `Strong objectives: ${input.audit.strongObjectives}`,
+    "",
+    "## Top Anomalies",
+    anomalyLines,
+    "",
+    "## DST Summary",
+    `Streams scanned: ${input.dst.streamCount}`,
+    `Integrity failures: ${input.dst.integrityFailures}`,
+    `Replay failures: ${input.dst.replayFailures}`,
+    `Deterministic failures: ${input.dst.deterministicFailures}`,
+    "",
+    "## Context DST Summary",
+    `Runs scanned: ${input.context.runCount}`,
+    `Hard failures: ${input.context.hardFailureCount}`,
+    `Compatibility warnings: ${input.context.compatibilityWarningCount}`,
+    `Replay failures: ${input.context.replayFailures}`,
+    `Deterministic failures: ${input.context.deterministicFailures}`,
+  ].join("\n");
+};
+
+const systemMetricVerification = (
+  label: string,
+): ReadonlyArray<string> => {
+  switch (label) {
+    case "base_dst":
+      return ["bun src/cli.ts dst --json"];
+    case "context_dst":
+      return ["bun src/cli.ts dst --context --json"];
+    case "factory_audit":
+      return ["bun src/cli.ts factory audit --limit 12 --json"];
+    default:
+      return [
+        "bun src/cli.ts factory audit --limit 12 --json",
+        "bun src/cli.ts dst --json",
+        "bun src/cli.ts dst --context --json",
+      ];
+  }
+};
+
+const normalizeSystemRecommendations = (
+  recommendations: ReadonlyArray<z.infer<typeof FactorySystemImprovementRecommendationSchema>["recommendations"][number]>,
+): ReadonlyArray<FactorySystemImprovementRecommendation> =>
+  recommendations.map((recommendation) => ({
+    summary: recommendation.summary.trim(),
+    anomalyPatterns: recommendation.anomalyPatterns
+      .map((pattern) => normalizeAuditPattern(pattern))
+      .filter(Boolean),
+    scope: recommendation.scope.trim() || "unknown",
+    confidence: recommendation.confidence,
+    suggestedFix: recommendation.suggestedFix.trim(),
+    successMetrics: recommendation.successMetrics.map((metric) => ({
+      label: metric.label.trim() || "metric",
+      baseline: metric.baseline.trim(),
+      target: metric.target.trim(),
+      severity: metric.severity,
+      verification: metric.verification
+        .map((item) => item.trim())
+        .filter(Boolean),
+    })).filter((metric) => metric.baseline && metric.target),
+    acceptanceChecks: recommendation.acceptanceChecks
+      .map((item) => item.trim())
+      .filter(Boolean),
+  }));
+
+const runSystemImprovementRecommendationGenerator = async (
+  recommendationGenerator: (
+    input: {
+      readonly audit: FactorySystemImprovementReport["auditSummary"];
+      readonly dst: FactorySystemImprovementReport["dstSummary"];
+      readonly context: FactorySystemImprovementReport["contextSummary"];
+      readonly healthStatus: FactorySystemImprovementReport["healthStatus"];
+    },
+  ) => Promise<ReadonlyArray<FactorySystemImprovementRecommendation>>,
+  input: {
+    readonly audit: FactorySystemImprovementReport["auditSummary"];
+    readonly dst: FactorySystemImprovementReport["dstSummary"];
+    readonly context: FactorySystemImprovementReport["contextSummary"];
+    readonly healthStatus: FactorySystemImprovementReport["healthStatus"];
+  },
+): Promise<FactorySystemImprovementRecommendationRun> => {
+  try {
+    return {
+      recommendations: await recommendationGenerator(input),
+      status: "ready",
+    };
+  } catch (error) {
+    return {
+      recommendations: [],
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+};
+
+const generateSystemImprovementRecommendations = async (
+  input: {
+    readonly audit: FactorySystemImprovementReport["auditSummary"];
+    readonly dst: FactorySystemImprovementReport["dstSummary"];
+    readonly context: FactorySystemImprovementReport["contextSummary"];
+    readonly healthStatus: FactorySystemImprovementReport["healthStatus"];
+  },
+): Promise<ReadonlyArray<FactorySystemImprovementRecommendation>> => {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error(
+      "OPENAI_API_KEY not set for repo-wide system recommendation generation",
+    );
+  }
+  const result = await llmStructured({
+    system: [
+      "You are an expert software reliability engineer analyzing repo-wide Receipt and Factory health signals.",
+      "Generate a small ranked set of repo-wide software-engineering improvements.",
+      "Prioritize recurring engine-level issues over one-off objective-local fixes.",
+      "Ignore historical schema drift warnings unless they indicate current hard failures.",
+      "Prefer one high-leverage orchestrator/runtime change over many narrow fixes.",
+      "Recommendations must be suitable for a software delivery objective executed by Codex.",
+      "Each recommendation must include:",
+      "- summary",
+      "- anomalyPatterns",
+      "- scope",
+      "- confidence",
+      "- suggestedFix",
+      "- successMetrics with label, baseline, target, verification, severity",
+      "- acceptanceChecks",
+      "Use labels base_dst, context_dst, and factory_audit when those system metrics are relevant.",
+      "Return an empty array if no repo-wide improvement is justified.",
+    ].join("\n"),
+    user: [
+      `Current health status: ${input.healthStatus}`,
+      "",
+      renderSystemImprovementInput(input),
+    ].join("\n"),
+    schema: FactorySystemImprovementRecommendationSchema,
+    schemaName: "FactorySystemImprovementRecommendations",
+  });
+  return normalizeSystemRecommendations(result.parsed.recommendations).map((recommendation) => ({
+    ...recommendation,
+    successMetrics: recommendation.successMetrics.map((metric) => ({
+      ...metric,
+      verification: metric.verification.length > 0
+        ? metric.verification
+        : systemMetricVerification(metric.label),
+    })),
+  }));
+};
+
+const renderSystemImprovementText = (
+  report: FactorySystemImprovementReport,
+): string => {
+  const recommendation = report.selectedRecommendation ?? report.recommendations[0];
+  return [
+    "# Repo-Wide System Improvement",
+    "",
+    `Generated: ${new Date(report.generatedAt).toISOString()}`,
+    `Health: ${report.healthStatus}`,
+    "",
+    "## Audit",
+    `Objectives audited: ${report.auditSummary.objectivesAudited}`,
+    `Weak objectives: ${report.auditSummary.weakObjectives}`,
+    `Strong objectives: ${report.auditSummary.strongObjectives}`,
+    ...(report.auditSummary.topAnomalies.length > 0
+      ? ["Top anomalies:", ...report.auditSummary.topAnomalies.map((item) => `- ${item.category}: ${item.count}`)]
+      : ["Top anomalies: none"]),
+    "",
+    "## DST",
+    `Streams: ${report.dstSummary.streamCount}`,
+    `Failures: integrity=${report.dstSummary.integrityFailures} replay=${report.dstSummary.replayFailures} deterministic=${report.dstSummary.deterministicFailures}`,
+    "",
+    "## Context DST",
+    `Runs: ${report.contextSummary.runCount}`,
+    `Hard failures: ${report.contextSummary.hardFailureCount}`,
+    `Compatibility warnings: ${report.contextSummary.compatibilityWarningCount}`,
+    `Failures: replay=${report.contextSummary.replayFailures} deterministic=${report.contextSummary.deterministicFailures}`,
+    "",
+    "## Recommendation",
+    recommendation
+      ? `- [${recommendation.confidence}] ${recommendation.summary}`
+      : "- none",
+    ...(recommendation
+      ? [
+          `- scope=${recommendation.scope}`,
+          `- fix=${recommendation.suggestedFix}`,
+          ...(recommendation.successMetrics.length > 0
+            ? ["", "## Metrics", ...recommendation.successMetrics.flatMap((metric) => [
+                `- ${metric.label} [${metric.severity}] baseline=${metric.baseline} target=${metric.target}`,
+                ...metric.verification.map((command) => `  verify: ${command}`),
+              ])]
+            : []),
+        ]
+      : []),
+    ...(report.autoFixObjectiveId
+      ? ["", "## Auto-fix", `- Objective: ${report.autoFixObjectiveId}`]
+      : []),
+  ].join("\n");
 };
 
 const objectiveIdFromAuditEntry = (text: string): string | undefined => {
@@ -873,6 +1190,14 @@ export const runFactoryObjectiveAudit = async (input: {
     recentAuditEntries: ReadonlyArray<{ readonly text: string }>,
     patternCounts: ReadonlyMap<string, number>,
   ) => Promise<ReadonlyArray<AuditRecommendation>>;
+  readonly systemRecommendationGenerator?: (
+    input: {
+      readonly audit: FactorySystemImprovementReport["auditSummary"];
+      readonly dst: FactorySystemImprovementReport["dstSummary"];
+      readonly context: FactorySystemImprovementReport["contextSummary"];
+      readonly healthStatus: FactorySystemImprovementReport["healthStatus"];
+    },
+  ) => Promise<ReadonlyArray<FactorySystemImprovementRecommendation>>;
 }): Promise<Record<string, unknown>> => {
   const parsed = parseObjectiveAuditPayload(input.payload);
   const report = await withObjectiveAuditRetry(() =>
@@ -1068,6 +1393,99 @@ export const runFactoryObjectiveAudit = async (input: {
     ]);
   });
 
+  let systemImprovementReport: FactorySystemImprovementReport | undefined;
+  let systemImprovementError: string | undefined;
+  try {
+    const [auditReport, dstReport, contextReport] = await Promise.all([
+      readFactoryReceiptAudit(
+        input.dataDir,
+        input.repoRoot,
+        SYSTEM_IMPROVEMENT_AUDIT_LIMIT,
+      ),
+      runReceiptDstAudit(input.dataDir, { includeContext: false }),
+      runReceiptContextDstAudit(input.dataDir, {
+        repoRoot: input.repoRoot,
+      }),
+    ]);
+    const compactAudit = compactAuditSummary(auditReport);
+    const compactDst = compactDstSummary(dstReport);
+    const compactContext = compactContextDstSummary(contextReport);
+    const healthStatus = deriveSystemHealthStatus({
+      audit: compactAudit,
+      dst: compactDst,
+      context: compactContext,
+    });
+    const systemRecommendationRun =
+      await runSystemImprovementRecommendationGenerator(
+        input.systemRecommendationGenerator
+          ?? generateSystemImprovementRecommendations,
+        {
+          audit: compactAudit,
+          dst: compactDst,
+          context: compactContext,
+          healthStatus,
+        },
+      );
+    const selectedRecommendation =
+      systemRecommendationRun.recommendations[0];
+    let systemAutoFixObjectiveId: string | undefined;
+    if (
+      input.factoryService
+      && input.autoFixEnabled !== false
+      && autoFixSourceEligible
+      && shouldCreateSystemAutoFixObjective(selectedRecommendation)
+    ) {
+      const existingObjectiveId = await findExistingSystemAutoFixObjective(
+        input.factoryService,
+        selectedRecommendation,
+      );
+      if (existingObjectiveId) {
+        systemAutoFixObjectiveId = existingObjectiveId;
+      } else {
+        try {
+          const objective = await input.factoryService.createObjective(
+            buildSystemAutoFixObjectiveInput({
+              recommendation: selectedRecommendation,
+              audit: compactAudit,
+              dst: compactDst,
+              context: compactContext,
+              triggerLabel:
+                "Repo-wide self-improvement recommendation triggered this software delivery objective.",
+            }),
+          );
+          systemAutoFixObjectiveId = objective.objectiveId;
+        } catch {
+          // system auto-fix is best-effort
+        }
+      }
+    }
+    systemImprovementReport = {
+      generatedAt: Date.now(),
+      healthStatus,
+      auditSummary: compactAudit,
+      dstSummary: compactDst,
+      contextSummary: compactContext,
+      recommendations: systemRecommendationRun.recommendations,
+      selectedRecommendation,
+      autoFixObjectiveId: systemAutoFixObjectiveId,
+    };
+    const artifact = systemImprovementArtifactPaths(input.dataDir);
+    await fs.mkdir(artifact.root, { recursive: true });
+    await fs.writeFile(
+      artifact.jsonPath,
+      JSON.stringify(systemImprovementReport, null, 2),
+      "utf-8",
+    );
+    await fs.writeFile(
+      artifact.textPath,
+      renderSystemImprovementText(systemImprovementReport),
+      "utf-8",
+    );
+  } catch (error) {
+    systemImprovementError =
+      error instanceof Error ? error.message : String(error);
+  }
+
   return {
     objectiveId: parsed.objectiveId,
     objectiveStatus: parsed.objectiveStatus,
@@ -1085,6 +1503,9 @@ export const runFactoryObjectiveAudit = async (input: {
     recommendationStatus: recommendationRun.status,
     recommendationError: recommendationRun.error,
     autoFixObjectiveId,
+    systemImprovementStatus: systemImprovementReport ? "ready" : "failed",
+    systemImprovementError,
+    systemAutoFixObjectiveId: systemImprovementReport?.autoFixObjectiveId,
   };
 };
 

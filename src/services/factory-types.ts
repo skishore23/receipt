@@ -217,6 +217,54 @@ export type FactoryObjectiveSelfImprovement = {
   }>;
 };
 
+export type FactorySystemImprovementMetric = {
+  readonly label: string;
+  readonly baseline: string;
+  readonly target: string;
+  readonly verification: ReadonlyArray<string>;
+  readonly severity: "warning" | "hard_defect";
+};
+
+export type FactorySystemImprovementRecommendation = {
+  readonly summary: string;
+  readonly anomalyPatterns: ReadonlyArray<string>;
+  readonly scope: string;
+  readonly confidence: "low" | "medium" | "high";
+  readonly suggestedFix: string;
+  readonly successMetrics: ReadonlyArray<FactorySystemImprovementMetric>;
+  readonly acceptanceChecks: ReadonlyArray<string>;
+};
+
+export type FactorySystemImprovementReport = {
+  readonly generatedAt: number;
+  readonly healthStatus: "healthy" | "watch" | "action_needed";
+  readonly auditSummary: {
+    readonly objectivesAudited: number;
+    readonly weakObjectives: number;
+    readonly strongObjectives: number;
+    readonly topAnomalies: ReadonlyArray<{
+      readonly category: string;
+      readonly count: number;
+    }>;
+  };
+  readonly dstSummary: {
+    readonly streamCount: number;
+    readonly integrityFailures: number;
+    readonly replayFailures: number;
+    readonly deterministicFailures: number;
+  };
+  readonly contextSummary: {
+    readonly runCount: number;
+    readonly hardFailureCount: number;
+    readonly compatibilityWarningCount: number;
+    readonly replayFailures: number;
+    readonly deterministicFailures: number;
+  };
+  readonly recommendations: ReadonlyArray<FactorySystemImprovementRecommendation>;
+  readonly selectedRecommendation?: FactorySystemImprovementRecommendation;
+  readonly autoFixObjectiveId?: string;
+};
+
 export type FactoryObjectiveDisplayState =
   | "Draft"
   | "Queued"
@@ -307,6 +355,7 @@ export type FactoryObjectiveCard = {
   readonly headRefName?: string;
   readonly baseRefName?: string;
   readonly selfImprovement?: FactoryObjectiveSelfImprovement;
+  readonly systemImprovement?: FactorySystemImprovementReport;
   readonly contract?: FactoryObjectiveContractRecord;
   readonly alignment?: FactoryObjectiveAlignmentSummary;
   readonly profile: FactoryObjectiveProfileSnapshot;
@@ -390,6 +439,7 @@ export type FactoryBoardProjection = {
     >
   >;
   readonly selectedObjectiveId?: string;
+  readonly systemImprovement?: FactorySystemImprovementReport;
 };
 
 export type FactoryLiveProjection = {

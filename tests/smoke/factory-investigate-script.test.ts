@@ -39,6 +39,7 @@ import {
   FactoryService,
   type FactoryTaskJobPayload,
 } from "../../src/services/factory-service";
+import { readPersistedSystemImprovementReport } from "../../src/services/factory/system-improvement-artifacts";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 
 const execFileAsync = promisify(execFile);
@@ -1074,6 +1075,83 @@ test("factory objective audit creates an auto-fix objective for recurring high-c
         entry.text.includes(result.autoFixObjectiveId!),
     ),
   ).toBe(true);
+}, 120_000);
+
+test("factory objective audit persists repo-wide system improvement and creates a software auto-fix objective", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService();
+  const created = await service.createObjective({
+    title: "Create repo-wide software auto-fix",
+    prompt: "Complete work so the repo-wide self-improvement pass can create a software objective.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    channel: "trial",
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const result = (await runFactoryObjectiveAudit({
+    dataDir,
+    repoRoot,
+    memoryTools: service.memoryTools!,
+    factoryService: service,
+    payload: {
+      kind: "factory.objective.audit",
+      objectiveId: created.objectiveId,
+      objectiveStatus: "completed",
+      objectiveUpdatedAt: Date.now(),
+      objectiveChannel: "trial",
+    },
+    recommendationGenerator: async () => [],
+    systemRecommendationGenerator: async () => [
+      {
+        summary: "Stabilize repo-wide system integrity by enforcing alignment reporting in the worker finalization path.",
+        anomalyPatterns: ["alignment_not_reported", "missing_alignment_artifact"],
+        scope: "src/services/factory/runtime/service.ts",
+        confidence: "high",
+        suggestedFix: "Persist a deterministic alignment artifact before job completion and require it in the finalization path.",
+        successMetrics: [
+          {
+            label: "context_dst",
+            baseline: "hard failures > 0 from missing alignment-related context",
+            target: "hard failures = 0 for alignment reporting regressions on new runs",
+            verification: ["bun src/cli.ts dst --context --json"],
+            severity: "hard_defect",
+          },
+        ],
+        acceptanceChecks: [
+          "bun src/cli.ts dst --context --json",
+          "bun src/cli.ts factory audit --limit 12 --json",
+        ],
+      },
+    ],
+  })) as {
+    readonly systemImprovementStatus: string;
+    readonly systemAutoFixObjectiveId?: string;
+  };
+
+  expect(result.systemImprovementStatus).toBe("ready");
+  expect(result.systemAutoFixObjectiveId).toBeTruthy();
+
+  const systemReport = await readPersistedSystemImprovementReport(dataDir);
+  expect(systemReport?.selectedRecommendation?.summary ?? "").toContain(
+    "alignment reporting",
+  );
+  expect(systemReport?.autoFixObjectiveId).toBe(result.systemAutoFixObjectiveId);
+  expect(systemReport?.recommendations[0]?.successMetrics[0]?.severity).toBe(
+    "hard_defect",
+  );
+
+  const autoFixObjective = await service.getObjective(result.systemAutoFixObjectiveId!);
+  expect(autoFixObjective.channel).toBe("auto-fix");
+  expect(autoFixObjective.objectiveMode).toBe("delivery");
+  expect(autoFixObjective.profile.rootProfileId).toBe("software");
+  expect(autoFixObjective.prompt).toContain("## Baseline Metrics");
+  expect(autoFixObjective.prompt).toContain("## Success Metrics");
+  expect(autoFixObjective.prompt).toContain("factory_system_auto_fix_key:");
 }, 120_000);
 
 test("factory objective audit can disable auto-fix objective creation while still surfacing recommendations", async () => {
