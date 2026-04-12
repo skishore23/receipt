@@ -10,6 +10,7 @@
         "@inkjs/ui": "^2.0.0",
         "@oblivionocean/minigfm": "^1.0.7",
         "@receipt/core": "workspace:*",
+        "@receipt/durable": "workspace:*",
         "@resonatehq/sdk": "^0.9.6",
         "@tailwindcss/cli": "^4.2.1",
         "clsx": "^2.1.1",
@@ -36,6 +37,13 @@
     "packages/core": {
       "name": "@receipt/core",
       "version": "0.1.0",
+    },
+    "packages/durable": {
+      "name": "@receipt/durable",
+      "version": "0.1.0",
+      "dependencies": {
+        "@resonatehq/sdk": "^0.9.6",
+      },
     },
   },
   "packages": {
@@ -148,6 +156,8 @@
     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.5.6", "", { "os": "win32", "cpu": "x64" }, "sha512-hbQlYcCq5dlAX9Qx+kFb0FHue6vbjlf0FrNzSKdYK2APUf7tGfGxQCk2ihEREmbR6ZMc0MVAD5RIX/41gpUzTw=="],
 
     "@receipt/core": ["@receipt/core@workspace:packages/core"],
+
+    "@receipt/durable": ["@receipt/durable@workspace:packages/durable"],
 
     "@resonatehq/sdk": ["@resonatehq/sdk@0.9.6", "", { "dependencies": { "cron-parser": "^5.3.0", "eventsource": "^4.0.0" } }, "sha512-8U75H2qgC4BJOW76vtLTaFibMNGbGvIIF8hubc4eDU+5woqSX18kYh8EA9eZQOYx4cNH3m8OWS66RwVZnyYL3g=="],
 
