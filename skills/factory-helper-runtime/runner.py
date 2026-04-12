@@ -70,6 +70,25 @@ def required_runtime_identity(name: str) -> str:
     return value
 
 
+def helper_supports_flag(entrypoint_path: str, flag: str) -> bool:
+    try:
+        return flag in Path(entrypoint_path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def factory_helper_output_dir() -> str | None:
+    explicit = os.getenv("RECEIPT_FACTORY_HELPER_OUTPUT_DIR", "").strip()
+    if explicit:
+        target = Path(explicit)
+    elif os.getenv("RECEIPT_FACTORY_TASK_ID", "").strip():
+        target = Path.cwd() / ".receipt" / "factory" / "evidence"
+    else:
+        return None
+    target.mkdir(parents=True, exist_ok=True)
+    return str(target)
+
+
 def attach_execution_records(
     result: dict[str, Any],
     *,
@@ -221,6 +240,10 @@ def command_run(args: argparse.Namespace) -> int:
     passthrough = list(args.helper_args or [])
     if passthrough[:1] == ["--"]:
         passthrough = passthrough[1:]
+    if "--output-dir" not in passthrough:
+        default_output_dir = factory_helper_output_dir()
+        if default_output_dir and helper_supports_flag(entry["entrypointPath"], "--output-dir"):
+            passthrough = [*passthrough, "--output-dir", default_output_dir]
     try:
         completed = subprocess.run(
             ["python3", entry["entrypointPath"], *passthrough],

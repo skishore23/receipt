@@ -93,8 +93,11 @@ test("writes and reads a canonical investigation evidence bundle", async () => {
   });
 
   const bundle = await readInvestigationEvidenceBundle(bundlePath);
+  expect(bundle.graph.graph_id).toBe("objective_1:task_1");
+  expect(bundle.semantic_status).toBe("final");
   expect(bundle.evidence_records).toHaveLength(1);
   expect(bundle.scripts_run).toHaveLength(1);
+  expect(bundle.observations).toHaveLength(0);
   expect(bundle.artifacts[0]?.summary).toContain("\"ok\":true");
   await fs.rm(dir, { recursive: true, force: true });
 });

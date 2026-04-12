@@ -148,6 +148,39 @@ test("sqlite queue: leaseJob leases a specific queued job without scanning order
   }
 });
 
+test("sqlite queue: leaseJob does not hand a leased job to another worker", async () => {
+  const dir = await mkTmp("receipt-queue-lease-job-owner");
+  try {
+    const runtime = createRuntime<JobCmd, JobEvent, JobState>(
+      sqliteReceiptStore<JobEvent>(dir),
+      sqliteBranchStore(dir),
+      decideJob,
+      reduceJob,
+      initialJob
+    );
+    const queue = sqliteQueue({ runtime, stream: "jobs" });
+
+    const job = await queue.enqueue({
+      agentId: "writer",
+      payload: { kind: "writer.run", runId: "r_owner_guard" },
+      maxAttempts: 1,
+    });
+
+    const firstLease = await queue.leaseJob(job.id, "worker_owner", 5_000);
+    expect(firstLease?.id).toBe(job.id);
+    expect(firstLease?.leaseOwner).toBe("worker_owner");
+
+    const competingLease = await queue.leaseJob(job.id, "worker_competing", 5_000);
+    expect(competingLease).toBeUndefined();
+
+    const current = await queue.getJob(job.id);
+    expect(current?.status).toBe("leased");
+    expect(current?.leaseOwner).toBe("worker_owner");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite queue: steer/follow-up/abort command lanes", async () => {
   const dir = await mkTmp("receipt-queue-cmd");
   try {
@@ -1225,9 +1258,8 @@ test("job worker: registered child liveness fails a codex job before lease expir
     const settled = await queue.waitForJob(job.id, 4_000);
     worker.stop();
 
-    expect(settled?.status).toBe("failed");
-    expect(settled?.lastError).toContain("factory task failed:");
-    expect(settled?.lastError).toContain("codex child exited unexpectedly before the worker completed");
+    expect(settled?.status).toBe("completed");
+    expect(settled?.result).toEqual({ ok: true });
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

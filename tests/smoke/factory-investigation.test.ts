@@ -1060,6 +1060,7 @@ test("factory investigation: infrastructure task prompts require helper-first AW
   expect(prompt).toContain("Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call.");
   expect(prompt).toContain("If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.");
   expect(prompt).toContain("Use Codex subagents only for bounded sidecar work");
+  expect(prompt).toContain("bounded parallel subagents are allowed only for independent sidecars");
   expect(prompt).toContain("Keep this task session as the single owner of the final JSON result.");
   expect(prompt).toContain("Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.");
   expect(prompt).toContain("Do not fan out broad parallel exploration");
@@ -2120,6 +2121,60 @@ test("factory investigation: repeated finalize recommendations without synth dis
   expect(report.assessment.notes.some((note) => note.includes("Repeated synthesis dispatches occurred without terminal completion"))).toBe(false);
 }, 120_000);
 
+test("factory investigation: enter_synthesizing recommendations queue a live follow-up command", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Finalize from evidence in place",
+    prompt: "When evidence is sufficient, signal the live task to finish instead of spawning a new task.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const emitObjective = (service as unknown as {
+    emitObjective: (objectiveId: string, event: Record<string, unknown>) => Promise<void>;
+  }).emitObjective.bind(service);
+
+  await emitObjective(payload.objectiveId, {
+    type: "monitor.recommendation",
+    objectiveId: payload.objectiveId,
+    recommendationId: "recommendation_finalize_in_place",
+    taskId: payload.taskId,
+    candidateId: payload.candidateId,
+    jobId: taskJob!.id,
+    recommendation: {
+      kind: "recommend_enter_synthesizing",
+      reason: "Mounted evidence already answers the task.",
+    },
+    reasoning: "The task has enough evidence and should finalize in place.",
+    recommendedAt: Date.now(),
+  });
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: payload.objectiveId,
+    reason: "reconcile",
+  });
+
+  const commands = await queue.consumeCommands(taskJob!.id, ["follow_up"]);
+  expect(commands).toHaveLength(1);
+  expect(commands[0]?.payload?.message).toContain("Evidence is sufficient.");
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.tasks).toHaveLength(1);
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "monitor.recommendation.consumed" && receipt.summary.includes("enter_synthesizing")
+  )).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "task.superseded")).toBe(false);
+}, 120_000);
+
 test("factory investigation: stale queued execution is downgraded to stalled", async () => {
   const { service, queue, repoRoot, dataDir } = await createFactoryService({
     codexRun: async () => ({ stdout: "", stderr: "" }),
@@ -2264,6 +2319,11 @@ test("factory investigation: follow-up tasks inherit source evidence into the ne
     "utf-8",
   );
   await fs.writeFile(
+    path.join(sourcePacketDir, `${payload.taskId}.last-message.md`),
+    JSON.stringify({ status: "answered", conclusion: "prior NAT result" }, null, 2),
+    "utf-8",
+  );
+  await fs.writeFile(
     path.join(sourceEvidenceDir, "nat_gateway_cost_spike.json"),
     JSON.stringify({
       topUsageTypes: [{ usageType: "NatGateway-Hours", amountUsd: 123.45 }],
@@ -2311,8 +2371,48 @@ test("factory investigation: follow-up tasks inherit source evidence into the ne
     fs.readFile(path.join(followUpPacketDir, `${payload.taskId}.evidence.json`), "utf-8"),
   ).resolves.toContain("prior NAT evidence");
   await expect(
+    fs.readFile(path.join(followUpPacketDir, `${payload.taskId}.last-message.md`), "utf-8"),
+  ).resolves.toContain("prior NAT result");
+  await expect(
     fs.readFile(path.join(followUpPacketDir, "evidence", "nat_gateway_cost_spike.json"), "utf-8"),
   ).resolves.toContain("NatGateway-Hours");
+}, 120_000);
+
+test("factory investigation: recoverTaskWorkerResult falls back to structured last-message output", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  const created = await service.createObjective({
+    title: "Recover from last-message",
+    prompt: "Recover a structured investigation answer when only last-message exists.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  const payload = taskJob!.payload as FactoryTaskJobPayload;
+  const recoveredRaw = {
+    status: "answered",
+    conclusion: "Recovered from last-message.",
+    findings: [],
+    uncertainties: [],
+    nextAction: null,
+  };
+
+  await fs.writeFile(payload.lastMessagePath, JSON.stringify(recoveredRaw), "utf-8");
+  await fs.rm(payload.resultPath, { force: true });
+
+  const recovered = await service.recoverTaskWorkerResult(taskJob!.payload as Record<string, unknown>, {
+    reason: "structured last-message only",
+  });
+
+  expect(recovered?.recoverySource).toBe("persisted_result");
+  expect(recovered?.output.conclusion).toBe("Recovered from last-message.");
+  await expect(fs.readFile(payload.resultPath, "utf-8")).resolves.toContain("Recovered from last-message.");
 }, 120_000);
 
 test("factory investigation: reactObjective requeues a missing active monitor job", async () => {

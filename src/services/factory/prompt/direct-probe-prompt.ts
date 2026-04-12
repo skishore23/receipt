@@ -46,6 +46,7 @@ export const renderFactoryDirectCodexProbePrompt = (input: {
     `## Probe Tactics`,
     `Start with a short internal plan. If the operator named a file, artifact, receipt, helper, or run, inspect that exact target before broader repo search or memory expansion.`,
     `If you use subagents, keep them as bounded sidecars and restate the probe context plus the exact artifact or question they own.`,
+    `A pair of independent sidecars may run in parallel only when the probe cleanly decomposes and neither sidecar blocks the other.`,
     `Do not parallelize broad repo exploration when one named artifact or one primary evidence path can answer the request.`,
     ``,
     `## Read-Only Contract`,

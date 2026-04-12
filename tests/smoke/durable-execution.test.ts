@@ -148,6 +148,40 @@ test("durable activity: persisted terminal result is recovered instead of rerunn
   }
 });
 
+test("durable activity: heartbeat and checkpoint preserve in-flight state before completion", async () => {
+  const dir = await mkTmp("receipt-durable-checkpoint");
+  try {
+    const backend = createLocalDurableBackend({
+      dbPath: path.join(dir, "receipt.db"),
+    });
+    const activity = await backend.runDurableActivity({
+      key: codexActivityKey("job_codex_checkpoint"),
+      input: { jobId: "job_codex_checkpoint" },
+      run: async (controller) => {
+        await controller?.heartbeat({ phase: "running" });
+        await controller?.checkpoint(
+          {
+            evidenceStatePath: "/tmp/task_01.evidence-state.json",
+            evidenceCount: 2,
+          },
+          {
+            phase: "collecting_evidence",
+          },
+        );
+        return { status: "completed", summary: "checkpointed" };
+      },
+    });
+
+    expect(activity.snapshot.status).toBe("completed");
+    expect(activity.snapshot.lastHeartbeatAt).toBeDefined();
+    expect(activity.snapshot.checkpointRevision).toBe(1);
+    expect(activity.snapshot.checkpointOutput?.evidenceCount).toBe(2);
+    expect(activity.snapshot.checkpointMetadata?.phase).toBe("collecting_evidence");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("durable queue wrapper: steer and follow-up are exposed through the queue interface from durable signals", async () => {
   const dir = await mkTmp("receipt-durable-queue");
   try {

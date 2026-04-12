@@ -1725,3 +1725,91 @@ test("factory objective audit ignores late sidecar failures that happen after ob
   };
   expect(result.verdict).toBe("strong");
 }, 120_000);
+
+test("factory investigate treats a single recovered interruption as advisory on a completed objective", async () => {
+  const { service, queue, repoRoot, dataDir } = await createFactoryService({
+    taskResult: {
+      outcome: "approved",
+      summary:
+        "Investigated the receipt flow with concrete evidence and a clean handoff.",
+      handoff:
+        "Use the captured commands and evidence bundle for any follow-up.",
+      artifacts: [],
+      scriptsRun: [
+        {
+          command: "git status --short",
+          summary: "Confirmed the investigation workspace stayed clean.",
+          status: "ok",
+        },
+      ],
+      completion: {
+        changed: [
+          "Captured the investigation evidence bundle and final handoff summary.",
+        ],
+        proof: [
+          "git status --short stayed clean while collecting the investigation evidence.",
+        ],
+        remaining: [],
+      },
+      report: {
+        conclusion:
+          "The objective completed with direct evidence and validation signal.",
+        evidence: [
+          { kind: "command", summary: "git status --short stayed clean." },
+        ],
+        scriptsRun: [{ command: "git status --short", exitCode: 0 }],
+        disagreements: [],
+        nextSteps: [],
+      },
+    },
+  });
+  const created = await service.createObjective({
+    title: "Recovered interruption objective",
+    prompt:
+      "Finish an investigation with enough evidence to score as a strong run.",
+    objectiveMode: "investigation",
+    severity: 2,
+    checks: [],
+    profileId: "generalist",
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+  const [job] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(job).toBeTruthy();
+  await service.runTask(job!.payload as FactoryTaskJobPayload);
+
+  const completed = await service.getObjective(created.objectiveId);
+  expect(completed.status).toBe("completed");
+
+  const recoveredJob = await queue.enqueue({
+    agentId: "codex",
+    lane: "collect",
+    payload: {
+      kind: "factory.task.monitor",
+      objectiveId: created.objectiveId,
+      taskId: "task_01",
+      candidateId: "task_01_candidate_01",
+      stream: `factory/objectives/${created.objectiveId}`,
+    },
+    maxAttempts: 1,
+  });
+  expect(
+    await queue.leaseJob(recoveredJob.id, "audit-test-worker", 60_000),
+  ).toBeTruthy();
+  await queue.complete(recoveredJob.id, "audit-test-worker", {
+    summary: "Recovered late lease interruption after objective completion.",
+    recovered: true,
+    recoverySource: "persisted_result",
+    interruptionKind: "lease_expired",
+  });
+
+  const liveReport = await readFactoryReceiptInvestigation(
+    dataDir,
+    repoRoot,
+    created.objectiveId,
+  );
+  expect(liveReport.assessment.verdict).toBe("strong");
+  expect(
+    liveReport.assessment.notes.some((note) =>
+      note.includes("recovered automatically")),
+  ).toBe(true);
+}, 120_000);

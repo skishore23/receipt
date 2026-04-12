@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import type { DurableBackend } from "@receipt/durable";
+import type { DurableActivityController, DurableBackend } from "@receipt/durable";
 import {
   CodexControlSignalError,
   LocalCodexExecutor,
@@ -82,7 +82,65 @@ const isNoRetryError = (err: unknown): boolean => {
 const isTerminalJobStatus = (status: unknown): boolean =>
   status === "completed" || status === "failed" || status === "canceled";
 
+type RecoveredInterruptionKind =
+  | "lease_expired"
+  | "child_exit"
+  | "stall"
+  | "timeout"
+  | "unknown";
+
+const interruptionKindFromText = (
+  value: string | undefined,
+): RecoveredInterruptionKind | undefined => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized.includes("lease expired")) return "lease_expired";
+  if (normalized.includes("child_exit")) return "child_exit";
+  if (normalized.includes("exited unexpectedly")) return "child_exit";
+  if (normalized.includes("timed out") || normalized.includes("timeout")) return "timeout";
+  if (normalized.includes("stalled")) return "stall";
+  return undefined;
+};
+
+const interruptionKindForJob = (
+  job: Pick<QueueJob, "status" | "lastError" | "leaseUntil" | "result">,
+  now = Date.now(),
+): RecoveredInterruptionKind => {
+  const result = job.result && typeof job.result === "object" && !Array.isArray(job.result)
+    ? job.result as Record<string, unknown>
+    : undefined;
+  const explicit = typeof result?.interruptionKind === "string"
+    ? result.interruptionKind.trim()
+    : "";
+  if (
+    explicit === "lease_expired"
+    || explicit === "child_exit"
+    || explicit === "stall"
+    || explicit === "timeout"
+    || explicit === "unknown"
+  ) {
+    return explicit;
+  }
+  const inferred = interruptionKindFromText(
+    (typeof result?.interruptionSummary === "string" ? result.interruptionSummary : undefined)
+    ?? job.lastError,
+  );
+  if (inferred) return inferred;
+  if (
+    (job.status === "leased" || job.status === "running")
+    && typeof job.leaseUntil === "number"
+    && job.leaseUntil <= now
+  ) {
+    return "lease_expired";
+  }
+  return "unknown";
+};
+
 const isRetryableAuditLockError = (error: unknown): boolean => {
+  return isSqliteLockError(error);
+};
+
+const isRetryableObjectiveControlLockError = (error: unknown): boolean => {
   return isSqliteLockError(error);
 };
 
@@ -118,6 +176,21 @@ const withObjectiveAuditRetry = async <T>(
     } catch (error) {
       attempts += 1;
       if (attempts >= 4 || !isRetryableAuditLockError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempts * 150));
+    }
+  }
+};
+
+export const withObjectiveControlRetry = async <T>(
+  work: () => Promise<T>,
+): Promise<T> => {
+  let attempts = 0;
+  while (true) {
+    try {
+      return await work();
+    } catch (error) {
+      attempts += 1;
+      if (attempts >= 4 || !isRetryableObjectiveControlLockError(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, attempts * 150));
     }
   }
@@ -1044,8 +1117,10 @@ export const createFactoryWorkerHandlers = (
               autoFixEnabled: opts.auditAutoFixEnabled,
               autoFixSourceChannels: opts.auditAutoFixSourceChannels,
             })
-          : await service.runObjectiveControl(
-              job.payload as Record<string, unknown>,
+          : await withObjectiveControlRetry(() =>
+              service.runObjectiveControl(
+                job.payload as Record<string, unknown>,
+              )
             );
       return { ok: true, result };
     } catch (err) {
@@ -1111,142 +1186,111 @@ export const createFactoryWorkerHandlers = (
         job.id,
         ctx.workerId,
         async () => job.payload.kind === "factory.task.run"
-          ? await (service.durable
-              ? service.durable.runDurableActivity({
-                  key: codexActivityKey(job.id),
-                  input: {
-                    jobId: job.id,
-                    payload: { ...(job.payload as Record<string, unknown>) },
-                  },
-                  metadata: {
-                    kind: String(job.payload.kind ?? "factory.task.run"),
-                    objectiveId: typeof job.payload.objectiveId === "string" ? job.payload.objectiveId : undefined,
-                  },
-                  recover: async () => {
-                    const payload = job.payload as Record<string, unknown>;
-                    return recoverPersistedJsonResult(
-                      typeof payload.resultPath === "string" ? payload.resultPath : undefined,
-                    );
-                  },
-                  run: async () => service.runTask(job.payload, {
-                    shouldAbort: async () => {
-                      const latest = await service.queue.getJob(job.id);
-                      return (
-                        latest?.abortRequested === true ||
-                        isTerminalJobStatus(latest?.status)
-                      );
-                    },
-                    pollSignal: async () => {
-                      const commands = await ctx.pullCommands([
-                        "abort",
-                        "steer",
-                        "follow_up",
-                      ]);
-                      if (commands.some((command) => command.command === "abort"))
-                        return { kind: "abort" as const };
-                      const restart = coalesceLiveGuidanceSignal(
-                        job.id,
-                        commands
-                          .filter(
-                            (
-                              command,
-                            ): command is typeof command & {
-                              readonly command: "steer" | "follow_up";
-                            } =>
-                              command.command === "steer" ||
-                              command.command === "follow_up",
-                          )
-                          .map((command) => ({
-                            id: command.id,
-                            command: command.command,
-                            payload: command.payload,
-                          })),
-                      );
-                      if (restart) return restart;
-                      const latest = await service.queue.getJob(job.id);
-                      if (
-                        latest?.abortRequested === true ||
-                        isTerminalJobStatus(latest?.status)
+          ? await (async () => {
+              const runTaskWithControl = (
+                activityController?: DurableActivityController<Record<string, unknown>>,
+              ): Promise<Record<string, unknown>> => service.runTask(job.payload, {
+                shouldAbort: async () => {
+                  const latest = await service.queue.getJob(job.id);
+                  return (
+                    latest?.abortRequested === true ||
+                    isTerminalJobStatus(latest?.status)
+                  );
+                },
+                pollSignal: async () => {
+                  const commands = await ctx.pullCommands([
+                    "abort",
+                    "steer",
+                    "follow_up",
+                  ]);
+                  if (commands.some((command) => command.command === "abort"))
+                    return { kind: "abort" as const };
+                  const restart = coalesceLiveGuidanceSignal(
+                    job.id,
+                    commands
+                      .filter(
+                        (
+                          command,
+                        ): command is typeof command & {
+                          readonly command: "steer" | "follow_up";
+                        } =>
+                          command.command === "steer" ||
+                          command.command === "follow_up",
                       )
-                        return { kind: "abort" };
-                      return undefined;
-                    },
-                    onProgress: async (update) => {
-                      await service.queue.progress(job.id, ctx.workerId, {
-                        worker: "codex",
-                        ...update,
-                      });
-                    },
-                    onChildSpawn: async (update) => {
-                      ctx.registerLeaseProcess({
-                        pid: update.pid,
-                        label: "codex child",
-                      });
-                    },
-                    onChildExit: async () => {
-                      ctx.clearLeaseProcess();
-                    },
-                  }).then((outcome) => outcome as Record<string, unknown>),
-                }).then((activity) => activity.result)
-              : service.runTask(job.payload, {
-              shouldAbort: async () => {
-                const latest = await service.queue.getJob(job.id);
-                return (
-                  latest?.abortRequested === true ||
-                  isTerminalJobStatus(latest?.status)
-                );
-              },
-              pollSignal: async () => {
-                const commands = await ctx.pullCommands([
-                  "abort",
-                  "steer",
-                  "follow_up",
-                ]);
-                if (commands.some((command) => command.command === "abort"))
-                  return { kind: "abort" as const };
-                const restart = coalesceLiveGuidanceSignal(
-                  job.id,
-                  commands
-                    .filter(
-                      (
-                        command,
-                      ): command is typeof command & {
-                        readonly command: "steer" | "follow_up";
-                      } =>
-                        command.command === "steer" ||
-                        command.command === "follow_up",
-                    )
-                    .map((command) => ({
-                      id: command.id,
-                      command: command.command,
-                      payload: command.payload,
-                    })),
-                );
-                if (restart) return restart;
-                const latest = await service.queue.getJob(job.id);
-                if (
-                  latest?.abortRequested === true ||
-                  isTerminalJobStatus(latest?.status)
-                )
-                  return { kind: "abort" };
-                return undefined;
-              },
-              onProgress: async (update) => {
-                await service.queue.progress(job.id, ctx.workerId, {
-                  worker: "codex",
-                  ...update,
-                });
-              },
-              onChildSpawn: async (update) => {
-                ctx.registerLeaseProcess({
-                  pid: update.pid,
-                  label: "codex child",
-                });
-              },
-              onChildExit: async () => {
-                ctx.clearLeaseProcess();
-              },
-            }))
+                      .map((command) => ({
+                        id: command.id,
+                        command: command.command,
+                        payload: command.payload,
+                      })),
+                  );
+                  if (restart) return restart;
+                  const latest = await service.queue.getJob(job.id);
+                  if (
+                    latest?.abortRequested === true ||
+                    isTerminalJobStatus(latest?.status)
+                  )
+                    return { kind: "abort" };
+                  return undefined;
+                },
+                onProgress: async (update) => {
+                  await service.queue.progress(job.id, ctx.workerId, {
+                    worker: "codex",
+                    ...update,
+                  });
+                },
+                onChildSpawn: async (update) => {
+                  ctx.registerLeaseProcess({
+                    pid: update.pid,
+                    label: "codex child",
+                  });
+                },
+                onChildExit: async () => {
+                  ctx.clearLeaseProcess();
+                },
+                ...(activityController ? { activityController } : {}),
+              });
+
+              if (!service.durable) {
+                return runTaskWithControl();
+              }
+
+              let recoveredTaskResult:
+                | Awaited<ReturnType<FactoryService["recoverTaskWorkerResult"]>>
+                | undefined;
+              const durableResult = await service.durable.runDurableActivity({
+                key: codexActivityKey(job.id),
+                input: {
+                  jobId: job.id,
+                  payload: { ...(job.payload as Record<string, unknown>) },
+                },
+                metadata: {
+                  kind: String(job.payload.kind ?? "factory.task.run"),
+                  objectiveId: typeof job.payload.objectiveId === "string" ? job.payload.objectiveId : undefined,
+                },
+                recover: async () => {
+                  recoveredTaskResult = await service.recoverTaskWorkerResult(
+                    job.payload as Record<string, unknown>,
+                    { reason: "durable activity recovery before rerun" },
+                  );
+                  return recoveredTaskResult?.output;
+                },
+                run: async (activityController) =>
+                  runTaskWithControl(activityController),
+              }).then((activity) => activity.result);
+
+              if (!recoveredTaskResult) {
+                return durableResult;
+              }
+              await service.finalizeRecoveredTaskWorkerResult(
+                job.payload as Record<string, unknown>,
+                recoveredTaskResult.output,
+              );
+              return service.buildRecoveredTaskJobResult({
+                output: recoveredTaskResult.output,
+                recoverySource: recoveredTaskResult.recoverySource,
+                interruptionKind: interruptionKindForJob(job),
+              });
+            })()
           : job.payload.kind === "factory.codex.run" ||
               job.payload.kind === "codex.run"
             ? await (async () => {

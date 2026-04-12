@@ -16,18 +16,23 @@ In this repo, prefer:
   bun run factory
   bun src/cli.ts factory
 
+Agent-friendly defaults:
+  use --json for machine-readable reads
+  use --output-file <path> on large read commands
+  keep mutations explicit: receipt abort, receipt factory react|promote|cancel|cleanup|archive|steer|follow-up|abort-job
+
 Commands:
   receipt new <agent-id> [--template basic|assistant-tool|human-loop|merge]
   receipt dev
   receipt run <agent-id> --problem <text> [--stream agents/<agentId>] [--run-id <runId>] [--max-iterations <n>] [--workspace <path>]
-  receipt trace <run-id|stream>
-  receipt replay <run-id|stream>
-  receipt dst [<prefix>] [--json] [--limit <n>] [--strict]
+  receipt trace <run-id|stream> [--json] [--output-file <path>]
+  receipt replay <run-id|stream> [--output-file <path>]
+  receipt dst [<prefix>] [--json] [--limit <n>] [--strict] [--output-file <path>]
   receipt fork <run-id|stream> --at <index> [--name <branch-name>]
-  receipt inspect <run-id|stream>
-  receipt jobs [list] [--status queued|leased|running|completed|failed|canceled] [--limit <n>]
+  receipt inspect <run-id|stream> [--output-file <path>]
+  receipt jobs [list] [--status queued|leased|running|completed|failed|canceled] [--limit <n>] [--output-file <path>]
   receipt jobs enqueue <agent-id> [--lane chat|collect|steer|follow_up] [--payload-json <json>] [--job-id <id>] [--max-attempts <n>] [--session-key <key>] [--singleton-mode allow|cancel|steer]
-  receipt jobs wait <job-id> [--timeout-ms <n>]
+  receipt jobs wait <job-id> [--timeout-ms <n>] [--output-file <path>]
   receipt jobs steer <job-id> [--payload-json <json>]
   receipt jobs follow-up <job-id> [--payload-json <json>]
   receipt jobs abort <job-id> [--reason <text>]
@@ -35,6 +40,7 @@ Commands:
   receipt memory <read|search|summarize|commit|diff> <scope> [options]
   receipt memory prefs <list|add|remove> [options]
   receipt sessions <search|read> [args] [options]
+  receipt doctor [--json] [--output-file <path>] [--repo-root <path>]
   receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|analyze|parse|investigate|audit|resume|react|promote|cancel|cleanup|archive|abort-job|steer|follow-up|experiment|codex-probe]`);
 };
 

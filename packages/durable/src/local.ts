@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { Database } from "bun:sqlite";
 
 import type {
+  ActivityCheckpointInput,
+  ActivityCompletionInput,
+  ActivityFailureInput,
+  ActivityHeartbeatInput,
   ActivityRunInput,
+  DurableActivityController,
   ActivitySnapshot,
   ActivityStatus,
   DurableBackend,
@@ -77,6 +82,10 @@ const decodeActivity = (row: Record<string, unknown> | null | undefined): Activi
     updatedAt: Number(row.updated_at),
     startedAt: row.started_at == null ? undefined : Number(row.started_at),
     completedAt: row.completed_at == null ? undefined : Number(row.completed_at),
+    lastHeartbeatAt: row.last_heartbeat_at == null ? undefined : Number(row.last_heartbeat_at),
+    checkpointRevision: row.checkpoint_revision == null ? 0 : Number(row.checkpoint_revision),
+    checkpointOutput: safeParseRecord(row.checkpoint_output_json),
+    checkpointMetadata: safeParseRecord(row.checkpoint_metadata_json),
     input: safeParseRecord(row.input_json),
     metadata: safeParseRecord(row.metadata_json),
     output: safeParseRecord(row.output_json),
@@ -124,14 +133,18 @@ const createTables = (db: SqliteDatabase): void => {
       key TEXT PRIMARY KEY NOT NULL,
       status TEXT NOT NULL,
       attempts INTEGER NOT NULL,
+      checkpoint_revision INTEGER NOT NULL DEFAULT 0,
       input_json TEXT,
       metadata_json TEXT,
       output_json TEXT,
+      checkpoint_output_json TEXT,
+      checkpoint_metadata_json TEXT,
       error_text TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       started_at INTEGER,
-      completed_at INTEGER
+      completed_at INTEGER,
+      last_heartbeat_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS durable_activity_attempt (
@@ -148,6 +161,18 @@ const createTables = (db: SqliteDatabase): void => {
     CREATE UNIQUE INDEX IF NOT EXISTS durable_activity_attempt_uq
       ON durable_activity_attempt(activity_key, attempt);
   `);
+
+  const existingColumns = (
+    db.query("PRAGMA table_info(durable_activity)").all() as Array<{ readonly name?: string }>
+  ).map((row) => row.name).filter((value): value is string => typeof value === "string");
+  const ensureColumn = (name: string, sql: string): void => {
+    if (existingColumns.includes(name)) return;
+    db.exec(`ALTER TABLE durable_activity ADD COLUMN ${sql};`);
+  };
+  ensureColumn("checkpoint_revision", "checkpoint_revision INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("checkpoint_output_json", "checkpoint_output_json TEXT");
+  ensureColumn("checkpoint_metadata_json", "checkpoint_metadata_json TEXT");
+  ensureColumn("last_heartbeat_at", "last_heartbeat_at INTEGER");
 };
 
 const cloneRecord = (value: Record<string, unknown> | undefined): Record<string, unknown> | undefined =>
@@ -173,6 +198,107 @@ export const createLocalDurableBackend = (
     db.query("SELECT * FROM durable_activity WHERE key = ?").get(key) as
       | Record<string, unknown>
       | undefined;
+
+  const heartbeatActivityRow = (
+    input: ActivityHeartbeatInput,
+  ): ActivitySnapshot | undefined =>
+    transaction(() => {
+      const existing = decodeActivity(getActivityRow(input.key));
+      if (!existing) return undefined;
+      const now = Date.now();
+      db.query(`
+        UPDATE durable_activity
+        SET updated_at = ?, last_heartbeat_at = ?, metadata_json = COALESCE(?, metadata_json)
+        WHERE key = ?
+      `).run(
+        now,
+        now,
+        encodeJson(cloneRecord(input.metadata)),
+        input.key,
+      );
+      return decodeActivity(getActivityRow(input.key));
+    });
+
+  const checkpointActivityRow = (
+    input: ActivityCheckpointInput,
+  ): ActivitySnapshot | undefined =>
+    transaction(() => {
+      const existing = decodeActivity(getActivityRow(input.key));
+      if (!existing) return undefined;
+      const now = Date.now();
+      db.query(`
+        UPDATE durable_activity
+        SET updated_at = ?,
+            last_heartbeat_at = ?,
+            checkpoint_revision = checkpoint_revision + 1,
+            checkpoint_output_json = COALESCE(?, checkpoint_output_json),
+            checkpoint_metadata_json = COALESCE(?, checkpoint_metadata_json)
+        WHERE key = ?
+      `).run(
+        now,
+        now,
+        encodeJson(cloneRecord(input.output)),
+        encodeJson(cloneRecord(input.metadata)),
+        input.key,
+      );
+      return decodeActivity(getActivityRow(input.key));
+    });
+
+  const completeActivityRow = (
+    input: ActivityCompletionInput,
+  ): ActivitySnapshot | undefined =>
+    transaction(() => {
+      const existing = decodeActivity(getActivityRow(input.key));
+      if (!existing) return undefined;
+      const now = Date.now();
+      db.query(`
+        UPDATE durable_activity
+        SET status = ?,
+            updated_at = ?,
+            completed_at = ?,
+            last_heartbeat_at = ?,
+            output_json = COALESCE(?, output_json),
+            metadata_json = COALESCE(?, metadata_json)
+        WHERE key = ?
+      `).run(
+        "completed",
+        now,
+        now,
+        now,
+        encodeJson(cloneRecord(input.output)),
+        encodeJson(cloneRecord(input.metadata)),
+        input.key,
+      );
+      return decodeActivity(getActivityRow(input.key));
+    });
+
+  const failActivityRow = (
+    input: ActivityFailureInput,
+  ): ActivitySnapshot | undefined =>
+    transaction(() => {
+      const existing = decodeActivity(getActivityRow(input.key));
+      if (!existing) return undefined;
+      const now = Date.now();
+      db.query(`
+        UPDATE durable_activity
+        SET status = ?,
+            updated_at = ?,
+            completed_at = ?,
+            last_heartbeat_at = ?,
+            error_text = ?,
+            metadata_json = COALESCE(?, metadata_json)
+        WHERE key = ?
+      `).run(
+        "failed",
+        now,
+        now,
+        now,
+        input.error,
+        encodeJson(cloneRecord(input.metadata)),
+        input.key,
+      );
+      return decodeActivity(getActivityRow(input.key));
+    });
 
   const upsertWorkflow = (input: StartWorkflowInput): WorkflowSnapshot =>
     transaction(() => {
@@ -365,6 +491,10 @@ export const createLocalDurableBackend = (
       return decodeWorkflow(getWorkflowRow(input.key));
     },
     getActivity: async (key) => decodeActivity(getActivityRow(key)),
+    heartbeatActivity: async (input) => heartbeatActivityRow(input),
+    checkpointActivity: async (input) => checkpointActivityRow(input),
+    completeActivity: async (input) => completeActivityRow(input),
+    failActivity: async (input) => failActivityRow(input),
     listActivities: async (opts) => {
       const rows = db.query("SELECT * FROM durable_activity ORDER BY key ASC").all() as Record<string, unknown>[];
       const statuses = opts?.statuses ? new Set(opts.statuses) : undefined;
@@ -386,17 +516,18 @@ export const createLocalDurableBackend = (
 
       const recovered = await input.recover?.();
       if (recovered) {
-        const now = Date.now();
-        transaction(() => {
-          const prior = decodeActivity(getActivityRow(input.key));
-          if (!prior) {
+        const prior = decodeActivity(getActivityRow(input.key));
+        if (!prior) {
+          const now = Date.now();
+          transaction(() => {
             db.query(`
               INSERT INTO durable_activity (
-                key, status, attempts, input_json, metadata_json, output_json, created_at, updated_at, started_at, completed_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                key, status, attempts, checkpoint_revision, input_json, metadata_json, output_json, created_at, updated_at, started_at, completed_at, last_heartbeat_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               input.key,
               "completed",
+              0,
               0,
               encodeJson(cloneRecord(input.input)),
               encodeJson(cloneRecord(input.metadata)),
@@ -405,22 +536,16 @@ export const createLocalDurableBackend = (
               now,
               now,
               now,
-            );
-          } else {
-            db.query(`
-              UPDATE durable_activity
-              SET status = ?, updated_at = ?, completed_at = ?, output_json = ?, metadata_json = COALESCE(?, metadata_json)
-              WHERE key = ?
-            `).run(
-              "completed",
               now,
-              now,
-              encodeJson(cloneRecord(recovered)),
-              encodeJson(cloneRecord(input.metadata)),
-              input.key,
             );
-          }
-        });
+          });
+        } else {
+          completeActivityRow({
+            key: input.key,
+            output: recovered,
+            metadata: input.metadata,
+          });
+        }
         const snapshot = decodeActivity(getActivityRow(input.key))!;
         return { snapshot, result: recovered };
       }
@@ -432,14 +557,16 @@ export const createLocalDurableBackend = (
         if (!current) {
           db.query(`
             INSERT INTO durable_activity (
-              key, status, attempts, input_json, metadata_json, created_at, updated_at, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              key, status, attempts, checkpoint_revision, input_json, metadata_json, created_at, updated_at, started_at, last_heartbeat_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             input.key,
             "running",
             attempts,
+            current?.checkpointRevision ?? 0,
             encodeJson(cloneRecord(input.input)),
             encodeJson(cloneRecord(input.metadata)),
+            now,
             now,
             now,
             now,
@@ -448,7 +575,8 @@ export const createLocalDurableBackend = (
           db.query(`
             UPDATE durable_activity
             SET status = ?, attempts = ?, updated_at = ?, started_at = ?, completed_at = NULL, output_json = NULL,
-                error_text = NULL, input_json = COALESCE(?, input_json), metadata_json = COALESCE(?, metadata_json)
+                error_text = NULL, input_json = COALESCE(?, input_json), metadata_json = COALESCE(?, metadata_json),
+                last_heartbeat_at = ?
             WHERE key = ?
           `).run(
             "running",
@@ -457,6 +585,7 @@ export const createLocalDurableBackend = (
             now,
             encodeJson(cloneRecord(input.input)),
             encodeJson(cloneRecord(input.metadata)),
+            now,
             input.key,
           );
         }
@@ -475,21 +604,36 @@ export const createLocalDurableBackend = (
       });
 
       try {
-        const result = await input.run();
+        const controller: DurableActivityController<Result> = {
+          heartbeat: async (metadata) => heartbeatActivityRow({
+            key: input.key,
+            metadata,
+          }),
+          checkpoint: async (output, metadata) => checkpointActivityRow({
+            key: input.key,
+            output,
+            metadata,
+          }),
+          complete: async (output, metadata) => completeActivityRow({
+            key: input.key,
+            output,
+            metadata,
+          }),
+          fail: async (error, metadata) => failActivityRow({
+            key: input.key,
+            error,
+            metadata,
+          }),
+          snapshot: async () => decodeActivity(getActivityRow(input.key)),
+        };
+        const result = await input.run(controller);
+        const current = decodeActivity(getActivityRow(input.key))!;
         const now = Date.now();
+        completeActivityRow({
+          key: input.key,
+          output: result,
+        });
         transaction(() => {
-          const current = decodeActivity(getActivityRow(input.key))!;
-          db.query(`
-            UPDATE durable_activity
-            SET status = ?, updated_at = ?, completed_at = ?, output_json = ?
-            WHERE key = ?
-          `).run(
-            "completed",
-            now,
-            now,
-            encodeJson(cloneRecord(result)),
-            input.key,
-          );
           db.query(`
             UPDATE durable_activity_attempt
             SET status = ?, completed_at = ?
@@ -507,20 +651,13 @@ export const createLocalDurableBackend = (
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const current = decodeActivity(getActivityRow(input.key))!;
         const now = Date.now();
+        failActivityRow({
+          key: input.key,
+          error: message,
+        });
         transaction(() => {
-          const current = decodeActivity(getActivityRow(input.key))!;
-          db.query(`
-            UPDATE durable_activity
-            SET status = ?, updated_at = ?, completed_at = ?, error_text = ?
-            WHERE key = ?
-          `).run(
-            "failed",
-            now,
-            now,
-            message,
-            input.key,
-          );
           db.query(`
             UPDATE durable_activity_attempt
             SET status = ?, completed_at = ?, error_text = ?

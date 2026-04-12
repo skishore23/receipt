@@ -361,6 +361,16 @@ export const sqliteQueue = (opts: SqliteQueueOptions): SqliteQueue => {
   const shouldQueueJob = (job: QueueJob): boolean =>
     job.status === "queued" && !job.abortRequested;
 
+  const isLeaseOwnedBy = (
+    job: QueueJob | undefined,
+    workerId: string,
+    attempt?: number,
+  ): job is QueueJob =>
+    Boolean(job)
+    && (job.status === "leased" || job.status === "running")
+    && job.leaseOwner === workerId
+    && (attempt == null || job.attempt === attempt);
+
   const upsertIndexedJob = (job: QueueJob): void => {
     const previous = index.jobsById.get(job.id);
     if (previous) {
@@ -880,7 +890,7 @@ export const sqliteQueue = (opts: SqliteQueueOptions): SqliteQueue => {
           attempt,
         }, changed);
         const current = index.jobsById.get(next.id);
-        return current ? cloneJob(current) : undefined;
+        return isLeaseOwnedBy(current, lease.workerId, attempt) ? cloneJob(current) : undefined;
       });
       if (changed.size > 0) notifyWaiters();
       await publishChangedJobs(changed);
@@ -892,7 +902,9 @@ export const sqliteQueue = (opts: SqliteQueueOptions): SqliteQueue => {
       const leased = await withWriteLock(async () => {
         const currentJob = await loadAuthoritativeJob(jobId, changed);
         if (!currentJob) return undefined;
-        if (currentJob.status !== "queued") return cloneJob(currentJob);
+        if (currentJob.status !== "queued") {
+          return isLeaseOwnedBy(currentJob, workerId) ? cloneJob(currentJob) : undefined;
+        }
         const attempt = currentJob.attempt + 1;
         await emitEvent({
           type: "job.leased",
@@ -902,7 +914,7 @@ export const sqliteQueue = (opts: SqliteQueueOptions): SqliteQueue => {
           attempt,
         }, changed);
         const next = index.jobsById.get(jobId);
-        return next ? cloneJob(next) : undefined;
+        return isLeaseOwnedBy(next, workerId, attempt) ? cloneJob(next) : undefined;
       });
       if (changed.size > 0) notifyWaiters();
       await publishChangedJobs(changed);

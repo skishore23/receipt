@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,10 +10,12 @@ import { createRuntime } from "@receipt/core/runtime";
 import { sqliteQueue } from "../../src/adapters/sqlite-queue";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { JobWorker } from "../../src/engine/runtime/job-worker";
+import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
-import { createFactoryWorkerHandlers } from "../../src/services/factory-runtime";
+import { createFactoryWorkerHandlers, withObjectiveControlRetry } from "../../src/services/factory-runtime";
 import {
+  FACTORY_CONTROL_AGENT_ID,
   FACTORY_MONITOR_AGENT_ID,
   FactoryService,
 } from "../../src/services/factory-service";
@@ -21,6 +24,84 @@ const execFileAsync = promisify(execFile);
 
 const createTempDir = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
+
+const createLockHolderScript = (): string => `
+  import { Database } from "bun:sqlite";
+
+  const dbPath = process.env.DB_PATH;
+  const holdMs = Number(process.env.HOLD_MS ?? "2000");
+  if (!dbPath) {
+    console.error("missing DB_PATH");
+    process.exit(1);
+  }
+
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("BEGIN IMMEDIATE;");
+  console.log("LOCKED");
+  setTimeout(() => {
+    try {
+      db.exec("COMMIT;");
+      db.close();
+      process.exit(0);
+    } catch (error) {
+      console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+      process.exit(1);
+    }
+  }, holdMs);
+`;
+
+const holdWriterLock = async (
+  dbPath: string,
+  holdMs = 2_000,
+): Promise<ReturnType<typeof spawn>> => {
+  const child = spawn(process.execPath, ["-e", createLockHolderScript()], {
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      HOLD_MS: String(holdMs),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.setEncoding("utf-8");
+  child.stderr.setEncoding("utf-8");
+
+  let stdout = "";
+  let stderr = "";
+  await new Promise<void>((resolve, reject) => {
+    const onStdout = (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("LOCKED")) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onStderr = (chunk: string) => {
+      stderr += chunk;
+    };
+    const onExit = (code: number | null) => {
+      cleanup();
+      reject(new Error(`lock-holder exited before taking the writer lock (code ${code ?? "null"}): ${stderr.trim()}`));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      child.stdout.off("data", onStdout);
+      child.stderr.off("data", onStderr);
+      child.off("exit", onExit);
+      child.off("error", onError);
+    };
+
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.on("exit", onExit);
+    child.on("error", onError);
+  });
+
+  return child;
+};
 
 const waitFor = async (
   predicate: () => boolean,
@@ -120,16 +201,14 @@ test("factory runtime: codex task completion reacts after the queue marks the ta
       stdoutPath: path.join(os.tmpdir(), "task.stdout.log"),
       stderrPath: path.join(os.tmpdir(), "task.stderr.log"),
       resultPath: path.join(os.tmpdir(), "task.result.json"),
+      lastMessagePath: path.join(os.tmpdir(), "task.last-message.md"),
       evidencePath: path.join(os.tmpdir(), "task.evidence.json"),
       manifestPath: path.join(os.tmpdir(), "task.manifest.json"),
-      contextPath: path.join(os.tmpdir(), "task.context.md"),
+      contextSummaryPath: path.join(os.tmpdir(), "task.context.md"),
       contextPackPath: path.join(os.tmpdir(), "task.context-pack.json"),
       receiptCliPath: path.join(os.tmpdir(), "task.receipt-cli.md"),
       memoryScriptPath: path.join(os.tmpdir(), "task.memory.cjs"),
-      memoryScopesPath: path.join(os.tmpdir(), "task.memory-scopes.json"),
-      skillBundlePath: path.join(os.tmpdir(), "task.skill-bundle.json"),
-      resultSchemaPath: path.join(os.tmpdir(), "task.result.schema.json"),
-      taskPrompt: "Investigate live completion ordering.",
+      memoryConfigPath: path.join(os.tmpdir(), "task.memory-scopes.json"),
       profile: {
         rootProfileId: "infrastructure",
         rootProfileLabel: "Infrastructure",
@@ -147,6 +226,7 @@ test("factory runtime: codex task completion reacts after the queue marks the ta
       repoSkillPaths: [],
       taskPhase: "collecting_evidence",
       jobId: "job_live_finalize",
+      problem: "Investigate live completion ordering.",
     },
   });
 
@@ -393,6 +473,83 @@ test("factory runtime: stale objective conflicts during react schedule reconcile
   }
 
   expect(reconcileCalls).toEqual([{ objectiveId: created.objectiveId, reason: "reconcile" }]);
+}, 120_000);
+
+test("factory runtime: objective control handler retries synthetic sqlite lock errors before failing", async () => {
+  const { queue, service } = await createService();
+  const created = await service.createObjective({
+    title: "Control handler retry",
+    prompt: "Retry transient sqlite locks before failing the control job.",
+    objectiveMode: "investigation",
+    severity: 2,
+  });
+
+  const controlJob = (await queue.listJobs({ limit: 20 }))
+    .find((job) =>
+      job.agentId === FACTORY_CONTROL_AGENT_ID
+      && job.payload.kind === "factory.objective.control"
+      && job.payload.objectiveId === created.objectiveId
+    );
+  expect(controlJob).toBeTruthy();
+
+  const originalRunObjectiveControl = service.runObjectiveControl.bind(service);
+  let attempts = 0;
+  service.runObjectiveControl = async (payload) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("database is locked");
+    }
+    return originalRunObjectiveControl(payload);
+  };
+
+  const handlers = createFactoryWorkerHandlers(service);
+  try {
+    await expect(handlers[FACTORY_CONTROL_AGENT_ID](controlJob!, {
+      workerId: "worker_factory_control_retry",
+      pullCommands: async () => [],
+      registerLeaseProcess: () => undefined,
+      clearLeaseProcess: () => undefined,
+    })).resolves.toMatchObject({
+      ok: true,
+      result: {
+        objectiveId: created.objectiveId,
+        status: "completed",
+      },
+    });
+  } finally {
+    service.runObjectiveControl = originalRunObjectiveControl;
+  }
+
+  expect(attempts).toBe(2);
+}, 120_000);
+
+test("factory runtime: objective control handler retries transient sqlite locks before failing", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-lock-helper");
+  const db = getReceiptDb(dataDir);
+  db.sqlite.exec("PRAGMA busy_timeout = 1;");
+  const insertMigration = db.sqlite.query("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)");
+
+  let attempts = 0;
+  let lockHolder: ReturnType<typeof spawn> | undefined;
+  try {
+    lockHolder = await holdWriterLock(db.path, 500);
+    await expect(withObjectiveControlRetry(async () => {
+      attempts += 1;
+      insertMigration.run(`factory_control_retry_${attempts}_${Date.now()}`, Date.now());
+      return "ok";
+    })).resolves.toBe("ok");
+    if (lockHolder.exitCode === null) {
+      const [code] = await once(lockHolder, "exit");
+      expect(code).toBe(0);
+    }
+  } finally {
+    if (lockHolder?.exitCode === null) {
+      lockHolder.kill("SIGKILL");
+      await once(lockHolder, "exit").catch(() => undefined);
+    }
+  }
+
+  expect(attempts).toBeGreaterThanOrEqual(2);
 }, 120_000);
 
 test("factory monitor runtime: suppresses redundant synth recommendation once synthesis is active", async () => {

@@ -113,6 +113,9 @@ type JobAnalysis = {
   readonly canceledReason?: string;
   readonly summary?: string;
   readonly tokensUsed?: number;
+  readonly recovered?: boolean;
+  readonly recoverySource?: string;
+  readonly interruptionKind?: string;
   readonly commands: ReadonlyArray<JobCommandAnalysis>;
 };
 
@@ -291,6 +294,20 @@ const asString = (value: unknown): string | undefined =>
 
 const asNumber = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const asBoolean = (value: unknown): boolean | undefined =>
+  typeof value === "boolean" ? value : undefined;
+
+const inferInterruptionKind = (value: string | undefined): string | undefined => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized.includes("lease expired")) return "lease_expired";
+  if (normalized.includes("child_exit")) return "child_exit";
+  if (normalized.includes("exited unexpectedly")) return "child_exit";
+  if (normalized.includes("timed out") || normalized.includes("timeout")) return "timeout";
+  if (normalized.includes("stalled")) return "stall";
+  return undefined;
+};
 
 const truncateInline = (value: string | undefined, max = 180): string | undefined => {
   const normalized = value?.replace(/\s+/g, " ").trim();
@@ -615,6 +632,9 @@ const readJobAnalysis = async (
   let heartbeats = 0;
   let summary: string | undefined;
   let tokensUsed: number | undefined;
+  let recovered: boolean | undefined;
+  let recoverySource: string | undefined;
+  let interruptionKind: string | undefined;
   for (const receipt of chain) {
     const event = receipt.body;
     if (event.type === "job.heartbeat") {
@@ -626,12 +646,18 @@ const readJobAnalysis = async (
       const result = asRecord(event.result);
       summary = asString(result?.summary) ?? summary;
       tokensUsed = asNumber(result?.tokensUsed) ?? tokensUsed;
+      recovered = asBoolean(result?.recovered) ?? recovered;
+      recoverySource = asString(result?.recoverySource) ?? recoverySource;
+      interruptionKind = asString(result?.interruptionKind) ?? interruptionKind;
       continue;
     }
     if (event.type === "job.completed") {
       const result = asRecord(event.result);
       summary = asString(result?.summary) ?? summary;
       tokensUsed = asNumber(result?.tokensUsed) ?? tokensUsed;
+      recovered = asBoolean(result?.recovered) ?? recovered;
+      recoverySource = asString(result?.recoverySource) ?? recoverySource;
+      interruptionKind = asString(result?.interruptionKind) ?? interruptionKind;
     }
   }
   const projectedResult = asRecord(projectionOverlay?.result);
@@ -669,6 +695,17 @@ const readJobAnalysis = async (
     canceledReason: effectiveCanceledReason,
     summary: truncateInline(asString(projectedResult?.summary) ?? summary ?? effectiveLastError ?? effectiveCanceledReason),
     tokensUsed: asNumber(projectedResult?.tokensUsed) ?? tokensUsed,
+    recovered: asBoolean(projectedResult?.recovered) ?? recovered,
+    recoverySource: asString(projectedResult?.recoverySource) ?? recoverySource,
+    interruptionKind:
+      asString(projectedResult?.interruptionKind)
+      ?? interruptionKind
+      ?? inferInterruptionKind(
+        asString(projectedResult?.interruptionSummary)
+        ?? effectiveLastError
+        ?? effectiveCanceledReason
+        ?? summary,
+      ),
     commands: job.commands.map((command) => ({
       commandId: command.id,
       command: command.command,
@@ -1052,6 +1089,15 @@ export const readObjectiveAnalysis = async (
   }
 
   for (const job of jobs) {
+    if (job.status === "completed" && job.recovered) {
+      addAnomaly(anomalies, {
+        kind: "job_recovered_interruption",
+        severity: "low",
+        summary: `${job.jobId}: recovered ${job.interruptionKind?.replace(/_/g, " ") ?? "interruption"}${job.recoverySource ? ` via ${job.recoverySource.replace(/_/g, " ")}` : ""}`,
+        at: job.updatedAt,
+        jobId: job.jobId,
+      });
+    }
     if (job.status === "stalled") {
       addAnomaly(anomalies, {
         kind: "job_stalled",

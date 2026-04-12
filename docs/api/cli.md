@@ -1,13 +1,38 @@
 # CLI API (`receipt`)
 
 Binary entrypoint: `receipt` (runs `src/cli.ts` through Bun).
+Repo-local wrapper: `.receipt/bin/receipt` (resolves the repo root correctly when symlinked onto `PATH`).
 
 If not installed globally, run through Bun:
 ```bash
 bun src/cli.ts <command> [args]
 ```
 
+## Agent-friendly usage
+
+- Prefer the stable `receipt` command surface over one-off shell pipelines when the repo CLI already exposes the data.
+- If setup, auth, or repo wiring is unclear, start with `doctor --json`.
+- Start with discovery and read commands before control commands: `doctor`, `trace`, `inspect`, `replay`, `factory inspect`, `factory replay`, `factory replay-chat`, `factory analyze`, `factory investigate`, `factory audit`.
+- Add `--json` when another tool or agent will consume the output.
+- For large read payloads, use `--output-file <path>` on `receipt trace|replay|inspect|dst|jobs|memory read|memory search|memory summarize|memory diff|sessions search|sessions read|doctor` and on `receipt factory replay|replay-chat|analyze|parse|investigate|audit`. The command writes the full payload to disk and returns the path instead of printing the whole blob.
+- Treat `receipt abort` and `receipt factory react|promote|cancel|cleanup|archive|steer|follow-up|abort-job` as explicit write or control commands.
+- Companion skill: `skills/receipt-cli-operator/SKILL.md`.
+
 ## Commands
+
+### receipt doctor
+- Purpose: report repo wiring, data dir resolution, required binaries, and auth status for the local Receipt runtime.
+- Flags:
+  - `--json` (recommended for automation).
+  - `--output-file <path>` (optional; writes the full report to disk and returns the path).
+  - `--repo-root <path>` (optional repo root override for the probe).
+- Output:
+  - text mode: compact status lines plus blocking issues and warnings.
+  - json mode: `{ ok, cwd, requestedRepoRoot, dataDir, configPath, configPresent, openAiApiKey, binaries, repo, auth, blockingIssues, warnings }`.
+- Example:
+```bash
+receipt doctor --json
+```
 
 ### receipt new <agent-id>
 - Purpose: scaffold `src/agents/<agent-id>.agent.ts`.
@@ -51,8 +76,12 @@ receipt run factory --problem "Plan a CLI-first migration" --stream agents/facto
 
 ### receipt trace <run-id|stream>
 - Purpose: print a compact line-per-receipt timeline.
-- Flags: none.
-- Output: `<idx> <ISO timestamp> <event-type>` lines.
+- Flags:
+  - `--json` (optional; returns `{ stream, receipts: [...] }`).
+  - `--output-file <path>` (optional).
+- Output:
+  - text mode: `<idx> <ISO timestamp> <event-type>` lines.
+  - json mode: `{ stream, receipts: [{ index, ts, isoTs, type }] }`.
 - Example:
 ```bash
 receipt trace run_abcd1234
@@ -60,7 +89,8 @@ receipt trace run_abcd1234
 
 ### receipt replay <run-id|stream>
 - Purpose: dump all receipt bodies for the resolved stream.
-- Flags: none.
+- Flags:
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ stream, receipts: [...] }`.
 - Example:
 ```bash
@@ -69,7 +99,8 @@ receipt replay agents/factory/runs/run_abcd1234
 
 ### receipt inspect <run-id|stream>
 - Purpose: show stream head summary.
-- Flags: none.
+- Flags:
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ stream, count, head }`.
 - Example:
 ```bash
@@ -92,6 +123,7 @@ receipt fork run_abcd1234 --at 12 --name agents/factory/runs/run_abcd1234/branch
 - Flags:
   - `--status queued|leased|running|completed|failed|canceled`.
   - `--limit <n>` (default 50, clamped to `1..500`).
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ jobs: [...] }`.
 - Example:
 ```bash
@@ -112,6 +144,7 @@ receipt abort job_abcd1234 --reason "cancel stale run"
 - Purpose: read the latest memory entries for a scope from the receipt-backed memory runtime.
 - Flags:
   - `--limit <n>` (optional; clamped by the memory adapter).
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ entries: [...] }`.
 - Side effects: appends an audited `memory.accessed` receipt for the scope.
 - Example:
@@ -124,6 +157,7 @@ receipt memory read factory/objectives/demo --limit 5
 - Flags:
   - `--query <text>` or trailing query text (required).
   - `--limit <n>` (optional).
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ entries: [...] }`.
 - Side effects: appends an audited `memory.accessed` receipt for the scope.
 - Example:
@@ -137,6 +171,7 @@ receipt memory search factory/repo/shared --query "integration conflict" --limit
   - `--query <text>` (optional).
   - `--limit <n>` (optional).
   - `--max-chars <n>` (optional).
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ summary, entries }`.
 - Side effects: appends an audited `memory.accessed` receipt for the scope.
 - Example:
@@ -160,6 +195,7 @@ receipt memory commit factory/objectives/demo/tasks/task_01 --text "Need reconci
 - Flags:
   - `--from-ts <epoch-ms>` (required).
   - `--to-ts <epoch-ms>` (optional; defaults to now).
+  - `--output-file <path>` (optional).
 - Output (JSON): `{ entries: [...] }`.
 - Side effects: appends an audited `memory.accessed` receipt for the scope.
 - Example:
@@ -172,6 +208,7 @@ receipt memory diff factory/objectives/demo --from-ts 1710000000000
 - Notes:
   - `receipt factory` with no subcommand opens the board/TUI when interactive, or prints the board snapshot with `--json`.
   - `/factory` web pages are inspect-only; create/react/job-control flows should use these CLI commands instead.
+  - large read payloads can be written with `--output-file <path>` on `replay`, `replay-chat`, `analyze`, `parse`, `investigate`, and `audit`.
 - Subcommands:
   - `init` prepares `.receipt/config.json`.
   - `run` creates a new objective and stays attached until terminal/manual-promotion state.

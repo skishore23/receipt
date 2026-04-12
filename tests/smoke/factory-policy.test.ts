@@ -326,6 +326,7 @@ test("factory policy: direct codex probes without an objective stay repo-scoped 
   expect(packet.renderedPrompt).toContain("Start with a short internal plan.");
   expect(packet.renderedPrompt).toContain("If the operator named a file, artifact, receipt, helper, or run, inspect that exact target before broader repo search or memory expansion.");
   expect(packet.renderedPrompt).toContain("If you use subagents, keep them as bounded sidecars");
+  expect(packet.renderedPrompt).toContain("A pair of independent sidecars may run in parallel only when the probe cleanly decomposes");
   expect(packet.renderedPrompt).toContain("Do not parallelize broad repo exploration when one named artifact or one primary evidence path can answer the request.");
 }, FACTORY_POLICY_TIMEOUT_MS);
 

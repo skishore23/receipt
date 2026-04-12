@@ -217,8 +217,36 @@ export const createDurableQueueBackend = (
     },
     leaseNext: (opts) => base.leaseNext(opts),
     leaseJob: (jobId, workerId, leaseMs) => base.leaseJob(jobId, workerId, leaseMs),
-    heartbeat: (jobId, workerId, leaseMs) => base.heartbeat(jobId, workerId, leaseMs),
-    progress: (jobId, workerId, result) => base.progress(jobId, workerId, result),
+    heartbeat: async (jobId, workerId, leaseMs) => {
+      const beat = await base.heartbeat(jobId, workerId, leaseMs);
+      const activityKey = beat ? activityKeyForJob(beat) : undefined;
+      if (activityKey) {
+        await durable.heartbeatActivity({
+          key: activityKey,
+          metadata: {
+            jobId,
+            workerId,
+            leaseMs,
+          },
+        }).catch(() => undefined);
+      }
+      return beat;
+    },
+    progress: async (jobId, workerId, result) => {
+      const progressed = await base.progress(jobId, workerId, result);
+      const activityKey = progressed ? activityKeyForJob(progressed) : undefined;
+      if (activityKey) {
+        await durable.heartbeatActivity({
+          key: activityKey,
+          metadata: {
+            jobId,
+            workerId,
+            result: asRecord(result) ?? undefined,
+          },
+        }).catch(() => undefined);
+      }
+      return progressed;
+    },
     complete: async (jobId, workerId, result) => {
       const completed = await base.complete(jobId, workerId, result);
       const workflowKey = completed ? workflowKeyForJob(completed) : undefined;

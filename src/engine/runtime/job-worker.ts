@@ -46,6 +46,7 @@ type ActiveLeaseState = {
   readonly startedAt: number;
   nextHeartbeatAt: number;
   process?: JobLeaseProcessRegistration;
+  childExitObservedAt?: number;
 };
 
 export class JobWorker {
@@ -156,13 +157,16 @@ export class JobWorker {
     state.nextHeartbeatAt = Date.now() + this.leaseHeartbeatMs;
   }
 
-  private async failDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
-    this.clearActiveLease(state.jobId);
+  private async noteDeadLeaseProcess(state: ActiveLeaseState): Promise<void> {
     const label = state.process?.label?.trim() || "job child process";
-    const reason = `factory task failed: ${label} exited unexpectedly before the worker completed`;
-    await this.queue.fail(state.jobId, this.workerId, reason, true, {
-      status: "failed",
-      summary: reason,
+    state.process = undefined;
+    state.childExitObservedAt = Date.now();
+    await this.queue.progress(state.jobId, this.workerId, {
+      interruptionKind: "child_exit",
+      interruptionSummary: `${label} exited unexpectedly before the worker completed`,
+      interruptionObservedAt: state.childExitObservedAt,
+    }).catch((err) => {
+      this.reportError(new Error(`Failed to record child exit for job ${state.jobId}: ${err}`));
     });
   }
 
@@ -171,8 +175,7 @@ export class JobWorker {
     for (const state of [...this.activeLeases.values()]) {
       const registeredProcess = state.process;
       if (registeredProcess && !this.isProcessAlive(registeredProcess.pid)) {
-        await this.failDeadLeaseProcess(state);
-        continue;
+        await this.noteDeadLeaseProcess(state);
       }
       if (now < state.nextHeartbeatAt) continue;
       try {
@@ -246,6 +249,10 @@ export class JobWorker {
         ...(this.leaseLanes?.length ? { lanes: this.leaseLanes } : {}),
       });
       if (!leased) break;
+      if (leased.leaseOwner && leased.leaseOwner !== this.workerId) {
+        await this.queue.refresh().catch(() => this.queue.snapshot());
+        break;
+      }
       leasedAny = true;
       const runPromise = this.runLeased(leased)
         .catch((err) => {

@@ -64,8 +64,8 @@ test("monitorCheckpointIntervalMs returns shorter interval for high severity", (
 });
 
 test("monitorCheckpointIntervalMs returns investigation interval for investigation mode", () => {
-  expect(monitorCheckpointIntervalMs("investigation", 2)).toBe(2 * 60 * 1_000);
-  expect(monitorCheckpointIntervalMs("investigation", 3)).toBe(2 * 60 * 1_000);
+  expect(monitorCheckpointIntervalMs("investigation", 2)).toBe(6 * 60 * 1_000);
+  expect(monitorCheckpointIntervalMs("investigation", 3)).toBe(6 * 60 * 1_000);
 });
 
 test("monitorCheckpointIntervalMs returns delivery interval for delivery mode", () => {

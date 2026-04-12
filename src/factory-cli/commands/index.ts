@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import React from "react";
@@ -443,6 +444,10 @@ const ensureObjectiveAuditQueued = async (
 
 const printJson = async (value: unknown): Promise<void> => {
   const payload = `${JSON.stringify(value, null, 2)}\n`;
+  await writeStdoutPayload(payload);
+};
+
+const writeStdoutPayload = async (payload: string): Promise<void> => {
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error | null): void => {
@@ -456,6 +461,38 @@ const printJson = async (value: unknown): Promise<void> => {
     );
     if (!wrote) process.stdout.once("drain", () => finish());
   });
+};
+
+const renderCliOutput = (value: string | unknown, asJson: boolean): string => {
+  if (asJson) return `${JSON.stringify(value, null, 2)}\n`;
+  const text = typeof value === "string" ? value : String(value);
+  return text.endsWith("\n") ? text : `${text}\n`;
+};
+
+const printFactoryReadOutput = async (input: {
+  readonly flags: Flags;
+  readonly asJson: boolean;
+  readonly value: string | unknown;
+}): Promise<void> => {
+  const payload = renderCliOutput(input.value, input.asJson);
+  const outputFile = asString(input.flags, "output-file");
+  if (!outputFile) {
+    await writeStdoutPayload(payload);
+    return;
+  }
+  const resolvedPath = path.resolve(outputFile);
+  await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+  await fs.writeFile(resolvedPath, payload, "utf-8");
+  if (input.asJson) {
+    await printJson({
+      ok: true,
+      outputFile: resolvedPath,
+      format: "json",
+      bytes: Buffer.byteLength(payload, "utf-8"),
+    });
+    return;
+  }
+  process.stdout.write(`wrote ${resolvedPath}\n`);
 };
 
 const parseHelperProvider = (
@@ -477,14 +514,34 @@ const hasHelpFlag = (flags: Flags): boolean =>
 
 const printFactoryUsage = (subcommand?: string): void => {
   switch (subcommand) {
+    case "replay":
+      console.log(
+        "receipt factory replay <objectiveId> [--json] [--output-file <path>]",
+      );
+      return;
+    case "replay-chat":
+      console.log(
+        "receipt factory replay-chat <chat-or-run-stream> [--json] [--output-file <path>]",
+      );
+      return;
+    case "analyze":
+      console.log(
+        "receipt factory analyze <objectiveId> [--json] [--output-file <path>]",
+      );
+      return;
+    case "parse":
+      console.log(
+        "receipt factory parse [<objectiveId|taskId|candidateId|jobId|runId>] [--json] [--output-file <path>]",
+      );
+      return;
     case "investigate":
       console.log(
-        "receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
+        "receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--output-file <path>] [--as-of-ts <ts>]",
       );
       return;
     case "audit":
       console.log(
-        "receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
+        "receipt factory audit [--limit <n>] [--objective <id>] [--json] [--output-file <path>]",
       );
       return;
     case "experiment":
@@ -502,11 +559,35 @@ const printFactoryUsage = (subcommand?: string): void => {
       console.log(
         [
           "",
-          "Factory commands:",
+          "Factory read / inspect:",
+          "  receipt factory inspect <objective-id> [--panel <name>] [--json]",
+          "  receipt factory replay <objective-id> [--json] [--output-file <path>]",
+          "  receipt factory replay-chat <chat-or-run-stream> [--json] [--output-file <path>]",
+          "  receipt factory analyze <objective-id> [--json] [--output-file <path>]",
+          "  receipt factory parse [<objectiveId|taskId|candidateId|jobId|runId>] [--json] [--output-file <path>]",
+          "  receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--output-file <path>] [--as-of-ts <ts>]",
+          "  receipt factory audit [--limit <n>] [--objective <id>] [--json] [--output-file <path>]",
+          "",
+          "Factory write / control:",
           "  receipt factory init [--repo-root <path>]",
           "  receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
-          "  receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId> [--json] [--compact] [--as-of-ts <ts>]",
-          "  receipt factory audit [--limit <n>] [--json] [--as-of-ts <ts>]",
+          "  receipt factory create --prompt <text> [--objective-mode delivery|investigation] [--severity 1|2|3|4|5]",
+          "  receipt factory compose [--objective <id>] --prompt <text>",
+          "  receipt factory react <objective-id> [--message <text>]",
+          "  receipt factory promote <objective-id>",
+          "  receipt factory cancel <objective-id> [--reason <text>]",
+          "  receipt factory cleanup <objective-id>",
+          "  receipt factory archive <objective-id>",
+          "  receipt factory steer <job-id> [--message <text>]",
+          "  receipt factory follow-up <job-id> [--message <text>]",
+          "  receipt factory abort-job <job-id> [--reason <text>]",
+          "",
+          "Notes:",
+          "  - Prefer read commands first and add --json when another tool or agent will consume the output.",
+          "  - Use --output-file <path> on large read commands to write the full payload and return the path.",
+          "  - Read commands do not mutate state; write / control commands do.",
+          "",
+          "Factory experiments:",
           "  receipt factory experiment long-run [--json] [--output-dir <path>] [--codex-bin <path>] [--keep-workdir]",
         ].join("\n"),
       );
@@ -722,7 +803,11 @@ const printFactoryInvestigation = async (opts: {
     typeof asOfTs === "number" ? { asOfTs } : {},
   );
   if (opts.asJson) {
-    await printJson(report);
+    await printFactoryReadOutput({
+      flags: opts.flags,
+      asJson: true,
+      value: report,
+    });
     return;
   }
   const compact = parseBooleanFlag(opts.flags, "compact");
@@ -738,13 +823,15 @@ const printFactoryInvestigation = async (opts: {
     compact ? 700 : 1_200,
     { min: 200, max: 20_000 },
   );
-  console.log(
-    renderFactoryReceiptInvestigationText(report, {
+  await printFactoryReadOutput({
+    flags: opts.flags,
+    asJson: false,
+    value: renderFactoryReceiptInvestigationText(report, {
       timelineLimit,
       contextChars,
       compact,
     }),
-  );
+  });
 };
 
 const printFactoryAudit = async (opts: {
@@ -767,10 +854,18 @@ const printFactoryAudit = async (opts: {
     objectiveId,
   );
   if (opts.asJson) {
-    await printJson(report);
+    await printFactoryReadOutput({
+      flags: opts.flags,
+      asJson: true,
+      value: report,
+    });
     return;
   }
-  console.log(renderFactoryReceiptAuditText(report));
+  await printFactoryReadOutput({
+    flags: opts.flags,
+    asJson: false,
+    value: renderFactoryReceiptAuditText(report),
+  });
 };
 
 const isThreadBoundEvent = (
@@ -1575,10 +1670,18 @@ export const handleFactoryCommand = async (
           throw new Error("factory replay requires <objective-id>");
         const replay = await readObjectiveReplay(config.dataDir, objectiveId);
         if (json || !isInteractiveTerminal()) {
-          await printJson(replay);
+          await printFactoryReadOutput({
+            flags,
+            asJson: true,
+            value: replay,
+          });
           return;
         }
-        console.log(renderObjectiveReplayText(replay));
+        await printFactoryReadOutput({
+          flags,
+          asJson: false,
+          value: renderObjectiveReplayText(replay),
+        });
         return;
       }
       case "replay-chat": {
@@ -1587,10 +1690,18 @@ export const handleFactoryCommand = async (
           throw new Error("factory replay-chat requires <chat-or-run-stream>");
         const replay = await readChatReplay(config.dataDir, stream);
         if (json || !isInteractiveTerminal()) {
-          await printJson(replay);
+          await printFactoryReadOutput({
+            flags,
+            asJson: true,
+            value: replay,
+          });
           return;
         }
-        console.log(renderChatReplayText(replay));
+        await printFactoryReadOutput({
+          flags,
+          asJson: false,
+          value: renderChatReplayText(replay),
+        });
         return;
       }
       case "analyze": {
@@ -1602,10 +1713,18 @@ export const handleFactoryCommand = async (
           objectiveId,
         );
         if (json || !isInteractiveTerminal()) {
-          await printJson(analysis);
+          await printFactoryReadOutput({
+            flags,
+            asJson: true,
+            value: analysis,
+          });
           return;
         }
-        console.log(renderObjectiveAnalysisText(analysis));
+        await printFactoryReadOutput({
+          flags,
+          asJson: false,
+          value: renderObjectiveAnalysisText(analysis),
+        });
         return;
       }
       case "parse": {
@@ -1616,10 +1735,18 @@ export const handleFactoryCommand = async (
           targetId,
         );
         if (json || !isInteractiveTerminal()) {
-          await printJson(parsed);
+          await printFactoryReadOutput({
+            flags,
+            asJson: true,
+            value: parsed,
+          });
           return;
         }
-        console.log(renderFactoryParsedRunText(parsed));
+        await printFactoryReadOutput({
+          flags,
+          asJson: false,
+          value: renderFactoryParsedRunText(parsed),
+        });
         return;
       }
       case "resume": {

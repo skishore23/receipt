@@ -57,6 +57,28 @@ elif args[:2] == ["elbv2", "describe-load-balancers"]:
     out({"LoadBalancers":[{"LoadBalancerName":"public-alb","LoadBalancerArn":"arn:alb","Type":"application","DNSName":"alb.example.com","Scheme":"internet-facing","State":{"Code":"active"},"VpcId":"vpc-1"}]})
 elif args[:2] == ["elb", "describe-load-balancers"]:
     out({"LoadBalancerDescriptions":[{"LoadBalancerName":"classic-public","DNSName":"classic.example.com","Scheme":"internet-facing","Instances":[],"SecurityGroups":["sg-1"],"Subnets":["subnet-1"]}]})
+elif args[:2] == ["cloudfront", "list-distributions"]:
+    out({"DistributionList":{"Items":[{"Id":"dist-1","ARN":"arn:cloudfront::dist-1","DomainName":"d111.cloudfront.net","Enabled":True,"Status":"Deployed","Aliases":{"Items":["cdn.example.com"]},"Origins":{"Items":[{"Id":"origin-1"}]}}]}})
+elif args[:2] == ["apigateway", "get-rest-apis"]:
+    out({"items":[{"id":"api-public","name":"public-rest","endpointConfiguration":{"types":["EDGE"]}},{"id":"api-private","name":"private-rest","endpointConfiguration":{"types":["PRIVATE"]}}]})
+elif args[:2] == ["apigatewayv2", "get-apis"]:
+    out({"Items":[{"ApiId":"http-public","Name":"public-http","ProtocolType":"HTTP","ApiEndpoint":"https://http-public.execute-api.us-east-1.amazonaws.com","DisableExecuteApiEndpoint":False},{"ApiId":"http-disabled","Name":"disabled-http","ProtocolType":"HTTP","ApiEndpoint":"https://http-disabled.execute-api.us-east-1.amazonaws.com","DisableExecuteApiEndpoint":True}]})
+elif args[:2] == ["lambda", "list-functions"]:
+    out({"Functions":[{"FunctionName":"public-url-fn","FunctionArn":"arn:aws:lambda:us-east-1:123456789012:function:public-url-fn"},{"FunctionName":"public-policy-fn","FunctionArn":"arn:aws:lambda:us-east-1:123456789012:function:public-policy-fn"},{"FunctionName":"private-fn","FunctionArn":"arn:aws:lambda:us-east-1:123456789012:function:private-fn"}]})
+elif args[:2] == ["lambda", "get-function-url-config"]:
+    function_name = args[args.index("--function-name")+1]
+    if function_name == "public-url-fn":
+        out({"AuthType":"NONE","FunctionUrl":"https://lambda-url.example.com"})
+    else:
+        print("ResourceNotFoundException", file=sys.stderr)
+        sys.exit(255)
+elif args[:2] == ["lambda", "get-policy"]:
+    function_name = args[args.index("--function-name")+1]
+    if function_name == "public-policy-fn":
+        out({"Policy": json.dumps({"Statement":[{"Sid":"publicInvoke","Principal":"*","Action":"lambda:InvokeFunction"}]})})
+    else:
+        print("ResourceNotFoundException", file=sys.stderr)
+        sys.exit(255)
 elif args[:2] == ["rds", "describe-db-instances"]:
     out({"DBInstances":[{"DBInstanceIdentifier":"db-public","Engine":"postgres","DBInstanceStatus":"available","PubliclyAccessible":True,"Endpoint":{"Address":"db.example.com","Port":5432}}]})
 else:
@@ -88,21 +110,35 @@ else:
     status: string;
     data: {
       counts: Record<string, number>;
+      findings: Record<string, unknown[]>;
     };
     artifacts: Array<{ path: string }>;
   };
   expect(result.status).toBe("ok");
   expect(result.data.counts).toMatchObject({
+    cloudFrontDistributions: 1,
+    publicApiGatewayRestApis: 1,
+    publicApiGatewayV2Apis: 1,
     publicEnis: 1,
     internetFacingLoadBalancers: 1,
     internetFacingClassicElbs: 1,
     openSecurityGroups: 1,
+    publicLambdaUrls: 1,
+    publicLambdaPolicies: 1,
     publicRdsInstances: 1,
     publicS3Buckets: 1,
   });
+  expect(result.data.findings.cloudFrontDistributions).toHaveLength(1);
+  expect(result.data.findings.publicApiGatewayRestApis).toHaveLength(1);
+  expect(result.data.findings.publicApiGatewayV2Apis).toHaveLength(1);
+  expect(result.data.findings.publicLambdaUrls).toHaveLength(1);
+  expect(result.data.findings.publicLambdaPolicies).toHaveLength(1);
   expect(result.artifacts.some((artifact) => artifact.path.endsWith("aws_internet_exposure_inventory.json"))).toBe(true);
   const markdown = await readFile(path.join(outDir, "aws_internet_exposure_inventory.md"), "utf-8");
+  expect(markdown).toContain("CloudFront distributions: 1");
+  expect(markdown).toContain("Public REST APIs: 1");
   expect(markdown).toContain("Public ENIs: 1");
+  expect(markdown).toContain("Public Lambda URLs: 1");
   expect(markdown).toContain("Public S3 buckets: 1");
   await rm(tempRoot, { recursive: true, force: true });
 });

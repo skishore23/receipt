@@ -5,6 +5,7 @@
   "exports": {
     "./runtime": "./src/runtime.ts",
     "./chain": "./src/chain.ts",
+    "./execution": "./src/execution.ts",
     "./graph": "./src/graph.ts",
     "./types": "./src/types.ts"
   }

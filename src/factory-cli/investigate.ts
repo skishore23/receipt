@@ -420,7 +420,12 @@ const buildAssessment = (
   const failedJobs = analysis?.jobs.filter((job) =>
     job.status === "failed"
     || (job.status === "canceled" && !TERMINAL_OBJECTIVE_CLEANUP_REASON_RE.test(job.canceledReason ?? ""))).length ?? 0;
-  const leaseExpiredCount = analysis?.anomalies.filter((item) => item.summary.includes("lease expired")).length ?? 0;
+  const recoveredInterruptionCount = analysis?.jobs.filter((job) =>
+    job.status === "completed"
+    && job.recovered === true).length ?? 0;
+  const unrecoveredLeaseExpiredCount = analysis?.jobs.filter((job) =>
+    job.interruptionKind === "lease_expired"
+    && job.recovered !== true).length ?? 0;
   const budgetExceededCount = analysis?.anomalies.filter((item) => item.summary.includes("iteration budget exhausted")).length ?? 0;
   const dbLockedCount = analysis?.anomalies.filter((item) => item.summary.includes("database is locked")).length ?? 0;
   const workspaceCollisionCount = analysis?.anomalies.filter((item) => /workspace (branch|path) already exists/i.test(item.summary)).length ?? 0;
@@ -549,17 +554,22 @@ const buildAssessment = (
   const severeSynthesisLoop = false;
 
   const efficiency: InvestigationEfficiency =
-    severeSynthesisLoop || stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || leaseExpiredCount >= 3 || budgetExceededCount >= 2
+    severeSynthesisLoop || stalledJobs > 0 || controlJobs >= 20 || failedJobs >= 4 || unrecoveredLeaseExpiredCount >= 3 || recoveredInterruptionCount >= 3 || budgetExceededCount >= 2
       ? "churn-heavy"
-      : synthesisLoop || controlJobs >= 6 || failedJobs >= 2 || leaseExpiredCount > 0 || budgetExceededCount > 0
+      : synthesisLoop || controlJobs >= 6 || failedJobs >= 2 || unrecoveredLeaseExpiredCount > 0 || recoveredInterruptionCount >= 2 || budgetExceededCount > 0
         ? "noisy"
         : "efficient";
 
   if (controlJobs > 0 && controlChurn !== "low") {
     notes.push(`Control-plane churn was ${controlChurn} with ${controlJobs} objective-control job(s).`);
   }
-  if (leaseExpiredCount > 0) {
-    notes.push(`Lease expiry surfaced ${leaseExpiredCount} time(s); recovery quality is hard to judge until runtime stability improves.`);
+  if (unrecoveredLeaseExpiredCount > 0) {
+    notes.push(`Lease expiry surfaced ${unrecoveredLeaseExpiredCount} unrecovered time(s); recovery quality is hard to judge until runtime stability improves.`);
+  }
+  if (recoveredInterruptionCount === 1) {
+    notes.push("One worker interruption was recovered automatically and did not block objective completion.");
+  } else if (recoveredInterruptionCount > 1) {
+    notes.push(`${recoveredInterruptionCount} worker interruptions were recovered automatically; delivery succeeded but runtime churn remains.`);
   }
   if (stalledJobs > 0) {
     notes.push(`Live execution stalled on ${stalledJobs} job(s); the objective is not making forward progress.`);

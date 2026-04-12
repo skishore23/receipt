@@ -8,6 +8,7 @@ import type {
   FactoryTaskAlignmentRecord,
   FactoryTaskCompletionRecord,
 } from "../modules/factory";
+import type { FactoryExecutionEvidenceState } from "./factory/runtime/evidence-state";
 
 export type FactoryEvidenceArtifact = {
   readonly label: string;
@@ -35,9 +36,19 @@ export type FactoryInvestigationEvidenceBundle = {
   readonly objective_id: string;
   readonly task_id: string;
   readonly candidate_id: string;
+  readonly graph: {
+    readonly graph_id: string;
+    readonly graph_version: number;
+    readonly active_frontier: ReadonlyArray<string>;
+    readonly completed_step_ids: ReadonlyArray<string>;
+    readonly pending_step_ids: ReadonlyArray<string>;
+    readonly failed_step_ids: ReadonlyArray<string>;
+  };
+  readonly semantic_status: "empty" | "partial" | "sufficient" | "final";
   readonly evidence_records: ReadonlyArray<FactoryEvidenceRecord>;
   readonly scripts_run: ReadonlyArray<FactoryExecutionScriptRun>;
   readonly artifacts: ReadonlyArray<FactoryEvidenceArtifact>;
+  readonly observations: ReadonlyArray<string>;
   readonly timestamps: {
     readonly created_at: number;
     readonly updated_at: number;
@@ -156,21 +167,45 @@ export const buildInvestigationEvidenceBundle = async (input: {
   readonly taskId: string;
   readonly candidateId: string;
   readonly report: FactoryInvestigationReport;
+  readonly executionState?: FactoryExecutionEvidenceState;
   readonly artifactPaths?: ReadonlyArray<{ readonly label: string; readonly path: string }>;
   readonly createdAt?: number;
   readonly updatedAt?: number;
-}): Promise<FactoryInvestigationEvidenceBundle> => ({
-  objective_id: requireNonEmpty(input.objectiveId, "objective_id"),
-  task_id: requireNonEmpty(input.taskId, "task_id"),
-  candidate_id: requireNonEmpty(input.candidateId, "candidate_id"),
-  evidence_records: (input.report.evidenceRecords ?? []).map(assertEvidenceRecord),
-  scripts_run: normalizeScriptsRun(input.report.scriptsRun),
-  artifacts: await Promise.all((input.artifactPaths ?? []).map(normalizeArtifact)),
-  timestamps: {
-    created_at: input.createdAt ?? Date.now(),
-    updated_at: input.updatedAt ?? Date.now(),
-  },
-});
+}): Promise<FactoryInvestigationEvidenceBundle> => {
+  const executionState = input.executionState;
+  const fallbackArtifacts = await Promise.all((input.artifactPaths ?? []).map(normalizeArtifact));
+  const evidenceRecords = executionState?.evidence_records?.length
+    ? executionState.evidence_records.map(assertEvidenceRecord)
+    : (input.report.evidenceRecords ?? []).map(assertEvidenceRecord);
+  const scriptsRun = executionState?.scripts_run?.length
+    ? normalizeScriptsRun(executionState.scripts_run)
+    : normalizeScriptsRun(input.report.scriptsRun);
+  const artifacts = executionState?.artifacts?.length
+    ? executionState.artifacts
+    : fallbackArtifacts;
+  return {
+    objective_id: requireNonEmpty(input.objectiveId, "objective_id"),
+    task_id: requireNonEmpty(input.taskId, "task_id"),
+    candidate_id: requireNonEmpty(input.candidateId, "candidate_id"),
+    graph: {
+      graph_id: requireNonEmpty(executionState?.graph.graphId ?? `${input.objectiveId}:${input.taskId}`, "graph.graph_id"),
+      graph_version: executionState?.graph.graphVersion ?? 1,
+      active_frontier: executionState?.graph.activeFrontier ?? [],
+      completed_step_ids: executionState?.graph.completedStepIds ?? [],
+      pending_step_ids: executionState?.graph.pendingStepIds ?? [],
+      failed_step_ids: executionState?.graph.failedStepIds ?? [],
+    },
+    semantic_status: executionState?.semantic_status ?? (evidenceRecords.length > 0 || scriptsRun.length > 0 ? "final" : "empty"),
+    evidence_records: evidenceRecords,
+    scripts_run: scriptsRun,
+    artifacts,
+    observations: executionState?.observations ?? [],
+    timestamps: {
+      created_at: input.createdAt ?? executionState?.timestamps.created_at ?? Date.now(),
+      updated_at: input.updatedAt ?? executionState?.timestamps.updated_at ?? Date.now(),
+    },
+  };
+};
 
 export const writeInvestigationEvidenceBundle = async (input: {
   readonly bundlePath: string;
@@ -178,6 +213,7 @@ export const writeInvestigationEvidenceBundle = async (input: {
   readonly taskId: string;
   readonly candidateId: string;
   readonly report: FactoryInvestigationReport;
+  readonly executionState?: FactoryExecutionEvidenceState;
   readonly artifactPaths?: ReadonlyArray<{ readonly label: string; readonly path: string }>;
   readonly createdAt?: number;
   readonly updatedAt?: number;
@@ -207,6 +243,11 @@ const asEvidenceRecords = (value: unknown): ReadonlyArray<FactoryEvidenceRecord>
     if (!asRecord(item)) throw new Error("factory evidence bundle invalid evidence_records entry");
     return assertEvidenceRecord(item as FactoryEvidenceRecord);
   });
+};
+
+const asStringArray = (value: unknown, label: string): ReadonlyArray<string> => {
+  if (!Array.isArray(value)) throw new Error(`factory evidence bundle invalid ${label}`);
+  return value.map((item) => requireNonEmpty(typeof item === "string" ? item : undefined, label));
 };
 
 const asArtifacts = (value: unknown): ReadonlyArray<FactoryEvidenceArtifact> => {
@@ -241,13 +282,35 @@ export const readInvestigationEvidenceBundle = async (
   if (createdAt === undefined || updatedAt === undefined) {
     throw new Error("factory evidence bundle invalid timestamps");
   }
+  const graph = asStringRecord(raw.graph, "graph");
+  const semanticStatus = typeof raw.semantic_status === "string" ? raw.semantic_status : undefined;
+  if (
+    semanticStatus !== "empty"
+    && semanticStatus !== "partial"
+    && semanticStatus !== "sufficient"
+    && semanticStatus !== "final"
+  ) {
+    throw new Error("factory evidence bundle invalid semantic_status");
+  }
   return {
     objective_id: requireNonEmpty(typeof raw.objective_id === "string" ? raw.objective_id : undefined, "objective_id"),
     task_id: requireNonEmpty(typeof raw.task_id === "string" ? raw.task_id : undefined, "task_id"),
     candidate_id: requireNonEmpty(typeof raw.candidate_id === "string" ? raw.candidate_id : undefined, "candidate_id"),
+    graph: {
+      graph_id: requireNonEmpty(typeof graph.graph_id === "string" ? graph.graph_id : undefined, "graph.graph_id"),
+      graph_version: typeof graph.graph_version === "number" && Number.isFinite(graph.graph_version)
+        ? graph.graph_version
+        : (() => { throw new Error("factory evidence bundle invalid graph.graph_version"); })(),
+      active_frontier: asStringArray(graph.active_frontier, "graph.active_frontier"),
+      completed_step_ids: asStringArray(graph.completed_step_ids, "graph.completed_step_ids"),
+      pending_step_ids: asStringArray(graph.pending_step_ids, "graph.pending_step_ids"),
+      failed_step_ids: asStringArray(graph.failed_step_ids, "graph.failed_step_ids"),
+    },
+    semantic_status: semanticStatus,
     evidence_records: asEvidenceRecords(raw.evidence_records),
     scripts_run: asScriptsRun(raw.scripts_run),
     artifacts: asArtifacts(raw.artifacts),
+    observations: asStringArray(raw.observations, "observations"),
     timestamps: {
       created_at: createdAt,
       updated_at: updatedAt,

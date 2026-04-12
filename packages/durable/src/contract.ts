@@ -49,10 +49,54 @@ export type ActivitySnapshot = {
   readonly updatedAt: number;
   readonly startedAt?: number;
   readonly completedAt?: number;
+  readonly lastHeartbeatAt?: number;
+  readonly checkpointRevision: number;
+  readonly checkpointOutput?: Record<string, unknown>;
+  readonly checkpointMetadata?: Record<string, unknown>;
   readonly input?: Record<string, unknown>;
   readonly metadata?: Record<string, unknown>;
   readonly output?: Record<string, unknown>;
   readonly error?: string;
+};
+
+export type ActivityHeartbeatInput = {
+  readonly key: ExecutionKey;
+  readonly metadata?: Record<string, unknown>;
+};
+
+export type ActivityCheckpointInput = {
+  readonly key: ExecutionKey;
+  readonly output?: Record<string, unknown>;
+  readonly metadata?: Record<string, unknown>;
+};
+
+export type ActivityCompletionInput = {
+  readonly key: ExecutionKey;
+  readonly output?: Record<string, unknown>;
+  readonly metadata?: Record<string, unknown>;
+};
+
+export type ActivityFailureInput = {
+  readonly key: ExecutionKey;
+  readonly error: string;
+  readonly metadata?: Record<string, unknown>;
+};
+
+export type DurableActivityController<Result extends Record<string, unknown>> = {
+  readonly heartbeat: (metadata?: Record<string, unknown>) => Promise<ActivitySnapshot | undefined>;
+  readonly checkpoint: (
+    output?: Record<string, unknown>,
+    metadata?: Record<string, unknown>,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly complete: (
+    output?: Result,
+    metadata?: Record<string, unknown>,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly fail: (
+    error: string,
+    metadata?: Record<string, unknown>,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly snapshot: () => Promise<ActivitySnapshot | undefined>;
 };
 
 export type StartWorkflowInput = {
@@ -87,7 +131,7 @@ export type ActivityRunInput<Result extends Record<string, unknown>> = {
   readonly input?: Record<string, unknown>;
   readonly metadata?: Record<string, unknown>;
   readonly recover?: () => Promise<Result | undefined>;
-  readonly run: () => Promise<Result>;
+  readonly run: (controller?: DurableActivityController<Result>) => Promise<Result>;
 };
 
 export type DurableBackend = {
@@ -125,6 +169,18 @@ export type DurableBackend = {
   }) => Promise<WorkflowSnapshot | undefined>;
   readonly getActivity: (
     key: ExecutionKey,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly heartbeatActivity: (
+    input: ActivityHeartbeatInput,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly checkpointActivity: (
+    input: ActivityCheckpointInput,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly completeActivity: (
+    input: ActivityCompletionInput,
+  ) => Promise<ActivitySnapshot | undefined>;
+  readonly failActivity: (
+    input: ActivityFailureInput,
   ) => Promise<ActivitySnapshot | undefined>;
   readonly listActivities: (opts?: {
     readonly prefix?: string;
@@ -171,3 +227,13 @@ export const runDurableActivity = <Result extends Record<string, unknown>>(
   input: ActivityRunInput<Result>,
 ): Promise<{ readonly snapshot: ActivitySnapshot; readonly result: Result }> =>
   backend.runDurableActivity(input);
+
+export const heartbeatActivity = (
+  backend: DurableBackend,
+  input: ActivityHeartbeatInput,
+): Promise<ActivitySnapshot | undefined> => backend.heartbeatActivity(input);
+
+export const checkpointActivity = (
+  backend: DurableBackend,
+  input: ActivityCheckpointInput,
+): Promise<ActivitySnapshot | undefined> => backend.checkpointActivity(input);

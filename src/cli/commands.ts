@@ -29,6 +29,7 @@ import {
   printUsage,
   type ParsedArgs,
 } from "./shared";
+import { renderReceiptDoctorText, runReceiptDoctor } from "./doctor";
 import {
   DATA_DIR,
   JOB_BACKEND,
@@ -211,26 +212,79 @@ const commandRun = async (agentId: string, flags: Flags): Promise<void> => {
   console.log(JSON.stringify({ ok: true, mode: "queued", jobId: job.id, runId, stream, runStream }, null, 2));
 };
 
-const commandTrace = async (runOrStream: string): Promise<void> => {
+const renderCliReadOutput = (value: string | unknown, asJson: boolean): string => {
+  if (asJson) return `${JSON.stringify(value, null, 2)}\n`;
+  const text = typeof value === "string" ? value : String(value);
+  return text.endsWith("\n") ? text : `${text}\n`;
+};
+
+const printCliReadOutput = async (input: {
+  readonly flags: Flags;
+  readonly asJson: boolean;
+  readonly value: string | unknown;
+}): Promise<void> => {
+  const payload = renderCliReadOutput(input.value, input.asJson);
+  const outputFile = asString(input.flags, "output-file");
+  if (!outputFile) {
+    process.stdout.write(payload);
+    return;
+  }
+  const resolvedPath = path.resolve(outputFile);
+  await fs.promises.mkdir(path.dirname(resolvedPath), { recursive: true });
+  await fs.promises.writeFile(resolvedPath, payload, "utf-8");
+  if (input.asJson) {
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      outputFile: resolvedPath,
+      format: "json",
+      bytes: Buffer.byteLength(payload, "utf-8"),
+    }, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`wrote ${resolvedPath}\n`);
+};
+
+const commandTrace = async (runOrStream: string, flags: Flags): Promise<void> => {
   const stream = await resolveStream(runOrStream);
   const chain = await readChain(stream);
-  chain.forEach((receipt, idx) => {
+  const entries = chain.map((receipt, idx) => {
     const body = receipt.body;
     const type = typeof body.type === "string" ? body.type : "unknown";
-    console.log(`${idx.toString().padStart(4, " ")}  ${new Date(receipt.ts).toISOString()}  ${type}`);
+    return {
+      index: idx,
+      ts: receipt.ts,
+      isoTs: new Date(receipt.ts).toISOString(),
+      type,
+    };
+  });
+  const asJson = flags.json === true || flags.json === "true";
+  await printCliReadOutput({
+    flags,
+    asJson,
+    value: asJson
+      ? { stream, receipts: entries }
+      : entries.map((entry) => `${entry.index.toString().padStart(4, " ")}  ${entry.isoTs}  ${entry.type}`).join("\n"),
   });
 };
 
-const commandReplay = async (runOrStream: string): Promise<void> => {
+const commandReplay = async (runOrStream: string, flags: Flags): Promise<void> => {
   const stream = await resolveStream(runOrStream);
   const chain = await readChain(stream);
-  console.log(JSON.stringify({ stream, receipts: chain.map((r) => r.body) }, null, 2));
+  await printCliReadOutput({
+    flags,
+    asJson: true,
+    value: { stream, receipts: chain.map((r) => r.body) },
+  });
 };
 
-const commandInspect = async (runOrStream: string): Promise<void> => {
+const commandInspect = async (runOrStream: string, flags: Flags): Promise<void> => {
   const stream = await resolveStream(runOrStream);
   const chain = await readChain(stream);
-  console.log(JSON.stringify({ stream, count: chain.length, head: chain[chain.length - 1]?.body ?? null }, null, 2));
+  await printCliReadOutput({
+    flags,
+    asJson: true,
+    value: { stream, count: chain.length, head: chain[chain.length - 1]?.body ?? null },
+  });
 };
 
 const commandDst = async (args: ReadonlyArray<string>, flags: Flags): Promise<void> => {
@@ -245,11 +299,13 @@ const commandDst = async (args: ReadonlyArray<string>, flags: Flags): Promise<vo
     repoRoot: ROOT,
   });
 
-  if (asJson) {
-    console.log(JSON.stringify(report, null, 2));
-  } else {
-    console.log(renderReceiptDstAuditText(report, { limit }));
-  }
+  await printCliReadOutput({
+    flags,
+    asJson,
+    value: asJson
+      ? report
+      : renderReceiptDstAuditText(report, { limit }),
+  });
 
   const hasReceiptFailures = report.integrityFailures > 0 || report.replayFailures > 0 || report.deterministicFailures > 0;
   const hasContextFailures = report.context
@@ -300,7 +356,11 @@ const commandJobsList = async (flags: Flags): Promise<void> => {
     status: status as JobState["jobs"][string]["status"] | undefined,
     limit: Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 50,
   });
-  console.log(JSON.stringify({ jobs }, null, 2));
+  await printCliReadOutput({
+    flags,
+    asJson: true,
+    value: { jobs },
+  });
 };
 
 const commandAbort = async (jobId: string, flags: Flags): Promise<void> => {
@@ -353,7 +413,11 @@ const commandJobsWait = async (args: ReadonlyArray<string>, flags: Flags): Promi
   const timeoutMs = parseNumberFlag(flags, "timeout-ms");
   const job = await queue.waitForJob(jobId, timeoutMs ?? 15_000, 200);
   if (!job) throw new Error(`job not found: ${jobId}`);
-  console.log(JSON.stringify({ job }, null, 2));
+  await printCliReadOutput({
+    flags,
+    asJson: true,
+    value: { job },
+  });
 };
 
 const commandJobsCommand = async (
@@ -441,7 +505,11 @@ const commandMemoryPrefs = async (args: ReadonlyArray<string>, flags: Flags): Pr
             limit: 50,
             audit: { actor: "cli", command: "memory.prefs.list" },
           })))).flat();
-      console.log(JSON.stringify({ scopes, entries }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { scopes, entries },
+      });
       return;
     }
     case "add": {
@@ -501,7 +569,11 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
         limit,
         audit: { actor: "cli", command: "memory.read" },
       });
-      console.log(JSON.stringify({ entries }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { entries },
+      });
       return;
     }
     case "search": {
@@ -514,7 +586,11 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
         limit,
         audit: { actor: "cli", command: "memory.search" },
       });
-      console.log(JSON.stringify({ entries }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { entries },
+      });
       return;
     }
     case "summarize": {
@@ -528,7 +604,11 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
         maxChars,
         audit: { actor: "cli", command: "memory.summarize" },
       });
-      console.log(JSON.stringify(result, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: result,
+      });
       return;
     }
     case "commit": {
@@ -556,7 +636,11 @@ const commandMemory = async (args: ReadonlyArray<string>, flags: Flags): Promise
         toTs,
         audit: { actor: "cli", command: "memory.diff" },
       });
-      console.log(JSON.stringify({ entries }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { entries },
+      });
       return;
     }
     default:
@@ -583,7 +667,11 @@ const commandSessions = async (args: ReadonlyArray<string>, flags: Flags): Promi
         sessionStream,
         limit,
       });
-      console.log(JSON.stringify({ results }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { results },
+      });
       return;
     }
     case "read": {
@@ -595,12 +683,31 @@ const commandSessions = async (args: ReadonlyArray<string>, flags: Flags): Promi
         ...(target.includes("/sessions/") ? { sessionStream: target } : { chatId: target }),
         limit,
       });
-      console.log(JSON.stringify({ messages }, null, 2));
+      await printCliReadOutput({
+        flags,
+        asJson: true,
+        value: { messages },
+      });
       return;
     }
     default:
       throw new Error(`Unknown sessions subcommand '${subcommand}'`);
   }
+};
+
+const commandDoctor = async (flags: Flags): Promise<void> => {
+  const requestedRepoRoot = path.resolve(asString(flags, "repo-root") ?? ROOT);
+  const report = await runReceiptDoctor({
+    cwd: ROOT,
+    requestedRepoRoot,
+    defaultDataDir: DATA_DIR,
+  });
+  const asJson = flags.json === true || flags.json === "true";
+  await printCliReadOutput({
+    flags,
+    asJson,
+    value: asJson ? report : renderReceiptDoctorText(report),
+  });
 };
 
 const isHelpToken = (value: string | undefined): boolean =>
@@ -635,13 +742,13 @@ export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
     case "trace": {
       const runOrStream = parsed.args[0];
       if (!runOrStream) throw new Error("run-id or stream is required");
-      await commandTrace(runOrStream);
+      await commandTrace(runOrStream, parsed.flags);
       return;
     }
     case "replay": {
       const runOrStream = parsed.args[0];
       if (!runOrStream) throw new Error("run-id or stream is required");
-      await commandReplay(runOrStream);
+      await commandReplay(runOrStream, parsed.flags);
       return;
     }
     case "dst":
@@ -657,7 +764,7 @@ export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
     case "inspect": {
       const runOrStream = parsed.args[0];
       if (!runOrStream) throw new Error("run-id or stream is required");
-      await commandInspect(runOrStream);
+      await commandInspect(runOrStream, parsed.flags);
       return;
     }
     case "jobs":
@@ -674,6 +781,9 @@ export const runCliCommand = async (parsed: ParsedArgs): Promise<void> => {
       return;
     case "sessions":
       await commandSessions(parsed.args, parsed.flags);
+      return;
+    case "doctor":
+      await commandDoctor(parsed.flags);
       return;
     case "factory":
       await handleFactoryCommand(process.cwd(), parsed.args, parsed.flags);

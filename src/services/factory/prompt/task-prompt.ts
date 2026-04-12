@@ -153,8 +153,11 @@ const renderTaskPromptBody = (input: {
     `## Execution Discipline`,
     `Do not run \`${input.factoryCliPrefix} factory promote\`, \`git push\`, or \`gh pr create\` from this task session.`,
     `The controller handles integration and PR publication after an approved candidate. If the objective prompt mentions publishing, satisfy it here by leaving a clean candidate diff plus proof for the controller handoff.`,
-    `Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call. If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
+    `Tool discipline: emit at most one tool call in each response, then wait for that tool result before issuing the next call.`,
+    `If you need several nearby packet or repo reads, combine them into one shell command instead of batching separate tool calls.`,
+    `Exception: when the task cleanly decomposes into at most two independent sidecars, you may launch one additional parallel read or bounded subagent whose output does not depend on the primary path.`,
     `Use Codex subagents only for bounded sidecar work such as parsing a captured artifact, checking one secondary evidence path, or verifying a concrete claim.`,
+    `When the task decomposes cleanly, bounded parallel subagents are allowed only for independent sidecars. Keep this task session as the single owner of the final JSON result and do not delegate the primary implementation path.`,
     `Keep this task session as the single owner of the final JSON result. Any delegated ask must restate the objective ID, task ID, candidate ID, and exact artifact or question it owns.`,
     `Do not fan out broad parallel exploration when one primary evidence path is already producing enough signal to finish the task.`,
     input.cloudExecutionContext?.preferredProvider

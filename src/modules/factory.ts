@@ -1,5 +1,6 @@
 export * from "./factory/types";
 export * from "./factory/events";
+export * from "./factory/kernel";
 
 export {
   FACTORY_TASK_WORKFLOW_BUCKETS,

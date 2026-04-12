@@ -4,7 +4,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { createLocalDurableBackend, type DurableBackend } from "@receipt/durable";
+import { createLocalDurableBackend, type DurableActivityController, type DurableBackend } from "@receipt/durable";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../../adapters/sqlite";
 import type { SqliteQueue, QueueJob } from "../../../adapters/sqlite-queue";
 import { CodexControlSignalError, CodexExecutionError, type CodexExecutor, type CodexRunControl, type CodexRunInput, type CodexRunResult } from "../../../adapters/codex-executor";
@@ -65,6 +65,7 @@ import {
   type FactoryChatCodexArtifactPaths,
 } from "../../factory-codex-artifacts";
 import {
+  type FactoryEvidenceArtifact,
   investigationEvidenceBundlePath,
   writeInvestigationEvidenceBundle,
 } from "../../factory-evidence-bundle";
@@ -141,6 +142,7 @@ import {
   renderInvestigationReportText,
 } from "../result-contracts";
 import {
+  parseJsonObjectCandidate,
   resolveFactoryInvestigationWorkerResult,
   resolveFactoryPublishWorkerResult,
   resolveFactoryTaskWorkerResult,
@@ -158,7 +160,18 @@ import {
   extractInvestigationHelperEvidence,
   hasHelperEvidence,
   synthesizeInvestigationSemanticResult,
+  type FactoryInvestigationHelperEvidence,
 } from "./investigation-results";
+import {
+  checkpointFactoryExecutionEvidenceState,
+  createFactoryExecutionEvidenceState,
+  factoryExecutionEvidenceStatePath,
+  finalizeFactoryExecutionEvidenceState,
+  readFactoryExecutionEvidenceState,
+  refineFactoryExecutionEvidenceStateForHardness,
+  writeFactoryExecutionEvidenceState,
+  type FactoryExecutionEvidenceState,
+} from "./evidence-state";
 import { renderFactoryObjectiveHandoff } from "./objective-handoff-renderer";
 import { inferObjectiveLiveOutputFocusFromDetail } from "../live-output";
 import {
@@ -264,6 +277,7 @@ import {
   type StoredObjectiveProjection,
   type StoredObjectiveProjectionSummary,
 } from "../../../db/projectors";
+import { isSqliteLockError } from "../../../db/client";
 
 const FACTORY_STREAM_PREFIX = "factory/objectives";
 const DEFAULT_CHECKS = ["bun run build"] as const;
@@ -292,6 +306,8 @@ const ALIGNMENT_CORRECTION_NOTE_PREFIX = "Alignment correction for this objectiv
 const PUBLISH_TRANSIENT_FAILURE_RE =
   /\b(could not resolve host|temporary failure in name resolution|name resolution|enotfound|eai_again|error connecting to api\.github\.com|githubstatus\.com|timed out|timeout|connection reset|econnreset|connection refused|econnrefused|network is unreachable|tls handshake timeout|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i;
 const PUBLISH_MAX_ATTEMPTS = 3;
+const INVESTIGATION_EVIDENCE_CHECKPOINT_INTERVAL_MS = 5_000;
+const INVESTIGATION_HARDNESS_COMMAND_THRESHOLD = 4;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -327,6 +343,10 @@ const fileRef = (ref: string, label?: string): GraphRef => ({ kind: "file", ref,
 const commitRef = (ref: string, label?: string): GraphRef => ({ kind: "commit", ref, label });
 const workspaceRef = (ref: string, label?: string): GraphRef => ({ kind: "workspace", ref, label });
 const artifactRef = (ref: string, label?: string): GraphRef => ({ kind: "artifact", ref, label });
+
+type FactoryTaskRunControl = CodexRunControl & {
+  readonly activityController?: DurableActivityController<Record<string, unknown>>;
+};
 
 const READABLE_FACTORY_ARTIFACT_RE = /\.(json|md|txt|csv)$/i;
 const TERMINAL_RENDER_MAX_FILE_BYTES = 32_768;
@@ -422,6 +442,23 @@ type FactoryLiveGuidance = {
   readonly sourceCommandIds: ReadonlyArray<string>;
   readonly jobId?: string;
   readonly appliedAt: number;
+};
+
+type FactoryTaskRecoverySource =
+  | "durable_output"
+  | "persisted_result"
+  | "checkpoint_evidence";
+
+type FactoryTaskInterruptionKind =
+  | "lease_expired"
+  | "child_exit"
+  | "stall"
+  | "timeout"
+  | "unknown";
+
+type FactoryRecoveredTaskResult = {
+  readonly output: Record<string, unknown>;
+  readonly recoverySource: Exclude<FactoryTaskRecoverySource, "durable_output">;
 };
 
 const factoryTaskRunJobId = (
@@ -2282,6 +2319,132 @@ export class FactoryService {
     }
   }
 
+  public async recoverTaskWorkerResult(
+    payload: Record<string, unknown>,
+    opts?: {
+      readonly reason?: string;
+    },
+  ): Promise<FactoryRecoveredTaskResult | undefined> {
+    const parsed = this.parseTaskPayload(payload);
+    if (await pathExists(parsed.resultPath)) {
+      try {
+        const raw = JSON.parse(await fs.readFile(parsed.resultPath, "utf-8"));
+        if (isRecord(raw)) {
+          return {
+            output: raw,
+            recoverySource: "persisted_result",
+          };
+        }
+      } catch {
+        // Fall through to checkpoint-backed recovery.
+      }
+    }
+    const recoveredFromLastMessage = parseJsonObjectCandidate(
+      await fs.readFile(parsed.lastMessagePath, "utf-8").catch(() => ""),
+    );
+    if (recoveredFromLastMessage) {
+      await fs.mkdir(path.dirname(parsed.resultPath), { recursive: true }).catch(() => undefined);
+      await fs.writeFile(parsed.resultPath, JSON.stringify(recoveredFromLastMessage, null, 2), "utf-8");
+      return {
+        output: recoveredFromLastMessage,
+        recoverySource: "persisted_result",
+      };
+    }
+    const recovered = await this.recoverCheckpointBackedTaskResult(
+      parsed,
+      opts?.reason ?? "missing terminal result",
+    );
+    if (!recovered) return undefined;
+    await fs.mkdir(path.dirname(parsed.resultPath), { recursive: true }).catch(() => undefined);
+    await fs.writeFile(parsed.resultPath, JSON.stringify(recovered.output, null, 2), "utf-8");
+    return recovered;
+  }
+
+  public async finalizeRecoveredTaskWorkerResult(
+    payload: Record<string, unknown>,
+    rawResult: Record<string, unknown>,
+  ): Promise<boolean> {
+    return this.maybeApplyRecoveredTaskWorkerResult(
+      this.parseTaskPayload(payload),
+      rawResult,
+    );
+  }
+
+  public buildRecoveredTaskJobResult(input: {
+    readonly output: Record<string, unknown>;
+    readonly recoverySource: FactoryTaskRecoverySource;
+    readonly interruptionKind: FactoryTaskInterruptionKind;
+  }): Record<string, unknown> {
+    return {
+      ...input.output,
+      recovered: true,
+      recoverySource: input.recoverySource,
+      interruptionKind: input.interruptionKind,
+      recoveredFromPersistedResult: true,
+      ...(input.recoverySource === "durable_output"
+        ? { recoveredFromDurableActivity: true }
+        : {}),
+      ...(input.recoverySource === "checkpoint_evidence"
+        ? { recoveredFromCheckpointEvidence: true }
+        : {}),
+    };
+  }
+
+  private async maybeApplyRecoveredTaskWorkerResult(
+    payload: FactoryTaskJobPayload,
+    rawResult: Record<string, unknown>,
+  ): Promise<boolean> {
+    const state = await this.getObjectiveState(payload.objectiveId).catch(() => undefined);
+    const task = state?.workflow.tasksById[payload.taskId];
+    if (!task || task.status !== "running") return false;
+    await this.applyTaskWorkerResult(payload, rawResult);
+    await this.reactObjective(payload.objectiveId);
+    return true;
+  }
+
+  private taskInterruptionKindFromText(
+    value: string | undefined,
+  ): FactoryTaskInterruptionKind | undefined {
+    const normalized = value?.trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized.includes("lease expired")) return "lease_expired";
+    if (normalized.includes("child_exit")) return "child_exit";
+    if (normalized.includes("exited unexpectedly")) return "child_exit";
+    if (normalized.includes("timed out") || normalized.includes("timeout")) return "timeout";
+    if (normalized.includes("stalled")) return "stall";
+    return undefined;
+  }
+
+  private taskInterruptionKindForJob(
+    job: Pick<QueueJob, "status" | "lastError" | "leaseUntil" | "result">,
+    now = Date.now(),
+  ): FactoryTaskInterruptionKind {
+    const result = isRecord(job.result) ? job.result : undefined;
+    const explicit = optionalTrimmedString(typeof result?.interruptionKind === "string" ? result.interruptionKind : undefined);
+    if (
+      explicit === "lease_expired"
+      || explicit === "child_exit"
+      || explicit === "stall"
+      || explicit === "timeout"
+      || explicit === "unknown"
+    ) {
+      return explicit;
+    }
+    const inferred = this.taskInterruptionKindFromText(
+      optionalTrimmedString(typeof result?.interruptionSummary === "string" ? result.interruptionSummary : undefined)
+      ?? optionalTrimmedString(job.lastError),
+    );
+    if (inferred) return inferred;
+    if (
+      (job.status === "leased" || job.status === "running")
+      && typeof job.leaseUntil === "number"
+      && job.leaseUntil <= now
+    ) {
+      return "lease_expired";
+    }
+    return "unknown";
+  }
+
   private async recoverPersistedStaleTaskResult(job: QueueJob): Promise<boolean> {
     if (!isRecord(job.payload) || job.payload.kind !== "factory.task.run") return false;
     let parsed: FactoryTaskJobPayload;
@@ -2291,34 +2454,32 @@ export class FactoryService {
       return false;
     }
     let recoveredOutput: Record<string, unknown> | undefined;
-    let recoveredFromDurableActivity = false;
+    let recoverySource: FactoryTaskRecoverySource | undefined;
     if (this.durable) {
       const activity = await this.durable.getActivity(codexActivityKey(job.id)).catch(() => undefined);
       if (activity?.status === "completed" && activity.output) {
         recoveredOutput = activity.output;
-        recoveredFromDurableActivity = true;
+        recoverySource = "durable_output";
       }
     }
-    if (!recoveredOutput && await pathExists(parsed.resultPath)) {
-      try {
-        const raw = JSON.parse(await fs.readFile(parsed.resultPath, "utf-8"));
-        if (isRecord(raw)) {
-          recoveredOutput = raw;
-        }
-      } catch {
-        recoveredOutput = undefined;
-      }
+    if (!recoveredOutput) {
+      const recovered = await this.recoverTaskWorkerResult(job.payload, {
+        reason: "stale task recovery after missing terminal result",
+      });
+      recoveredOutput = recovered?.output;
+      recoverySource = recovered?.recoverySource;
     }
     if (!recoveredOutput) return false;
-    await this.applyTaskWorkerResult(parsed, recoveredOutput);
-    const completed = await this.queue.complete(job.id, job.leaseOwner ?? "factory.resume", {
-      objectiveId: parsed.objectiveId,
-      taskId: parsed.taskId,
-      candidateId: parsed.candidateId,
-      status: "completed",
-      recoveredFromPersistedResult: true,
-      ...(recoveredFromDurableActivity ? { recoveredFromDurableActivity: true } : {}),
-    });
+    await this.maybeApplyRecoveredTaskWorkerResult(parsed, recoveredOutput);
+    const completed = await this.queue.complete(
+      job.id,
+      job.leaseOwner ?? "factory.resume",
+      this.buildRecoveredTaskJobResult({
+        output: recoveredOutput,
+        recoverySource: recoverySource ?? "persisted_result",
+        interruptionKind: this.taskInterruptionKindForJob(job),
+      }),
+    );
     if (completed) {
       await this.enqueueObjectiveControl(parsed.objectiveId, "reconcile");
     }
@@ -2335,7 +2496,11 @@ export class FactoryService {
         continue;
       }
       const objectiveId = objectiveIdForQueueJob(job);
-      await this.queue.cancel(job.id, "stale execution recovered during startup reconciliation", "factory.resume");
+      await this.queue.cancel(
+        job.id,
+        `stale execution unrecoverable during startup reconciliation (${this.taskInterruptionKindForJob(job, now)})`,
+        "factory.resume",
+      );
       if (objectiveId) {
         await this.enqueueObjectiveControl(objectiveId, "reconcile");
       }
@@ -2914,6 +3079,58 @@ export class FactoryService {
           await this.processObjectiveStartup(objectiveId, startupReason);
         }
       } catch (error) {
+        if (isFactoryStaleObjectiveConflict(error)) {
+          if (passes < 2) {
+            nextReason = "reconcile";
+            continue;
+          }
+          await this.enqueueObjectiveControl(objectiveId, "reconcile").catch(() => undefined);
+          if (workflowKey && this.durable) {
+            await this.durable.setWorkflowStatus({
+              key: workflowKey,
+              status: "completed",
+              output: {
+                objectiveId,
+                status: "completed",
+                reason: "reconcile",
+              },
+            });
+          }
+          return {
+            objectiveId,
+            status: "completed",
+            reason: "reconcile",
+          };
+        }
+        if (isSqliteLockError(error) || transientFactoryOperationMessage(error)) {
+          if (passes < 2) {
+            nextReason = "reconcile";
+            await sleep(150);
+            continue;
+          }
+          if (await this.scheduleTransientObjectiveReconcile(state, {
+            operation: `objective control ${effectiveReason}`,
+            selectedActionId: `retry_objective_control_${effectiveReason}`,
+            frontierTaskIds: state.workflow.activeTaskIds,
+          }, error)) {
+            if (workflowKey && this.durable) {
+              await this.durable.setWorkflowStatus({
+                key: workflowKey,
+                status: "completed",
+                output: {
+                  objectiveId,
+                  status: "completed",
+                  reason: "reconcile",
+                },
+              });
+            }
+            return {
+              objectiveId,
+              status: "completed",
+              reason: "reconcile",
+            };
+          }
+        }
         if (this.isInvalidBaseCommitControlError(error)) {
           const reasonText = "objective canceled after invalid base commit was detected during control recovery";
           await this.cancelObjectiveScopedJobs(objectiveId, reasonText, "factory.control");
@@ -3495,6 +3712,10 @@ export class FactoryService {
       case "continue":
         return false;
       case "recommend_enter_synthesizing": {
+        const guidance = this.synthesizeNowGuidance(recommendation.recommendation.reason);
+        if (task.jobId) {
+          await this.queueJobFollowUp(task.jobId, guidance, "factory.control").catch(() => undefined);
+        }
         await this.emitObjectiveBatch(state.objectiveId, [
           this.runtimeDecisionEvent(
             state,
@@ -3505,11 +3726,7 @@ export class FactoryService {
           {
             type: "objective.operator.noted",
             objectiveId: state.objectiveId,
-            message: [
-              "Evidence is sufficient. Stop collecting and return the semantic investigation JSON immediately.",
-              "Do not rerun helpers, revisit bootstrap files, or add bookkeeping commands.",
-              recommendation.recommendation.reason,
-            ].filter(Boolean).join("\n"),
+            message: guidance,
             notedAt: Date.now(),
           },
         ], basedOn);
@@ -3519,7 +3736,7 @@ export class FactoryService {
           recommendationId: recommendation.recommendationId,
           taskId: recommendation.taskId,
           candidateId: recommendation.candidateId,
-          outcome: "follow_up",
+          outcome: "enter_synthesizing",
           consumedAt: Date.now(),
         });
         return true;
@@ -3869,7 +4086,7 @@ export class FactoryService {
     }
   }
 
-  async runTask(payload: Record<string, unknown>, control?: CodexRunControl): Promise<Record<string, unknown>> {
+  async runTask(payload: Record<string, unknown>, control?: FactoryTaskRunControl): Promise<Record<string, unknown>> {
     await this.ensureBootstrap();
     const parsed = this.parseTaskPayload(payload);
     let state = await this.getObjectiveState(parsed.objectiveId);
@@ -3977,6 +4194,7 @@ export class FactoryService {
         state = await this.getObjectiveState(parsed.objectiveId);
         task = state.workflow.tasksById[parsed.taskId];
         if (!task) throw new FactoryServiceError(404, "factory task not found");
+        await this.loadFactoryExecutionEvidenceState(parsed, task.prompt);
         const prompt = await this.renderTaskPrompt(state, task, parsed, guidanceHistory);
         await archiveFactoryTaskPrompt({
           dataDir: this.dataDir,
@@ -3986,61 +4204,138 @@ export class FactoryService {
         const investigationTimeoutMs = parsed.objectiveMode === "investigation"
           ? 180_000
           : undefined;
-        execution = await this.codexExecutor.run({
-          prompt,
-          workspacePath: parsed.workspacePath,
-          promptPath: parsed.promptPath,
-          lastMessagePath: parsed.lastMessagePath,
-          stdoutPath: parsed.stdoutPath,
-          stderrPath: parsed.stderrPath,
-          evidencePath: parsed.evidencePath,
-          model: FACTORY_TASK_CODEX_MODEL,
-          jsonOutput: true,
-          outputSchemaPath: resultSchemaPath,
-          completionSignalPath: parsed.lastMessagePath,
-          completionQuietMs: 1_500,
-          timeoutMs: investigationTimeoutMs,
-          stallTimeoutMs: parsed.objectiveMode === "investigation"
-            ? 90_000
-            : undefined,
-          reasoningEffort: severityWorkerReasoningEffort(
-            parsed.profile.rootProfileId,
-            parsed.objectiveMode,
-            parsed.severity,
-            parsed.taskPhase,
-            task.taskKind,
-          ),
-          sandboxMode: sandboxModeForTask(),
-          isolateCodexHome: true,
-          objectiveId: parsed.objectiveId,
-          taskId: parsed.taskId,
-          candidateId: parsed.candidateId,
-          integrationRef: parsed.integrationRef,
-          contextRefs: parsed.contextRefs,
-          skillBundlePaths: parsed.skillBundlePaths,
-          repoSkillPaths: parsed.repoSkillPaths,
-          env: {
-            DATA_DIR: workspaceCommandEnv.commandDataDir,
-            RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
-            PATH: workspaceCommandEnv.path,
+        let latestObservation = "Task execution started.";
+        let observedCommandCount = 0;
+        let stopCheckpointLoop = false;
+        const checkpointLoop = (async () => {
+          while (!stopCheckpointLoop) {
+            await sleep(INVESTIGATION_EVIDENCE_CHECKPOINT_INTERVAL_MS);
+            if (stopCheckpointLoop) break;
+            await control?.activityController?.heartbeat({
+              phase: "collecting_evidence",
+              observation: latestObservation,
+              commandCount: observedCommandCount,
+            }).catch(() => undefined);
+            await this.checkpointInvestigationEvidenceState(
+              parsed,
+              task.prompt,
+              {
+                observation: latestObservation,
+                commandCount: observedCommandCount,
+                activityController: control?.activityController,
+              },
+            ).catch(() => undefined);
+          }
+        })();
+        const wrappedControl: CodexRunControl = {
+          shouldAbort: control?.shouldAbort,
+          pollSignal: control?.pollSignal,
+          onProgress: async (update) => {
+            const summary = update.lastMessage ?? update.summary;
+            if (summary) latestObservation = summary;
+            if (
+              update.eventType?.startsWith("item.")
+              && typeof update.summary === "string"
+              && update.summary.toLowerCase().includes("command")
+            ) {
+              observedCommandCount += 1;
+            }
+            await control?.activityController?.heartbeat({
+              progressAt: update.progressAt,
+              eventType: update.eventType,
+              summary: update.summary,
+              commandCount: observedCommandCount,
+            }).catch(() => undefined);
+            if (
+              update.eventType === "item.completed"
+              || update.eventType === "item.failed"
+            ) {
+              await this.checkpointInvestigationEvidenceState(
+                parsed,
+                task.prompt,
+                {
+                  observation: summary,
+                  commandCount: observedCommandCount,
+                  activityController: control?.activityController,
+                },
+              ).catch(() => undefined);
+            }
+            await control?.onProgress?.(update);
           },
-        }, control);
+          onChildSpawn: async (update) => {
+            await control?.activityController?.heartbeat({
+              childPid: update.pid,
+              startedAt: update.startedAt,
+              command: update.command,
+            }).catch(() => undefined);
+            await control?.onChildSpawn?.(update);
+          },
+          onChildExit: async (update) => {
+            await control?.activityController?.heartbeat({
+              childPid: update.pid,
+              exitCode: update.exitCode,
+              signal: update.signal ?? null,
+            }).catch(() => undefined);
+            await control?.onChildExit?.(update);
+          },
+        };
+        try {
+          execution = await this.codexExecutor.run({
+            prompt,
+            workspacePath: parsed.workspacePath,
+            promptPath: parsed.promptPath,
+            lastMessagePath: parsed.lastMessagePath,
+            stdoutPath: parsed.stdoutPath,
+            stderrPath: parsed.stderrPath,
+            evidencePath: parsed.evidencePath,
+            model: FACTORY_TASK_CODEX_MODEL,
+            jsonOutput: true,
+            outputSchemaPath: resultSchemaPath,
+            completionSignalPath: parsed.lastMessagePath,
+            completionQuietMs: 1_500,
+            timeoutMs: investigationTimeoutMs,
+            stallTimeoutMs: parsed.objectiveMode === "investigation"
+              ? 90_000
+              : undefined,
+            reasoningEffort: severityWorkerReasoningEffort(
+              parsed.profile.rootProfileId,
+              parsed.objectiveMode,
+              parsed.severity,
+              parsed.taskPhase,
+              task.taskKind,
+            ),
+            sandboxMode: sandboxModeForTask(),
+            isolateCodexHome: true,
+            objectiveId: parsed.objectiveId,
+            taskId: parsed.taskId,
+            candidateId: parsed.candidateId,
+            integrationRef: parsed.integrationRef,
+            contextRefs: parsed.contextRefs,
+            skillBundlePaths: parsed.skillBundlePaths,
+            repoSkillPaths: parsed.repoSkillPaths,
+            env: {
+              DATA_DIR: workspaceCommandEnv.commandDataDir,
+              RECEIPT_DATA_DIR: workspaceCommandEnv.commandDataDir,
+              PATH: workspaceCommandEnv.path,
+            },
+          }, wrappedControl);
+        } finally {
+          stopCheckpointLoop = true;
+          await checkpointLoop;
+        }
         break;
       } catch (error) {
-        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") {
-          if (
-            parsed.objectiveMode === "investigation"
-            && !(error instanceof CodexControlSignalError)
-          ) {
-            const retryGuidance = await this.buildInvestigationEvidenceRetryGuidance(parsed, error, guidanceHistory);
-            if (retryGuidance) {
-              guidanceHistory.push(retryGuidance);
-              continue;
-            }
-            const fallbackExecution = await this.fallbackExecutionForTaskError(parsed, error);
-            const fallbackResult = await this.buildFallbackInvestigationTaskResult(parsed, fallbackExecution, error);
-            await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
-            await this.applyTaskWorkerResult(parsed, fallbackResult);
+        if (error instanceof CodexControlSignalError && error.signal.kind === "restart") {
+          const restartResult = error.result;
+          const structuredLastMessage = parseJsonObjectCandidate(
+            optionalTrimmedString(restartResult?.lastMessage) ?? "",
+          );
+          const recoveredResult = restartResult && structuredLastMessage
+            ? await this.resolveTaskWorkerResult(parsed, restartResult).catch(() => undefined)
+            : undefined;
+          if (recoveredResult) {
+            await fs.writeFile(parsed.resultPath, JSON.stringify(recoveredResult, null, 2), "utf-8");
+            await this.applyTaskWorkerResult(parsed, recoveredResult);
             await this.reactObjective(parsed.objectiveId);
             return {
               objectiveId: parsed.objectiveId,
@@ -4049,10 +4344,48 @@ export class FactoryService {
               status: "completed",
             };
           }
+        }
+        if (!(error instanceof CodexControlSignalError) || error.signal.kind !== "restart") {
+          if (!(error instanceof CodexControlSignalError)) {
+            await this.checkpointInvestigationEvidenceState(
+              parsed,
+              task.prompt,
+              {
+                observation: clipText(error instanceof Error ? error.message : String(error), 280),
+                activityController: control?.activityController,
+              },
+            ).catch(() => undefined);
+            if (parsed.objectiveMode === "investigation") {
+              const retryGuidance = await this.buildInvestigationEvidenceRetryGuidance(parsed, error, guidanceHistory);
+              if (retryGuidance) {
+                guidanceHistory.push(retryGuidance);
+                continue;
+              }
+              const fallbackExecution = await this.fallbackExecutionForTaskError(parsed, error);
+              const fallbackResult = await this.buildFallbackInvestigationTaskResult(parsed, fallbackExecution, error);
+              await fs.writeFile(parsed.resultPath, JSON.stringify(fallbackResult, null, 2), "utf-8");
+              await this.applyTaskWorkerResult(parsed, fallbackResult);
+              await this.reactObjective(parsed.objectiveId);
+              return {
+                objectiveId: parsed.objectiveId,
+                taskId: parsed.taskId,
+                candidateId: parsed.candidateId,
+                status: "completed",
+              };
+            }
+          }
           throw error;
         }
         const guidance = parseFactoryLiveGuidance(error.signal);
         if (!guidance) throw error;
+        await this.checkpointInvestigationEvidenceState(
+          parsed,
+          task.prompt,
+          {
+            observation: guidance.guidance,
+            activityController: control?.activityController,
+          },
+        ).catch(() => undefined);
         guidanceHistory.push(guidance);
       }
     }
@@ -4264,6 +4597,46 @@ export class FactoryService {
     }
     return [...copied.values()]
       .sort((left, right) => right.bytes - left.bytes || left.label.localeCompare(right.label));
+  }
+
+  private async sourceTaskCoreReadableArtifacts(
+    sourceTask: FactoryTaskRecord | undefined,
+  ): Promise<ReadonlyArray<FactoryReadableArtifact>> {
+    if (!sourceTask?.workspacePath) return [];
+    const files = buildTaskFilePaths(
+      sourceTask.workspacePath,
+      sourceTask.taskId,
+      taskExecutionPhaseValue(sourceTask),
+    );
+    const candidatePaths = [
+      files.resultPath,
+      files.lastMessagePath,
+      files.evidencePath,
+      factoryExecutionEvidenceStatePath(files.resultPath),
+      investigationEvidenceBundlePath(files.resultPath),
+    ];
+    const readableArtifacts: FactoryReadableArtifact[] = [];
+    for (const candidatePath of candidatePaths) {
+      const label = path.basename(candidatePath);
+      if (!READABLE_FACTORY_ARTIFACT_RE.test(label)) continue;
+      const stat = await fs.stat(candidatePath).catch(() => undefined);
+      if (!stat?.isFile() || stat.size <= 0) continue;
+      readableArtifacts.push({
+        path: candidatePath,
+        label,
+        bytes: stat.size,
+      });
+    }
+    return readableArtifacts.sort((left, right) =>
+      right.bytes - left.bytes || left.label.localeCompare(right.label));
+  }
+
+  private synthesizeNowGuidance(reason: string | undefined): string {
+    return [
+      "Evidence is sufficient. Stop collecting and return the semantic investigation JSON immediately.",
+      "Do not rerun helpers, revisit bootstrap files, or add bookkeeping commands.",
+      optionalTrimmedString(reason),
+    ].filter(Boolean).join("\n");
   }
 
   private latestRenderableCandidate(
@@ -4603,6 +4976,10 @@ export class FactoryService {
       executionMode: payload.executionMode,
       git: this.git,
     });
+    const controllerFallback = isRecord(rawResult.controllerFallback)
+      ? rawResult.controllerFallback
+      : undefined;
+    const checkpointBackedNoop = controllerFallback?.source === "checkpointed_evidence_state";
     const checkResults = await runFactoryChecks({
       commands: state.checks,
       workspacePath: payload.workspacePath,
@@ -4659,7 +5036,8 @@ export class FactoryService {
       return;
     }
 
-    const committed = status.dirty && payload.executionMode === "worktree"
+    const effectiveWorkspaceDirty = checkpointBackedNoop ? false : status.dirty;
+    const committed = effectiveWorkspaceDirty && payload.executionMode === "worktree"
       ? await this.git.commitWorkspace(
           payload.workspacePath,
           `[factory][${payload.objectiveId}] ${payload.taskId} ${state.title}`,
@@ -4820,7 +5198,7 @@ export class FactoryService {
       taskId: payload.taskId,
       candidateId: payload.candidateId,
       outcome: plannerOutcome,
-      workspaceDirty: status.dirty,
+      workspaceDirty: effectiveWorkspaceDirty,
       hasFailedCheck: Boolean(failedCheck),
       reworkBlockedReason,
       candidate: {
@@ -6341,13 +6719,14 @@ export class FactoryService {
     const sourceTaskReadableArtifacts = sourceTask?.workspacePath
       ? await listTaskReadableArtifacts(sourceTask.workspacePath, sourceTaskArtifactActivity)
       : [];
+    const sourceTaskCoreReadableArtifacts = await this.sourceTaskCoreReadableArtifacts(sourceTask);
     const inheritedReadableArtifacts = await this.materializeInheritedReadableArtifacts(
       workspacePath,
       Object.values(inheritedSourceArtifactRefs),
     );
     const inheritedSourceWorkspaceArtifacts = await this.materializeReadableArtifactsIntoWorkspace(
       workspacePath,
-      sourceTaskReadableArtifacts,
+      [...sourceTaskCoreReadableArtifacts, ...sourceTaskReadableArtifacts],
     );
     const artifactActivity = await listTaskArtifactActivity(
       workspacePath,
@@ -6943,6 +7322,293 @@ export class FactoryService {
     return true;
   }
 
+  private async loadFactoryExecutionEvidenceState(
+    payload: Pick<FactoryTaskJobPayload, "objectiveId" | "taskId" | "candidateId" | "resultPath">,
+    goal: string,
+  ): Promise<FactoryExecutionEvidenceState> {
+    const statePath = factoryExecutionEvidenceStatePath(payload.resultPath);
+    const existing = await readFactoryExecutionEvidenceState(statePath).catch(() => undefined);
+    if (existing) return existing;
+    const created = createFactoryExecutionEvidenceState({
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      candidateId: payload.candidateId,
+      goal,
+      scopeKey: payload.taskId,
+    });
+    return writeFactoryExecutionEvidenceState(statePath, created);
+  }
+
+  private helperEvidenceFromExecutionState(
+    executionState: FactoryExecutionEvidenceState,
+  ): FactoryInvestigationHelperEvidence {
+    const summary = clipText(
+      executionState.deltas.at(-1)?.summary
+      ?? executionState.observations.at(-1)
+      ?? executionState.evidence_records[0]?.command_or_api,
+      280,
+    );
+    return {
+      ...(summary ? { summary } : {}),
+      evidence: executionState.evidence_records.slice(0, 8).map((record) => ({
+        title: record.tool_name,
+        summary: clipText(
+          typeof record.outputs.output_preview === "string"
+            ? record.outputs.output_preview
+            : record.command_or_api,
+          280,
+        ) ?? record.command_or_api,
+        detail: clipText(
+          Object.keys(record.summary_metrics).length > 0
+            ? JSON.stringify(record.summary_metrics)
+            : record.command_or_api,
+          280,
+        ),
+      })),
+      evidenceRecords: executionState.evidence_records,
+      artifacts: executionState.artifacts,
+      scriptsRun: executionState.scripts_run,
+    };
+  }
+
+  private async checkpointInvestigationEvidenceState(
+    payload: Pick<
+      FactoryTaskJobPayload,
+      "objectiveId" | "taskId" | "candidateId" | "workspacePath" | "evidencePath" | "resultPath"
+    >,
+    goal: string,
+    opts?: {
+      readonly observation?: string;
+      readonly commandCount?: number;
+      readonly activityController?: DurableActivityController<Record<string, unknown>>;
+    },
+  ): Promise<FactoryExecutionEvidenceState> {
+    let executionState = await this.loadFactoryExecutionEvidenceState(payload, goal);
+    const telemetry = await this.readTaskTelemetryEvidence(payload.evidencePath);
+    const helperEvidence = await extractInvestigationHelperEvidence({
+      workspacePath: payload.workspacePath,
+      telemetry,
+      objectiveId: payload.objectiveId,
+      taskId: payload.taskId,
+      strictHelperEvidence: false,
+    });
+    const observedCommands = Math.max(
+      opts?.commandCount ?? 0,
+      helperEvidence.scriptsRun.length,
+    );
+    if (
+      executionState.graph.steps.length === 1
+      && (
+        observedCommands >= INVESTIGATION_HARDNESS_COMMAND_THRESHOLD
+        || Boolean(opts?.observation && /lease|stalled|restart|steer|follow-up|follow up/i.test(opts.observation))
+      )
+    ) {
+      executionState = refineFactoryExecutionEvidenceStateForHardness(
+        executionState,
+        opts?.observation ?? `Runtime observed ${observedCommands} command(s) without a terminal result.`,
+      );
+    }
+    const nextState = checkpointFactoryExecutionEvidenceState({
+      current: executionState,
+      evidenceRecords: helperEvidence.evidenceRecords,
+      scriptsRun: helperEvidence.scriptsRun,
+      artifacts: helperEvidence.artifacts,
+      observations: opts?.observation ? [opts.observation] : [],
+      ...(helperEvidence.summary ? { summary: helperEvidence.summary } : {}),
+      semanticStatus:
+        helperEvidence.evidenceRecords.length > 0
+        || helperEvidence.scriptsRun.length > 0
+        || helperEvidence.artifacts.length > 0
+          ? "partial"
+          : "empty",
+    });
+    const statePath = factoryExecutionEvidenceStatePath(payload.resultPath);
+    const persisted = await writeFactoryExecutionEvidenceState(statePath, nextState);
+    await opts?.activityController?.checkpoint({
+      evidenceStatePath: statePath,
+      evidenceCount: persisted.evidence_records.length,
+      scriptCount: persisted.scripts_run.length,
+      artifactCount: persisted.artifacts.length,
+      semanticStatus: persisted.semantic_status,
+      graphId: persisted.graph.graphId,
+      graphVersion: persisted.graph.graphVersion,
+    }, {
+      observation: opts?.observation,
+    }).catch(() => undefined);
+    return persisted;
+  }
+
+  private async finalizeInvestigationEvidenceState(
+    payload: Pick<
+      FactoryTaskJobPayload,
+      "objectiveId" | "taskId" | "candidateId" | "resultPath"
+    >,
+    goal: string,
+    input: {
+      readonly report: FactoryInvestigationReport;
+      readonly artifacts: ReadonlyArray<FactoryEvidenceArtifact>;
+      readonly summary: string;
+      readonly observations?: ReadonlyArray<string>;
+      readonly activityController?: DurableActivityController<Record<string, unknown>>;
+    },
+  ): Promise<FactoryExecutionEvidenceState> {
+    const current = await this.loadFactoryExecutionEvidenceState(payload, goal);
+    const finalized = finalizeFactoryExecutionEvidenceState({
+      current,
+      evidenceRecords: input.report.evidenceRecords ?? [],
+      scriptsRun: input.report.scriptsRun,
+      artifacts: input.artifacts,
+      summary: input.summary,
+      observations: input.observations,
+    });
+    const statePath = factoryExecutionEvidenceStatePath(payload.resultPath);
+    const persisted = await writeFactoryExecutionEvidenceState(statePath, finalized);
+    await input.activityController?.checkpoint({
+      evidenceStatePath: statePath,
+      evidenceCount: persisted.evidence_records.length,
+      scriptCount: persisted.scripts_run.length,
+      artifactCount: persisted.artifacts.length,
+      semanticStatus: persisted.semantic_status,
+      graphId: persisted.graph.graphId,
+      graphVersion: persisted.graph.graphVersion,
+      finalized: true,
+    }).catch(() => undefined);
+    return persisted;
+  }
+
+  private buildCheckpointBackedInvestigationTaskResult(
+    executionState: FactoryExecutionEvidenceState,
+    reason: string,
+  ): Record<string, unknown> {
+    const helperEvidence = this.helperEvidenceFromExecutionState(executionState);
+    const fallbackSummary = clipText(
+      helperEvidence.summary
+      ?? `Recovered investigation from checkpointed evidence after ${reason}.`,
+      280,
+    ) ?? `Recovered investigation from checkpointed evidence after ${reason}.`;
+    const semanticFallback = buildFallbackInvestigationSemanticResult({
+      helperEvidence,
+      rawResult: {
+        controllerFallback: {
+          summary: fallbackSummary,
+          nextAction: "Finalize from checkpointed evidence state.",
+          error: reason,
+        },
+      },
+      errorDetail: clipText(reason, 280),
+    });
+    return {
+      ...semanticFallback,
+      controllerFallback: {
+        summary: fallbackSummary,
+        nextAction: "Finalize from checkpointed evidence state.",
+        error: reason,
+        source: "checkpointed_evidence_state",
+      },
+    };
+  }
+
+  private buildCheckpointBackedDeliveryTaskResult(
+    executionState: FactoryExecutionEvidenceState,
+    reason: string,
+  ): Record<string, unknown> {
+    const helperEvidence = this.helperEvidenceFromExecutionState(executionState);
+    const fallbackSummary = clipText(
+      helperEvidence.summary
+      ?? `Recovered delivery from checkpointed evidence after ${reason}.`,
+      280,
+    ) ?? `Recovered delivery from checkpointed evidence after ${reason}.`;
+    const scriptsRun = helperEvidence.scriptsRun.length > 0
+      ? helperEvidence.scriptsRun
+      : executionState.evidence_records
+        .slice(0, 6)
+        .map((record) => ({
+          command: record.command_or_api,
+          summary: clipText(
+            typeof record.outputs.output_preview === "string"
+              ? record.outputs.output_preview
+              : `Recovered ${record.tool_name} evidence from checkpointed state.`,
+            280,
+          ),
+          status: "ok" as const,
+        }));
+    const completion = buildDefaultTaskCompletion({
+      summary: fallbackSummary,
+      workerArtifacts: helperEvidence.artifacts,
+      scriptsRun,
+    });
+    const inferredAligned = completion.remaining.length === 0 && completion.proof.length > 0;
+    const nextAction = "Finalize from checkpointed evidence state and verify the recovered workspace.";
+    return {
+      outcome: completion.proof.length > 0 ? "approved" : "partial",
+      summary: fallbackSummary,
+      handoff: `${fallbackSummary}\n\nRecovered from checkpointed evidence after ${reason}.`,
+      artifacts: helperEvidence.artifacts,
+      scriptsRun,
+      completion,
+      alignment: {
+        verdict: inferredAligned ? "aligned" : "uncertain",
+        satisfied: inferredAligned
+          ? ["Controller recovered the task from checkpointed evidence and preserved proof-backed completion."]
+          : [],
+        missing: inferredAligned
+          ? []
+          : ["Recovered delivery evidence did not prove the full objective contract yet."],
+        outOfScope: [],
+        rationale: inferredAligned
+          ? "The controller recovered a proof-backed delivery result from checkpointed evidence and found no remaining work."
+          : "Checkpointed evidence survived, but the recovered delivery result still needs an explicit contract review.",
+      },
+      nextAction,
+      controllerFallback: {
+        summary: fallbackSummary,
+        nextAction,
+        error: reason,
+        source: "checkpointed_evidence_state",
+      },
+    };
+  }
+
+  private buildCheckpointBackedTaskResult(
+    objectiveMode: FactoryTaskJobPayload["objectiveMode"],
+    executionState: FactoryExecutionEvidenceState,
+    reason: string,
+  ): Record<string, unknown> {
+    if (objectiveMode === "investigation") {
+      return this.buildCheckpointBackedInvestigationTaskResult(
+        executionState,
+        reason,
+      );
+    }
+    return this.buildCheckpointBackedDeliveryTaskResult(executionState, reason);
+  }
+
+  private async recoverCheckpointBackedTaskResult(
+    payload: FactoryTaskJobPayload,
+    reason: string,
+  ): Promise<FactoryRecoveredTaskResult | undefined> {
+    const evidenceStatePath = factoryExecutionEvidenceStatePath(payload.resultPath);
+    const checkpointedState = await readFactoryExecutionEvidenceState(evidenceStatePath).catch(() => undefined);
+    if (
+      !checkpointedState
+      || (
+        checkpointedState.evidence_records.length === 0
+        && checkpointedState.scripts_run.length === 0
+        && checkpointedState.artifacts.length === 0
+      )
+    ) {
+      return undefined;
+    }
+    return {
+      output: this.buildCheckpointBackedTaskResult(
+        payload.objectiveMode,
+        checkpointedState,
+        reason,
+      ),
+      recoverySource: "checkpoint_evidence",
+    };
+  }
+
   private async resolveTaskWorkerResult(
     payload: FactoryTaskJobPayload,
     execution: CodexRunResult,
@@ -7188,6 +7854,17 @@ export class FactoryService {
         return [[artifactKeyFromLabel(item.label, index), artifactRef(resolvedPath, item.label)] as const];
       }),
     ) satisfies Readonly<Record<string, GraphRef>>;
+    const finalizedEvidenceState = await this.finalizeInvestigationEvidenceState(
+      payload,
+      task.prompt,
+      {
+        report,
+        artifacts: helperArtifacts,
+        summary: semantic.conclusion,
+        observations: semantic.uncertainties,
+      },
+    );
+    const evidenceStatePath = factoryExecutionEvidenceStatePath(payload.resultPath);
     const canonicalEvidenceBundlePath = investigationEvidenceBundlePath(payload.resultPath);
     const canonicalEvidenceBundle = await writeInvestigationEvidenceBundle({
       bundlePath: canonicalEvidenceBundlePath,
@@ -7195,6 +7872,7 @@ export class FactoryService {
       taskId: payload.taskId,
       candidateId: payload.candidateId,
       report,
+      executionState: finalizedEvidenceState,
       artifactPaths: helperArtifacts.flatMap((item) => {
         const rawPath = optionalTrimmedString(item.path);
         if (!rawPath) return [];
@@ -7214,6 +7892,7 @@ export class FactoryService {
     const resultRefs = {
       ...baseResultRefs,
       ...artifactRefs,
+      evidenceState: fileRef(evidenceStatePath, "task evidence state"),
       evidenceBundle: fileRef(canonicalEvidenceBundlePath, "task evidence bundle"),
       ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;

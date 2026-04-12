@@ -94,54 +94,6 @@ const createSandboxBootstrapFailureCodexStub = async (): Promise<{
   return { scriptPath, attemptsPath };
 };
 
-const createOlderBwrapHelpStub = async (): Promise<string> => {
-  const dir = await mkTmp("receipt-bwrap-help-stub");
-  const scriptPath = path.join(dir, "bwrap-help-stub");
-  const body = [
-    "#!/usr/bin/env bun",
-    "const help = process.argv.includes('--help');",
-    "if (help) {",
-    "  process.stdout.write('Usage: bwrap [OPTIONS]\\n');",
-    "  process.stdout.write('  --bind DIR DEST\\n');",
-    "  process.stdout.write('  --ro-bind DIR DEST\\n');",
-    "  process.exit(0);",
-    "}",
-    "process.stdout.write('bwrap stub\\n');",
-  ].join("\n");
-  await fs.writeFile(scriptPath, body, "utf-8");
-  await fs.chmod(scriptPath, 0o755);
-  return scriptPath;
-};
-
-const createSandboxRetryCodexStub = async (): Promise<{
-  readonly scriptPath: string;
-  readonly attemptsPath: string;
-}> => {
-  const dir = await mkTmp("receipt-codex-executor-sandbox-retry");
-  const scriptPath = path.join(dir, "codex-sandbox-retry-stub");
-  const attemptsPath = path.join(dir, "attempts.log");
-  const body = [
-    "#!/usr/bin/env bun",
-    "const fs = require('node:fs');",
-    "const args = process.argv.slice(2);",
-    "const sandboxIndex = args.indexOf('--sandbox');",
-    "const sandboxMode = sandboxIndex >= 0 ? args[sandboxIndex + 1] : undefined;",
-    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
-    "const attemptsPath = process.env.SANDBOX_ATTEMPTS_PATH;",
-    "if (!lastMessagePath || !attemptsPath) throw new Error('missing sandbox test args');",
-    "fs.appendFileSync(attemptsPath, String(sandboxMode ?? 'none') + '\\n', 'utf8');",
-    "if (sandboxMode) {",
-    "  process.stderr.write('bwrap: Unknown option --argv0\\n');",
-    "  process.exit(1);",
-    "}",
-    "fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'sandbox retry succeeded', handoff: 'ok' }), 'utf8');",
-    "process.stdout.write('sandbox-retry-ok');",
-  ].join("\n");
-  await fs.writeFile(scriptPath, body, "utf-8");
-  await fs.chmod(scriptPath, 0o755);
-  return { scriptPath, attemptsPath };
-};
-
 const createArgvCaptureCodexStub = async (): Promise<{
   readonly scriptPath: string;
   readonly argsPath: string;
@@ -351,6 +303,40 @@ const createLateStructuredLastMessageCodexStub = async (): Promise<string> => {
     "  await sleep(700);",
     "  fs.writeFileSync(lastMessagePath, JSON.stringify({ outcome: 'approved', summary: 'late structured completion', handoff: 'waited for real payload' }), 'utf8');",
     "  process.stderr.write('late structured message written\\n');",
+    "  setInterval(() => { process.stderr.write('still streaming\\n'); }, 100);",
+    "})().catch((err) => {",
+    "  console.error(err instanceof Error ? err.message : String(err));",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+  await fs.writeFile(scriptPath, body, "utf-8");
+  await fs.chmod(scriptPath, 0o755);
+  return scriptPath;
+};
+
+const createStructuredCompletionWithActiveCommandStub = async (): Promise<string> => {
+  const dir = await mkTmp("receipt-codex-executor-active-command-gate");
+  const scriptPath = path.join(dir, "codex-active-command-gate-stub");
+  const body = [
+    "#!/usr/bin/env bun",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const lastMessagePath = args[args.indexOf('--output-last-message') + 1];",
+    "const readAll = async () => { let data = ''; for await (const chunk of process.stdin) data += chunk; return data; };",
+    "const emit = (payload) => process.stdout.write(`${JSON.stringify(payload)}\\n`);",
+    "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+    "(async () => {",
+    "  if (!args.includes('--json')) throw new Error('missing --json');",
+    "  if (!lastMessagePath) throw new Error('missing last message path');",
+    "  await readAll();",
+    "  const payload = { outcome: 'approved', summary: 'waited for helper completion', handoff: 'helper finished' };",
+    "  emit({ type: 'turn.started' });",
+    "  emit({ type: 'item.started', item: { id: 'cmd_1', type: 'command_execution', command: 'python3 helper.py', status: 'in_progress' } });",
+    "  emit({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(payload) } });",
+    "  fs.writeFileSync(lastMessagePath, JSON.stringify(payload), 'utf8');",
+    "  await sleep(700);",
+    "  emit({ type: 'item.completed', item: { id: 'cmd_1', type: 'command_execution', command: 'python3 helper.py', aggregated_output: '{\"status\":\"ok\"}', exit_code: 0, status: 'completed' } });",
     "  setInterval(() => { process.stderr.write('still streaming\\n'); }, 100);",
     "})().catch((err) => {",
     "  console.error(err instanceof Error ? err.message : String(err));",
@@ -648,6 +634,49 @@ test("local codex executor waits for structured completion content instead of an
   await expect(fs.readFile(stderrPath, "utf-8")).resolves.toContain("late structured message written");
 }, 15_000);
 
+test("local codex executor does not complete while a command execution is still active", async () => {
+  const root = await mkTmp("receipt-codex-executor-active-command-workspace");
+  const stub = await createStructuredCompletionWithActiveCommandStub();
+  const artifactDir = path.join(root, ".receipt", "factory");
+  const promptPath = path.join(artifactDir, "task.prompt.md");
+  const lastMessagePath = path.join(artifactDir, "task.last-message.md");
+  const stdoutPath = path.join(artifactDir, "task.stdout.log");
+  const stderrPath = path.join(artifactDir, "task.stderr.log");
+  const outputSchemaPath = path.join(artifactDir, "task.schema.json");
+  await fs.mkdir(path.dirname(outputSchemaPath), { recursive: true });
+  await fs.writeFile(outputSchemaPath, JSON.stringify({
+    type: "object",
+    required: ["outcome", "summary", "handoff"],
+  }), "utf-8");
+  const executor = new LocalCodexExecutor({
+    bin: stub,
+    timeoutMs: 60_000,
+  });
+
+  const startedAt = Date.now();
+  const result = await executor.run({
+    prompt: "# Task\nReturn the final JSON only.\n",
+    workspacePath: root,
+    promptPath,
+    lastMessagePath,
+    stdoutPath,
+    stderrPath,
+    jsonOutput: true,
+    outputSchemaPath,
+    completionSignalPath: lastMessagePath,
+    completionQuietMs: 300,
+    sandboxMode: "workspace-write",
+    mutationPolicy: "workspace_edit",
+  });
+  const elapsed = Date.now() - startedAt;
+
+  expect(elapsed).toBeGreaterThanOrEqual(650);
+  expect(elapsed).toBeLessThan(5_000);
+  expect(result.exitCode).toBe(0);
+  expect(result.lastMessage).toContain("\"summary\":\"waited for helper completion\"");
+  await expect(fs.readFile(stdoutPath, "utf-8")).resolves.toContain("\"id\":\"cmd_1\"");
+}, 15_000);
+
 test("local codex executor aborts a wedged codex child after the stall timeout", async () => {
   const root = await mkTmp("receipt-codex-executor-stall-workspace");
   const stub = await createBootstrapThenHangCodexStub();
@@ -894,6 +923,8 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   await fs.writeFile(path.join(repoSkillsRoot, "factory-receipt-worker", "references", "memory-scopes.md"), "memory\n", "utf-8");
   await fs.writeFile(path.join(sourceCodexHome, "auth.json"), "{\"token\":\"test\"}\n", "utf-8");
   await fs.writeFile(path.join(sourceCodexHome, "config.toml"), "model = \"gpt-5.4\"\n", "utf-8");
+  await fs.mkdir(path.join(sourceCodexHome, "agents"), { recursive: true });
+  await fs.writeFile(path.join(sourceCodexHome, "agents", "reviewer.toml"), "name = \"reviewer\"\n", "utf-8");
   await fs.mkdir(path.join(sourceCodexHome, "skills", "unwanted"), { recursive: true });
   await fs.writeFile(path.join(sourceCodexHome, "skills", "unwanted", "SKILL.md"), "# should not be copied\n", "utf-8");
 
@@ -908,6 +939,7 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
     "if (!codexHome) throw new Error('missing CODEX_HOME');",
     "if (!fs.existsSync(path.join(codexHome, 'auth.json'))) throw new Error('missing auth.json');",
     "if (!fs.existsSync(path.join(codexHome, 'config.toml'))) throw new Error('missing config.toml');",
+    "if (!fs.existsSync(path.join(codexHome, 'agents', 'reviewer.toml'))) throw new Error('missing agent config copy');",
     "if (!fs.existsSync(path.join(codexHome, 'skills', 'factory-receipt-worker', 'SKILL.md'))) throw new Error('missing repo skill copy');",
     "if (!fs.existsSync(path.join(codexHome, 'skills', '.system', 'factory-receipt-worker', 'SKILL.md'))) throw new Error('missing repo skill alias');",
     "if (fs.existsSync(path.join(codexHome, 'skills', 'unwanted'))) throw new Error('unexpected source home skills copied');",
@@ -949,10 +981,9 @@ test("local codex executor can isolate CODEX_HOME while preserving auth/config f
   expect(result.lastMessage).toContain("\"summary\":\"isolated\"");
 }, 15_000);
 
-test("local codex executor retries sandbox startup once after older bwrap compatibility failure", async () => {
-  const root = await mkTmp("receipt-codex-executor-sandbox-retry-workspace");
-  const { scriptPath, attemptsPath } = await createSandboxRetryCodexStub();
-  const bwrapStub = await createOlderBwrapHelpStub();
+test("local codex executor fails immediately when sandbox startup is incompatible", async () => {
+  const root = await mkTmp("receipt-codex-executor-sandbox-failure-workspace");
+  const { scriptPath, attemptsPath } = await createSandboxBootstrapFailureCodexStub();
   const artifactDir = path.join(root, ".receipt", "factory");
   const promptPath = path.join(artifactDir, "task.prompt.md");
   const lastMessagePath = path.join(artifactDir, "task.last-message.md");
@@ -963,7 +994,6 @@ test("local codex executor retries sandbox startup once after older bwrap compat
     timeoutMs: 60_000,
     env: {
       ...process.env,
-      BWRAP_BIN: bwrapStub,
       SANDBOX_ATTEMPTS_PATH: attemptsPath,
     },
   });
@@ -977,12 +1007,11 @@ test("local codex executor retries sandbox startup once after older bwrap compat
     stderrPath,
     sandboxMode: "workspace-write",
     mutationPolicy: "workspace_edit",
-  })).resolves.toMatchObject({ exitCode: 0 });
+  })).rejects.toThrow("bwrap: Unknown option --argv0");
 
-  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\nnone\n");
+  await expect(fs.readFile(attemptsPath, "utf-8")).resolves.toBe("workspace-write\n");
   const stderrLog = await fs.readFile(stderrPath, "utf-8");
   expect(stderrLog).toContain("bwrap: Unknown option --argv0");
-  expect(stderrLog).toContain("\"eventType\":\"sandbox_start_retry\"");
 }, 15_000);
 
 test("local codex executor writes evidence for failed steps", async () => {

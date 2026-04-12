@@ -273,25 +273,11 @@ const prepareIsolatedCodexHome = async (
       copyFileIfExists(path.join(sourceHome, "config.toml"), path.join(isolatedHome, "config.toml")),
       copyFileIfExists(path.join(sourceHome, "version.json"), path.join(isolatedHome, "version.json")),
       copyFileIfExists(path.join(sourceHome, ".codex-global-state.json"), path.join(isolatedHome, ".codex-global-state.json")),
+      copyPathIfExists(path.join(sourceHome, "agents"), path.join(isolatedHome, "agents")),
     ]);
   }
   await materializeRepoSkillsIntoIsolatedCodexHome(isolatedHome, repoSkillPaths);
   return isolatedHome;
-};
-
-const emitSandboxRetryEvent = async (
-  control: CodexRunControl | undefined,
-  stderrPath: string,
-  removedFlags: ReadonlyArray<string>,
-): Promise<void> => {
-  const update: CodexProgressUpdate = {
-    status: "running",
-    progressAt: Date.now(),
-    eventType: "sandbox_start_retry",
-    summary: `Sandbox start retry without ${removedFlags.join(", ")}`,
-  };
-  await Promise.resolve(control?.onProgress?.(update)).catch(() => undefined);
-  await fsp.appendFile(stderrPath, `${JSON.stringify({ eventType: "sandbox_start_retry", removedFlags })}\n`, "utf-8").catch(() => undefined);
 };
 
 const closeStream = (stream: fs.WriteStream): Promise<void> =>
@@ -359,6 +345,12 @@ const clipTail = (value: string | undefined, max = 400): string | undefined => {
   if (!normalized) return undefined;
   return normalized.length <= max ? normalized : `…${normalized.slice(normalized.length - max + 1)}`;
 };
+
+const codexCommandActivityKey = (item: Record<string, unknown> | undefined): string | undefined =>
+  asString(item?.id)
+  ?? asString(item?.command)
+  ?? asString(item?.title)
+  ?? asString(item?.summary);
 
 const humanizeEventLabel = (value: string | undefined): string | undefined => {
   const normalized = value?.trim();
@@ -505,7 +497,7 @@ export class LocalCodexExecutor implements CodexExecutor {
     }
 
     try {
-      const execute = async (sandboxMode: CodexRunInput["sandboxMode"], retrying = false): Promise<CodexRunResult> => {
+      const execute = async (sandboxMode: CodexRunInput["sandboxMode"]): Promise<CodexRunResult> => {
         await fsp.mkdir(path.dirname(input.promptPath), { recursive: true });
         await fsp.mkdir(path.dirname(input.lastMessagePath), { recursive: true });
         await fsp.mkdir(path.dirname(input.stdoutPath), { recursive: true });
@@ -571,6 +563,7 @@ export class LocalCodexExecutor implements CodexExecutor {
         let latestStructuredLastMessage: string | undefined;
         let lastStructuredFileMessage: string | undefined;
         let structuredTokensUsed: number | undefined;
+        const activeCommandCounts = new Map<string, number>();
         let stdoutJsonBuffer = "";
         let progressFingerprint = "";
         let progressChain = Promise.resolve();
@@ -592,6 +585,43 @@ export class LocalCodexExecutor implements CodexExecutor {
             .then(() => Promise.resolve(callback(update)))
             .catch(() => undefined);
         };
+        const activeCommandExecutionCount = (): number =>
+          [...activeCommandCounts.values()].reduce((sum, value) => sum + value, 0);
+        const queueStructuredLastMessageWrite = (nextMessage: string): void => {
+          lastMessageWriteChain = lastMessageWriteChain
+            .then(async () => {
+              const currentMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
+              const trimmedCurrentMessage = currentMessage.trim();
+              if (trimmedCurrentMessage && trimmedCurrentMessage !== (lastStructuredFileMessage?.trim() ?? "")) {
+                return;
+              }
+              await fsp.writeFile(input.lastMessagePath, nextMessage, "utf-8");
+              lastStructuredFileMessage = nextMessage;
+            })
+            .catch(() => undefined);
+        };
+        const noteCommandActivity = (eventType: string, item: Record<string, unknown> | undefined): void => {
+          if (asString(item?.type) !== "command_execution") return;
+          const key = codexCommandActivityKey(item);
+          if (!key) return;
+          if (eventType === "item.started") {
+            activeCommandCounts.set(key, (activeCommandCounts.get(key) ?? 0) + 1);
+            lastObservedActivityAt = Date.now();
+            return;
+          }
+          if (eventType === "item.completed" || eventType === "item.failed") {
+            const next = (activeCommandCounts.get(key) ?? 0) - 1;
+            if (next > 0) {
+              activeCommandCounts.set(key, next);
+            } else {
+              activeCommandCounts.delete(key);
+            }
+            lastObservedActivityAt = Date.now();
+            if (activeCommandExecutionCount() === 0 && latestStructuredLastMessage) {
+              queueStructuredLastMessageWrite(latestStructuredLastMessage);
+            }
+          }
+        };
         const consumeJsonStdout = (chunk: string): void => {
           if (!input.jsonOutput) return;
           stdoutJsonBuffer += chunk;
@@ -607,6 +637,7 @@ export class LocalCodexExecutor implements CodexExecutor {
               parsed = undefined;
             }
             if (!parsed) continue;
+            noteCommandActivity(asString(parsed.type) ?? "", asRecord(parsed.item));
             const update = progressFromCodexJsonEvent(parsed);
             if (!update) continue;
             const enrichedUpdate: CodexProgressUpdate = {
@@ -619,19 +650,11 @@ export class LocalCodexExecutor implements CodexExecutor {
             if (enrichedUpdate.lastMessage) {
               latestEventText = enrichedUpdate.lastMessage;
               latestStructuredLastMessage = enrichedUpdate.lastMessage;
-              if (!input.outputSchemaPath || parseJsonObjectCandidate(enrichedUpdate.lastMessage)) {
-                const nextMessage = enrichedUpdate.lastMessage;
-                lastMessageWriteChain = lastMessageWriteChain
-                  .then(async () => {
-                    const currentMessage = await fsp.readFile(input.lastMessagePath, "utf-8").catch(() => "");
-                    const trimmedCurrentMessage = currentMessage.trim();
-                    if (trimmedCurrentMessage && trimmedCurrentMessage !== (lastStructuredFileMessage?.trim() ?? "")) {
-                      return;
-                    }
-                    await fsp.writeFile(input.lastMessagePath, nextMessage, "utf-8");
-                    lastStructuredFileMessage = nextMessage;
-                  })
-                  .catch(() => undefined);
+              if (
+                (!input.outputSchemaPath || parseJsonObjectCandidate(enrichedUpdate.lastMessage))
+                && activeCommandExecutionCount() === 0
+              ) {
+                queueStructuredLastMessageWrite(enrichedUpdate.lastMessage);
               }
             } else if (enrichedUpdate.summary && !["Codex started working.", "Codex completed the turn."].includes(enrichedUpdate.summary)) {
               latestEventText = enrichedUpdate.summary;
@@ -708,6 +731,7 @@ export class LocalCodexExecutor implements CodexExecutor {
                   : true;
                 if (
                   structuredReady
+                  && activeCommandExecutionCount() === 0
                   && (outputQuiet || (prefersStructuredCompletion && completionStable))
                 ) {
                   completionTriggered = true;
@@ -735,6 +759,10 @@ export class LocalCodexExecutor implements CodexExecutor {
                 activityFileMtimes.set(candidatePath, nextMtimeMs);
                 if (nextMtimeMs !== undefined) lastObservedActivityAt = Date.now();
               }
+            }
+            if (activeCommandExecutionCount() > 0) {
+              await delay(stallPollMs);
+              continue;
             }
             if (Date.now() - lastObservedActivityAt >= stallTimeoutMs) {
               stalled = true;
@@ -811,16 +839,6 @@ export class LocalCodexExecutor implements CodexExecutor {
             }
           });
         });
-
-        const stderrLog = `${result.stderr}\n${result.stdout}\n${await fsp.readFile(input.stderrPath, "utf-8").catch(() => "")}`;
-        const unknownOptionDetected = /Unknown option/i.test(stderrLog);
-        if (!retrying && sandboxMode && unknownOptionDetected) {
-          const removedFlags = new Set<string>(stderrLog.match(/--[A-Za-z0-9-]+/g) ?? []);
-          if (removedFlags.size > 0) {
-            await emitSandboxRetryEvent(control, input.stderrPath, [...removedFlags]);
-            return execute(undefined, true);
-          }
-        }
 
         await completionLoop;
         await stallLoop;

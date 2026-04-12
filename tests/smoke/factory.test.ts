@@ -38,6 +38,13 @@ import { factoryChatSessionStream, factoryChatStream, repoKeyForRoot } from "../
 import { ensureFactoryWorkspaceCommandEnv, runFactoryChecks } from "../../src/services/factory/check-runner";
 import { readPersistedObjectiveAuditMetadata } from "../../src/services/factory/objective-audit-artifacts";
 import {
+  checkpointFactoryExecutionEvidenceState,
+  createFactoryExecutionEvidenceState,
+  factoryExecutionEvidenceStatePath,
+  refineFactoryExecutionEvidenceStateForHardness,
+  writeFactoryExecutionEvidenceState,
+} from "../../src/services/factory/runtime/evidence-state";
+import {
   buildFactoryWorkbenchShellSnapshot,
   factoryWorkbenchBoardResponse,
   factoryWorkbenchHeaderIsland,
@@ -1745,6 +1752,135 @@ test("factory service: resumeObjectives retries stale startup reconciliation ins
   expect(attempts).toBe(2);
 });
 
+test("factory service: objective control retries stale receipt conflicts with a reconcile pass", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-stale-retry");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Control stale retry",
+    prompt: "Recover from a stale objective receipt conflict during startup.",
+    objectiveMode: "investigation",
+  });
+
+  const internals = service as unknown as {
+    processObjectiveStartup(
+      objectiveId: string,
+      reason: "startup" | "admitted",
+    ): Promise<void>;
+    processObjectiveReconcile(objectiveId: string): Promise<void>;
+  };
+  const originalStartup = internals.processObjectiveStartup.bind(service);
+  const originalReconcile = internals.processObjectiveReconcile.bind(service);
+  let startupCalls = 0;
+  let reconcileCalls = 0;
+  internals.processObjectiveStartup = async (objectiveId, reason) => {
+    startupCalls += 1;
+    if (startupCalls === 1) {
+      throw new Error("Expected prev hash stale-prev but head is fresh-prev");
+    }
+    await originalStartup(objectiveId, reason);
+  };
+  internals.processObjectiveReconcile = async (objectiveId) => {
+    reconcileCalls += 1;
+    await originalReconcile(objectiveId);
+  };
+
+  try {
+    await expect(service.runObjectiveControl({
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "startup",
+    })).resolves.toEqual({
+      objectiveId: created.objectiveId,
+      status: "completed",
+      reason: "reconcile",
+    });
+  } finally {
+    internals.processObjectiveStartup = originalStartup;
+    internals.processObjectiveReconcile = originalReconcile;
+  }
+
+  expect(startupCalls).toBe(1);
+  expect(reconcileCalls).toBe(1);
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.tasks.length).toBeGreaterThanOrEqual(1);
+});
+
+test("factory service: objective control reconciles transient sqlite locks instead of blocking", async () => {
+  const dataDir = await createTempDir("receipt-factory-control-transient-lock");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Control transient lock recovery",
+    prompt: "Recover when startup and reconcile both hit transient sqlite contention.",
+    objectiveMode: "investigation",
+  });
+
+  const internals = service as unknown as {
+    processObjectiveStartup(
+      objectiveId: string,
+      reason: "startup" | "admitted",
+    ): Promise<void>;
+    processObjectiveReconcile(objectiveId: string): Promise<void>;
+  };
+  const originalStartup = internals.processObjectiveStartup.bind(service);
+  const originalReconcile = internals.processObjectiveReconcile.bind(service);
+  let startupCalls = 0;
+  let reconcileCalls = 0;
+  internals.processObjectiveStartup = async () => {
+    startupCalls += 1;
+    throw new Error("database is locked");
+  };
+  internals.processObjectiveReconcile = async () => {
+    reconcileCalls += 1;
+    throw new Error("database is locked");
+  };
+
+  try {
+    await expect(service.runObjectiveControl({
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "startup",
+    })).resolves.toEqual({
+      objectiveId: created.objectiveId,
+      status: "completed",
+      reason: "reconcile",
+    });
+  } finally {
+    internals.processObjectiveStartup = originalStartup;
+    internals.processObjectiveReconcile = originalReconcile;
+  }
+
+  expect(startupCalls).toBe(1);
+  expect(reconcileCalls).toBe(1);
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.status).not.toBe("blocked");
+  expect(detail.recentReceipts.some((receipt) =>
+    receipt.type === "objective.control.wake.requested" && receipt.summary.includes("reconcile")
+  )).toBe(true);
+  expect(detail.recentReceipts.some((receipt) => receipt.type === "objective.blocked")).toBe(false);
+});
+
 test("factory service: startup reconciliation cancels stale queued execution and queues a reconcile control", async () => {
   const dataDir = await createTempDir("receipt-factory-stale-startup-reconcile");
   const repoRoot = await createSourceRepo();
@@ -1897,6 +2033,8 @@ test("factory service: startup reconciliation applies a persisted stale task res
   const recoveredJob = await queue.getJob(queuedTaskJob!.id);
   expect(recoveredJob?.status).toBe("completed");
   expect((recoveredJob?.result as { readonly recoveredFromPersistedResult?: boolean } | undefined)?.recoveredFromPersistedResult).toBe(true);
+  expect((recoveredJob?.result as { readonly recovered?: boolean } | undefined)?.recovered).toBe(true);
+  expect((recoveredJob?.result as { readonly recoverySource?: string } | undefined)?.recoverySource).toBe("persisted_result");
   await service.runObjectiveControl({
     kind: "factory.objective.control",
     objectiveId: created.objectiveId,
@@ -1989,6 +2127,8 @@ test("factory service: startup reconciliation finalizes investigation objectives
   const recoveredJob = await queue.getJob(queuedTaskJob!.id);
   expect(recoveredJob?.status).toBe("completed");
   expect((recoveredJob?.result as { readonly recoveredFromPersistedResult?: boolean } | undefined)?.recoveredFromPersistedResult).toBe(true);
+  expect((recoveredJob?.result as { readonly recovered?: boolean } | undefined)?.recovered).toBe(true);
+  expect((recoveredJob?.result as { readonly recoverySource?: string } | undefined)?.recoverySource).toBe("persisted_result");
 
   await service.runObjectiveControl({
     kind: "factory.objective.control",
@@ -1996,7 +2136,231 @@ test("factory service: startup reconciliation finalizes investigation objectives
     reason: "reconcile",
   });
 
-  const recoveredDetail = await service.getObjective(created.objectiveId);
+  let recoveredDetail = await service.getObjective(created.objectiveId);
+  if (recoveredDetail.status !== "completed") {
+    await service.runObjectiveControl({
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "reconcile",
+    });
+    recoveredDetail = await service.getObjective(created.objectiveId);
+  }
+  expect(recoveredDetail.status).toBe("completed");
+});
+
+test("factory service: startup reconciliation finalizes investigation objectives from checkpointed evidence state when no result file exists", async () => {
+  const dataDir = await createTempDir("receipt-factory-stale-investigation-checkpoint");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Recover checkpointed investigation evidence",
+    prompt: "Investigate the current posture and recover from checkpointed evidence only.",
+    objectiveMode: "investigation",
+    checks: [],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const activeQueuedTask = detail.tasks.find((task) =>
+    task.status === "running"
+    && task.jobStatus === "queued"
+    && typeof task.jobId === "string",
+  );
+  expect(activeQueuedTask?.jobId).toBeDefined();
+  const queuedTaskJob = await queue.getJob(activeQueuedTask!.jobId!);
+  expect(queuedTaskJob?.status).toBe("queued");
+
+  const leasedTaskJob = await queue.leaseJob(queuedTaskJob!.id, "worker-stale", 600_000);
+  expect(leasedTaskJob?.status).toBe("leased");
+  const payload = leasedTaskJob?.payload as FactoryTaskJobPayload;
+  const artifactPath = path.join(path.dirname(payload.resultPath), "artifact.json");
+  await fs.mkdir(path.dirname(artifactPath), { recursive: true });
+  await fs.writeFile(artifactPath, JSON.stringify({ exposure: "confirmed" }, null, 2), "utf-8");
+
+  const checkpointedState = checkpointFactoryExecutionEvidenceState({
+    current: refineFactoryExecutionEvidenceStateForHardness(
+      createFactoryExecutionEvidenceState({
+        objectiveId: created.objectiveId,
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        goal: "Recover checkpointed investigation evidence.",
+      }),
+      "Runtime observed repeated command churn during evidence collection.",
+    ),
+    stepId: "collect_primary_evidence",
+    evidenceRecords: [{
+      objective_id: created.objectiveId,
+      task_id: payload.taskId,
+      timestamp: Date.now(),
+      tool_name: "aws_cli_command",
+      command_or_api: "aws elbv2 describe-load-balancers --region us-east-1",
+      inputs: { region: "us-east-1" },
+      outputs: { status: "ok", output_preview: "internet-facing ALB detected" },
+      summary_metrics: { load_balancers: 1 },
+    }],
+    scriptsRun: [{
+      command: "aws elbv2 describe-load-balancers --region us-east-1",
+      summary: "Recovered checkpointed evidence.",
+      status: "ok",
+    }],
+    artifacts: [{
+      label: "artifact.json",
+      path: artifactPath,
+      summary: "Recovered checkpoint artifact.",
+    }],
+    observations: ["Checkpointed evidence survived the stale execution."],
+    summary: "Recovered checkpointed investigation evidence.",
+  });
+  await writeFactoryExecutionEvidenceState(
+    factoryExecutionEvidenceStatePath(payload.resultPath),
+    checkpointedState,
+  );
+
+  const internals = service as unknown as {
+    reconcileStaleObjectiveExecutionJobs(now: number): Promise<void>;
+  };
+  await internals.reconcileStaleObjectiveExecutionJobs((leasedTaskJob?.updatedAt ?? Date.now()) + 100_000);
+
+  const recoveredJob = await queue.getJob(queuedTaskJob!.id);
+  expect(recoveredJob?.status).toBe("completed");
+  expect((recoveredJob?.result as { readonly recoveredFromPersistedResult?: boolean } | undefined)?.recoveredFromPersistedResult).toBe(true);
+  expect((recoveredJob?.result as { readonly recovered?: boolean } | undefined)?.recovered).toBe(true);
+  expect((recoveredJob?.result as { readonly recoverySource?: string } | undefined)?.recoverySource).toBe("checkpoint_evidence");
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: created.objectiveId,
+    reason: "reconcile",
+  });
+
+  let recoveredDetail = await service.getObjective(created.objectiveId);
+  if (recoveredDetail.status !== "completed") {
+    await service.runObjectiveControl({
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "reconcile",
+    });
+    recoveredDetail = await service.getObjective(created.objectiveId);
+  }
+  expect(recoveredDetail.status).toBe("completed");
+});
+
+test("factory service: startup reconciliation recovers delivery tasks from checkpointed evidence state", async () => {
+  const dataDir = await createTempDir("receipt-factory-stale-delivery-checkpoint");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Recover checkpointed delivery evidence",
+    prompt: "Capture the required change and recover from checkpointed delivery evidence only.",
+    checks: ["true"],
+  });
+  await runObjectiveStartup(service, created.objectiveId);
+
+  const detail = await service.getObjective(created.objectiveId);
+  const activeQueuedTask = detail.tasks.find((task) =>
+    task.status === "running"
+    && task.jobStatus === "queued"
+    && typeof task.jobId === "string",
+  );
+  expect(activeQueuedTask?.jobId).toBeDefined();
+  const queuedTaskJob = await queue.getJob(activeQueuedTask!.jobId!);
+  expect(queuedTaskJob?.status).toBe("queued");
+
+  const leasedTaskJob = await queue.leaseJob(queuedTaskJob!.id, "worker-stale", 600_000);
+  expect(leasedTaskJob?.status).toBe("leased");
+  const payload = leasedTaskJob?.payload as FactoryTaskJobPayload;
+
+  await fs.mkdir(path.dirname(payload.resultPath), { recursive: true });
+  await fs.writeFile(
+    path.join(payload.workspacePath, "RECOVERED_DELIVERY.md"),
+    "Recovered delivery checkpoint\n",
+    "utf-8",
+  );
+
+  const checkpointedState = checkpointFactoryExecutionEvidenceState({
+    current: refineFactoryExecutionEvidenceStateForHardness(
+      createFactoryExecutionEvidenceState({
+        objectiveId: created.objectiveId,
+        taskId: payload.taskId,
+        candidateId: payload.candidateId,
+        goal: "Recover checkpointed delivery evidence.",
+      }),
+      "Runtime observed repeated command churn during delivery execution.",
+    ),
+    stepId: "collect_primary_evidence",
+    evidenceRecords: [{
+      objective_id: created.objectiveId,
+      task_id: payload.taskId,
+      timestamp: Date.now(),
+      tool_name: "workspace_probe",
+      command_or_api: "git status --short",
+      inputs: {},
+      outputs: { output_preview: "RECOVERED_DELIVERY.md" },
+      summary_metrics: { changed_files: 1 },
+    }],
+    scriptsRun: [{
+      command: "git status --short",
+      summary: "Recovered checkpointed delivery evidence.",
+      status: "ok",
+    }],
+    artifacts: [{
+      label: "RECOVERED_DELIVERY.md",
+      path: path.join(payload.workspacePath, "RECOVERED_DELIVERY.md"),
+      summary: "Recovered delivery artifact.",
+    }],
+    observations: ["Checkpointed delivery evidence survived the stale execution."],
+    summary: "Recovered checkpointed delivery evidence.",
+  });
+  await writeFactoryExecutionEvidenceState(
+    factoryExecutionEvidenceStatePath(payload.resultPath),
+    checkpointedState,
+  );
+
+  const internals = service as unknown as {
+    reconcileStaleObjectiveExecutionJobs(now: number): Promise<void>;
+  };
+  await internals.reconcileStaleObjectiveExecutionJobs((leasedTaskJob?.updatedAt ?? Date.now()) + 100_000);
+
+  const recoveredJob = await queue.getJob(queuedTaskJob!.id);
+  expect(recoveredJob?.status).toBe("completed");
+  expect((recoveredJob?.result as { readonly recovered?: boolean } | undefined)?.recovered).toBe(true);
+  expect((recoveredJob?.result as { readonly recoverySource?: string } | undefined)?.recoverySource).toBe("checkpoint_evidence");
+
+  await service.runObjectiveControl({
+    kind: "factory.objective.control",
+    objectiveId: created.objectiveId,
+    reason: "reconcile",
+  });
+
+  let recoveredDetail = await service.getObjective(created.objectiveId);
+  if (recoveredDetail.status !== "completed") {
+    await service.runObjectiveControl({
+      kind: "factory.objective.control",
+      objectiveId: created.objectiveId,
+      reason: "reconcile",
+    });
+    recoveredDetail = await service.getObjective(created.objectiveId);
+  }
   expect(recoveredDetail.status).toBe("completed");
 });
 

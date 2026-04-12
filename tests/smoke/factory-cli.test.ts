@@ -394,10 +394,12 @@ test("factory cli: investigate and audit help return usage without executing the
 
   expect(investigateHelp.code).toBe(0);
   expect(investigateHelp.stdout).toContain("receipt factory investigate");
+  expect(investigateHelp.stdout).toContain("--output-file");
   expect(investigateHelp.stdout).toContain("--as-of-ts");
 
   expect(auditHelp.code).toBe(0);
   expect(auditHelp.stdout).toContain("receipt factory audit");
+  expect(auditHelp.stdout).toContain("--output-file");
   expect(auditHelp.stdout).toContain("--limit");
 });
 
@@ -832,6 +834,69 @@ test("factory cli: audit supports a targeted objective without changing the rece
   expect(targetedText.stdout).toContain("Objectives audited: 1");
 }, 120_000);
 
+test("factory cli: audit can write the full JSON report to an output file", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  const objectiveId = "objective_audit_output_file";
+  await seedObjectiveReplay(runtimeConfig.dataDir, objectiveId, [
+    {
+      type: "objective.created",
+      objectiveId,
+      title: "Audit output file objective",
+      prompt: "Create a small audit target.",
+      channel: "results",
+      baseHash: "target-base",
+      objectiveMode: "investigation",
+      severity: 2,
+      checks: [],
+      checksSource: "default",
+      profile: {
+        rootProfileId: "generalist",
+        rootProfileLabel: "Generalist",
+        resolvedProfileHash: "hash-target",
+        promptHash: "prompt-target",
+        promptPath: "profiles/software/PROFILE.md",
+        selectedSkills: [],
+        objectivePolicy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      },
+      policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    } as FactoryEvent,
+  ]);
+
+  const outputPath = path.join(repoDir, "tmp", "factory-audit.json");
+  const run = await runCli([
+    "factory",
+    "audit",
+    "--objective",
+    objectiveId,
+    "--json",
+    "--output-file",
+    outputPath,
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(run.code).toBe(0);
+  const ack = JSON.parse(run.stdout) as {
+    readonly ok: boolean;
+    readonly outputFile: string;
+    readonly format: string;
+  };
+  expect(ack.ok).toBe(true);
+  expect(ack.outputFile).toBe(path.resolve(outputPath));
+  expect(ack.format).toBe("json");
+
+  const written = JSON.parse(await fs.readFile(outputPath, "utf-8")) as {
+    readonly summary: { readonly objectivesAudited: number; readonly sampledObjectiveIds: ReadonlyArray<string> };
+  };
+  expect(written.summary.objectivesAudited).toBe(1);
+  expect(written.summary.sampledObjectiveIds).toEqual([objectiveId]);
+}, 120_000);
+
 test("factory cli: replay-chat exposes the historical infrastructure binding path", async () => {
   const repoDir = await createRepo();
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
@@ -892,6 +957,42 @@ test("factory cli: replay-chat exposes the historical infrastructure binding pat
     `thread.bound:dispatch_update:${historicalInfrastructureStartupObjectiveId}`,
     `run.continued::${historicalInfrastructureStartupObjectiveId}`,
   ]);
+}, 120_000);
+
+test("factory cli: replay can write the JSON snapshot to an output file", async () => {
+  const repoDir = await createRepo();
+  const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
+  expect(init.code).toBe(0);
+
+  const runtimeConfig = await resolveFactoryRuntimeConfig(repoDir);
+  await seedObjectiveReplay(runtimeConfig.dataDir, historicalInfrastructureObjectiveId, historicalInfrastructureObjectiveReceipts);
+
+  const outputPath = path.join(repoDir, "tmp", "factory-replay.json");
+  const replay = await runCli([
+    "factory",
+    "replay",
+    historicalInfrastructureObjectiveId,
+    "--output-file",
+    outputPath,
+    "--repo-root",
+    repoDir,
+  ]);
+  expect(replay.code).toBe(0);
+  const ack = JSON.parse(replay.stdout) as {
+    readonly ok: boolean;
+    readonly outputFile: string;
+    readonly format: string;
+  };
+  expect(ack.ok).toBe(true);
+  expect(ack.outputFile).toBe(path.resolve(outputPath));
+  expect(ack.format).toBe("json");
+
+  const written = JSON.parse(await fs.readFile(outputPath, "utf-8")) as {
+    readonly objectiveId: string;
+    readonly receiptCount: number;
+  };
+  expect(written.objectiveId).toBe(historicalInfrastructureObjectiveId);
+  expect(written.receiptCount).toBe(historicalInfrastructureObjectiveReceipts.length);
 }, 120_000);
 
 test("factory cli: analyze summarizes run sequence, job control noise, and agent tool errors", async () => {

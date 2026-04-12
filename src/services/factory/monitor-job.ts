@@ -17,7 +17,7 @@ const readTail = async (filePath: string, maxChars: number): Promise<string> => 
   }
 };
 
-const INVESTIGATION_CHECKPOINT_MS = 2 * 60 * 1_000;
+const INVESTIGATION_CHECKPOINT_MS = 6 * 60 * 1_000;
 const DELIVERY_CHECKPOINT_MS = 10 * 60 * 1_000;
 const HIGH_SEVERITY_CHECKPOINT_MS = 90 * 1_000;
 
