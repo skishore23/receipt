@@ -27,7 +27,7 @@ Commands:
   receipt run <agent-id> --problem <text> [--stream agents/<agentId>] [--run-id <runId>] [--max-iterations <n>] [--workspace <path>]
   receipt trace <run-id|stream> [--json] [--output-file <path>]
   receipt replay <run-id|stream> [--output-file <path>]
-  receipt dst [<prefix>] [--json] [--limit <n>] [--strict] [--output-file <path>]
+  receipt dst [<prefix>] [--context] [--json] [--limit <n>] [--strict] [--output-file <path>]
   receipt fork <run-id|stream> --at <index> [--name <branch-name>]
   receipt inspect <run-id|stream> [--output-file <path>]
   receipt jobs [list] [--status queued|leased|running|completed|failed|canceled] [--limit <n>] [--output-file <path>]

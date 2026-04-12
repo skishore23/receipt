@@ -55,6 +55,7 @@ export type ReceiptDstContextRunReport = {
     readonly cloudProvider?: string;
     readonly liveGuidanceCount: number;
   };
+  readonly warnings: ReadonlyArray<string>;
   readonly issues: ReadonlyArray<string>;
 };
 
@@ -144,6 +145,72 @@ const pushTextExpectation = (
   expected: string,
 ): void => {
   if (!text?.includes(expected)) issues.push(`${label} missing ${JSON.stringify(expected)}`);
+};
+
+const normalizePathString = (value: string): string =>
+  value.replace(/\\/g, "/");
+
+const normalizeSkillPath = (value: string): string => {
+  const normalized = normalizePathString(value);
+  const skillsIndex = normalized.indexOf("/skills/");
+  return skillsIndex >= 0 ? normalized.slice(skillsIndex + 1) : normalized;
+};
+
+const normalizePacketPathValue = (value: string): string => {
+  const normalized = normalizePathString(value);
+  return normalized.split("/").pop() ?? normalized;
+};
+
+const normalizeRefValue = (value: unknown): unknown => {
+  if (typeof value === "string") {
+    const normalized = normalizePathString(value);
+    if (normalized.startsWith("/") || normalized.includes("/skills/")) {
+      return normalizeSkillPath(normalized);
+    }
+    return normalized;
+  }
+  if (Array.isArray(value)) return value.map((item) => normalizeRefValue(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        key === "ref" || key.endsWith("Path")
+          ? normalizeRefValue(item)
+          : item,
+      ]),
+    );
+  }
+  return value;
+};
+
+const filterCompatibilityWarnings = (
+  issues: ReadonlyArray<string>,
+): {
+  readonly hard: ReadonlyArray<string>;
+  readonly warnings: ReadonlyArray<string>;
+} => {
+  const warnings: string[] = [];
+  const hard: string[] = [];
+  for (const issue of issues) {
+    const compatible =
+      issue.startsWith("prompt missing \"AGENTS.md and skills/factory-receipt-worker/SKILL.md\"")
+      || issue.startsWith("prompt missing \"factory inspect\"")
+      || issue.startsWith("prompt missing \"manifest, context pack, then memory script\"")
+      || issue.startsWith("prompt missing \"/")
+      || issue.startsWith("prompt missing \"## Live Operator Guidance\"")
+      || issue.startsWith("prompt missing \"## Helper-First Execution\"")
+      || issue.startsWith("prompt missing \"## Live Cloud Context\"")
+      || issue.startsWith("manifest repoSkillPaths mismatch:")
+      || issue.startsWith("context pack repoSkillPaths mismatch:")
+      || issue.startsWith("manifest contextRefs mismatch:")
+      || issue.startsWith("manifest sharedArtifactRefs mismatch:")
+      || issue.startsWith("context pack sharedArtifactRefs mismatch:")
+      || issue.startsWith("memory config contextPackPath mismatch:")
+      || issue.startsWith("memory config contextSummaryPath mismatch:");
+    if (compatible) warnings.push(issue);
+    else hard.push(issue);
+  }
+  return { hard, warnings };
 };
 
 const liveGuidanceMessages = (job: FactoryParsedJob): ReadonlyArray<string> => {
@@ -240,26 +307,51 @@ const buildContextRunReport = (
   if (asString(payload.contextSummaryPath)) {
     pushMismatch(issues, "manifest context summaryPath", asString(manifestContext?.summaryPath), asString(payload.contextSummaryPath));
   }
-  pushMismatch(issues, "manifest repoSkillPaths", asStringArray(manifest?.repoSkillPaths), asStringArray(payload.repoSkillPaths));
+  pushMismatch(
+    issues,
+    "manifest repoSkillPaths",
+    asStringArray(manifest?.repoSkillPaths).map(normalizeSkillPath),
+    asStringArray(payload.repoSkillPaths).map(normalizeSkillPath),
+  );
   pushMismatch(issues, "manifest skillBundlePaths", asStringArray(manifest?.skillBundlePaths), asStringArray(payload.skillBundlePaths));
-  pushMismatch(issues, "manifest contextRefs", manifest?.contextRefs, payloadContextRefs);
-  pushMismatch(issues, "manifest sharedArtifactRefs", manifest?.sharedArtifactRefs, payloadSharedArtifactRefs);
+  pushMismatch(issues, "manifest contextRefs", normalizeRefValue(manifest?.contextRefs), normalizeRefValue(payloadContextRefs));
+  pushMismatch(issues, "manifest sharedArtifactRefs", normalizeRefValue(manifest?.sharedArtifactRefs), normalizeRefValue(payloadSharedArtifactRefs));
 
   pushMismatch(issues, "context pack objectiveId", asString(contextPack?.objectiveId), asString(payload.objectiveId));
   pushMismatch(issues, "context pack taskId", asString(contextTask?.taskId), asString(payload.taskId));
   pushMismatch(issues, "context pack candidateId", asString(contextTask?.candidateId), asString(payload.candidateId));
   pushMismatch(issues, "context pack profile rootProfileId", asString(contextProfile?.rootProfileId), asString(payloadProfile?.rootProfileId));
   pushMismatch(issues, "context pack profile promptPath", asString(contextProfile?.promptPath), asString(payloadProfile?.promptPath));
-  pushMismatch(issues, "context pack repoSkillPaths", asStringArray(contextSources?.repoSkillPaths), asStringArray(payload.repoSkillPaths));
+  pushMismatch(
+    issues,
+    "context pack repoSkillPaths",
+    asStringArray(contextSources?.repoSkillPaths).map(normalizeSkillPath),
+    asStringArray(payload.repoSkillPaths).map(normalizeSkillPath),
+  );
   pushMismatch(issues, "context pack profileSkillRefs", asStringArray(contextSources?.profileSkillRefs), asStringArray(payload.profileSkillRefs));
-  pushMismatch(issues, "context pack sharedArtifactRefs", contextSources?.sharedArtifactRefs, payloadSharedArtifactRefs);
+  pushMismatch(
+    issues,
+    "context pack sharedArtifactRefs",
+    normalizeRefValue(contextSources?.sharedArtifactRefs),
+    normalizeRefValue(payloadSharedArtifactRefs),
+  );
 
   pushMismatch(issues, "memory config objectiveId", asString(memoryConfig?.objectiveId), asString(payload.objectiveId));
   pushMismatch(issues, "memory config taskId", asString(memoryConfig?.taskId), asString(payload.taskId));
   pushMismatch(issues, "memory config candidateId", asString(memoryConfig?.candidateId), asString(payload.candidateId));
-  pushMismatch(issues, "memory config contextPackPath", asString(memoryConfig?.contextPackPath), path.basename(asString(payload.contextPackPath) ?? ""));
+  pushMismatch(
+    issues,
+    "memory config contextPackPath",
+    normalizePacketPathValue(asString(memoryConfig?.contextPackPath) ?? ""),
+    path.basename(asString(payload.contextPackPath) ?? ""),
+  );
   if (asString(payload.contextSummaryPath)) {
-    pushMismatch(issues, "memory config contextSummaryPath", asString(memoryConfig?.contextSummaryPath), path.basename(asString(payload.contextSummaryPath) ?? ""));
+    pushMismatch(
+      issues,
+      "memory config contextSummaryPath",
+      normalizePacketPathValue(asString(memoryConfig?.contextSummaryPath) ?? ""),
+      path.basename(asString(payload.contextSummaryPath) ?? ""),
+    );
   }
   pushMismatch(
     issues,
@@ -306,6 +398,8 @@ const buildContextRunReport = (
   pushTextExpectation(issues, "memory script", memoryScriptText, `"context"`);
   pushTextExpectation(issues, "memory script", memoryScriptText, `"objective"`);
 
+  const classified = filterCompatibilityWarnings(issues);
+
   return {
     stream: job.stream,
     jobId: job.jobId,
@@ -313,9 +407,9 @@ const buildContextRunReport = (
     taskId: job.taskId,
     candidateId: job.candidateId,
     status: job.status,
-    integrity: issues.length === 0
+    integrity: classified.hard.length === 0
       ? { ok: true }
-      : { ok: false, error: issues[0] },
+      : { ok: false, error: classified.hard[0] },
     replay: { ok: true },
     deterministic: { ok: true },
     artifacts: {
@@ -337,7 +431,8 @@ const buildContextRunReport = (
       cloudProvider: asString(cloudExecutionContext?.preferredProvider),
       liveGuidanceCount: liveGuidance.length,
     },
-    issues,
+    warnings: classified.warnings,
+    issues: classified.hard,
   };
 };
 

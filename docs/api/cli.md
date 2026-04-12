@@ -12,7 +12,8 @@ bun src/cli.ts <command> [args]
 
 - Prefer the stable `receipt` command surface over one-off shell pipelines when the repo CLI already exposes the data.
 - If setup, auth, or repo wiring is unclear, start with `doctor --json`.
-- Start with discovery and read commands before control commands: `doctor`, `trace`, `inspect`, `replay`, `factory inspect`, `factory replay`, `factory replay-chat`, `factory analyze`, `factory investigate`, `factory audit`.
+- Inside a Factory task worktree, start from the packet, task context summary, and generated receipt-cli surface first; do not default to `factory inspect` there.
+- Start with discovery and read commands before control commands: `doctor`, `trace`, `inspect`, `replay`, `dst`, `factory inspect`, `factory replay`, `factory replay-chat`, `factory analyze`, `factory investigate`, `factory audit`.
 - Add `--json` when another tool or agent will consume the output.
 - For large read payloads, use `--output-file <path>` on `receipt trace|replay|inspect|dst|jobs|memory read|memory search|memory summarize|memory diff|sessions search|sessions read|doctor` and on `receipt factory replay|replay-chat|analyze|parse|investigate|audit`. The command writes the full payload to disk and returns the path instead of printing the whole blob.
 - Treat `receipt abort` and `receipt factory react|promote|cancel|cleanup|archive|steer|follow-up|abort-job` as explicit write or control commands.
@@ -95,6 +96,27 @@ receipt trace run_abcd1234
 - Example:
 ```bash
 receipt replay agents/factory/runs/run_abcd1234
+```
+
+### receipt dst [<prefix>]
+- Purpose: audit receipt streams for integrity, replayability, and deterministic replay stability; with `--context`, also audit historical Factory task packets.
+- Flags:
+  - `<prefix>` optional stream-prefix filter such as `factory/objectives/` or `memory/`.
+  - `--context` (optional; includes Factory task packet checks for historical `factory.task.run` jobs).
+  - `--json` (optional; returns the full audit report).
+  - `--limit <n>` (optional; text mode only, limits listed streams/runs).
+  - `--strict` (optional; exits non-zero when receipt or context failures are present).
+  - `--output-file <path>` (optional).
+- Output:
+  - text mode: summary counts, failing streams first, plus the optional Factory context section.
+  - json mode: `{ scannedAt, dataDir, streamCount, kinds, statusCounts, integrityFailures, replayFailures, deterministicFailures, streams, context? }`.
+- Notes:
+  - context JSON includes per-run `warnings` and `issues`; compatibility drift such as older prompt wording can surface as warnings without failing integrity.
+  - empty historical Factory objective streams and legacy events unknown to the current reducer are tolerated during the replay summary pass.
+- Example:
+```bash
+receipt dst factory/objectives/ --json --strict
+receipt dst --context --json
 ```
 
 ### receipt inspect <run-id|stream>

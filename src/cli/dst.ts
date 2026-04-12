@@ -198,8 +198,25 @@ const uniqueRunIds = (chain: Chain<GenericEvent>): ReadonlyArray<string> =>
 const asStatusCounts = (counts: Readonly<Record<string, number>>): SummaryStatusMap =>
   Object.keys(counts).length > 0 ? counts : EMPTY_STATUS_COUNTS;
 
+const hasFactoryWorkflow = (value: unknown): value is typeof initialFactoryState =>
+  Boolean(value)
+  && typeof value === "object"
+  && "workflow" in value
+  && Boolean((value as { readonly workflow?: unknown }).workflow);
+
+const reduceFactoryForDst = (
+  state: typeof initialFactoryState,
+  event: GenericEvent,
+  ts: number,
+): typeof initialFactoryState => {
+  const next = reduceFactory(state, event as FactoryEvent, ts);
+  return hasFactoryWorkflow(next) ? next : state;
+};
+
 const summarizeFactoryObjective = (chain: Chain<GenericEvent>): StreamSummary => {
-  const state = fold(chain as Chain<FactoryEvent>, reduceFactory, initialFactoryState);
+  const state = chain.length === 0
+    ? initialFactoryState
+    : fold(chain, reduceFactoryForDst, initialFactoryState);
   const projection = buildFactoryProjection(state);
   return {
     kind: "factory.objective",

@@ -18,7 +18,7 @@ Instead, "context" is split across several layers that serve different jobs:
 | Reduced state | Structured current view derived from receipts | In-memory replay result from reducers | Services, routes, projections |
 | Prompt context | The exact text or bounded summary sent to an LLM | Prompt builders and `prompt.context` / compaction events | Factory flows |
 | Scoped memory | Durable summaries/facts keyed by scope | `memory/<scope>` streams | Long-running agents, Factory workers |
-| Factory task packet | Materialized worker handoff for one task pass | `<worktree>/.receipt/factory/*` | Codex or another worker |
+| Factory task packet | Materialized worker handoff for one task pass, including the text-first task context summary and bounded receipt CLI surface | `<worktree>/.receipt/factory/*` | Codex or another worker |
 
 The important design choice is this:
 
@@ -26,7 +26,7 @@ The important design choice is this:
 - operational context is derived from receipts and Git state
 - worker context is materialized just-in-time into a bounded packet
 
-Factory is the strongest example of this design. It does not dump the whole objective transcript into Codex. It builds a compact task packet, a recursive context pack, and a layered memory script, then records the result back into receipts and scoped memory.
+Factory is the strongest example of this design. It does not dump the whole objective transcript into Codex. It builds a compact task packet, a text-first task context summary, a recursive context pack, a bounded receipt CLI surface, and a layered memory script, then records the result back into receipts and scoped memory.
 
 ## Core Rule: Receipts Are The Durable Context Plane
 
@@ -269,6 +269,7 @@ This writes a complete worker handoff into:
 
 Current files:
 
+- `<taskId>.context.md`
 - `<taskId>.manifest.json`
 - `<taskId>.context-pack.json`
 - `<taskId>.prompt.md`
@@ -276,19 +277,37 @@ Current files:
 - `<taskId>.stdout.log`
 - `<taskId>.stderr.log`
 - `<taskId>.last-message.md`
+- `<taskId>.evidence.json`
 - `<taskId>.skill-bundle.json`
 - `<taskId>.memory.cjs`
 - `<taskId>.memory-scopes.json`
+- `<taskId>.receipt-cli.md`
 
 This packet is the most concrete answer to "what context does the worker actually get?"
 
 It is not the whole objective chain. It is a bounded, generated handoff.
 
-## 6. The task packet has four separate context channels
+## 6. The task packet has six separate context channels
 
-`writeTaskPacket(...)` assembles four distinct kinds of worker context.
+`writeTaskPacket(...)` assembles six distinct kinds of worker context.
 
-### A. Manifest context
+### A. Task context summary
+
+`renderTaskContextSummary(...)` generates a text-first bootstrap digest for the worker.
+
+It includes:
+
+- objective and task identity
+- current integration state
+- selected helpers and cloud guidance when present
+- related-task and candidate-lineage summaries
+- recent focused receipts
+- mounted evidence hints
+- bootstrap seed lines describing the primary evidence path and stop condition
+
+This is the worker's fast-start surface. It lets the worker answer "what should I look at first?" without rereading the whole packet.
+
+### B. Manifest context
 
 The manifest contains:
 
@@ -305,7 +324,7 @@ The manifest contains:
 
 This is the structural context map for the worker pass.
 
-### B. Recursive context pack
+### C. Recursive context pack
 
 `buildTaskContextPack(...)` generates a focused JSON document for the current task pass.
 
@@ -332,7 +351,7 @@ Factory computes relations such as:
 
 So the context pack is not just "upstream deps". It gives the worker a local map of the execution neighborhood.
 
-### C. Layered memory config and script
+### D. Layered memory config and script
 
 Factory does not expect the worker to read giant memory dumps directly.
 
@@ -357,7 +376,21 @@ When `OPENAI_API_KEY` is present, that CLI path uses embeddings by default for `
 
 So the worker gets a tool interface for recall, not just a pile of text.
 
-### D. Repo skills
+### E. Receipt CLI surface
+
+Factory also generates:
+
+- `<taskId>.receipt-cli.md`
+
+This is a bounded command surface for the worker. It tells the worker:
+
+- which `receipt inspect|trace|replay` and `receipt memory ...` commands are safe from the task worktree
+- which `receipt factory investigate ...` commands are controller-side only
+- which Factory mutation commands must not be run from the task worktree
+
+That keeps packet-guided inspection separate from broader controller operations.
+
+### F. Repo skills
 
 Factory merges two skill sources:
 
@@ -472,18 +505,23 @@ Instead it includes:
 
 - objective prompt
 - task prompt
+- objective contract and planning receipt
 - dependency summaries
-- checks
-- `contextRefs`
-- repo skill paths
-- generated skill bundle paths
+- task-boundary and execution-discipline rules
+- selected helper and live cloud guidance sections when present
+- paths to the task context summary, context pack, memory script, and receipt CLI surface
+- checked-in repo skill paths
 - recommended memory-script commands
 - a short bootstrap memory summary
 - result contract
 
 The prompt explicitly tells the worker:
 
+- start with the task context summary instead of rereading the whole packet stack
+- use the JSON context pack only for exact fields, refs, and artifact paths
+- use the generated Receipt CLI surface before ad hoc broader `receipt ...` exploration
 - use the generated memory script
+- do not call `receipt factory inspect` from the task worktree
 - do not rely on large raw memory dumps
 
 This is the repo's clearest statement of context policy in Factory.
@@ -509,12 +547,14 @@ When a worker finishes, `applyTaskWorkerResult(...)`:
 
 The produced candidate stores artifact refs for:
 
+- context summary
 - manifest
 - prompt
 - result JSON
 - stdout
 - stderr
 - last message
+- evidence
 - recursive context pack
 - memory script
 - memory config
@@ -559,7 +599,9 @@ Factory's debug projection in `buildObjectiveDebug(...)` exposes:
 - recent receipts
 - active and recent jobs
 - worktrees
+- latest context summary paths
 - latest context pack paths
+- latest receipt CLI surface paths
 - memory script paths
 
 The workbench views in `src/views/factory/workbench/page.ts` and `src/views/factory-workbench.ts` are not inventing context. They are surfacing the files and projections built by the service.
@@ -599,7 +641,7 @@ If you want to understand "why did the worker know X?" or "why did it miss Y?", 
 3. Repo profile
    - Check the cached profile and generated skills under the Factory repo-profile directory.
 4. Worktree packet
-   - Open the current `.manifest.json`, `.context-pack.json`, `.memory-scopes.json`, and `.prompt.md`.
+   - Open the current `.context.md`, `.context-pack.json`, `.receipt-cli.md`, `.manifest.json`, `.memory-scopes.json`, and `.prompt.md`.
 5. Scoped memory
    - Read objective, task, candidate, repo, and integration scopes.
 6. Worker output
@@ -630,7 +672,8 @@ In Factory specifically:
 - task records keep references, not giant transcripts
 - repo profile adds shared repo-level context
 - each dispatch materializes a bounded packet into the worktree
-- the recursive context pack and layered memory script are the worker's main context interface
+- the task context summary is the fast bootstrap surface
+- the recursive context pack, receipt CLI surface, and layered memory script are the worker's main deeper context interfaces
 - results are written back into receipts and scoped memory so the next pass has better context than the last one
 
 That is the actual context model in this repo.

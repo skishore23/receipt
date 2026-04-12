@@ -9,8 +9,8 @@ Use this skill when the active work should run a checked-in helper first instead
 
 ## Runtime Order
 
-1. Read the task packet, context pack, and memory script.
-2. Check the mounted helper context for selected helpers.
+1. Read the task context summary and packet surfaces first.
+2. Check the mounted helper context and receipt-cli surface for the selected helper and bounded evidence path.
 3. Run the best matching checked-in helper with the shared runner.
 4. Interpret the normalized helper output.
 5. Stop when one or two helper runs produce enough evidence.
@@ -51,6 +51,7 @@ Result fields:
 ## Rules
 
 - Prefer a checked-in helper over a new `.receipt/factory/*.sh` script.
+- If the context summary or mounted evidence already answers the question, stop instead of rerunning helper discovery.
 - If no helper matches closely enough and repo edits are allowed, author or extend a checked-in helper under `skills/factory-helper-runtime/catalog/` instead of stopping at a no-helper report.
 - If repo edits are out of scope for the current run, return the missing helper name and route the work back to a repo-writing Factory task. Do not invent a task-local `.receipt/factory/*.sh` script.
 - Keep helper runs Unix-style: explicit CLI args in, structured JSON out.

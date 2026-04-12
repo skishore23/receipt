@@ -681,9 +681,12 @@ Factory tasks are dispatched with:
 - objective/task/candidate identifiers
 - workspace path
 - prompt/result/stdout/stderr paths
+- context summary path
 - manifest path
+- context pack path
 - memory script path
 - memory config path
+- receipt CLI surface path
 - repo skill paths
 - generated skill bundle paths
 - bounded `contextRefs`
@@ -707,10 +710,12 @@ Current handling:
 
 ## Layered Memory Access
 
-Factory workers now receive a generated memory script and config under the task workspace:
+Factory workers now receive a text-first task context summary plus a generated memory script and config under the task workspace:
 
+- `.receipt/factory/<taskId>.context.md`
 - `.receipt/factory/<taskId>.memory.cjs`
 - `.receipt/factory/<taskId>.memory-scopes.json`
+- `.receipt/factory/<taskId>.receipt-cli.md`
 
 Configured scopes:
 
@@ -728,7 +733,7 @@ For `overview`, `scope`, `search`, `read`, and `commit`, the script shells out t
 - `receipt memory read`
 - `receipt memory commit`
 
-For `context` and `objective`, it reads the generated `context-pack.json` directly.
+For `context` and `objective`, it reads the generated `context-pack.json` directly, and `context` prepends the current task context summary when present.
 
 Supported script commands:
 
@@ -749,6 +754,8 @@ Specifically:
 - scope summaries still come from receipt-backed `memory.summarize`
 - `overview` compacts those scopes under a bounded budget
 - when `OPENAI_API_KEY` is present, worker-side memory retrieval uses embeddings by default; otherwise it falls back to keyword matching
+- the text-first task context summary is the worker's fast bootstrap surface
+- the generated receipt CLI surface keeps task-worktree-safe `receipt inspect|trace|replay|memory ...` commands separate from controller-side-only `receipt factory investigate|steer|follow-up|abort-job`
 - `context` renders a recursive pack built from:
   - the focused task
   - its dependency closure
@@ -757,7 +764,7 @@ Specifically:
   - candidate lineage
   - recent related receipts
 - the prompt still includes a small bootstrap summary for the task scope
-- the script is the primary memory interface for deeper recall
+- the script is the primary memory interface for deeper recall after the summary and packet surfaces
 
 It is therefore no longer only layered scope compaction, but it is still not a generic interpreter over an arbitrary full objective/run graph.
 
@@ -765,8 +772,10 @@ It is therefore no longer only layered scope compaction, but it is still not a g
 
 ```mermaid
 flowchart TD
-  Task["Focused task"] --> Scopes["Layered memory scopes"]
+  Task["Focused task"] --> ContextSummary["Task context summary"]
   Task --> ContextPack["Recursive context pack"]
+  Task --> Scopes["Layered memory scopes"]
+  Task --> ReceiptCli["Receipt CLI surface"]
 
   Scopes --> Agent["agent scope"]
   Scopes --> Repo["repo/shared"]
@@ -782,7 +791,9 @@ flowchart TD
 
   Scopes --> Script["generated .memory.cjs"]
   ContextPack --> Script
-  Script --> Worker["worker prompt + bounded recall"]
+  ContextSummary --> Worker["worker prompt + bounded recall"]
+  ReceiptCli --> Worker
+  Script --> Worker
 ```
 
 ## Git Model
@@ -909,6 +920,7 @@ What the current implementation does guarantee:
 - runtime DAG mutation is expressed as receipts when enabled
 - per-pass candidate lineage is explicit
 - recursive context packs cover the task-local execution subgraph
+- workers get a bounded receipt CLI surface instead of being forced into broad controller-side inspection from the task worktree
 
 What it does not yet fully guarantee:
 

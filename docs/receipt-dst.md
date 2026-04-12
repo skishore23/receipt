@@ -9,7 +9,7 @@ Scope: How `receipt dst` works today for receipt streams and Factory worker cont
 `receipt dst` is the repo's built-in audit pass for two related questions:
 
 - are receipt streams structurally valid and replayable?
-- for Factory task runs, did the worker packet stay internally consistent across payload, manifest, context pack, prompt, and memory config?
+- for Factory task runs, did the worker packet stay internally consistent across payload, context summary, manifest, context pack, prompt, receipt CLI surface, and memory config?
 
 This document describes the implementation that exists in code today.
 
@@ -65,7 +65,7 @@ flowchart TD
   MaybeContext -- yes --> JobStreams["List jobs/* streams"]
   JobStreams --> FactoryRuns["Keep only factory.task.run jobs"]
   FactoryRuns --> PacketLoad["Load payload + task packet artifacts\nfrom worktree or archive"]
-  PacketLoad --> PacketCheck["Check manifest, context pack, prompt,\nmemory config, memory script"]
+  PacketLoad --> PacketCheck["Check context summary, manifest, context pack,\nprompt, receipt CLI surface, memory config, memory script"]
   PacketCheck --> ContextCompare["Re-read packet on a second pass\nand compare normalized snapshot"]
   ContextCompare --> ContextReport["Context DST report"]
   ContextReport --> Final
@@ -103,6 +103,7 @@ The base report tracks three separate dimensions:
 - the stream is append-valid
 - the stream can still be replayed now
 - the replay-derived summary is stable across fresh reads when the stream is not actively changing
+- empty historical Factory objective streams and legacy objective events that the current reducer no longer understands do not automatically fail the replay summary pass
 
 ### What base DST does not prove
 
@@ -157,10 +158,11 @@ The optional Factory context audit is implemented in [`src/cli/dst-context.ts`](
 
 It exists because the most critical worker context is not stored inside the receipt stream itself. Factory workers read a materialized packet made of files such as:
 
+- `*.context.md`
 - `*.manifest.json`
 - `*.context-pack.json`
-- `*.context.md`
 - `*.prompt.md`
+- `*.receipt-cli.md`
 - `*.memory-scopes.json`
 - `*.memory.cjs`
 
@@ -181,18 +183,34 @@ For each matching job, it loads the parsed task run through [`src/factory-cli/pa
 For each task run, it verifies:
 
 - required packet artifacts exist
+- the job payload matches the context summary and receipt CLI surface paths when present
 - the job payload matches the manifest
 - the job payload matches the context pack
 - the job payload matches the memory config
 - the prompt includes the bootstrap contract:
+  - task context summary
   - manifest
   - context pack
   - memory script
+  - receipt CLI surface
   - `AGENTS.md`
   - `skills/factory-receipt-worker/SKILL.md`
 - helper-first and cloud-context sections appear when the packet says they should
 - live `steer` and `follow_up` guidance messages are present in the rendered prompt when queued commands existed
 - a second fresh read of the same packet produces the same normalized snapshot
+
+### Historical compatibility warnings
+
+Context DST does not treat every older packet wording difference as a hard failure.
+
+Several kinds of historical drift are downgraded to warnings instead of integrity failures, including:
+
+- older prompt wording for the bootstrap contract
+- older prompt section headings for operator guidance, helper-first execution, or live cloud context
+- historical absolute packet paths stored in memory config files
+- normalized skill-path or artifact-ref formatting drift between older manifests, context packs, and the current payload shape
+
+Hard failures are therefore reserved for missing artifacts, real payload-to-packet disagreement, or unstable packet rereads.
 
 ### Context summary metrics
 
@@ -223,10 +241,11 @@ The archive implementation is in [`src/services/factory-task-packet-archive.ts`]
 
 It preserves:
 
-- manifest
 - context summary
+- manifest
 - context pack
 - prompt
+- receipt CLI surface
 - memory config
 - memory script
 
@@ -288,6 +307,7 @@ Text mode gives:
 - failing streams first
 - top stream summaries
 - optional Factory context section when `--context` is enabled
+- hard failures only; compatibility warnings stay in JSON output
 
 JSON mode gives one top-level report with:
 
@@ -300,6 +320,8 @@ The `context` object contains:
 - aggregate failure counts
 - per-status counts
 - one entry per audited `factory.task.run`
+- per-run `warnings` for tolerated historical drift
+- per-run `issues` for hard integrity problems
 
 ## Code Map
 

@@ -220,6 +220,7 @@ For each dispatched task, Factory writes a bounded task packet into:
 
 That packet includes:
 
+- `<taskId>.context.md`
 - `<taskId>.manifest.json`
 - `<taskId>.context-pack.json`
 - `<taskId>.prompt.md`
@@ -227,9 +228,11 @@ That packet includes:
 - `<taskId>.stdout.log`
 - `<taskId>.stderr.log`
 - `<taskId>.last-message.md`
+- `<taskId>.evidence.json`
 - `<taskId>.skill-bundle.json`
 - `<taskId>.memory.cjs`
 - `<taskId>.memory-scopes.json`
+- `<taskId>.receipt-cli.md`
 
 These files are the handoff from orchestration to the worker.
 
@@ -243,7 +246,7 @@ sequenceDiagram
   participant Codex
 
   Factory->>Git: create/restore task worktree
-  Factory->>Factory: write manifest, prompt, context pack, memory script
+  Factory->>Factory: write context summary, manifest, prompt, context pack, receipt-cli surface, memory script
   Factory->>Queue: enqueue factory.task.run
   Queue->>Codex: lease codex job
   Codex->>Git: edit files in task worktree
@@ -263,15 +266,17 @@ Codex gets:
 - candidate id
 - task prompt
 - objective prompt
+- objective contract and task-boundary rules
 - dependency summaries
-- checks
-- context refs
-- repo skill paths
-- generated skill bundle paths
+- selected helper and cloud guidance when present
+- task context summary path
+- context pack path
+- receipt-cli surface path
+- checked-in repo skill paths
 - memory script path
 - result contract path
 
-Factory explicitly tells Codex to use the generated memory script instead of trying to pull huge raw memory dumps.
+Factory explicitly tells Codex to start with the task context summary, use the generated receipt-cli surface before ad hoc broader `receipt ...` exploration, and then use the memory script for deeper scoped recall instead of trying to pull huge raw memory dumps.
 
 ## Memory And Context In The Worker Path
 
@@ -286,11 +291,11 @@ The worker-facing memory scopes include:
 - `factory/objectives/<objectiveId>/candidates/<candidateId>`
 - `factory/objectives/<objectiveId>/integration`
 
-The generated memory script is the main worker interface for recall and compaction.
+The generated memory script is the main deeper worker interface for recall and compaction, after the task context summary and receipt-cli surface bootstrap the run.
 
 ```mermaid
 flowchart TD
-  Factory["Factory service"] --> Packet["Task packet in .receipt/factory/\nmanifest + context-pack + memory-scopes + memory.cjs"]
+  Factory["Factory service"] --> Packet["Task packet in .receipt/factory/\ncontext.md + manifest + context-pack + receipt-cli + memory-scopes + memory.cjs"]
   Packet --> Worker["Codex worker"]
 
   Worker -->|"bun <taskId>.memory.cjs context/objective"| PackRead["Read context-pack.json directly"]
@@ -314,6 +319,8 @@ flowchart TD
 
 In other words:
 
+- the task context summary is the fast bootstrap digest
+- the generated receipt-cli surface keeps task-worktree-safe commands separate from controller-only operations
 - `context` and `objective` are packet reads, not live memory queries
 - `overview`, `scope`, `search`, `read`, and `commit` go through `receipt memory ...`
 - the packet keeps the worker on scoped memory instead of broad receipt discovery

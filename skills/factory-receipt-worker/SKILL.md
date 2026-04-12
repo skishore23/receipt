@@ -12,21 +12,24 @@ Use it for direct Codex probe debugging too, but remember that probe packets are
 
 Do this before making code or review claims:
 
-1. Read the current `.receipt/factory/*.manifest.json`.
+1. Read the current `.receipt/factory/*.context.md`.
 2. Read the current `.receipt/factory/*.context-pack.json`.
-3. Run the generated `.receipt/factory/*.memory.cjs` script for `context` and `objective`.
-4. If you need a controller-side reconstruction before reviewing, retrying, or course-correcting, run `receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId>` from the repo root or mounted controller workspace.
-5. Treat the mounted packet, recent receipts, and memory output as the worker interface. Do not call `receipt factory inspect` from inside a task worktree unless the runtime explicitly says a safe writable receipt snapshot is mounted.
-6. If the question is about whether Codex status capture itself is broken, reproduce it independently with `receipt factory codex-probe --mode both --json --reply probe-ok` before claiming the status pipeline is failing.
+3. Read the current `.receipt/factory/*.receipt-cli.md`, and reopen `.receipt/factory/*.manifest.json` only when you need exact contract or path reconciliation.
+4. Run the generated `.receipt/factory/*.memory.cjs` script for `context` and `objective`.
+5. If you need a controller-side reconstruction before reviewing, retrying, or course-correcting, run `receipt factory investigate <objectiveId|taskId|candidateId|jobId|runId>` from the repo root or mounted controller workspace.
+6. Treat the mounted packet, recent receipts, the generated Receipt CLI surface, and memory output as the worker interface. Do not call `receipt factory inspect` from inside a task worktree unless the runtime explicitly says a safe writable receipt snapshot is mounted.
+7. If the question is about whether Codex status capture itself is broken, reproduce it independently with `receipt factory codex-probe --mode both --json --reply probe-ok` before claiming the status pipeline is failing.
 
 ## Working Rules
 
 - Treat the worktree packet and receipt surfaces as the primary worker context.
+- Treat the task context summary as the fast bootstrap digest; use the raw manifest and context pack only when you need exact fields, refs, or path verification.
 - Treat Resonate as the execution control plane and receipts as the evidence/read-model. When job state and packet evidence disagree, inspect the current objective state and recent receipts before assuming old queue behavior.
 - Do not run `receipt factory inspect` from inside a task worktree unless the runtime explicitly mounted a writable receipt snapshot.
 - If the packet links to an objective, use the mounted recent receipts and memory output before claiming prior decisions, inherited failures, or missing context.
 - Treat the prompt as bootstrap only.
 - Prefer the current objective over broader history.
+- Use the generated Receipt CLI surface before broadening into ad hoc `receipt ...` inspection.
 - Use repo-shared memory before assuming you need broader cross-objective context.
 - Before asking for a retry or claiming a repair path, prefer `receipt factory investigate ...` so the decision is grounded in actual task, candidate, DAG, and handoff evidence.
 - Do not assume generated repo-profile skills outside the worktree are present or necessary.

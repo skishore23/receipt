@@ -7,11 +7,13 @@ Use the existing task packet and `receipt` CLI before inventing new context-gath
 Start in the current worktree:
 
 - `ls .receipt/factory`
-- `sed -n '1,220p' .receipt/factory/<taskId>.manifest.json`
+- `sed -n '1,240p' .receipt/factory/<taskId>.context.md`
 - `sed -n '1,240p' .receipt/factory/<taskId>.context-pack.json`
+- `sed -n '1,220p' .receipt/factory/<taskId>.receipt-cli.md`
+- `sed -n '1,220p' .receipt/factory/<taskId>.manifest.json`
 - `sed -n '1,220p' .receipt/factory/<taskId>.memory-scopes.json`
 
-Then use the generated memory script:
+Then use the generated memory script only when the summary and packet still leave a factual gap:
 
 - `bun .receipt/factory/<taskId>.memory.cjs context 2800`
 - `bun .receipt/factory/<taskId>.memory.cjs objective 1800`
@@ -24,9 +26,12 @@ Then use the generated memory script:
 
 Do not call `receipt factory inspect` from inside a task worktree by default.
 
-Use the mounted packet and memory output instead:
+Use the mounted packet, Receipt CLI surface, and memory output instead:
 
-- manifest and context-pack for current task/candidate state
+- context summary for the precomputed bootstrap digest
+- context-pack for exact fields, refs, and packet-relative paths
+- receipt-cli surface for the bounded task-worktree-safe command set
+- manifest for contract and path reconciliation
 - mounted recent receipts for objective history
 - memory script output for task, objective, and repo summaries
 
@@ -110,7 +115,7 @@ When the Factory objective view is not enough, inspect the objective stream dire
 - `receipt trace factory/objectives/<objectiveId>`
 - `receipt replay factory/objectives/<objectiveId>`
 
-Use these only after checking the task packet and `receipt factory inspect`, because the direct stream output is lower-level.
+Use these only after checking the task packet, context summary, and generated Receipt CLI surface, because the direct stream output is lower-level.
 
 ## Memory Queries
 

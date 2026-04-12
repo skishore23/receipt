@@ -279,6 +279,11 @@ Task packets currently build layered memory scopes such as:
 - `factory/objectives/<objectiveId>/candidates/<candidateId>`
 - `factory/objectives/<objectiveId>/integration`
 
+Factory also uses controller-side audit scopes for self-improvement and cross-run review:
+
+- `factory/audits/objectives/<objectiveId>`
+- `factory/audits/repo`
+
 Scope builder: `src/services/factory/task-packets.ts`
 
 ### Read-only vs writable scopes
@@ -289,11 +294,14 @@ The worker packet marks some scopes as read-only:
 - repo shared memory
 
 Workers are expected to commit to scoped task/objective/candidate/integration memory instead of modifying shared global context.
+Audit scopes are controller-facing review memory, not task-worktree write targets.
 
 ### Memory script
 
 Factory task packets ship:
 
+- `*.context.md`
+- `*.receipt-cli.md`
 - `*.memory-scopes.json`
 - `*.memory.cjs`
 
@@ -309,7 +317,11 @@ The generated memory script gives workers bounded commands like:
 
 Implementation: `src/services/factory-codex-artifacts.ts`
 
-This is the main worker-facing interface for memory in Factory. It lets the worker inspect scoped summaries and commit durable notes without pulling large raw memory dumps.
+Workers are expected to start with the text-first task context summary and bounded receipt CLI surface, then use the memory script for deeper scoped recall and durable note commits.
+
+The `context` command reads the current context summary plus the recursive context pack. `objective` reads the objective slice from the context pack. `overview`, `scope`, `search`, `read`, and `commit` shell out through `receipt memory ...`.
+
+So the memory script is the main deeper worker-facing memory interface in Factory. It lets the worker inspect scoped summaries and commit durable notes without pulling large raw memory dumps.
 
 ### Factory memory commits
 

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { createRuntime } from "@receipt/core/runtime";
 import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
+import { getReceiptDb } from "../../src/db/client";
 import { runReceiptDstAudit } from "../../src/cli/dst";
 import { resolveBunRuntime } from "../../src/lib/runtime-paths";
 import {
@@ -560,6 +561,105 @@ test("receipt dst audit summarizes mixed receipt streams deterministically", asy
   }
 });
 
+test("receipt dst audit tolerates empty historical objective streams", async () => {
+  const dataDir = await createTempDir("receipt-dst-empty-objective");
+  try {
+    const db = getReceiptDb(dataDir);
+    db.sqlite.query(`
+      INSERT INTO streams (name, head_hash, receipt_count, updated_at, last_ts)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      "factory/objectives/objective_empty_dst",
+      null,
+      0,
+      Date.now(),
+      null,
+    );
+
+    const report = await runReceiptDstAudit(dataDir, {
+      prefix: "factory/objectives/",
+    });
+    const stream = report.streams.find((entry) => entry.stream === "factory/objectives/objective_empty_dst");
+
+    expect(stream).toBeTruthy();
+    expect(stream?.kind).toBe("factory.objective");
+    expect(stream?.receiptCount).toBe(0);
+    expect(stream?.replay.ok).toBe(true);
+    expect(stream?.deterministic.ok).toBe(true);
+    expect(stream?.summary.kind).toBe("factory.objective");
+    expect(stream?.summary.taskCount).toBe(0);
+    expect(stream?.summary.candidateCount).toBe(0);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst audit tolerates historical objective events unknown to the current reducer", async () => {
+  const dataDir = await createTempDir("receipt-dst-historical-objective");
+  try {
+    await seedEvents(dataDir, "factory/objectives/objective_historical_dst", [
+      {
+        type: "objective.created",
+        objectiveId: "objective_historical_dst",
+        title: "Historical objective",
+        prompt: "Investigate a historical stream.",
+        channel: "results",
+        baseHash: "abc123",
+        objectiveMode: "investigation",
+        severity: 1,
+        checks: [],
+        checksSource: "default",
+        profile: DEFAULT_FACTORY_OBJECTIVE_PROFILE,
+        policy: DEFAULT_FACTORY_OBJECTIVE_POLICY,
+        createdAt: 1,
+      },
+      {
+        type: "task.added",
+        objectiveId: "objective_historical_dst",
+        task: {
+          nodeId: "task_01",
+          taskId: "task_01",
+          taskKind: "planned",
+          title: "Historical task",
+          prompt: "Inspect the old packet.",
+          workerType: "codex",
+          executionMode: "worktree",
+          baseCommit: "abc123",
+          dependsOn: [],
+          status: "pending",
+          skillBundlePaths: [],
+          contextRefs: [],
+          artifactRefs: {},
+          createdAt: 2,
+        } satisfies FactoryTaskRecord,
+        createdAt: 2,
+      },
+      {
+        type: "monitor.intervention",
+        objectiveId: "objective_historical_dst",
+        taskId: "task_01",
+        jobId: "job_historical_dst",
+        interventionKind: "steer",
+        detail: "Finish with the evidence already captured.",
+        interventionAt: 3,
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      prefix: "factory/objectives/",
+    });
+    const stream = report.streams.find((entry) => entry.stream === "factory/objectives/objective_historical_dst");
+
+    expect(stream).toBeTruthy();
+    expect(stream?.replay.ok).toBe(true);
+    expect(stream?.deterministic.ok).toBe(true);
+    expect(stream?.summary.kind).toBe("factory.objective");
+    expect(stream?.summary.taskCount).toBe(1);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("receipt dst --strict exits non-zero when replay issues are found", async () => {
   const dataDir = await createTempDir("receipt-dst-strict");
   try {
@@ -714,6 +814,110 @@ test("receipt dst context audit summarizes historical factory task packets deter
     expect(report.context?.runs[0]?.summary.cloudProvider).toBe("aws");
     expect(report.context?.runs[0]?.summary.helperCount).toBe(1);
     expect(report.context?.runs[0]?.summary.liveGuidanceCount).toBe(1);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst context audit tolerates historical prompt contract wording drift", async () => {
+  const dataDir = await createTempDir("receipt-dst-context-prompt-compat");
+  const { workspacePath, payload } = await createFactoryTaskPacketFixture({
+    objectiveId: "objective_context_prompt_compat",
+    taskId: "task_context_prompt_compat",
+    candidateId: "candidate_context_prompt_compat",
+    jobId: "job_context_prompt_compat",
+    guidanceMessage: "Use the packet before broader memory.",
+  });
+  try {
+    const promptPath = String(payload.promptPath);
+    const prompt = await fs.readFile(promptPath, "utf-8");
+    await fs.writeFile(
+      promptPath,
+      prompt
+        .replace("manifest, context pack, then memory script", "manifest and recursive packet files")
+        .replace("\n## Live Operator Guidance\n", "\n## Operator Notes\n"),
+      "utf-8",
+    );
+
+    await seedJobEvents(dataDir, "jobs/job_context_prompt_compat", [
+      {
+        type: "job.enqueued",
+        jobId: "job_context_prompt_compat",
+        agentId: "codex",
+        lane: "collect",
+        payload,
+        maxAttempts: 1,
+        sessionKey: "factory:objective_context_prompt_compat:task_context_prompt_compat",
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+      {
+        type: "queue.command",
+        jobId: "job_context_prompt_compat",
+        commandId: "cmd_follow_up_01",
+        command: "follow_up",
+        lane: "follow_up",
+        payload: {
+          note: "Use the packet before broader memory.",
+        },
+        by: "factory-cli",
+        createdAt: 2,
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      includeContext: true,
+      repoRoot: ROOT,
+    });
+
+    expect(report.context?.integrityFailures).toBe(0);
+    expect(report.context?.runs[0]?.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("prompt missing"),
+    ]));
+    expect(report.context?.runs[0]?.issues).toEqual([]);
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("receipt dst context audit tolerates historical absolute packet paths in memory config", async () => {
+  const dataDir = await createTempDir("receipt-dst-context-memory-path-compat");
+  const { workspacePath, payload } = await createFactoryTaskPacketFixture({
+    objectiveId: "objective_context_memory_path_compat",
+    taskId: "task_context_memory_path_compat",
+    candidateId: "candidate_context_memory_path_compat",
+    jobId: "job_context_memory_path_compat",
+  });
+  try {
+    const memoryConfigPath = String(payload.memoryConfigPath);
+    const memoryConfig = JSON.parse(await fs.readFile(memoryConfigPath, "utf-8")) as Record<string, unknown>;
+    memoryConfig.contextPackPath = String(payload.contextPackPath);
+    memoryConfig.contextSummaryPath = String(payload.contextSummaryPath);
+    await fs.writeFile(memoryConfigPath, JSON.stringify(memoryConfig, null, 2), "utf-8");
+
+    await seedJobEvents(dataDir, "jobs/job_context_memory_path_compat", [
+      {
+        type: "job.enqueued",
+        jobId: "job_context_memory_path_compat",
+        agentId: "codex",
+        lane: "collect",
+        payload,
+        maxAttempts: 1,
+        sessionKey: "factory:objective_context_memory_path_compat:task_context_memory_path_compat",
+        singletonMode: "allow",
+        createdAt: 1,
+      },
+    ]);
+
+    const report = await runReceiptDstAudit(dataDir, {
+      includeContext: true,
+      repoRoot: ROOT,
+    });
+
+    expect(report.context?.integrityFailures).toBe(0);
+    expect(report.context?.runs[0]?.issues).toEqual([]);
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
     await fs.rm(workspacePath, { recursive: true, force: true });
