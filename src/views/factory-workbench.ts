@@ -5,6 +5,7 @@ import type {
   FactoryObjectiveDetail,
   FactoryTaskView,
 } from "../services/factory-types";
+import { buildFactoryObjectiveLoadingState } from "../services/factory/live-status";
 import { summarizeFactoryQueueJob } from "./factory/job-presenters";
 
 type WorkbenchEmphasis = "accent" | "warning" | "danger" | "success" | "muted";
@@ -151,6 +152,14 @@ export type FactoryWorkbenchFocus = {
   readonly stderrTail?: string;
   readonly artifactSummary?: string;
   readonly artifactActivity?: ReadonlyArray<FactoryArtifactActivity>;
+  readonly loading?: {
+    readonly label: string;
+    readonly summary: string;
+    readonly detail?: string;
+    readonly highlights?: ReadonlyArray<string>;
+    readonly nextAction?: string;
+    readonly tone: "info" | "warning" | "danger" | "success";
+  };
 };
 
 export type FactoryWorkbenchSummary = {
@@ -326,42 +335,67 @@ export const buildFactoryWorkbench = (input: {
         )
     : undefined;
   const focus = focusedTask
+    ? (() => {
+        const loading = buildFactoryObjectiveLoadingState({
+          detail,
+          live: {
+            activeTasks: [{
+              taskId: focusedTask.taskId,
+              status: focusedTask.status,
+              jobStatus: focusedTask.jobStatus,
+              elapsedMs: focusedTask.elapsedMs,
+              lastMessage: output?.lastMessage ?? focusedTask.lastMessage,
+              stdoutTail: output?.stdoutTail ?? focusedTask.stdoutTail,
+              stderrTail: output?.stderrTail ?? focusedTask.stderrTail,
+              artifactSummary: output?.artifactSummary ?? focusedTask.artifactSummary,
+              latestSummary: focusedTask.latestSummary ?? focusedTask.candidateSummary,
+            }],
+          },
+        });
+        return {
+          focusKind: focusedJob ? "job" : "task",
+          focusId: focusedJob?.jobId ?? focusedTask.taskId,
+          title: focusedTask.title,
+          status: focusedTaskStatus ?? focusedTask.status ?? focusedTask.jobStatus ?? "pending",
+          active: output?.active ?? focusedTask.isActive,
+          summary: focusedTaskSummary ?? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary,
+          taskId: focusedTask.taskId,
+          candidateId: output?.candidateId ?? focusedTask.candidateId,
+          jobId: output?.jobId ?? focusedTask.jobId ?? focusedJob?.jobId,
+          updatedAt: focusedJob?.updatedAt,
+          lastMessage: output?.lastMessage ?? focusedTask.lastMessage,
+          stdoutTail: output?.stdoutTail ?? focusedTask.stdoutTail,
+          stderrTail: output?.stderrTail ?? focusedTask.stderrTail,
+          artifactSummary: output?.artifactSummary ?? focusedTask.artifactSummary,
+          artifactActivity: output?.artifactActivity ?? focusedTask.artifactActivity,
+          loading,
+        } satisfies FactoryWorkbenchFocus;
+      })()
+    : focusedJob
     ? {
-        focusKind: focusedJob ? "job" : "task",
-        focusId: focusedJob?.jobId ?? focusedTask.taskId,
-        title: focusedTask.title,
-        status: focusedTaskStatus ?? focusedTask.status ?? focusedTask.jobStatus ?? "pending",
-        active: output?.active ?? focusedTask.isActive,
-        summary: focusedTaskSummary ?? focusedTask.blockedReason ?? focusedTask.latestSummary ?? focusedTask.candidateSummary,
-        taskId: focusedTask.taskId,
-        candidateId: output?.candidateId ?? focusedTask.candidateId,
-        jobId: output?.jobId ?? focusedTask.jobId ?? focusedJob?.jobId,
-        updatedAt: focusedJob?.updatedAt,
-        lastMessage: output?.lastMessage ?? focusedTask.lastMessage,
-        stdoutTail: output?.stdoutTail ?? focusedTask.stdoutTail,
-        stderrTail: output?.stderrTail ?? focusedTask.stderrTail,
-        artifactSummary: output?.artifactSummary ?? focusedTask.artifactSummary,
-        artifactActivity: output?.artifactActivity ?? focusedTask.artifactActivity,
+        ...(() => {
+          const loading = buildFactoryObjectiveLoadingState({ detail });
+          return {
+            focusKind: "job",
+            focusId: focusedJob.jobId,
+            title: output?.title ?? `Job ${focusedJob.jobId}`,
+            status: output?.status ?? focusedJob.status,
+            active: output?.active ?? focusedJob.running,
+            summary: output?.summary ?? focusedJob.summary,
+            taskId: output?.taskId,
+            candidateId: output?.candidateId ?? focusedJob.candidateId,
+            jobId: focusedJob.jobId,
+            updatedAt: focusedJob.updatedAt,
+            lastMessage: output?.lastMessage,
+            stdoutTail: output?.stdoutTail,
+            stderrTail: output?.stderrTail,
+            artifactSummary: output?.artifactSummary,
+            artifactActivity: output?.artifactActivity,
+            loading,
+          };
+        })(),
       } satisfies FactoryWorkbenchFocus
-      : focusedJob
-      ? {
-          focusKind: "job",
-          focusId: focusedJob.jobId,
-          title: output?.title ?? `Job ${focusedJob.jobId}`,
-          status: output?.status ?? focusedJob.status,
-          active: output?.active ?? focusedJob.running,
-          summary: output?.summary ?? focusedJob.summary,
-          taskId: output?.taskId,
-          candidateId: output?.candidateId ?? focusedJob.candidateId,
-          jobId: focusedJob.jobId,
-          updatedAt: focusedJob.updatedAt,
-          lastMessage: output?.lastMessage,
-          stdoutTail: output?.stdoutTail,
-          stderrTail: output?.stderrTail,
-          artifactSummary: output?.artifactSummary,
-          artifactActivity: output?.artifactActivity,
-        } satisfies FactoryWorkbenchFocus
-      : undefined;
+    : undefined;
   const elapsedMinutes = typeof detail.budgetState.elapsedMinutes === "number"
     ? detail.budgetState.elapsedMinutes
     : Math.max(0, Math.floor((now - detail.createdAt) / 60_000));

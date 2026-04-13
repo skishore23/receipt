@@ -657,7 +657,9 @@ test("factory cli: text panels lead with active and next task summaries", () => 
   expect(tasksText).toContain("active=task_01 [running] Implement workbench shell");
   expect(tasksText).toContain("next=task_02 [ready] Follow-up validation");
   expect(tasksText).toContain("counts=total:2 active:1 ready:1 blocked:0");
-  expect(liveText).toContain("focus=task_01 [running] Implement workbench shell");
+  expect(liveText).toContain("status=Collecting evidence");
+  expect(liveText).toContain("summary=Rendering the CLI workbench.");
+  expect(liveText).toContain("detail=task_01 · running");
   expect(liveText).toContain("signal=Rendering the CLI workbench.");
 });
 
@@ -2407,11 +2409,11 @@ test("factory cli: attached run prints compact progress without waiting spam", a
 
   expect(run.code).toBe(0);
   expect(run.stdout).not.toContain("waiting...");
-  expect(run.stdout).toContain("phase=");
-  expect(run.stdout).toContain("task=");
+  expect(run.stdout).toContain("Collecting evidence");
+  expect(run.stdout).toContain("task_01");
 }, 30_000);
 
-test("factory cli: create, compose, and react expose structured mutation results", async () => {
+test("factory cli: create, compose, note, and react expose structured mutation results", async () => {
   const repoDir = await createRepo();
 
   const init = await runCli(["factory", "init", "--yes", "--force", "--json", "--repo-root", repoDir]);
@@ -2462,12 +2464,51 @@ test("factory cli: create, compose, and react expose structured mutation results
     readonly action: string;
     readonly note?: string;
     readonly objective: {
+      readonly latestSummary?: string;
       readonly recentReceipts: ReadonlyArray<{ readonly type: string }>;
     };
   };
   expect(composedPayload.action).toBe("compose");
   expect(composedPayload.note).toMatch(/Tighten the next pass/);
   expect(composedPayload.objective.recentReceipts.some((receipt) => receipt.type === "objective.operator.noted")).toBe(true);
+  expect(composedPayload.objective.latestSummary).not.toBe(
+    "Tighten the next pass and keep receipts concise.",
+  );
+
+  const noted = await runCli([
+    "factory",
+    "note",
+    createdPayload.objectiveId,
+    "--json",
+    "--repo-root",
+    repoDir,
+    "--message",
+    "Background note that should not supersede the running objective.",
+  ]);
+  expect(noted.code).toBe(0);
+  const notedPayload = JSON.parse(noted.stdout) as {
+    readonly action: string;
+    readonly note?: string;
+    readonly objectiveId: string;
+    readonly objective: {
+      readonly objectiveId: string;
+      readonly latestSummary?: string;
+      readonly recentReceipts: ReadonlyArray<{ readonly type: string }>;
+    };
+  };
+  expect(notedPayload.action).toBe("note");
+  expect(notedPayload.note).toBe(
+    "Background note that should not supersede the running objective.",
+  );
+  expect(notedPayload.objectiveId).toBe(createdPayload.objectiveId);
+  expect(
+    notedPayload.objective.recentReceipts.some(
+      (receipt) => receipt.type === "objective.operator.noted",
+    ),
+  ).toBe(true);
+  expect(notedPayload.objective.latestSummary).not.toBe(
+    "Background note that should not supersede the running objective.",
+  );
 
   const reacted = await runCli([
     "factory",
@@ -2738,6 +2779,13 @@ test("factory cli: composer parser handles plain text and slash commands", () =>
       message: "Need a tighter validation pass",
     },
   });
+  expect(parseComposerDraft("/note Keep the current task running while I ask about RDS", "obj_123")).toEqual({
+    ok: true,
+    command: {
+      type: "note",
+      message: "Keep the current task running while I ask about RDS",
+    },
+  });
   expect(parseComposerDraft("/watch obj_123", "obj_456")).toEqual({
     ok: true,
     command: {
@@ -2846,6 +2894,7 @@ test("factory cli: composer parser rejects job commands without a selected objec
 });
 
 test("factory cli: composer metadata exposes steer and follow-up commands in help surfaces", () => {
+  expect(COMPOSER_COMMANDS.some((command) => command.name === "note" && command.usage === "/note [message]")).toBe(true);
   expect(COMPOSER_COMMANDS.some((command) => command.name === "steer" && command.usage === "/steer <message>")).toBe(true);
   expect(COMPOSER_COMMANDS.some((command) => command.name === "follow-up" && command.usage === "/follow-up <message>")).toBe(true);
 });
@@ -2861,6 +2910,11 @@ test("factory workbench: shared projection keeps rich task data and defaults foc
     focusKind: "task",
     focusId: "task_01",
     taskId: "task_01",
+    loading: {
+      label: "Collecting evidence",
+      summary: "Rendering the CLI workbench.",
+      detail: "task_01 · running",
+    },
   });
   expect(workbench?.focusedTask).toMatchObject({
     prompt: "Render the running task workbench in the CLI rail.",

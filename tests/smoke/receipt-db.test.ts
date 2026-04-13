@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { getProjectionOffset, getReceiptDb, setProjectionOffset, withSqliteLockRetry } from "../../src/db/client";
+import { getProjectionOffset, getReceiptDb, listChangedStreams, setProjectionOffset, withSqliteLockRetry } from "../../src/db/client";
 
 const mkTmp = async (label: string): Promise<string> =>
   fs.mkdtemp(path.join(os.tmpdir(), `${label}-`));
@@ -151,6 +151,38 @@ test("db client: drizzle writes survive a transient writer lock", async () => {
       lockHolder.kill("SIGKILL");
       await once(lockHolder, "exit").catch(() => undefined);
     }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("db client: listChangedStreams keeps latest change per stream after an offset", async () => {
+  const dir = await mkTmp("receipt-db-change-log");
+  try {
+    const db = getReceiptDb(dir);
+    const insert = db.sqlite.query(`
+      INSERT INTO change_log (global_seq, stream, event_type, changed_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    for (const [globalSeq, stream] of [
+      [1, "factory/objectives/a"],
+      [2, "jobs/job_a"],
+      [3, "factory/objectives/a"],
+      [4, "factory/objectives/b"],
+      [5, "factory/objectives/a"],
+      [6, "agents/factory/repo/profile/chat"],
+    ] as const) {
+      insert.run(globalSeq, stream, "test.changed", now + globalSeq);
+    }
+
+    expect(listChangedStreams(db, {
+      afterGlobalSeq: 2,
+      streamPrefix: "factory/objectives/",
+    })).toEqual([
+      { stream: "factory/objectives/b", lastGlobalSeq: 4 },
+      { stream: "factory/objectives/a", lastGlobalSeq: 5 },
+    ]);
+  } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });

@@ -13,6 +13,10 @@ export type ComposerCommand =
       readonly message?: string;
     }
   | {
+      readonly type: "note";
+      readonly message?: string;
+    }
+  | {
       readonly type: "watch";
       readonly objectiveId?: string;
     }
@@ -66,6 +70,7 @@ export const COMPOSER_COMMANDS: ReadonlyArray<ComposerCommandDefinition> = [
   { name: "obj", label: "/obj", usage: "/obj <prompt>", description: "Create a new objective from the prompt." },
   { name: "new", label: "/new", usage: "/new <prompt>", description: "Start a new thread from the prompt." },
   { name: "react", label: "/react", usage: "/react [message]", description: "React to the selected objective." },
+  { name: "note", label: "/note", usage: "/note [message]", description: "Add a note to the selected objective without mutating it." },
   { name: "watch", label: "/watch", usage: "/watch <objective-id>", description: "Focus an objective by id." },
   { name: "promote", label: "/promote", usage: "/promote", description: "Promote the selected objective." },
   { name: "cancel", label: "/cancel", usage: "/cancel [reason]", description: "Cancel the selected objective." },
@@ -282,6 +287,17 @@ export const parseComposerDraft = (draft: string, selectedObjectiveId?: string):
         ok: true,
         command: {
           type: "react",
+          message: payload || undefined,
+        },
+      };
+    case "note":
+      if (!selectedObjectiveId) {
+        return { ok: false, error: "Select an objective before noting it." };
+      }
+      return {
+        ok: true,
+        command: {
+          type: "note",
           message: payload || undefined,
         },
       };

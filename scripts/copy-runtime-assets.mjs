@@ -22,7 +22,10 @@ const sseSource = await (async () => {
 })();
 await fs.copyFile(sseSource, path.join(ASSETS_DEST, "htmx-ext-sse.js"));
 const clientBuild = await Bun.build({
-  entrypoints: [path.join(ROOT, "src", "client", "factory-client.ts")],
+  entrypoints: [
+    path.join(ROOT, "src", "client", "factory-client.ts"),
+    path.join(ROOT, "src", "client", "factory-preview.ts"),
+  ],
   outdir: ASSETS_DEST,
   target: "browser",
   format: "iife",

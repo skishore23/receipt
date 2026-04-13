@@ -367,7 +367,6 @@ const createFactoryDispatchTool = (input: {
         severity: normalized.severity ?? currentObjective?.severity,
         checks: normalized.checks,
         channel: normalized.channel,
-        startImmediately: true,
       };
       detail = await input.factoryService.createObjective(payload);
     } else if (action === "react") {
@@ -385,7 +384,6 @@ const createFactoryDispatchTool = (input: {
           severity: normalized.severity ?? currentObjective.severity,
           checks: normalized.checks,
           channel: normalized.channel,
-          startImmediately: true,
         });
         action = "create";
       } else if (followUpPrompt) {

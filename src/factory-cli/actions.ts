@@ -7,6 +7,7 @@ import { prepareObjectiveCreation } from "./composer";
 export type FactoryObjectiveMutationAction =
   | "create"
   | "compose"
+  | "note"
   | "react"
   | "promote"
   | "cancel"
@@ -62,11 +63,12 @@ export const pickActiveObjectiveJob = (
   detail: FactoryObjectiveDetail | undefined,
   live: FactoryLiveProjection | undefined,
 ): QueueJob | undefined => {
-  const fromLive = live?.recentJobs.find((job) => activeJobStatus(job.status));
+  const recentJobs = live?.recentJobs ?? [];
+  const fromLive = recentJobs.find((job) => activeJobStatus(job.status));
   if (fromLive) return fromLive;
   const taskJobId = detail?.tasks.find((task) => activeJobStatus(task.jobStatus) && task.jobId)?.jobId;
   if (!taskJobId) return undefined;
-  return live?.recentJobs.find((job) => job.id === taskJobId);
+  return recentJobs.find((job) => job.id === taskJobId);
 };
 
 export const createObjectiveMutation = async (
@@ -160,6 +162,26 @@ export const reactObjectiveMutation = async (
     kind: "objective",
     action: "react",
     objectiveId: objective.objectiveId,
+    objective,
+    note: input.message,
+  };
+};
+
+export const noteObjectiveMutation = async (
+  runtime: FactoryCliRuntime,
+  input: {
+    readonly objectiveId: string;
+    readonly message: string;
+  },
+): Promise<FactoryObjectiveMutationResult> => {
+  await withOptimisticMutationRetry(() =>
+    runtime.service.addObjectiveNote(input.objectiveId, input.message)
+  );
+  const objective = await runtime.service.getObjective(input.objectiveId);
+  return {
+    kind: "objective",
+    action: "note",
+    objectiveId: input.objectiveId,
     objective,
     note: input.message,
   };

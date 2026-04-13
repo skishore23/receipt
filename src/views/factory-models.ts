@@ -470,6 +470,14 @@ export type FactoryWorkbenchSummarySectionModel = {
     readonly lastMessage?: string;
     readonly stdoutTail?: string;
     readonly stderrTail?: string;
+    readonly loading?: {
+      readonly label: string;
+      readonly summary: string;
+      readonly detail?: string;
+      readonly highlights?: ReadonlyArray<string>;
+      readonly nextAction?: string;
+      readonly tone: "info" | "warning" | "danger" | "success";
+    };
   };
   readonly latestDecisionSummary?: string;
   readonly latestDecisionAt?: number;
@@ -520,6 +528,14 @@ export type FactoryWorkbenchActivitySectionModel = {
     readonly lastMessage?: string;
     readonly stdoutTail?: string;
     readonly stderrTail?: string;
+    readonly loading?: {
+      readonly label: string;
+      readonly summary: string;
+      readonly detail?: string;
+      readonly highlights?: ReadonlyArray<string>;
+      readonly nextAction?: string;
+      readonly tone: "info" | "warning" | "danger" | "success";
+    };
   };
   readonly run?: FactoryLiveRunCard;
 };

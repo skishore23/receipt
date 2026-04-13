@@ -4,6 +4,7 @@ import type {
   FactoryWorkbenchFilterKey,
   FactoryWorkbenchPageModel,
 } from "../../../views/factory-models";
+import type { FactoryWorkbenchShellBase } from "../../../views/factory/workbench/route";
 import {
   makeFactoryChatId,
   normalizeFocusKind,
@@ -22,7 +23,7 @@ import {
 } from "./params";
 
 export type FactoryWorkbenchRequestState = {
-  readonly shellBase: "/factory" | "/factory-new";
+  readonly shellBase: FactoryWorkbenchShellBase;
   readonly hasRequestedProfile: boolean;
   readonly hasRequestedObjective: boolean;
   readonly hasRequestedFocus: boolean;

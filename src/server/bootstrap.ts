@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 
 import { Hono } from "hono";
+import { websocket } from "hono/bun";
 import { createServerComposition } from "./composition";
 import { resolveServerConfig } from "./config";
 import {
@@ -59,13 +60,17 @@ import {
   createFactoryWorkerHandlers,
 } from "../services/factory-runtime";
 import {
+  createFactoryLocalWorker,
+  scheduleFactoryObjectiveReconcileOnJobChange,
+  startFactoryLocalRuntime,
+} from "../services/factory-local-runtime";
+import {
   FACTORY_CONTROL_AGENT_ID,
   FACTORY_MONITOR_AGENT_ID,
   type FactoryService,
 } from "../services/factory-service";
 import {
   shouldQueueObjectiveAudit,
-  shouldQueueObjectiveControlReconcile,
   shouldReconcileObjectiveFromJobChange,
 } from "../services/factory-job-gates";
 import { loadAgentRoutes } from "../framework/agent-loader";
@@ -153,27 +158,6 @@ const memoryTools = createMemoryTools({
 let queueImpl: JobBackend | undefined;
 let factoryServiceRef: FactoryService | undefined;
 
-const shouldQueueFactoryObjectiveReconcile = async (
-  objectiveId: string,
-  sourceUpdatedAt: number,
-): Promise<boolean> => {
-  const queue = queueImpl;
-  const factoryService = factoryServiceRef;
-  const [recentJobs, detail] = await Promise.all([
-    queue?.listJobs({ limit: 200 }) ?? Promise.resolve([]),
-    factoryService?.getObjective(objectiveId).catch(() => undefined) ??
-      Promise.resolve(undefined),
-  ]);
-  return shouldQueueObjectiveControlReconcile({
-    controlAgentId: FACTORY_CONTROL_AGENT_ID,
-    objectiveId,
-    recentJobs,
-    sourceUpdatedAt,
-    objectiveInactive:
-      detail != null && isTerminalObjectiveStatus(detail.status),
-  });
-};
-
 const isTerminalObjectiveStatus = (status: unknown): boolean =>
   status === "completed" ||
   status === "blocked" ||
@@ -229,12 +213,12 @@ const baseQueue = sqliteQueue({
       // We enqueue a control job to reconcile the objective so the orchestrator
       // naturally picks it up, avoiding mutable global state or direct side-effects.
       if (objectiveId && shouldReconcileObjectiveFromJobChange(job)) {
-        if (
-          await shouldQueueFactoryObjectiveReconcile(objectiveId, job.updatedAt)
-        ) {
-          factoryServiceRef
-            ?.scheduleObjectiveControl(objectiveId, "reconcile")
-            .catch(console.error);
+        if (factoryServiceRef) {
+          scheduleFactoryObjectiveReconcileOnJobChange({
+            job,
+            queue,
+            service: factoryServiceRef,
+          }).catch(console.error);
         }
       }
 
@@ -627,27 +611,25 @@ const localWorkerStates = new Map<
     },
   ],
   [
-    "orchestration",
+    "agent",
     {
-      role: "orchestration",
-      workerId: `${jobWorkerId}:orchestration`,
+      role: "agent",
+      workerId: `${jobWorkerId}:agent`,
       concurrency: orchestrationJobConcurrency,
     },
   ],
   [
-    "codex",
+    "factory",
     {
-      role: "codex",
-      workerId: `${jobWorkerId}:codex`,
-      concurrency: codexJobConcurrency,
+      role: "factory",
+      workerId: `${jobWorkerId}:factory`,
+      concurrency: Math.max(
+        1,
+        orchestrationJobConcurrency + codexJobConcurrency,
+      ),
     },
   ],
 ]);
-const localWorkerOrder: ReadonlyArray<LocalRuntimeWorkerRole> = [
-  "chat",
-  "orchestration",
-  "codex",
-];
 const runtimeHealthState = {
   lastResumeAt: undefined as number | undefined,
   lastResumeError: undefined as string | undefined,
@@ -701,6 +683,17 @@ const evaluateLocalRuntimeWatchdog = async (): Promise<void> => {
     );
   }
   runtimeHealthState.lastWatchdogWarningSignature = warningSignature;
+};
+const recordFactoryResumeSuccess = async (): Promise<void> => {
+  runtimeHealthState.lastResumeAt = Date.now();
+  runtimeHealthState.lastResumeError = undefined;
+  runtimeHealthState.lastResumeErrorAt = undefined;
+  await evaluateLocalRuntimeWatchdog();
+};
+const recordFactoryResumeError = (error: unknown): void => {
+  runtimeHealthState.lastResumeError =
+    error instanceof Error ? error.message : String(error);
+  runtimeHealthState.lastResumeErrorAt = Date.now();
 };
 const agentRunner = createAgentRunner({
   defaultAgentId: "agent",
@@ -1196,66 +1189,73 @@ const jobHandlers = {
   },
 } satisfies Record<string, JobHandler>;
 
-const workers = [
-  new JobWorker({
-    queue,
-    handlers: jobHandlers,
-    workerId: localWorkerStates.get("chat")!.workerId,
-    leaseAgentIds: ["factory"],
-    leaseLanes: ["chat"],
-    idleResyncMs: jobIdleResyncMs,
-    leaseMs: Math.max(jobLeaseMs, 120_000),
-    concurrency: chatJobConcurrency,
-    onTick: () => {
-      markLocalWorkerTick("chat");
-    },
-    onError: (error) => {
-      markLocalWorkerError("chat", error);
-      console.error(`[job-worker ${jobWorkerId}:chat]`, error);
-    },
-    onLeaseRenewal: (event) => {
-      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "chat", ...event }));
-    },
-  }),
-  new JobWorker({
-    queue,
-    handlers: jobHandlers,
-    workerId: localWorkerStates.get("orchestration")!.workerId,
-    leaseAgentIds: ["agent", FACTORY_CONTROL_AGENT_ID, FACTORY_MONITOR_AGENT_ID],
-    idleResyncMs: jobIdleResyncMs,
-    leaseMs: Math.max(jobLeaseMs, 120_000),
-    concurrency: orchestrationJobConcurrency,
-    onTick: () => {
-      markLocalWorkerTick("orchestration");
-    },
-    onError: (error) => {
-      markLocalWorkerError("orchestration", error);
-      console.error(`[job-worker ${jobWorkerId}:orchestration]`, error);
-    },
-    onLeaseRenewal: (event) => {
-      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "orchestration", ...event }));
-    },
-  }),
-  new JobWorker({
-    queue,
-    handlers: jobHandlers,
-    workerId: localWorkerStates.get("codex")!.workerId,
-    leaseAgentIds: ["codex"],
-    idleResyncMs: jobIdleResyncMs,
-    leaseMs: Math.max(codexJobLeaseMs, 120_000),
-    concurrency: codexJobConcurrency,
-    onTick: () => {
-      markLocalWorkerTick("codex");
-    },
-    onError: (error) => {
-      markLocalWorkerError("codex", error);
-      console.error(`[job-worker ${jobWorkerId}:codex]`, error);
-    },
-    onLeaseRenewal: (event) => {
-      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "codex", ...event }));
-    },
-  }),
-];
+const factoryJobHandlers = {
+  [FACTORY_CONTROL_AGENT_ID]: jobHandlers[FACTORY_CONTROL_AGENT_ID],
+  [FACTORY_MONITOR_AGENT_ID]: jobHandlers[FACTORY_MONITOR_AGENT_ID],
+  codex: jobHandlers.codex,
+} satisfies Record<
+  typeof FACTORY_CONTROL_AGENT_ID | typeof FACTORY_MONITOR_AGENT_ID | "codex",
+  JobHandler
+>;
+
+const chatWorker = new JobWorker({
+  queue,
+  handlers: jobHandlers,
+  workerId: localWorkerStates.get("chat")!.workerId,
+  leaseAgentIds: ["factory"],
+  leaseLanes: ["chat"],
+  idleResyncMs: jobIdleResyncMs,
+  leaseMs: Math.max(jobLeaseMs, 120_000),
+  concurrency: chatJobConcurrency,
+  onTick: () => {
+    markLocalWorkerTick("chat");
+  },
+  onError: (error) => {
+    markLocalWorkerError("chat", error);
+    console.error(`[job-worker ${jobWorkerId}:chat]`, error);
+  },
+  onLeaseRenewal: (event) => {
+    console.info(JSON.stringify({ type: "job.lease_renewed", scope: "chat", ...event }));
+  },
+});
+
+const agentWorker = new JobWorker({
+  queue,
+  handlers: jobHandlers,
+  workerId: localWorkerStates.get("agent")!.workerId,
+  leaseAgentIds: ["agent"],
+  idleResyncMs: jobIdleResyncMs,
+  leaseMs: Math.max(jobLeaseMs, 120_000),
+  concurrency: orchestrationJobConcurrency,
+  onTick: () => {
+    markLocalWorkerTick("agent");
+  },
+  onError: (error) => {
+    markLocalWorkerError("agent", error);
+    console.error(`[job-worker ${jobWorkerId}:agent]`, error);
+  },
+  onLeaseRenewal: (event) => {
+    console.info(JSON.stringify({ type: "job.lease_renewed", scope: "agent", ...event }));
+  },
+});
+
+const factoryWorker = createFactoryLocalWorker({
+  queue,
+  handlers: factoryJobHandlers,
+  workerId: localWorkerStates.get("factory")!.workerId,
+  idleResyncMs: jobIdleResyncMs,
+  leaseMs: Math.max(jobLeaseMs, codexJobLeaseMs, 120_000),
+  concurrency: localWorkerStates.get("factory")!.concurrency,
+  scope: "factory",
+  onTick: () => {
+    markLocalWorkerTick("factory");
+  },
+  onError: (error) => {
+    markLocalWorkerError("factory", error);
+    console.error(`[job-worker ${jobWorkerId}:factory]`, error);
+  },
+});
+const workers = [chatWorker, agentWorker, factoryWorker] as const;
 const resonateRoleRuntime =
   JOB_BACKEND === "resonate"
     ? createResonateRoleRuntime(PROCESS_ROLE, {
@@ -1295,10 +1295,22 @@ if (JOB_BACKEND === "resonate") {
 }
 const startRuntimeWorkers = async (): Promise<void> => {
   if (JOB_BACKEND === "local") {
-    for (const [index, worker] of workers.entries()) {
-      markLocalWorkerStarted(localWorkerOrder[index]!);
-      worker.start();
-    }
+    markLocalWorkerStarted("chat");
+    chatWorker.start();
+    markLocalWorkerStarted("agent");
+    agentWorker.start();
+    markLocalWorkerStarted("factory");
+    await startFactoryLocalRuntime({
+      worker: factoryWorker,
+      service: factoryService,
+      onResumeSuccess: async () => {
+        await recordFactoryResumeSuccess();
+      },
+      onResumeError: async (error) => {
+        recordFactoryResumeError(error);
+        console.error("[factory resume]", error);
+      },
+    }).catch(() => undefined);
     return;
   }
   await resonateRoleRuntime?.start();
@@ -1307,19 +1319,15 @@ const startRuntimeWorkers = async (): Promise<void> => {
 let objectiveResumeScheduled = false;
 const scheduleObjectiveResume = (): void => {
   if (objectiveResumeScheduled) return;
+  if (JOB_BACKEND === "local") return;
   if (JOB_BACKEND === "resonate" && PROCESS_ROLE !== "api") return;
   objectiveResumeScheduled = true;
   const runResume = async () => {
     try {
       await factoryService.resumeObjectives();
-      runtimeHealthState.lastResumeAt = Date.now();
-      runtimeHealthState.lastResumeError = undefined;
-      runtimeHealthState.lastResumeErrorAt = undefined;
-      await evaluateLocalRuntimeWatchdog();
+      await recordFactoryResumeSuccess();
     } catch (err) {
-      runtimeHealthState.lastResumeError =
-        err instanceof Error ? err.message : String(err);
-      runtimeHealthState.lastResumeErrorAt = Date.now();
+      recordFactoryResumeError(err);
       console.error("[factory resume]", err);
     }
   };
@@ -1739,6 +1747,30 @@ const scheduleUiWarmup = (): void => {
   timer.unref();
 };
 
+const SERVER_IDLE_TIMEOUT_SECONDS = 30;
+const serverOptions = {
+  fetch: app.fetch,
+  port: PORT,
+  idleTimeout: SERVER_IDLE_TIMEOUT_SECONDS,
+  websocket,
+} as Bun.Serve.Options<unknown>;
+const serveWithOptions = Bun.serve as (
+  options: Bun.Serve.Options<unknown>,
+) => Bun.Server<unknown>;
+
+// Bind the port before local workers start so a duplicate process cannot lease
+// jobs or mutate SQLite before failing with EADDRINUSE.
+const httpServer = shouldServeHttp
+  ? serveWithOptions(serverOptions)
+  : undefined;
+if (httpServer) {
+  console.log(`Receipt server listening on http://localhost:${PORT}`);
+} else {
+  console.log(
+    `Receipt ${PROCESS_ROLE} runtime connected to ${process.env.RESONATE_URL ?? "http://127.0.0.1:8001"}`,
+  );
+}
+
 try {
   await startRuntimeWorkers();
 } catch (err) {
@@ -1837,27 +1869,6 @@ if (shouldServeHttp) {
     }
   }, 500);
   receiptWatcher.unref();
-}
-
-const SERVER_IDLE_TIMEOUT_SECONDS = 30;
-const serverOptions: Bun.Serve.Options<undefined> = {
-  fetch: app.fetch,
-  port: PORT,
-  idleTimeout: SERVER_IDLE_TIMEOUT_SECONDS,
-};
-const serveWithOptions = Bun.serve as (
-  options: Bun.Serve.Options<undefined>,
-) => Bun.Server<undefined>;
-
-const httpServer = shouldServeHttp
-  ? serveWithOptions(serverOptions)
-  : undefined;
-if (httpServer) {
-  console.log(`Receipt server listening on http://localhost:${PORT}`);
-} else {
-  console.log(
-    `Receipt ${PROCESS_ROLE} runtime connected to ${process.env.RESONATE_URL ?? "http://127.0.0.1:8001"}`,
-  );
 }
 
 scheduleObjectiveResume();

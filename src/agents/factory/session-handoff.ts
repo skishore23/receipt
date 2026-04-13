@@ -300,7 +300,7 @@ export const writeObjectiveDispatchToSession = async (input: {
       type: "response.finalized",
       runId,
       agentId: "orchestrator",
-      content: `**${input.title}** dispatched — tracking objective here.`,
+      content: `I started **${input.title}** as a tracked objective. It can keep running in the background while we continue the conversation here.`,
     },
     {
       type: "run.status",

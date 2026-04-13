@@ -175,6 +175,31 @@ test("factory chat profiles: resolves an explicitly requested profile with the m
   expect(resolved.systemPrompt).toContain("up to 20 parallel child runs");
 });
 
+test("factory chat profiles: checked-in generalist prompt carries conversational background-work guidance", async () => {
+  const resolved = await resolveFactoryChatProfile({
+    repoRoot: process.cwd(),
+    profileRoot: process.cwd(),
+    requestedId: "generalist",
+  });
+
+  expect(resolved.systemPrompt).toContain("I'm running that now, and we can keep talking while it finishes.");
+  expect(resolved.systemPrompt).toContain("keep the operator in a normal conversation loop");
+  expect(resolved.systemPrompt).toContain("say so casually and keep the thread open for normal conversation");
+});
+
+test("factory chat profiles: shared conversational baseline applies to every checked-in profile", async () => {
+  for (const requestedId of ["generalist", "software", "infrastructure", "qa"] as const) {
+    const resolved = await resolveFactoryChatProfile({
+      repoRoot: process.cwd(),
+      profileRoot: process.cwd(),
+      requestedId,
+    });
+    expect(resolved.systemPrompt).toContain("Treat PROFILE.md and SOUL.md as the primary source of personality");
+    expect(resolved.systemPrompt).toContain("If work is already running, say that plainly in natural language");
+    expect(resolved.systemPrompt).toContain("Use natural conversational flow by default");
+  }
+});
+
 test("factory chat profiles: falls back to the default profile without route-hint selection", async () => {
   const profileRoot = await createTempDir("receipt-factory-profile-root");
   const repoRoot = await createTempDir("receipt-factory-target-repo");

@@ -231,34 +231,61 @@ export const listChangedStreams = (
   },
 ): ReadonlyArray<{ readonly stream: string; readonly lastGlobalSeq: number }> => {
   const prefix = input.streamPrefix?.trim();
+  if (input.afterGlobalSeq <= 0) {
+    const rows = db.read(() => (
+      prefix
+        ? db.orm.select({
+            stream: schema.changeLog.stream,
+            lastGlobalSeq: max(schema.changeLog.globalSeq),
+          })
+          .from(schema.changeLog)
+          .where(like(schema.changeLog.stream, `${prefix}%`))
+          .groupBy(schema.changeLog.stream)
+          .orderBy(sql`MAX(${schema.changeLog.globalSeq}) ASC`)
+          .all()
+        : db.orm.select({
+            stream: schema.changeLog.stream,
+            lastGlobalSeq: max(schema.changeLog.globalSeq),
+          })
+          .from(schema.changeLog)
+          .groupBy(schema.changeLog.stream)
+          .orderBy(sql`MAX(${schema.changeLog.globalSeq}) ASC`)
+          .all()
+    ));
+    return rows.map((row) => ({
+      stream: row.stream,
+      lastGlobalSeq: Number(row.lastGlobalSeq ?? 0),
+    }));
+  }
   const rows = db.read(() => (
     prefix
       ? db.orm.select({
           stream: schema.changeLog.stream,
-          lastGlobalSeq: max(schema.changeLog.globalSeq),
+          globalSeq: schema.changeLog.globalSeq,
         })
         .from(schema.changeLog)
         .where(and(
           gt(schema.changeLog.globalSeq, input.afterGlobalSeq),
           like(schema.changeLog.stream, `${prefix}%`),
         ))
-        .groupBy(schema.changeLog.stream)
-        .orderBy(sql`MAX(${schema.changeLog.globalSeq}) ASC`)
+        .orderBy(schema.changeLog.globalSeq)
         .all()
       : db.orm.select({
           stream: schema.changeLog.stream,
-          lastGlobalSeq: max(schema.changeLog.globalSeq),
+          globalSeq: schema.changeLog.globalSeq,
         })
         .from(schema.changeLog)
         .where(gt(schema.changeLog.globalSeq, input.afterGlobalSeq))
-        .groupBy(schema.changeLog.stream)
-        .orderBy(sql`MAX(${schema.changeLog.globalSeq}) ASC`)
+        .orderBy(schema.changeLog.globalSeq)
         .all()
   ));
-  return rows.map((row) => ({
-    stream: row.stream,
-    lastGlobalSeq: Number(row.lastGlobalSeq ?? 0),
-  }));
+  const latestByStream = new Map<string, number>();
+  for (const row of rows) {
+    latestByStream.set(row.stream, Number(row.globalSeq));
+  }
+  return [...latestByStream.entries()]
+    .map(([stream, lastGlobalSeq]) => ({ stream, lastGlobalSeq }))
+    .sort((left, right) => left.lastGlobalSeq - right.lastGlobalSeq);
 };
 
 export const listStreamsByPrefix = (db: ReceiptDb, prefix?: string): ReadonlyArray<string> => {

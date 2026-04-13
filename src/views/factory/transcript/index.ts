@@ -321,16 +321,15 @@ const blockedObjectiveTranscriptItem = (
   );
   const next = compactStatusText(thread?.nextAction ?? workbench?.summary.nextAction ?? "", 220);
   const lines = [
-    `${title} is blocked and handed back to Chat.`,
+    `${title} is blocked right now.`,
     currentSignal ? `What we know: ${currentSignal}` : "",
     blocker && blocker !== currentSignal ? `Still missing: ${blocker}` : "",
-    next ? `Tracked next step: ${next}` : "",
-    "Chat can explain the current evidence or inspect the repo with a read-only Codex probe. Use `/react <guidance>` to continue the tracked objective.",
+    next ? `Smallest next step: ${next}` : "",
+    "I can help unpack the evidence here, and if you want me to continue the tracked work, use `/react <guidance>`.",
   ].filter(Boolean);
   return {
     key: `objective-blocked-handoff-${thread?.objectiveId ?? workbench?.summary.objectiveId ?? model.objectiveId ?? "current"}-${thread?.latestDecisionAt ?? thread?.updatedAt ?? 0}`,
-    kind: "system",
-    title: "Objective blocked",
+    kind: "assistant",
     body: lines.join("\n\n"),
     meta: "Blocked handoff",
   };

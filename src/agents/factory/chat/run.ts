@@ -27,6 +27,7 @@ import {
 } from "../chat-context";
 import {
   combineFinalizers,
+  createLiveFactoryFailureFinalizer,
   createLiveFactoryFinalizer,
   isActiveJobStatus,
 } from "../../orchestration-utils";
@@ -38,7 +39,11 @@ import { summarizeChildProgress, asString } from "./input";
 import { codexJobSnapshot } from "./status";
 import { listChildJobsForRun } from "./input";
 import { analyzeFactoryChatTurn } from "./turn-analysis";
-import { decideFactoryChatAutoDispatch, decideFactoryChatAutoHandoff } from "./ownership";
+import {
+  decideFactoryChatAutoDispatch,
+  decideFactoryChatAutoHandoff,
+  decideFactoryChatBoundObjectiveDispatch,
+} from "./ownership";
 import {
   loadConversationProjection,
   renderSessionRecallSummary,
@@ -256,12 +261,22 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     return created;
   };
   const initialTurnAnalysis = await analyzeTurn(input.problem);
+  const boundObjective = effectiveObjectiveId
+    && initialTurnAnalysis.responseStyle === "work"
+    && typeof input.factoryService.getObjective === "function"
+    ? await input.factoryService.getObjective(effectiveObjectiveId).catch(() => undefined)
+    : undefined;
   const autoHandoff = decideFactoryChatAutoHandoff({
     currentProfileId: resolvedProfile.root.id,
     handoffTargets: resolvedProfile.handoffTargets,
     problem: input.problem,
     responseStyle: initialTurnAnalysis.responseStyle,
     hasBoundObjective: Boolean(effectiveObjectiveId),
+  });
+  const boundObjectiveAutoDispatch = decideFactoryChatBoundObjectiveDispatch({
+    problem: input.problem,
+    responseStyle: initialTurnAnalysis.responseStyle,
+    boundObjective,
   });
   const autoDispatch = decideFactoryChatAutoDispatch({
     currentProfileId: resolvedProfile.root.id,
@@ -270,6 +285,7 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     hasBoundObjective: Boolean(effectiveObjectiveId),
   });
   let forcedAutoHandoffUsed = false;
+  let forcedBoundObjectiveDispatchUsed = false;
   let forcedAutoDispatchUsed = false;
   const llmStructuredWithAutoHandoff: FactoryChatRunInput["llmStructured"] = async (opts) => {
     if (autoHandoff && opts.schemaName === "agent_action" && forcedAutoHandoffUsed === false) {
@@ -293,6 +309,39 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
         parsed: opts.schema.parse(forcedAction),
         raw: JSON.stringify(forcedAction),
       };
+    }
+    if (boundObjectiveAutoDispatch && opts.schemaName === "agent_action" && forcedBoundObjectiveDispatchUsed === false) {
+      const dispatchObjectiveId = getCurrentObjectiveId();
+      if (
+        boundObjectiveAutoDispatch.action !== "react"
+        || (typeof dispatchObjectiveId === "string" && dispatchObjectiveId.length > 0)
+      ) {
+        forcedBoundObjectiveDispatchUsed = true;
+        const forcedAction = {
+          thought: boundObjectiveAutoDispatch.reason,
+          action: {
+            type: "tool",
+            name: "factory.dispatch",
+            input: JSON.stringify({
+              action: boundObjectiveAutoDispatch.action,
+              ...(boundObjectiveAutoDispatch.action === "react"
+                ? {
+                    objectiveId: dispatchObjectiveId,
+                    note: boundObjectiveAutoDispatch.note,
+                  }
+                : {
+                    prompt: boundObjectiveAutoDispatch.prompt,
+                  }),
+              reason: boundObjectiveAutoDispatch.reason,
+            }),
+            text: null,
+          },
+        };
+        return {
+          parsed: opts.schema.parse(forcedAction),
+          raw: JSON.stringify(forcedAction),
+        };
+      }
     }
     if (autoDispatch && opts.schemaName === "agent_action" && forcedAutoDispatchUsed === false) {
       forcedAutoDispatchUsed = true;
@@ -347,6 +396,22 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     liveWaitState: factoryLiveWaitState,
     supervisorConfig,
   });
+  const describeActiveChild = async () => {
+    const activeChildren = (await listChildJobsForRun(input.queue, input.runId))
+      .filter((job) => isActiveJobStatus(job.status))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    const activeChild = activeChildren[0];
+    if (!activeChild) return undefined;
+    const snapshot = await codexJobSnapshot(activeChild, input.dataDir);
+    return {
+      jobId: activeChild.id,
+      detail: summarizeChildProgress({
+        lastMessage: asString(snapshot.lastMessage),
+        stderrTail: asString(snapshot.stderrTail),
+        stdoutTail: asString(snapshot.stdoutTail),
+      }),
+    };
+  };
   const onIterationBudgetExhausted: NonNullable<AgentRunInput["onIterationBudgetExhausted"]> = async ({ runId, problem, config, progress }) => {
     if (isStuckProgress(progress)) return undefined;
     const objectiveId = getCurrentObjectiveId();
@@ -532,28 +597,18 @@ export const runFactoryChat = async (input: FactoryChatRunInput): Promise<AgentR
     },
     capabilities,
     onIterationBudgetExhausted,
+    failureFinalizer: createLiveFactoryFailureFinalizer({
+      factoryService: input.factoryService,
+      getCurrentObjectiveId,
+      describeActiveChild,
+    }),
     finalizer: combineFinalizers(
       createLiveFactoryFinalizer({
         factoryService: input.factoryService,
         getCurrentObjectiveId,
         liveWaitState: factoryLiveWaitState,
         finalWhileChildRunning: resolvedProfile.orchestration.finalWhileChildRunning,
-        describeActiveChild: async () => {
-          const activeChildren = (await listChildJobsForRun(input.queue, input.runId))
-            .filter((job) => isActiveJobStatus(job.status))
-            .sort((left, right) => right.updatedAt - left.updatedAt);
-          const activeChild = activeChildren[0];
-          if (!activeChild) return undefined;
-          const snapshot = await codexJobSnapshot(activeChild, input.dataDir);
-          return {
-            jobId: activeChild.id,
-            detail: summarizeChildProgress({
-              lastMessage: asString(snapshot.lastMessage),
-              stderrTail: asString(snapshot.stderrTail),
-              stdoutTail: asString(snapshot.stdoutTail),
-            }),
-          };
-        },
+        describeActiveChild,
       }),
       input.finalizer,
     ),

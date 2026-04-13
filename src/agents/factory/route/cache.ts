@@ -14,6 +14,7 @@ import {
 import type { AgentRunChain } from "../shared";
 import type { AgentLoaderContext } from "../../../framework/agent-types";
 import { FactoryService } from "../../../services/factory-service";
+import type { FactoryChatResolvedProfile } from "../../../services/factory-chat-profiles";
 
 export type FactoryRouteCache = ReturnType<typeof createFactoryRouteCache>;
 
@@ -25,6 +26,7 @@ export const createFactoryRouteCache = (input: {
   readonly chatProjectionDataDir?: string;
 }) => {
   const projectionCacheTtlMs = 900;
+  const profileCacheTtlMs = 10_000;
   const recentJobsCache = new Map<string, {
     readonly expiresAt: number;
     readonly value: Promise<ReadonlyArray<QueueJob>>;
@@ -41,18 +43,23 @@ export const createFactoryRouteCache = (input: {
     readonly expiresAt: number;
     readonly value: Promise<string | undefined>;
   }>();
+  const resolvedProfileCache = new Map<string, {
+    readonly expiresAt: number;
+    readonly value: Promise<FactoryChatResolvedProfile>;
+  }>();
 
   const withProjectionCache = async <T>(
     cache: Map<string, { readonly expiresAt: number; readonly value: Promise<T> }>,
     key: string,
     build: () => Promise<T>,
+    ttlMs = projectionCacheTtlMs,
   ): Promise<T> => {
     const now = Date.now();
     const cached = cache.get(key);
     if (cached && cached.expiresAt > now) return cached.value;
     const value = build();
     cache.set(key, {
-      expiresAt: now + projectionCacheTtlMs,
+      expiresAt: now + ttlMs,
       value,
     });
     setTimeout(() => {
@@ -60,7 +67,7 @@ export const createFactoryRouteCache = (input: {
       if (current?.value === value && current.expiresAt <= Date.now()) {
         cache.delete(key);
       }
-    }, projectionCacheTtlMs + 20);
+    }, ttlMs + 20);
     return value;
   };
 
@@ -77,6 +84,26 @@ export const createFactoryRouteCache = (input: {
     profileCatalogCache,
     input.profileRoot,
     () => discoverFactoryChatProfiles(input.profileRoot),
+    profileCacheTtlMs,
+  );
+
+  const resolveFactoryChatProfileCached = async (inputProfile: {
+    readonly repoRoot: string;
+    readonly profileRoot?: string;
+    readonly requestedId?: string;
+    readonly problem?: string;
+    readonly allowDefaultOverride?: boolean;
+  }): Promise<FactoryChatResolvedProfile> => withProjectionCache(
+    resolvedProfileCache,
+    JSON.stringify({
+      repoRoot: inputProfile.repoRoot,
+      profileRoot: inputProfile.profileRoot ?? input.profileRoot,
+      requestedId: inputProfile.requestedId ?? "",
+      problem: inputProfile.problem ?? "",
+      allowDefaultOverride: inputProfile.allowDefaultOverride ?? false,
+    }),
+    () => resolveFactoryChatProfile(inputProfile),
+    profileCacheTtlMs,
   );
 
   const resolveObjectiveProjectionVersion = async (): Promise<number> => {
@@ -94,7 +121,7 @@ export const createFactoryRouteCache = (input: {
     readonly chatId?: string;
   }): Promise<string | undefined> => {
     if (!inputStream.chatId) return undefined;
-    const resolved = await resolveFactoryChatProfile({
+    const resolved = await resolveFactoryChatProfileCached({
       repoRoot: input.service.git.repoRoot,
       profileRoot: input.profileRoot,
       requestedId: inputStream.profileId,
@@ -120,9 +147,6 @@ export const createFactoryRouteCache = (input: {
     JSON.stringify({
       profileId: inputStream.profileId ?? "",
       chatId: inputStream.chatId ?? "",
-      objectiveProjectionVersion: typeof input.service.projectionVersion === "function"
-        ? input.service.projectionVersion()
-        : undefined,
     }),
     () => resolveSessionStreamVersion(inputStream),
   );
@@ -169,6 +193,7 @@ export const createFactoryRouteCache = (input: {
   return {
     loadRecentJobs,
     loadFactoryProfiles,
+    resolveFactoryChatProfileCached,
     resolveObjectiveProjectionVersion,
     resolveObjectiveProjectionVersionCached,
     resolveSessionStreamVersion,

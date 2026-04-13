@@ -17,8 +17,8 @@ const makeJob = (input: Partial<QueueJob> & Pick<QueueJob, "id" | "agentId" | "l
 
 const healthyWorkers = (now: number): ReadonlyArray<LocalRuntimeWorkerState> => ([
   { role: "chat", workerId: "worker:chat", concurrency: 10, startedAt: now - 5_000, lastTickAt: now - 500 },
-  { role: "orchestration", workerId: "worker:orchestration", concurrency: 4, startedAt: now - 5_000, lastTickAt: now - 500 },
-  { role: "codex", workerId: "worker:codex", concurrency: 6, startedAt: now - 5_000, lastTickAt: now - 500 },
+  { role: "agent", workerId: "worker:agent", concurrency: 4, startedAt: now - 5_000, lastTickAt: now - 500 },
+  { role: "factory", workerId: "worker:factory", concurrency: 10, startedAt: now - 5_000, lastTickAt: now - 500 },
 ]);
 
 test("local runtime health: ready snapshot reports workers, queue age, and no degradation", () => {
@@ -51,10 +51,10 @@ test("local runtime health: ready snapshot reports workers, queue age, and no de
   expect(summary.checks.queueWatchdog.ok).toBe(true);
   expect(summary.oldestQueuedMsByLane.collect).toBe(5_000);
   expect(summary.stalledObjectives).toBe(0);
-  expect(summary.workers.readyRoles).toEqual(["chat", "orchestration", "codex"]);
+  expect(summary.workers.readyRoles).toEqual(["chat", "agent", "factory"]);
 });
 
-test("local runtime health: stale queued codex work without a healthy codex worker is degraded", () => {
+test("local runtime health: stale queued factory work without a healthy factory worker is degraded", () => {
   const now = 2_000_000;
   const summary = summarizeLocalRuntimeHealth({
     now,
@@ -74,8 +74,8 @@ test("local runtime health: stale queued codex work without a healthy codex work
     ],
     workers: [
       { role: "chat", workerId: "worker:chat", concurrency: 10, startedAt: now - 5_000, lastTickAt: now - 500 },
-      { role: "orchestration", workerId: "worker:orchestration", concurrency: 4, startedAt: now - 5_000, lastTickAt: now - 500 },
-      { role: "codex", workerId: "worker:codex", concurrency: 6, startedAt: now - 200_000, lastTickAt: now - 150_000 },
+      { role: "agent", workerId: "worker:agent", concurrency: 4, startedAt: now - 5_000, lastTickAt: now - 500 },
+      { role: "factory", workerId: "worker:factory", concurrency: 10, startedAt: now - 200_000, lastTickAt: now - 150_000 },
     ],
     lastResumeAt: now - 1_000,
     staleAfterMs: 90_000,
@@ -88,5 +88,5 @@ test("local runtime health: stale queued codex work without a healthy codex work
   expect(summary.checks.queueWatchdog.ok).toBe(false);
   expect(summary.stalledObjectives).toBe(1);
   expect(summary.watchdog.warnings[0]).toContain("job_stale_codex");
-  expect(summary.watchdog.warnings[0]).toContain("codex");
+  expect(summary.watchdog.warnings[0]).toContain("factory");
 });

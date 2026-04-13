@@ -5,7 +5,7 @@ import {
   liveExecutionSnapshotForJobs,
 } from "../services/factory/live-jobs";
 
-export type LocalRuntimeWorkerRole = "chat" | "orchestration" | "codex";
+export type LocalRuntimeWorkerRole = "chat" | "agent" | "factory";
 
 export type LocalRuntimeWorkerState = {
   readonly role: LocalRuntimeWorkerRole;
@@ -65,10 +65,17 @@ const laneAgeSeed = (): Record<"chat" | "collect" | "steer" | "follow_up", numbe
 });
 
 const localRuntimeWorkerRoleForJob = (job: Pick<QueueJob, "agentId" | "payload">): LocalRuntimeWorkerRole | undefined => {
-  if (job.agentId === "codex") return "codex";
-  if (job.agentId === "factory-control") return "orchestration";
+  if (
+    job.agentId === "codex"
+    || job.agentId === "factory-control"
+    || job.agentId === "factory-monitor"
+  ) {
+    return "factory";
+  }
+  if (job.agentId === "agent") return "agent";
   const kind = typeof job.payload.kind === "string" ? job.payload.kind : undefined;
-  if (kind === "factory.run" || kind === "agent.run") return "chat";
+  if (kind === "factory.run") return "chat";
+  if (kind === "agent.run") return "agent";
   return undefined;
 };
 
@@ -109,7 +116,7 @@ export const summarizeLocalRuntimeHealth = (input: {
       : Math.max(oldestQueuedMsByLane[job.lane]!, ageMs);
   }
 
-  const expectedRoles: ReadonlyArray<LocalRuntimeWorkerRole> = ["chat", "orchestration", "codex"];
+  const expectedRoles: ReadonlyArray<LocalRuntimeWorkerRole> = ["chat", "agent", "factory"];
   const workerByRole = Object.fromEntries(
     expectedRoles.map((role) => {
       const worker = input.workers.find((entry) => entry.role === role) ?? {
@@ -193,7 +200,7 @@ export const summarizeLocalRuntimeHealth = (input: {
       queueWatchdog: watchdogOk
         ? {
             ok: true,
-            summary: "No stale queued codex/control jobs were detected without a healthy worker.",
+            summary: "No stale queued factory jobs were detected without a healthy worker.",
           }
         : {
             ok: false,

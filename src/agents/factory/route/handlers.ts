@@ -16,9 +16,7 @@ import {
   assertFactoryProfileCreateModeAllowed,
   assertFactoryProfileDispatchActionAllowed,
   factoryChatResolvedProfileActionSubject,
-  repoKeyForRoot,
   type FactoryChatProfileObjectiveMode,
-  resolveFactoryChatProfile,
 } from "../../../services/factory-chat-profiles";
 import {
   FactoryService,
@@ -46,6 +44,7 @@ import {
   type FactoryWorkbenchWorkspaceModel,
 } from "../../../views/factory-models";
 import type { QueueJob } from "../../../adapters/sqlite-queue";
+import type { FactoryObjectiveDetail } from "../../../services/factory-types";
 import { buildChatItemsForRun, buildChatItemsFromConversation } from "../chat-items";
 import {
 } from "../chat-context";
@@ -83,6 +82,7 @@ import { syncChangedChatContextProjections } from "../../../db/projectors";
 import { createFactoryRouteCache } from "./cache";
 import { createFactoryRouteEvents } from "./events";
 import { registerFactoryApiRoutes } from "./register-factory-api-routes";
+import { registerFactoryPreviewRoutes } from "./register-factory-preview-routes";
 import { registerFactoryLinearUiRoutes } from "./register-factory-ui-routes-linear";
 import { registerFactoryUiRoutes } from "./register-factory-ui-routes";
 import { registerReceiptRoutes } from "./register-receipt-routes";
@@ -90,7 +90,6 @@ import { registerRuntimeRoutes } from "./register-runtime-routes";
 import { createRuntimeDashboardLoader } from "./runtime-dashboard";
 import { createFactoryRouteSessionRuntime } from "./session-runtime";
 import type { FactoryDispatchAction } from "../dispatch";
-import { summarizeUserPreferences } from "../../../services/conversation-memory";
 import {
   isTerminalObjectiveStatus,
   normalizedWorkbenchDetailTab,
@@ -127,6 +126,7 @@ const createFactoryRoute = (ctx: AgentLoaderContext): AgentRouteModule => {
   const {
     loadRecentJobs,
     loadFactoryProfiles,
+    resolveFactoryChatProfileCached,
     resolveObjectiveProjectionVersionCached,
     resolveSessionStreamVersionCached,
     loadChatContextProjectionForSession,
@@ -391,6 +391,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly expiresAt: number;
     readonly value: Promise<FactoryWorkbenchPageModel>;
   }>();
+  const WORKBENCH_MODEL_CACHE_TTL_MS = 5_000;
 
   const objectiveIdFromRunChain = (chain: AgentRunChain): string | undefined => {
     const projection = projectAgentRun(chain);
@@ -499,7 +500,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   });
   const {
     resolveChatEventSubscriptions,
-    subscribeChatEventStream,
   } = routeEvents;
 
   const dedupeObjectiveCards = (
@@ -536,11 +536,11 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   };
 
   const filterSessionContinuationPredecessors = <T extends { readonly objectiveId: string }>(
-    cards: ReadonlyArray<T>,
+    cards: ReadonlyArray<T> | undefined,
     predecessorObjectiveIds: ReadonlySet<string>,
     preservedObjectiveId?: string,
   ): ReadonlyArray<T> =>
-    cards.filter((card) =>
+    (cards ?? []).filter((card) =>
       card.objectiveId === preservedObjectiveId
       || !predecessorObjectiveIds.has(card.objectiveId));
   const WORKBENCH_OBJECTIVE_PAGE_SIZE = 8;
@@ -792,6 +792,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
             lastMessage: focus.lastMessage,
             stdoutTail: focus.stdoutTail,
             stderrTail: focus.stderrTail,
+            loading: focus.loading,
           }
         : undefined,
       latestDecisionSummary: selectedObjective?.latestDecisionSummary,
@@ -897,6 +898,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
             lastMessage: focus.lastMessage,
             stdoutTail: focus.stdoutTail,
             stderrTail: focus.stderrTail,
+            loading: focus.loading,
           }
         : undefined,
       run: input.activeRun,
@@ -980,13 +982,12 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     await service.ensureBootstrap();
     const repoRoot = service.git.repoRoot;
     const requestedObjectiveId = input.objectiveId?.trim();
-    const [resolved, profiles, detail] = await Promise.all([
-      resolveFactoryChatProfile({
+    const [resolved, detail] = await Promise.all([
+      resolveFactoryChatProfileCached({
         repoRoot,
         profileRoot,
         requestedId: input.profileId,
       }),
-      loadFactoryProfiles(),
       requestedObjectiveId
         ? service.getObjective(requestedObjectiveId).catch((err) => {
             if (err instanceof FactoryServiceError && err.status === 404) return undefined;
@@ -995,7 +996,15 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         : Promise.resolve(undefined),
     ]);
     const effectiveProfileId = detail?.profile.rootProfileId ?? resolved.root.id;
-    const effectiveProfile = profiles.find((profile) => profile.id === effectiveProfileId) ?? resolved.root;
+    const effectiveProfile = effectiveProfileId === resolved.root.id
+      ? {
+          id: resolved.root.id,
+          label: resolved.root.label,
+        }
+      : {
+          id: effectiveProfileId,
+          label: detail?.profile.rootProfileLabel ?? resolved.root.label,
+        };
     const board = await service.buildBoardProjection({
       selectedObjectiveId: requestedObjectiveId,
       profileId: effectiveProfileId,
@@ -1106,6 +1115,11 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
             ),
             completed: filterSessionContinuationPredecessors(
               board.sections.completed,
+              sessionContinuationPredecessors,
+              resolvedObjectiveId,
+            ),
+            archived: filterSessionContinuationPredecessors(
+              board.sections.archived,
               sessionContinuationPredecessors,
               resolvedObjectiveId,
             ),
@@ -1253,6 +1267,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         sessionVersion,
       }),
       () => buildWorkbenchSessionRuntime(input),
+      WORKBENCH_MODEL_CACHE_TTL_MS,
     );
   };
 
@@ -1284,6 +1299,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         sessionVersion,
       }),
       () => buildWorkbenchWorkspaceModel(input),
+      WORKBENCH_MODEL_CACHE_TTL_MS,
     );
   };
 
@@ -1295,20 +1311,12 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   }): Promise<FactoryChatIslandModel> => {
     await service.ensureBootstrap();
     const repoRoot = service.git.repoRoot;
-    const resolved = await resolveFactoryChatProfile({
+    const resolved = await resolveFactoryChatProfileCached({
       repoRoot,
       profileRoot,
       requestedId: input.profileId,
     });
     const activeProfileOverview = describeProfileMarkdown(resolved.root);
-    const userPreferencesSummary = memoryTools
-      ? await summarizeUserPreferences({
-          memoryTools,
-          repoKey: repoKeyForRoot(repoRoot),
-          runId: "factory_workbench_chat",
-          actor: "factory-ui",
-        })
-      : undefined;
     const selectedObjectiveId = input.selectedObjectiveId?.trim();
     if (selectedObjectiveId) {
       try {
@@ -1366,7 +1374,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         activeCodex: runtime.activeCodex,
         liveChildren: runtime.liveChildren,
         activeRun: runtime.activeRun,
-        userPreferencesSummary,
         jobs: [],
         chatContext,
         items: runtime.runChains.flatMap((runChain, index) => buildChatItemsForRun(runtime.runIds[index]!, runChain, jobsById)),
@@ -1397,7 +1404,6 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
       activeCodex: undefined,
       liveChildren: [],
       activeRun: undefined,
-      userPreferencesSummary,
       jobs: [],
       chatContext,
       items: buildChatItemsFromConversation(chatContext.conversation, {
@@ -1430,6 +1436,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         sessionVersion,
       }),
       () => buildWorkbenchChatModel(input),
+      WORKBENCH_MODEL_CACHE_TTL_MS,
     );
   };
 
@@ -1548,26 +1555,33 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         sessionVersion,
       }),
       () => buildWorkbenchPageModel(input),
+      WORKBENCH_MODEL_CACHE_TTL_MS,
     );
   };
 
   const loadWorkbenchRequestContext = async (
     req: Request,
     timing?: WorkbenchServerTiming,
+    options: {
+      readonly includeSessionVersion?: boolean;
+    } = {},
   ): Promise<WorkbenchRequestContext> => {
     const request = timing
       ? await timing.measure("request_normalization", () => Promise.resolve(readWorkbenchRequest(req)))
       : readWorkbenchRequest(req);
+    const includeSessionVersion = options.includeSessionVersion ?? true;
     const [sessionVersion, objectiveVersion, queueVersion] = await Promise.all([
-      timing
-        ? timing.measure("session_version", () => resolveSessionStreamVersionCached({
-            profileId: request.profileId,
-            chatId: request.chatId,
-          }))
-        : resolveSessionStreamVersionCached({
-            profileId: request.profileId,
-            chatId: request.chatId,
-          }),
+      includeSessionVersion
+        ? (timing
+            ? timing.measure("session_version", () => resolveSessionStreamVersionCached({
+                profileId: request.profileId,
+                chatId: request.chatId,
+              }))
+            : resolveSessionStreamVersionCached({
+                profileId: request.profileId,
+                chatId: request.chatId,
+              }))
+        : Promise.resolve(undefined),
       timing
         ? timing.measure("objective_version", () => resolveObjectiveProjectionVersionCached())
         : resolveObjectiveProjectionVersionCached(),
@@ -1580,6 +1594,38 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         objectiveVersion,
         queueVersion,
       },
+    };
+  };
+
+  const loadWorkbenchRequestPreviewStaticEnvelope = async (
+    req: Request,
+    timing?: WorkbenchServerTiming,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly envelope: WorkbenchVersionEnvelope;
+  }> => {
+    const context = await loadWorkbenchRequestContext(req, timing, {
+      includeSessionVersion: false,
+    });
+    return {
+      request: context.request,
+      envelope: buildWorkbenchVersionEnvelope(context.request, context.versions),
+    };
+  };
+
+  const loadWorkbenchRequestPreviewChatEnvelope = async (
+    req: Request,
+    timing?: WorkbenchServerTiming,
+  ): Promise<{
+    readonly request: FactoryWorkbenchRequestState;
+    readonly envelope: WorkbenchVersionEnvelope;
+  }> => {
+    const context = await loadWorkbenchRequestContext(req, timing, {
+      includeSessionVersion: true,
+    });
+    return {
+      request: context.request,
+      envelope: buildWorkbenchVersionEnvelope(context.request, context.versions),
     };
   };
 
@@ -1858,6 +1904,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     readonly header: FactoryWorkbenchHeaderIslandModel;
     readonly workspace: FactoryWorkbenchWorkspaceModel;
     readonly chat: FactoryChatIslandModel;
+    readonly detail?: FactoryObjectiveDetail;
   }> => {
     const context = await loadWorkbenchRequestContext(req, timing);
     const workspace = timing
@@ -1889,11 +1936,23 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         ? timing.measure("profiles", () => loadFactoryProfiles())
         : loadFactoryProfiles(),
     ]);
+    const detail = workspace.objectiveId
+      ? timing
+        ? await timing.measure("selected_objective_detail", () => service.getObjective(workspace.objectiveId).catch((err) => {
+            if (err instanceof FactoryServiceError && err.status === 404) return undefined;
+            throw err;
+          }))
+        : await service.getObjective(workspace.objectiveId).catch((err) => {
+            if (err instanceof FactoryServiceError && err.status === 404) return undefined;
+            throw err;
+          })
+      : undefined;
     return {
       request: context.request,
       envelope: buildWorkbenchVersionEnvelope(context.request, context.versions),
       workspace,
       chat,
+      detail,
       header: buildWorkbenchHeaderModel({
         request: context.request,
         workspace,
@@ -1908,7 +1967,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     paths: {
       shell: "/factory",
       state: "/factory/api/objectives",
-      events: "/factory/events",
+      events: "/factory/live",
     },
     register: (app: Hono) => {
       registerFactoryUiRoutes({
@@ -1933,6 +1992,18 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         loadWorkbenchRequestChatShellModel,
         loadWorkbenchRequestSelectionModel,
       });
+      registerFactoryPreviewRoutes({
+        app,
+        wrap,
+        ctx,
+        loadWorkbenchRequestBoardModel,
+        loadWorkbenchRequestFocusModel,
+        loadWorkbenchRequestChatBodyModel,
+        loadWorkbenchRequestSelectionModel,
+        loadWorkbenchRequestPreviewStaticEnvelope,
+        loadWorkbenchRequestPreviewChatEnvelope,
+        resolveChatEventSubscriptions,
+      });
       registerFactoryApiRoutes({
         app,
         basePath: "/factory",
@@ -1941,14 +2012,12 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         service,
         profileRoot,
         loadFactoryProfiles,
-        loadWorkbenchRequestWorkspaceModel,
         resolveObjectiveChatBinding,
         resolveWatchedObjectiveId,
         resolveComposerJob,
         assertComposeDispatchActionAllowed,
         assertComposeCreateModeAllowed,
         resolveChatEventSubscriptions,
-        subscribeChatEventStream,
         agentRuntime,
         memoryTools,
         dataDir: chatProjectionDataDir,
@@ -1961,14 +2030,30 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
         service,
         profileRoot,
         loadFactoryProfiles,
-        loadWorkbenchRequestWorkspaceModel,
         resolveObjectiveChatBinding,
         resolveWatchedObjectiveId,
         resolveComposerJob,
         assertComposeDispatchActionAllowed,
         assertComposeCreateModeAllowed,
         resolveChatEventSubscriptions,
-        subscribeChatEventStream,
+        agentRuntime,
+        memoryTools,
+        dataDir: chatProjectionDataDir,
+      });
+      registerFactoryApiRoutes({
+        app,
+        basePath: "/factory-preview",
+        wrap,
+        ctx,
+        service,
+        profileRoot,
+        loadFactoryProfiles,
+        resolveObjectiveChatBinding,
+        resolveWatchedObjectiveId,
+        resolveComposerJob,
+        assertComposeDispatchActionAllowed,
+        assertComposeCreateModeAllowed,
+        resolveChatEventSubscriptions,
         agentRuntime,
         memoryTools,
         dataDir: chatProjectionDataDir,

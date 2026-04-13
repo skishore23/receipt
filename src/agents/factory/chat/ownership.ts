@@ -12,8 +12,127 @@ type FactoryChatAutoDispatchDecision = {
   readonly reason: string;
 };
 
+type FactoryChatBoundObjectiveDispatchDecision = {
+  readonly action: "create" | "react";
+  readonly prompt?: string;
+  readonly note?: string;
+  readonly reason: string;
+};
+
 const normalizeProblem = (value: string): string =>
   value.replace(/\s+/g, " ").trim();
+
+const STATUS_OR_META = [
+  /\bstatus\b/i,
+  /\bprogress\b/i,
+  /\bupdate\b/i,
+  /\bwhat happened\b/i,
+  /\bwhat's happening\b/i,
+  /\bhow('?s| is) it going\b/i,
+  /\bis it done\b/i,
+  /\bdid it finish\b/i,
+  /\bcurrent state\b/i,
+  /\blatest state\b/i,
+  /\bmonitor(ing)?\b/i,
+  /\bwatch(ing)?\b/i,
+  /\bwait(ing)?\b/i,
+] as const;
+
+const SEPARATE_OBJECTIVE = [
+  /\bnew objective\b/i,
+  /\bseparate objective\b/i,
+  /\bdifferent objective\b/i,
+  /\bseparately\b/i,
+  /\bin parallel\b/i,
+  /\bunrelated\b/i,
+] as const;
+
+const CONTROL_INTENT = [
+  /\bpromote\b/i,
+  /\bcancel\b/i,
+  /\barchive\b/i,
+  /\bcleanup\b/i,
+  /\bcurrent thread\b/i,
+  /\bthread objective\b/i,
+] as const;
+
+const FOLLOW_UP_WORK = [
+  /\badd\b/i,
+  /\banaly[sz]e\b/i,
+  /\bcollect\b/i,
+  /\bdebug\b/i,
+  /\bfix\b/i,
+  /\bgather\b/i,
+  /\bimplement\b/i,
+  /\binclude\b/i,
+  /\binvestigate\b/i,
+  /\brefactor\b/i,
+  /\breview\b/i,
+  /\brerun\b/i,
+  /\bretry\b/i,
+  /\bresume\b/i,
+  /\bship\b/i,
+  /\btest\b/i,
+  /\btrace\b/i,
+  /\bupdate\b/i,
+  /\bvalidate\b/i,
+  /\bverify\b/i,
+] as const;
+
+const REFERENTIAL_CONTINUATION = [
+  /\bit\b/i,
+  /\bthis\b/i,
+  /\bthat\b/i,
+  /\bsame\b/i,
+  /\bcurrent\b/i,
+  /\bexisting\b/i,
+  /\bcontinue\b/i,
+  /\bresume\b/i,
+  /\brerun\b/i,
+  /\bretry\b/i,
+  /\bagain\b/i,
+] as const;
+
+const KEYWORD_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "because",
+  "before",
+  "check",
+  "current",
+  "debug",
+  "does",
+  "dont",
+  "from",
+  "have",
+  "into",
+  "just",
+  "keep",
+  "latest",
+  "make",
+  "more",
+  "need",
+  "please",
+  "show",
+  "still",
+  "tell",
+  "that",
+  "them",
+  "there",
+  "they",
+  "this",
+  "those",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "work",
+  "would",
+]);
 
 const titleCaseFirst = (value: string): string =>
   value.length > 0 ? `${value[0]!.toUpperCase()}${value.slice(1)}` : value;
@@ -23,6 +142,24 @@ const trimTrailingPunctuation = (value: string): string =>
 
 const countMatches = (text: string, patterns: ReadonlyArray<RegExp>): number =>
   patterns.reduce((total, pattern) => total + (pattern.test(text) ? 1 : 0), 0);
+
+const tokenizeKeywords = (value: string): Set<string> =>
+  new Set(
+    normalizeProblem(value)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .filter((token) => token.length >= 4 && !KEYWORD_STOPWORDS.has(token))
+  );
+
+const hasKeywordOverlap = (problem: string, objectiveSummary: string): boolean => {
+  const left = tokenizeKeywords(problem);
+  const right = tokenizeKeywords(objectiveSummary);
+  if (left.size < 2 || right.size < 2) return true;
+  for (const token of left) {
+    if (right.has(token)) return true;
+  }
+  return false;
+};
 
 const INFRA_STRONG = [
   /\baws\b/i,
@@ -168,5 +305,54 @@ export const decideFactoryChatAutoDispatch = (input: {
     prompt,
     objectiveMode: "investigation",
     reason: "Infrastructure profile starts substantive AWS/cloud requests in tracked investigation objectives.",
+  };
+};
+
+export const decideFactoryChatBoundObjectiveDispatch = (input: {
+  readonly problem: string;
+  readonly responseStyle: "conversational" | "work";
+  readonly boundObjective?: {
+    readonly status?: string;
+    readonly title?: string;
+    readonly latestSummary?: string;
+    readonly nextAction?: string;
+  };
+}): FactoryChatBoundObjectiveDispatchDecision | undefined => {
+  if (input.responseStyle !== "work") return undefined;
+  if (!input.boundObjective) return undefined;
+  const prompt = normalizeProblem(input.problem);
+  if (!prompt) return undefined;
+  if (countMatches(prompt, STATUS_OR_META) > 0) return undefined;
+  if (countMatches(prompt, CONTROL_INTENT) > 0) return undefined;
+  if (countMatches(prompt, SEPARATE_OBJECTIVE) > 0) {
+    return {
+      action: "create",
+      prompt,
+      reason: "The user explicitly asked for separate tracked work.",
+    };
+  }
+  if (countMatches(prompt, FOLLOW_UP_WORK) === 0) return undefined;
+  const objectiveSummary = [
+    input.boundObjective.title,
+    input.boundObjective.latestSummary,
+    input.boundObjective.nextAction,
+  ].filter(Boolean).join("\n");
+  const seemsReferential = countMatches(prompt, REFERENTIAL_CONTINUATION) > 0;
+  const noObjectiveOverlap = objectiveSummary.length > 0 && hasKeywordOverlap(prompt, objectiveSummary) === false;
+  if (!seemsReferential && noObjectiveOverlap) {
+    return {
+      action: "create",
+      prompt,
+      reason: "The follow-up looks unrelated to the currently bound objective, so it should start a fresh objective.",
+    };
+  }
+  return {
+    action: "react",
+    note: prompt,
+    reason: input.boundObjective.status === "completed"
+      || input.boundObjective.status === "failed"
+      || input.boundObjective.status === "canceled"
+      ? "The user is asking for fresh work after a terminal objective, so continue via a follow-up objective."
+      : "The user is asking for substantive follow-up work on the bound objective.",
   };
 };

@@ -808,19 +808,15 @@ export const buildChatItemsFromConversation = (
     const body = parsed ? (jsonRecordToMarkdown(parsed) ?? message.text) : message.text;
     const ho = message.objectiveHandoff;
     if (message.role === "assistant" && ho) {
-      const terminal = ho.status === "completed" || ho.status === "failed" || ho.status === "canceled";
-      if (!terminal) {
-        const meta = ho.status === "blocked"
-          ? "Blocked handoff"
-          : displayLabel(ho.status) || ho.status;
-        return {
-          key: `${message.runId}-${message.role}-${index}`,
-          kind: "system",
-          title: `Objective handoff for ${ho.title.trim()}`,
-          body,
-          meta,
-        };
-      }
+      const meta = ho.status === "blocked"
+        ? "Blocked handoff"
+        : displayLabel(ho.status) || ho.status;
+      return {
+        key: `${message.runId}-${message.role}-${index}`,
+        kind: "assistant",
+        body,
+        meta,
+      };
     }
     return {
       key: `${message.runId}-${message.role}-${index}`,

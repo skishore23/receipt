@@ -1,6 +1,8 @@
 import type { Hono } from "hono";
+import { upgradeWebSocket } from "hono/bun";
 
 import type { Runtime } from "@receipt/core/runtime";
+import { bindBunWebSocketToLiveHub } from "@receipt/live/bun";
 
 import type { MemoryTools } from "../../../adapters/memory-tools";
 import { optionalTrimmedString, readRecordBody, json } from "../../../framework/http";
@@ -36,7 +38,6 @@ import {
 } from "../../../factory-cli/composer";
 import type { AgentLoaderContext } from "../../../framework/agent-types";
 import type { QueueJob } from "../../../adapters/sqlite-queue";
-import type { FactoryWorkbenchPageModel } from "../../../views/factory-models";
 import {
   buildWorkbenchLink,
   navigationError,
@@ -53,19 +54,15 @@ import {
   requestedProfileId,
   requestedRunId,
 } from "./params";
-import { readWorkbenchRequest, type FactoryWorkbenchRequestState } from "./workbench-request";
+import { readWorkbenchRequest } from "./workbench-request";
 import type { FactoryDispatchAction } from "../dispatch";
 import { jobObjectiveId } from "../shared";
+import { liveSubscriptionsForFactoryChatEvents } from "./events";
 
 type RouteWrap = <T>(
   fn: () => Promise<T>,
   render: (value: T) => Response,
 ) => Promise<Response>;
-
-type WorkbenchRequestWorkspaceModel = {
-  readonly request: FactoryWorkbenchRequestState;
-  readonly model: FactoryWorkbenchPageModel["workspace"];
-};
 
 type ObjectiveChatBinding = {
   readonly objectiveId: string;
@@ -77,13 +74,12 @@ type ResolvedFactoryChatProfile = Awaited<ReturnType<typeof resolveFactoryChatPr
 
 export const registerFactoryApiRoutes = (input: {
   readonly app: Hono;
-  readonly basePath?: "/factory" | "/factory-new";
+  readonly basePath?: "/factory" | "/factory-new" | "/factory-preview";
   readonly wrap: RouteWrap;
   readonly ctx: AgentLoaderContext;
   readonly service: FactoryService;
   readonly profileRoot: string;
   readonly loadFactoryProfiles: () => Promise<ReadonlyArray<FactoryChatProfile>>;
-  readonly loadWorkbenchRequestWorkspaceModel: (req: Request) => Promise<WorkbenchRequestWorkspaceModel>;
   readonly resolveObjectiveChatBinding: (
     objectiveId: string,
     profileId?: string,
@@ -110,15 +106,6 @@ export const registerFactoryApiRoutes = (input: {
     readonly objectiveId?: string;
     readonly jobIds: ReadonlyArray<string>;
   }>;
-  readonly subscribeChatEventStream: (
-    body: {
-      readonly profileId: string;
-      readonly stream?: string;
-      readonly objectiveId?: string;
-      readonly jobIds: ReadonlyArray<string>;
-    },
-    signal: AbortSignal,
-  ) => Response;
   readonly agentRuntime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly memoryTools?: MemoryTools;
   readonly dataDir?: string;
@@ -131,18 +118,23 @@ export const registerFactoryApiRoutes = (input: {
     service,
     profileRoot,
     loadFactoryProfiles,
-    loadWorkbenchRequestWorkspaceModel,
     resolveObjectiveChatBinding,
     resolveWatchedObjectiveId,
     resolveComposerJob,
     assertComposeDispatchActionAllowed,
     assertComposeCreateModeAllowed,
     resolveChatEventSubscriptions,
-    subscribeChatEventStream,
     memoryTools,
     dataDir,
   } = input;
   const repoKey = repoKeyForRoot(service.git.repoRoot);
+  const readChatEventSubscriptionRequest = (req: Request) => resolveChatEventSubscriptions({
+    profileId: requestedProfileId(req) ?? "generalist",
+    chatId: requestedChatId(req),
+    objectiveId: requestedObjectiveId(req),
+    runId: requestedRunId(req),
+    jobId: requestedJobId(req),
+  });
 
   app.post(`${basePath}/compose`, async (c) => {
     const req = c.req.raw;
@@ -229,7 +221,6 @@ export const registerFactoryApiRoutes = (input: {
               prompt: command.prompt,
               objectiveMode: requestedObjectiveMode,
               profileId: targetProfileId,
-              startImmediately: true,
             });
             const dispatchRunId = await writeObjectiveDispatchToSession({
               agentRuntime: input.agentRuntime,
@@ -266,6 +257,25 @@ export const registerFactoryApiRoutes = (input: {
             assertComposeDispatchActionAllowed(resolved, "react");
             if (!request.objectiveId) return navigationError(req, 409, "Select an objective before reacting to it.");
             const detail = await service.reactObjectiveWithNote(request.objectiveId, command.message);
+            ctx.sse.publish("factory", detail.objectiveId);
+            return workbenchNavigationResponse(req, workbenchLink({
+              profileId: request.profileId,
+              chatId: request.chatId,
+              objectiveId: detail.objectiveId,
+              inspectorTab: request.inspectorTab,
+              detailTab: request.detailTab,
+              page: request.page,
+              filter: request.filter,
+            }), {
+              chatId: request.chatId,
+              objectiveId: detail.objectiveId,
+            });
+          }
+          case "note": {
+            assertComposeDispatchActionAllowed(resolved, "react");
+            if (!request.objectiveId) return navigationError(req, 409, "Select an objective before noting it.");
+            await service.addObjectiveNote(request.objectiveId, command.message ?? "");
+            const detail = await service.getObjective(request.objectiveId);
             ctx.sse.publish("factory", detail.objectiveId);
             return workbenchNavigationResponse(req, workbenchLink({
               profileId: request.profileId,
@@ -605,41 +615,27 @@ export const registerFactoryApiRoutes = (input: {
     }
   });
 
-  app.get(`${basePath}/events`, async (c) => wrap(
-    async () => resolveChatEventSubscriptions({
-      profileId: requestedProfileId(c.req.raw) ?? "generalist",
-      chatId: requestedChatId(c.req.raw),
-      objectiveId: requestedObjectiveId(c.req.raw),
-      runId: requestedRunId(c.req.raw),
-      jobId: requestedJobId(c.req.raw),
-    }),
-    (body) => subscribeChatEventStream(body, c.req.raw.signal),
-  ));
-
-  app.get(`${basePath}/chat/events`, async (c) => wrap(
-    async () => resolveChatEventSubscriptions({
-      profileId: requestedProfileId(c.req.raw) ?? "generalist",
-      chatId: requestedChatId(c.req.raw),
-      objectiveId: requestedObjectiveId(c.req.raw),
-      runId: requestedRunId(c.req.raw),
-      jobId: requestedJobId(c.req.raw),
-    }),
-    (body) => subscribeChatEventStream(body, c.req.raw.signal),
-  ));
-
-  app.get(`${basePath}/background/events`, async (c) => wrap(
-    async () => {
-      const { model } = await loadWorkbenchRequestWorkspaceModel(c.req.raw);
+  app.get(
+    `${basePath}/live`,
+    upgradeWebSocket(async (c) => {
+      const body = await readChatEventSubscriptionRequest(c.req.raw);
+      const subscriptions = liveSubscriptionsForFactoryChatEvents(body);
+      let connection: { readonly close: () => void } | null = null;
       return {
-        profileId: model.activeProfileId,
-        objectiveId: model.objectiveId,
+        onOpen(_event, ws) {
+          connection = bindBunWebSocketToLiveHub(ctx.sse, subscriptions, ws);
+        },
+        onClose() {
+          connection?.close();
+          connection = null;
+        },
+        onError() {
+          connection?.close();
+          connection = null;
+        },
       };
-    },
-    (body) => ctx.sse.subscribeMany([
-      { topic: "profile-board" as const, stream: body.profileId },
-      ...(body.objectiveId ? [{ topic: "objective-runtime" as const, stream: body.objectiveId }] : []),
-    ], c.req.raw.signal),
-  ));
+    }),
+  );
 
   app.get(`${basePath}/api/live-output`, async (c) => wrap(
     async () => {

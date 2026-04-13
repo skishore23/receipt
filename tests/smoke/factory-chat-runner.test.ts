@@ -1903,8 +1903,8 @@ test("factory chat runner: Infrastructure auto-dispatches work turns into invest
     prompt: "show me list of s3 in a table",
     objectiveMode: "investigation",
     profileId: "infrastructure",
-    startImmediately: true,
   });
+  expect(createdInput).not.toHaveProperty("startImmediately");
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_auto_dispatch_infra"));
   const dispatchCall = chain.find((receipt) =>
@@ -1917,6 +1917,184 @@ test("factory chat runner: Infrastructure auto-dispatches work turns into invest
     objectiveMode: "investigation",
     prompt: "show me list of s3 in a table",
   });
+});
+
+test("factory chat runner: bound objective work follow-ups auto-react before the model drifts into status polling", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-bound-react");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "generalist",
+    label: "Tech Lead",
+    default: true,
+    toolAllowlist: ["factory.dispatch"],
+  });
+
+  let reacted: { objectiveId?: string; message?: string } | undefined;
+  let agentActionCalls = 0;
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_bound_objective_auto_react",
+    problem: "Rerun validation and include proof in the next pass.",
+    objectiveId: "objective_demo",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: withTurnAnalysis(async ({ schema, schemaName }: Record<string, unknown>) => {
+      if (schemaName !== "agent_action") {
+        throw new Error(`unexpected schema ${String(schemaName)}`);
+      }
+      agentActionCalls += 1;
+      const typedSchema = schema as { parse: (value: unknown) => unknown };
+      return {
+        parsed: typedSchema.parse({
+          thought: "confirm the follow-up",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "Queued the follow-up.",
+          },
+        }),
+        raw: "",
+      };
+    }),
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub({
+      reactObjectiveWithNote: async (objectiveId: string, message?: string) => {
+        reacted = { objectiveId, message };
+        return {
+          ...(await createFactoryServiceStub().getObjective(objectiveId)),
+          latestSummary: message ?? "Follow-up queued.",
+        };
+      },
+    }) as never,
+    repoRoot,
+    profileRoot,
+  });
+
+  expect(agentActionCalls).toBe(1);
+  expect(result.status).toBe("completed");
+  expect(result.finalResponse).toBe("Queued the follow-up.");
+  expect(reacted).toEqual({
+    objectiveId: "objective_demo",
+    message: "Rerun validation and include proof in the next pass.",
+  });
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_bound_objective_auto_react"));
+  const dispatchCall = chain.find((receipt) =>
+    receipt.body.type === "tool.called"
+    && receipt.body.tool === "factory.dispatch"
+  )?.body;
+  expect(dispatchCall && "tool" in dispatchCall ? dispatchCall.tool : undefined).toBe("factory.dispatch");
+  expect(dispatchCall && "input" in dispatchCall ? dispatchCall.input : undefined).toMatchObject({
+    action: "react",
+    objectiveId: "objective_demo",
+    note: "Rerun validation and include proof in the next pass.",
+  });
+});
+
+test("factory chat runner: timed-out bound-objective status checks still finalize with the latest live reply", async () => {
+  const dataDir = await createTempDir("receipt-factory-chat-timeout-fallback");
+  const repoRoot = await createTempDir("receipt-factory-chat-repo");
+  const profileRoot = await createTempDir("receipt-factory-chat-profile-root");
+  const agentRuntime = createAgentRuntime(dataDir);
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const memoryTools = createMemoryStub();
+  await writeProfile(profileRoot, {
+    id: "software",
+    label: "Software",
+    default: true,
+    toolAllowlist: ["factory.status"],
+  });
+
+  let agentActionCalls = 0;
+  const result = await runFactoryChat({
+    stream: "agents/factory/demo",
+    runId: "run_bound_objective_timeout_fallback",
+    problem: "What's the current status?",
+    profileId: "software",
+    objectiveId: "objective_demo",
+    config: FACTORY_CHAT_DEFAULT_CONFIG,
+    runtime: agentRuntime,
+    llmText: async () => "",
+    llmStructured: withTurnAnalysis(async ({ schema, schemaName }: Record<string, unknown>) => {
+      if (schemaName !== "agent_action") {
+        throw new Error(`unexpected schema ${String(schemaName)}`);
+      }
+      agentActionCalls += 1;
+      const typedSchema = schema as { parse: (value: unknown) => unknown };
+      if (agentActionCalls === 1) {
+        return {
+          parsed: typedSchema.parse({
+            thought: "check live status first",
+            action: {
+              type: "tool",
+              name: "factory.status",
+              input: JSON.stringify({ objectiveId: "objective_demo" }),
+              text: null,
+            },
+          }),
+          raw: "",
+        };
+      }
+      return await new Promise(() => {});
+    }),
+    model: "test-model",
+    apiReady: true,
+    memoryTools,
+    delegationTools: createNoopDelegationTools(),
+    workspaceRoot: repoRoot,
+    queue,
+    factoryService: createFactoryServiceStub({
+      getObjective: async (objectiveId: string) => ({
+        objectiveId,
+        title: "Objective demo",
+        status: "active",
+        phase: "collecting_evidence",
+        objectiveMode: "delivery",
+        severity: 2,
+        latestSummary: "Still collecting evidence for the active task.",
+        nextAction: "Wait for the current task pass to finish.",
+        integration: { status: "idle", queuedCandidateIds: [] },
+        latestDecision: {
+          summary: "Keep waiting for live progress.",
+          at: Date.now(),
+          source: "runtime",
+        },
+        blockedExplanation: undefined,
+        evidenceCards: [],
+        tasks: [],
+      }),
+    }) as never,
+    repoRoot,
+    profileRoot,
+    extraConfig: {
+      structuredTimeoutMs: 25,
+    },
+  });
+
+  expect(agentActionCalls).toBe(2);
+  expect(result.status).toBe("failed");
+  expect(result.finalResponse).toContain("I hit a reply timeout while checking the latest state.");
+  expect(result.finalResponse).toContain("Work is still running in this chat.");
+  expect(result.finalResponse).toContain("Objective demo is active (collecting_evidence).");
+
+  const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_bound_objective_timeout_fallback"));
+  expect(chain.some((receipt) => receipt.body.type === "failure.report")).toBe(true);
+  const finalized = chain.findLast((receipt) => receipt.body.type === "response.finalized")?.body;
+  expect(finalized?.type).toBe("response.finalized");
+  expect(finalized && "content" in finalized ? finalized.content : "").toContain("I hit a reply timeout while checking the latest state.");
 });
 
 test("factory chat runner: profile.handoff accepts common profile id aliases", async () => {
@@ -3584,20 +3762,26 @@ test("factory chat runner: lightweight conversational turns skip bound objective
       responseStyle: "conversational",
       includeBoundObjectiveContext: false,
     }),
-    llmStructured: withTurnAnalysis(async ({ schema: s, user }: Record<string, unknown>) => {
-      capturedUserPrompt = user as string;
-      const schema = s as { parse: (v: unknown) => unknown };
-      const reply = {
-        thought: "introduce the chat controller briefly",
-        action: {
-          type: "final",
-          name: null,
-          input: "{}",
-          text: "I handle the chat thread and hand tracked work off when needed.",
-        },
-      };
-      return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
-    }),
+    llmStructured: withTurnAnalysis(
+      async ({ schema: s, user }: Record<string, unknown>) => {
+        capturedUserPrompt = user as string;
+        const schema = s as { parse: (v: unknown) => unknown };
+        const reply = {
+          thought: "introduce the chat controller briefly",
+          action: {
+            type: "final",
+            name: null,
+            input: "{}",
+            text: "I handle the chat thread and hand tracked work off when needed.",
+          },
+        };
+        return { parsed: schema.parse(reply), raw: JSON.stringify(reply) };
+      },
+      {
+        responseStyle: "conversational",
+        includeBoundObjectiveContext: false,
+      },
+    ),
     model: "test-model",
     apiReady: true,
     memoryTools,
@@ -4290,8 +4474,8 @@ test("factory chat runner: terminal bound objectives create a follow-up objectiv
     objectiveMode: "delivery",
     severity: 3,
     profileId: "generalist",
-    startImmediately: true,
   });
+  expect(createdInput).not.toHaveProperty("startImmediately");
   expect(reacted).toBeUndefined();
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/terminal-followup", "run_dispatch_terminal_followup"));
   const observed = chain.find((receipt) => receipt.body.type === "tool.observed")?.body;
@@ -4593,8 +4777,8 @@ test("factory chat runner: canonical completed-objective follow-up fields create
     objectiveMode: "investigation",
     severity: 2,
     profileId: "generalist",
-    startImmediately: true,
   });
+  expect(createdInput).not.toHaveProperty("startImmediately");
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_dispatch_followup"));
   const boundEvents = chain.filter((receipt) => receipt.body.type === "thread.bound").map((receipt) => receipt.body);
   const latestBound = boundEvents.at(-1);
@@ -4710,8 +4894,8 @@ test("factory chat runner: compatibility aliases and single-string checks no lon
     checks: ["repo_profile"],
     channel: "software",
     profileId: "generalist",
-    startImmediately: true,
   });
+  expect(createdInput).not.toHaveProperty("startImmediately");
 
   const chain = await agentRuntime.chain(agentRunStream("agents/factory/demo", "run_factory_compat_dispatch"));
   const toolCalls = chain.filter((receipt) => receipt.body.type === "tool.called").map((receipt) => receipt.body);

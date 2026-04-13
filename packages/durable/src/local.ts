@@ -23,9 +23,48 @@ type SqliteDatabase = Database;
 
 type LocalDurableBackendOptions = {
   readonly dbPath: string;
+  readonly busyTimeoutMs?: number;
 };
 
 const DEFAULT_BUSY_TIMEOUT_MS = 30_000;
+const SQLITE_LOCK_RE =
+  /\b(database is locked|database is busy|sqlite_busy|sqlite_locked|sqlite_busy_snapshot|SQLITE_BUSY|SQLITE_LOCKED)\b/i;
+const DEFAULT_LOCK_RETRY_ATTEMPTS = 8;
+const DEFAULT_LOCK_RETRY_BASE_MS = 25;
+const DEFAULT_LOCK_RETRY_MAX_DELAY_MS = 250;
+const SQLITE_SLEEP_BUFFER = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+const SQLITE_SLEEP_STATE = new Int32Array(SQLITE_SLEEP_BUFFER);
+
+const sleepSync = (delayMs: number): void => {
+  if (delayMs <= 0) return;
+  Atomics.wait(SQLITE_SLEEP_STATE, 0, 0, delayMs);
+};
+
+const sqliteLockRetryDelayMs = (attempt: number): number =>
+  Math.min(
+    DEFAULT_LOCK_RETRY_BASE_MS * (2 ** Math.max(0, attempt - 1)),
+    DEFAULT_LOCK_RETRY_MAX_DELAY_MS,
+  );
+
+const isSqliteLockError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return SQLITE_LOCK_RE.test(message);
+};
+
+const withSqliteLockRetry = <T>(work: () => T): T => {
+  let attempt = 0;
+  while (true) {
+    try {
+      return work();
+    } catch (error) {
+      if (!isSqliteLockError(error) || attempt >= DEFAULT_LOCK_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      attempt += 1;
+      sleepSync(sqliteLockRetryDelayMs(attempt));
+    }
+  }
+};
 
 const safeParseRecord = (value: unknown): Record<string, unknown> | undefined => {
   if (typeof value !== "string" || value.trim().length === 0) return undefined;
@@ -93,10 +132,11 @@ const decodeActivity = (row: Record<string, unknown> | null | undefined): Activi
   };
 };
 
-const createTables = (db: SqliteDatabase): void => {
-  db.exec(`PRAGMA journal_mode = WAL;`);
-  db.exec(`PRAGMA busy_timeout = ${DEFAULT_BUSY_TIMEOUT_MS};`);
-  db.exec(`
+const createTables = (db: SqliteDatabase, busyTimeoutMs: number): void => {
+  withSqliteLockRetry(() => {
+    db.exec(`PRAGMA journal_mode = WAL;`);
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+    db.exec(`
     CREATE TABLE IF NOT EXISTS durable_workflow (
       key TEXT PRIMARY KEY NOT NULL,
       status TEXT NOT NULL,
@@ -162,17 +202,18 @@ const createTables = (db: SqliteDatabase): void => {
       ON durable_activity_attempt(activity_key, attempt);
   `);
 
-  const existingColumns = (
-    db.query("PRAGMA table_info(durable_activity)").all() as Array<{ readonly name?: string }>
-  ).map((row) => row.name).filter((value): value is string => typeof value === "string");
-  const ensureColumn = (name: string, sql: string): void => {
-    if (existingColumns.includes(name)) return;
-    db.exec(`ALTER TABLE durable_activity ADD COLUMN ${sql};`);
-  };
-  ensureColumn("checkpoint_revision", "checkpoint_revision INTEGER NOT NULL DEFAULT 0");
-  ensureColumn("checkpoint_output_json", "checkpoint_output_json TEXT");
-  ensureColumn("checkpoint_metadata_json", "checkpoint_metadata_json TEXT");
-  ensureColumn("last_heartbeat_at", "last_heartbeat_at INTEGER");
+    const existingColumns = (
+      db.query("PRAGMA table_info(durable_activity)").all() as Array<{ readonly name?: string }>
+    ).map((row) => row.name).filter((value): value is string => typeof value === "string");
+    const ensureColumn = (name: string, sql: string): void => {
+      if (existingColumns.includes(name)) return;
+      db.exec(`ALTER TABLE durable_activity ADD COLUMN ${sql};`);
+    };
+    ensureColumn("checkpoint_revision", "checkpoint_revision INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("checkpoint_output_json", "checkpoint_output_json TEXT");
+    ensureColumn("checkpoint_metadata_json", "checkpoint_metadata_json TEXT");
+    ensureColumn("last_heartbeat_at", "last_heartbeat_at INTEGER");
+  });
 };
 
 const cloneRecord = (value: Record<string, unknown> | undefined): Record<string, unknown> | undefined =>
@@ -182,22 +223,28 @@ export const createLocalDurableBackend = (
   opts: LocalDurableBackendOptions,
 ): DurableBackend => {
   const db = new Database(opts.dbPath, { create: true });
-  createTables(db);
+  createTables(db, opts.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS);
 
   const transaction = <T>(work: () => T): T => {
-    const wrapped = db.transaction(work);
-    return wrapped();
+    return withSqliteLockRetry(() => {
+      const wrapped = db.transaction(work);
+      return wrapped();
+    });
   };
 
   const getWorkflowRow = (key: ExecutionKey): Record<string, unknown> | undefined =>
-    db.query("SELECT * FROM durable_workflow WHERE key = ?").get(key) as
-      | Record<string, unknown>
-      | undefined;
+    withSqliteLockRetry(() =>
+      db.query("SELECT * FROM durable_workflow WHERE key = ?").get(key) as
+        | Record<string, unknown>
+        | undefined
+    );
 
   const getActivityRow = (key: ExecutionKey): Record<string, unknown> | undefined =>
-    db.query("SELECT * FROM durable_activity WHERE key = ?").get(key) as
-      | Record<string, unknown>
-      | undefined;
+    withSqliteLockRetry(() =>
+      db.query("SELECT * FROM durable_activity WHERE key = ?").get(key) as
+        | Record<string, unknown>
+        | undefined
+    );
 
   const heartbeatActivityRow = (
     input: ActivityHeartbeatInput,
@@ -338,9 +385,11 @@ export const createLocalDurableBackend = (
     });
 
   const listSignalsForKey = (key: ExecutionKey): ReadonlyArray<SignalEnvelope> =>
-    (db.query(
-      "SELECT * FROM durable_signal WHERE workflow_key = ? ORDER BY seq ASC",
-    ).all(key) as Record<string, unknown>[]).map(decodeSignal);
+    withSqliteLockRetry(() =>
+      (db.query(
+        "SELECT * FROM durable_signal WHERE workflow_key = ? ORDER BY seq ASC",
+      ).all(key) as Record<string, unknown>[]).map(decodeSignal)
+    );
 
   return {
     startOrResumeWorkflow: async (input) => upsertWorkflow(input),
@@ -469,7 +518,9 @@ export const createLocalDurableBackend = (
       }),
     getWorkflow: async (key) => decodeWorkflow(getWorkflowRow(key)),
     listWorkflows: async (opts) => {
-      const rows = db.query("SELECT * FROM durable_workflow ORDER BY key ASC").all() as Record<string, unknown>[];
+      const rows = withSqliteLockRetry(
+        () => db.query("SELECT * FROM durable_workflow ORDER BY key ASC").all() as Record<string, unknown>[],
+      );
       const statuses = opts?.statuses ? new Set(opts.statuses) : undefined;
       const prefix = opts?.prefix?.trim();
       return rows
@@ -496,7 +547,9 @@ export const createLocalDurableBackend = (
     completeActivity: async (input) => completeActivityRow(input),
     failActivity: async (input) => failActivityRow(input),
     listActivities: async (opts) => {
-      const rows = db.query("SELECT * FROM durable_activity ORDER BY key ASC").all() as Record<string, unknown>[];
+      const rows = withSqliteLockRetry(
+        () => db.query("SELECT * FROM durable_activity ORDER BY key ASC").all() as Record<string, unknown>[],
+      );
       const statuses = opts?.statuses ? new Set(opts.statuses) : undefined;
       const prefix = opts?.prefix?.trim();
       return rows
@@ -563,7 +616,7 @@ export const createLocalDurableBackend = (
             input.key,
             "running",
             attempts,
-            current?.checkpointRevision ?? 0,
+            0,
             encodeJson(cloneRecord(input.input)),
             encodeJson(cloneRecord(input.metadata)),
             now,
