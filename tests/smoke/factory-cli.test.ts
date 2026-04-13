@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { sqliteBranchStore, sqliteReceiptStore } from "../../src/adapters/sqlite";
 import { createRuntime } from "@receipt/core/runtime";
+import { terminalExitForDetail } from "../../src/factory-cli/app";
 import { COMPOSER_COMMANDS, inferObjectiveProfileHint, parseComposerDraft } from "../../src/factory-cli/composer";
 import { createObjectiveMutation } from "../../src/factory-cli/actions";
 import { loadFactoryConfig, resolveFactoryRuntimeConfig } from "../../src/factory-cli/config";
@@ -2412,6 +2413,21 @@ test("factory cli: attached run prints compact progress without waiting spam", a
   expect(run.stdout).toContain("Collecting evidence");
   expect(run.stdout).toContain("task_01");
 }, 30_000);
+
+test("factory cli: completed objectives do not force the attached TUI to exit", () => {
+  const terminal = terminalExitForDetail({
+    objectiveId: "objective_done",
+    status: "completed",
+    integration: { status: "promoted" },
+    policy: {
+      promotion: {
+        autoPromote: true,
+      },
+    },
+  } as unknown as Parameters<typeof terminalExitForDetail>[0]);
+
+  expect(terminal).toBeUndefined();
+});
 
 test("factory cli: create, compose, note, and react expose structured mutation results", async () => {
   const repoDir = await createRepo();

@@ -25,6 +25,7 @@ import {
 export type FactoryWorkbenchRequestState = {
   readonly shellBase: FactoryWorkbenchShellBase;
   readonly hasRequestedProfile: boolean;
+  readonly hasRequestedChat: boolean;
   readonly hasRequestedObjective: boolean;
   readonly hasRequestedFocus: boolean;
   readonly profileId: string;
@@ -40,16 +41,18 @@ export type FactoryWorkbenchRequestState = {
 
 export const readWorkbenchRequest = (req: Request): FactoryWorkbenchRequestState => {
   const profileId = requestedProfileId(req);
+  const chatId = requestedChatId(req);
   const objectiveId = requestedObjectiveId(req);
   const focusKind = requestedFocusKind(req);
   const focusId = requestedFocusId(req);
   return {
     shellBase: requestedWorkbenchShellBase(req),
     hasRequestedProfile: profileId !== undefined,
+    hasRequestedChat: chatId !== undefined,
     hasRequestedObjective: objectiveId !== undefined,
     hasRequestedFocus: focusKind !== undefined || focusId !== undefined,
     profileId: profileId ?? "generalist",
-    chatId: requestedChatId(req) ?? makeFactoryChatId(),
+    chatId: chatId ?? makeFactoryChatId(),
     objectiveId,
     inspectorTab: normalizedWorkbenchInspectorTab(requestedInspectorTab(req)),
     detailTab: normalizedWorkbenchDetailTab(requestedWorkbenchDetailTab(req), Boolean(objectiveId)),

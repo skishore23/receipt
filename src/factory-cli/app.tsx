@@ -85,8 +85,7 @@ const HOTKEYS = [
   ["q", "quit"],
 ] as const;
 
-const exitForDetail = (detail: FactoryObjectiveDetail): FactoryAppExit | undefined => {
-  if (detail.status === "completed") return { code: 0, reason: "completed", objectiveId: detail.objectiveId };
+export const terminalExitForDetail = (detail: FactoryObjectiveDetail): FactoryAppExit | undefined => {
   if (detail.status === "failed") return { code: 1, reason: "failed", objectiveId: detail.objectiveId };
   if (detail.status === "canceled") return { code: 1, reason: "canceled", objectiveId: detail.objectiveId };
   if (detail.status === "blocked") return { code: 2, reason: "blocked", objectiveId: detail.objectiveId };
@@ -1128,7 +1127,7 @@ export const FactoryTerminalApp = ({
 
   useEffect(() => {
     if (!exitOnTerminal || !snapshot?.detail) return;
-    const terminal = exitForDetail(snapshot.detail);
+    const terminal = terminalExitForDetail(snapshot.detail);
     if (terminal) safeExit(terminal);
   }, [
     exitOnTerminal,
@@ -1222,10 +1221,12 @@ export const FactoryTerminalApp = ({
         return;
       case "react":
         await runAction("Reacting objective", async () => {
-          await reactObjectiveMutation(runtime, {
+          const result = await reactObjectiveMutation(runtime, {
             objectiveId,
             message: command.message,
           });
+          selectedObjectiveIdRef.current = result.objectiveId;
+          setSelectedObjectiveId(result.objectiveId);
         });
         setDraft("");
         return;

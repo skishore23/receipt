@@ -971,6 +971,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   const buildWorkbenchWorkspaceModel = async (input: {
     readonly profileId?: string;
     readonly chatId?: string;
+    readonly hasRequestedChat?: boolean;
     readonly objectiveId?: string;
     readonly inspectorTab?: FactoryInspectorTab;
     readonly detailTab?: FactoryWorkbenchDetailTab;
@@ -1042,9 +1043,11 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
     const objectiveChatIdsByObjectiveId = new Map<string, string>(
       [...objectiveChatBindings.entries()].map(([objectiveId, binding]) => [objectiveId, binding.chatId]),
     );
-    const effectiveChatId = resolvedObjectiveId
-      ? objectiveChatBindings.get(resolvedObjectiveId)?.chatId ?? input.chatId
-      : input.chatId;
+    const effectiveChatId = input.hasRequestedChat
+      ? input.chatId
+      : resolvedObjectiveId
+        ? objectiveChatBindings.get(resolvedObjectiveId)?.chatId ?? input.chatId
+        : input.chatId;
     const { jobs: recentJobs } = detail
       ? await collectExplicitObjectiveJobs(
           detail,
@@ -1274,6 +1277,7 @@ const resolveWatchedObjectiveId = async (value: string | undefined): Promise<str
   const buildWorkbenchWorkspaceModelCached = async (input: {
     readonly profileId?: string;
     readonly chatId?: string;
+    readonly hasRequestedChat?: boolean;
     readonly objectiveId?: string;
     readonly inspectorTab?: FactoryInspectorTab;
     readonly detailTab?: FactoryWorkbenchDetailTab;

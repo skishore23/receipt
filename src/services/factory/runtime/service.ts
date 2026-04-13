@@ -2061,6 +2061,18 @@ export class FactoryService {
     const state = await this.getObjectiveState(objectiveId);
     this.assertObjectiveProfileDispatchActionAllowed(this.objectiveProfileForState(state), "react");
     const normalized = optionalTrimmedString(message);
+    if (normalized && this.isObjectiveContinuationBoundary(state)) {
+      return this.createObjective({
+        title: clipText(normalized, 96) ?? "Factory objective",
+        prompt: normalized,
+        baseHash: state.baseHash,
+        objectiveMode: state.objectiveMode,
+        severity: state.severity,
+        checks: state.checks,
+        channel: state.channel,
+        profileId: state.profile.rootProfileId,
+      });
+    }
     if (normalized) await this.addObjectiveNote(objectiveId, normalized);
     await this.reactObjective(objectiveId);
     return this.getObjective(objectiveId);
@@ -2580,6 +2592,15 @@ export class FactoryService {
 
   private isTerminalObjectiveStatus(status: FactoryObjectiveStatus): boolean {
     return isLifecycleTerminalObjectiveStatus(status);
+  }
+
+  private isObjectiveContinuationBoundary(
+    state: Pick<FactoryState, "status" | "archivedAt">,
+  ): boolean {
+    return Boolean(state.archivedAt)
+      || state.status === "completed"
+      || state.status === "failed"
+      || state.status === "canceled";
   }
 
   private objectiveConsumesRepoSlot(

@@ -1543,6 +1543,65 @@ test("factory service: terminal cleanup retires lingering non-audit jobs without
   expect(detail.phaseDetail).toBe("completed");
 });
 
+test("factory service: reactObjectiveWithNote creates a follow-up objective after completion", async () => {
+  const dataDir = await createTempDir("receipt-factory-followup-after-complete");
+  const repoRoot = await createSourceRepo();
+  const jobRuntime = createJobRuntime(dataDir);
+  const queue = sqliteQueue({ runtime: jobRuntime, stream: "jobs" });
+  const service = new FactoryService({
+    dataDir,
+    queue,
+    jobRuntime,
+    sse: new SseHub(),
+    codexExecutor: { run: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "" }) },
+    repoRoot,
+  });
+
+  const created = await service.createObjective({
+    title: "Completed objective follow-up",
+    prompt: "Finish the original objective.",
+    checks: ["git status --short"],
+  });
+
+  const bootstrapControl = (await queue.listJobs({ limit: 20 }))
+    .find((job) => job.agentId === "factory-control" && job.payload.objectiveId === created.objectiveId);
+  if (bootstrapControl) {
+    await queue.cancel(bootstrapControl.id, "test cleanup bootstrap", "factory.test");
+  }
+
+  const internals = service as unknown as {
+    emitObjective(objectiveId: string, event: {
+      readonly type: "objective.completed";
+      readonly objectiveId: string;
+      readonly summary: string;
+      readonly completedAt: number;
+    }): Promise<void>;
+  };
+  await internals.emitObjective(created.objectiveId, {
+    type: "objective.completed",
+    objectiveId: created.objectiveId,
+    summary: "Objective completed successfully.",
+    completedAt: Date.now(),
+  });
+
+  const followedUp = await service.reactObjectiveWithNote(
+    created.objectiveId,
+    "Continue by tightening the docs and adding another validation pass.",
+  );
+
+  expect(followedUp.objectiveId).not.toBe(created.objectiveId);
+  expect(followedUp.prompt).toContain("Continue by tightening the docs");
+  expect(followedUp.objectiveMode).toBe("delivery");
+  expect(followedUp.checks).toEqual(["git status --short"]);
+
+  const original = await service.getObjective(created.objectiveId);
+  expect(original.status).toBe("completed");
+  expect(original.recentReceipts.some((receipt) => (
+    receipt.type === "objective.operator.noted"
+    && receipt.summary.includes("tightening the docs")
+  ))).toBe(false);
+});
+
 test("factory service: reconcile retires lingering live jobs when it completes the objective inline", async () => {
   const dataDir = await createTempDir("receipt-factory-terminal-cleanup-inline");
   const repoRoot = await createSourceRepo();
@@ -8586,6 +8645,68 @@ test("factory route: /factory-preview compose keeps the preview shell contract",
     objectiveId: "objective_demo",
     message: "Keep moving on the failing integration test.",
   });
+});
+
+test("factory route: /factory-preview preserves an explicitly requested chat even when the selected objective has a bound chat", async () => {
+  const dataDir = await createTempDir("receipt-factory-preview-explicit-chat");
+  await writeChatProjection({
+    dataDir,
+    repoRoot: process.cwd(),
+    profileId: "generalist",
+    chatId: "chat_bound",
+    events: [
+      {
+        type: "problem.set",
+        runId: "run_bound",
+        problem: "Original bound thread.",
+      },
+      {
+        type: "thread.bound",
+        runId: "run_bound",
+        objectiveId: "objective_done",
+        chatId: "chat_bound",
+        reason: "startup",
+      },
+    ],
+  });
+  const completedObjective = {
+    ...makeStubObjectiveDetail("objective_done", "job_done"),
+    status: "completed",
+    phase: "completed",
+    latestSummary: "Completed objective summary",
+    nextAction: "Start a follow-up objective for more work.",
+  } as unknown as Awaited<ReturnType<FactoryService["getObjective"]>>;
+  const completedCard = {
+    ...completedObjective,
+    section: "completed" as const,
+  };
+  const app = createRouteTestApp({
+    dataDir,
+    service: {
+      buildBoardProjection: async () => ({
+        objectives: [completedCard],
+        sections: {
+          needs_attention: [],
+          active: [],
+          queued: [],
+          completed: [completedCard],
+        },
+        selectedObjectiveId: "objective_done",
+      }),
+      listObjectives: async () => [
+        completedObjective as unknown as Awaited<ReturnType<FactoryService["listObjectives"]>>[number],
+      ],
+      getObjective: async () => completedObjective,
+    },
+  });
+
+  const response = await app.request("http://receipt.test/factory-preview?profile=generalist&chat=chat_explicit&objective=objective_done&detailTab=action");
+  const body = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(body).toContain('data-chat-id="chat_explicit"');
+  expect(body).toContain("/factory-preview/island/timeline?profile=generalist&amp;chat=chat_explicit&amp;objective=objective_done&amp;detailTab=action");
+  expect(body).not.toContain('data-chat-id="chat_bound"');
 });
 
 test("factory route: /runtime returns the legacy runtime architecture layout with live data", async () => {
