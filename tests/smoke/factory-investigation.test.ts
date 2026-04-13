@@ -13,6 +13,7 @@ import { createRuntime } from "@receipt/core/runtime";
 import { getReceiptDb } from "../../src/db/client";
 import { SseHub } from "../../src/framework/sse-hub";
 import { decide as decideJob, initial as initialJob, reduce as reduceJob, type JobCmd, type JobEvent, type JobState } from "../../src/modules/job";
+import { initialFactoryState } from "../../src/modules/factory";
 import { readFactoryReceiptInvestigation } from "../../src/factory-cli/investigate";
 import { writeInvestigationEvidenceBundle } from "../../src/services/factory-evidence-bundle";
 import { FACTORY_MONITOR_AGENT_ID, FactoryService, type FactoryTaskJobPayload } from "../../src/services/factory-service";
@@ -462,6 +463,192 @@ test("factory investigation: blocked structured reports stay non-approvable and 
   expect(detail.latestHandoff?.status).toBe("blocked");
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.reported")).toBe(true);
   expect(detail.recentReceipts.some((receipt) => receipt.type === "investigation.synthesized")).toBe(false);
+}, 120_000);
+
+test("factory investigation: getObjective rehydrates stale durable handoffs from tabular artifacts", async () => {
+  const { service, repoRoot } = await createFactoryService({
+    codexRun: async () => ({ stdout: "{}", stderr: "", lastMessage: "{}" }),
+  });
+
+  const inventoryJsonPath = path.join(repoRoot, "aws_s3_bucket_inventory.json");
+  const inventoryMarkdownPath = path.join(repoRoot, "aws_s3_bucket_inventory.md");
+  await fs.writeFile(inventoryJsonPath, JSON.stringify({
+    totalCount: 5,
+    buckets: [
+      { name: "cloudscore1", region: "us-east-1" },
+      { name: "cloudscoreradiusreport", region: "us-east-1" },
+    ],
+  }, null, 2), "utf-8");
+  await fs.writeFile(inventoryMarkdownPath, [
+    "# S3 bucket inventory",
+    "",
+    "| Bucket | Region |",
+    "| --- | --- |",
+    "| cloudscore1 | us-east-1 |",
+    "| cloudscoreradiusreport | us-east-1 |",
+  ].join("\n"), "utf-8");
+
+  const report = {
+    conclusion: "Found five buckets.",
+    evidence: [],
+    scriptsRun: [],
+    disagreements: [],
+    nextSteps: [],
+  } as const;
+  const staleOutput = [
+    "Conclusion Found five buckets.",
+    "",
+    "Evidence",
+    "",
+    "S3 bucket inventory completed with a helper run.",
+  ].join("\n");
+  const staleState = {
+    ...initialFactoryState,
+    objectiveId: "objective_s3",
+    title: "show me list of s3 in a table",
+    prompt: "show me list of s3 in a table",
+    objectiveMode: "investigation",
+    status: "completed",
+    createdAt: 1,
+    updatedAt: 2,
+    latestSummary: "Found five buckets.",
+    workflow: {
+      ...initialFactoryState.workflow,
+      objectiveId: "objective_s3",
+      status: "completed",
+      taskIds: ["task_01"],
+      tasksById: {
+        task_01: {
+          nodeId: "task_01",
+          dependsOn: [],
+          status: "approved",
+          taskId: "task_01",
+          taskKind: "planned",
+          title: "show me list of s3 in a table",
+          prompt: "show me list of s3 in a table",
+          workerType: "codex",
+          executionMode: "worktree",
+          baseCommit: "base",
+          skillBundlePaths: [],
+          contextRefs: [],
+          artifactRefs: {},
+          createdAt: 1,
+          completedAt: 2,
+        },
+      },
+      activeTaskIds: [],
+      updatedAt: 2,
+    },
+    investigation: {
+      reports: {
+        task_01: {
+          taskId: "task_01",
+          candidateId: "task_01_candidate_01",
+          outcome: "approved",
+          summary: "Found five buckets.",
+          handoff: "Found five buckets and wrote the inventory artifact.",
+          presentation: {
+            kind: "investigation_report",
+            renderHint: "report",
+            inlineBody: "Found five buckets and wrote the inventory artifact.",
+            primaryArtifactLabels: ["S3 bucket inventory", "S3 bucket inventory markdown"],
+          },
+          completion: {
+            changed: [],
+            proof: [],
+            remaining: [],
+          },
+          report,
+          artifactRefs: {
+            inventory: {
+              kind: "artifact",
+              ref: inventoryJsonPath,
+              label: "S3 bucket inventory",
+            },
+            inventoryMarkdown: {
+              kind: "artifact",
+              ref: inventoryMarkdownPath,
+              label: "S3 bucket inventory markdown",
+            },
+          },
+          reportedAt: 2,
+        },
+      },
+      reportOrder: ["task_01"],
+      synthesized: {
+        summary: "Found five buckets.",
+        report,
+        taskIds: ["task_01"],
+        synthesizedAt: 2,
+      },
+    },
+    latestHandoff: {
+      status: "completed",
+      summary: "Found five buckets.",
+      renderedBody: staleOutput,
+      output: staleOutput,
+      renderSourceHash: "stale-objective-handoff",
+      handoffKey: "handoff_stale",
+      sourceUpdatedAt: 2,
+    },
+  };
+  expect(staleState.latestHandoff?.renderedBody).toContain("Conclusion");
+  expect(staleState.latestHandoff?.renderedBody).not.toContain("| Bucket | Region |");
+
+  const card = await (service as any).buildObjectiveCard(staleState, undefined, [], false, []);
+  expect(card.latestHandoff?.renderedBody).toContain("| Bucket | Region |");
+  expect(card.latestHandoff?.renderedBody).toContain("| cloudscore1 | us-east-1 |");
+  expect(card.latestHandoff?.renderedBody).not.toContain("Conclusion");
+}, 120_000);
+
+test("factory investigation: semantic conclusions keep full markdown tables in the completed handoff", async () => {
+  const { service, queue } = await createFactoryService({
+    codexRun: async () => {
+      const raw = JSON.stringify({
+        status: "answered",
+        conclusion: [
+          "I captured the active AWS account's S3 inventory and rendered the bucket list with creation dates in a table.",
+          "",
+          "| Bucket | Created |",
+          "| --- | --- |",
+          "| cf-templates--1fzoen9o074n-us-east-1 | 2025-06-07T16:49:02+00:00 |",
+          "| cf-templates--9aweqz1t8nk8-us-east-1 | 2024-09-26T12:40:17+00:00 |",
+          "| cloudscore1 | 2024-11-04T19:00:58+00:00 |",
+          "| cloudscoreradiusreport | 2024-11-19T18:39:27+00:00 |",
+          "| lambdasam-3d3986c07d-us-east-1 | 2024-11-04T19:28:30+00:00 |",
+        ].join("\n"),
+        findings: [{
+          title: "S3 bucket inventory captured successfully",
+          summary: "The helper returned 5 buckets with creation timestamps.",
+          confidence: "confirmed",
+          evidenceRefLabels: ["S3 bucket inventory markdown"],
+        }],
+        uncertainties: [],
+        nextAction: null,
+      });
+      return { stdout: raw, stderr: "", lastMessage: raw };
+    },
+  });
+
+  const created = await service.createObjective({
+    title: "Show S3 buckets with creation dates",
+    prompt: "show list of s3 buckets with creation date in a table",
+    objectiveMode: "investigation",
+    severity: 1,
+    profileId: "infrastructure",
+  });
+
+  await runObjectiveStartup(service, created.objectiveId);
+  const [taskJob] = await objectiveTaskJobs(queue, created.objectiveId);
+  expect(taskJob).toBeTruthy();
+  await service.runTask(taskJob!.payload as FactoryTaskJobPayload);
+
+  const detail = await service.getObjective(created.objectiveId);
+  expect(detail.latestHandoff?.status).toBe("completed");
+  expect(detail.latestHandoff?.renderedBody).toContain("| Bucket | Created |");
+  expect(detail.latestHandoff?.renderedBody).toContain("| cloudscore1 | 2024-11-04T19:00:58+00:00 |");
+  expect(detail.latestHandoff?.renderedBody).toContain("| lambdasam-3d3986c07d-us-east-1 | 2024-11-04T19:28:30+00:00 |");
+  expect(detail.latestHandoff?.renderedBody).not.toContain("2024-09-26T12:40:1...");
 }, 120_000);
 
 test("factory investigation: approved results downgrade to partial when captured evidence artifacts record errors", async () => {

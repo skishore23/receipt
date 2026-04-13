@@ -3,7 +3,7 @@ import path from "node:path";
 import { readRepoStatus } from "../lib/repo-status";
 import type { FactoryService } from "../services/factory-service";
 import type { AgentToolExecutor } from "./capabilities";
-import type { AgentFinalizer, AgentRunInput } from "./agent";
+import type { AgentFailureFinalizer, AgentFinalizer, AgentRunInput } from "./agent";
 
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -101,6 +101,12 @@ export const renderActiveChildProgressText = (progress: ActiveChildProgress): st
     "Keep this chat open for live updates.",
   ].filter(Boolean).join("\n\n");
 
+const isTerminalObjectiveDetail = (status: unknown): boolean =>
+  status === "blocked"
+  || status === "completed"
+  || status === "failed"
+  || status === "canceled";
+
 export const createLiveFactoryFinalizer = (input: {
   readonly factoryService?: Pick<FactoryService, "getObjective">;
   readonly getCurrentObjectiveId: () => string | undefined;
@@ -131,7 +137,7 @@ export const createLiveFactoryFinalizer = (input: {
     const objectiveId = input.getCurrentObjectiveId();
     if (!objectiveId) return { accept: true };
     const detail = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
-    if (!detail || detail.archivedAt || detail.status === "blocked" || detail.status === "completed" || detail.status === "failed" || detail.status === "canceled") {
+    if (!detail || detail.archivedAt || isTerminalObjectiveDetail(detail.status)) {
       return { accept: true };
     }
     if (finalWhileChildRunning === "allow") return { accept: true };
@@ -150,6 +156,50 @@ export const createLiveFactoryFinalizer = (input: {
         "Keep this chat open for live updates.",
       ].filter(Boolean).join("\n\n"),
     };
+  };
+
+export const createLiveFactoryFailureFinalizer = (input: {
+  readonly factoryService?: Pick<FactoryService, "getObjective">;
+  readonly getCurrentObjectiveId: () => string | undefined;
+  readonly describeActiveChild?: () => Promise<ActiveChildProgress | undefined>;
+}): AgentFailureFinalizer =>
+  async ({ failure }) => {
+    const lead = /timed out/i.test(failure.message)
+      ? "I hit a reply timeout while checking the latest state."
+      : "I couldn't finish the reply, but here's the latest state.";
+    const activeChild = await input.describeActiveChild?.();
+    if (activeChild?.summary || activeChild?.detail || activeChild?.jobId) {
+      return [lead, renderActiveChildProgressText(activeChild)].join("\n\n");
+    }
+    const objectiveId = input.getCurrentObjectiveId();
+    if (!objectiveId || !input.factoryService) {
+      return `${lead}\n\nPlease retry the message if you need a fresh pass.`;
+    }
+    const detail = await input.factoryService.getObjective(objectiveId).catch(() => undefined);
+    if (!detail) return `${lead}\n\nPlease retry the message if you need a fresh pass.`;
+    if (!detail.archivedAt && !isTerminalObjectiveDetail(detail.status)) {
+      return [
+        lead,
+        "Work is still running in this chat.",
+        `${detail.title || detail.objectiveId} is ${detail.status}${detail.phase ? ` (${detail.phase})` : ""}.`,
+        asString(detail.latestSummary),
+        "Keep this chat open for live updates.",
+      ].filter(Boolean).join("\n\n");
+    }
+    if (detail.status === "blocked") {
+      return [
+        lead,
+        detail.blockedExplanation?.summary
+          ?? `${detail.title || detail.objectiveId} is blocked.`,
+        asString(detail.latestSummary),
+        "React to the objective with follow-up guidance if you want to continue this work.",
+      ].filter(Boolean).join("\n\n");
+    }
+    return [
+      lead,
+      `${detail.title || detail.objectiveId} is ${detail.status}${detail.phase ? ` (${detail.phase})` : ""}.`,
+      asString(detail.latestSummary) ?? asString(detail.nextAction),
+    ].filter(Boolean).join("\n\n");
   };
 
 export const combineFinalizers = (

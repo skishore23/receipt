@@ -1,4 +1,4 @@
-export type ReactiveRefreshKind = "sse" | "body";
+export type ReactiveRefreshKind = "live" | "body";
 
 export type ReactiveRefreshSpec = {
   readonly kind: ReactiveRefreshKind;
@@ -31,26 +31,29 @@ type ReactivePushDecision<
 
 type ConnectedReactiveSource = {
   readonly signature: string;
-  readonly eventSource: EventSource;
+  readonly liveSource: {
+    addEventListener: (type: string, handler: (event: Event | MessageEvent<string>) => void) => void;
+    close: () => void;
+  };
 };
 
 const parseReactiveRefreshSpec = (value: string): ReactiveRefreshSpec | undefined => {
   const trimmed = value.trim();
   if (!trimmed || trimmed === "load") return undefined;
-  const descriptorMatch = trimmed.match(/^(sse|body):([^@]+?)(?:@(\d+))?$/i);
+  const descriptorMatch = trimmed.match(/^(live|sse|body):([^@]+?)(?:@(\d+))?$/i);
   if (descriptorMatch && descriptorMatch[1] && descriptorMatch[2]) {
     const throttleMs = descriptorMatch[3] ? Number(descriptorMatch[3]) : undefined;
     return {
-      kind: descriptorMatch[1].toLowerCase() === "body" ? "body" : "sse",
+      kind: descriptorMatch[1].toLowerCase() === "body" ? "body" : "live",
       event: descriptorMatch[2].trim(),
       throttleMs: typeof throttleMs === "number" && Number.isFinite(throttleMs) ? throttleMs : undefined,
     };
   }
-  const triggerMatch = trimmed.match(/^sse:([a-z0-9:-]+)(?:\s+throttle:(\d+)ms)?$/i);
+  const triggerMatch = trimmed.match(/^(?:live|sse):([a-z0-9:-]+)(?:\s+throttle:(\d+)ms)?$/i);
   if (triggerMatch && triggerMatch[1]) {
     const throttleMs = triggerMatch[2] ? Number(triggerMatch[2]) : undefined;
     return {
-      kind: "sse",
+      kind: "live",
       event: triggerMatch[1],
       throttleMs: typeof throttleMs === "number" && Number.isFinite(throttleMs) ? throttleMs : undefined,
     };
@@ -141,23 +144,30 @@ export const createReactivePushRouter = <
   readonly targets: () => ReadonlyArray<ReactiveRefreshTarget<SourceKey, TargetKey, ScopeKey>>;
   readonly eventPath: (sourceKey: SourceKey) => string | null;
   readonly getScopeKey?: () => ScopeKey | undefined;
-  readonly ignoreSseMessage?: (event: MessageEvent<string>) => boolean;
-  readonly onSseEvent?: (input: {
+  readonly ignoreLiveMessage?: (event: MessageEvent<string>) => boolean;
+  readonly onLiveEvent?: (input: {
     readonly sourceKey: SourceKey;
     readonly eventName: string;
     readonly event: MessageEvent<string>;
     readonly scopeKey?: ScopeKey;
   }) => void;
-  readonly onEventSourceConnected?: (input: {
+  readonly onLiveSourceConnected?: (input: {
     readonly sourceKey: SourceKey;
-    readonly eventSource: EventSource;
+    readonly liveSource: {
+      addEventListener: (type: string, handler: (event: Event | MessageEvent<string>) => void) => void;
+      close: () => void;
+    };
     readonly path: string;
   }) => void;
+  readonly connectLiveSource?: (path: string) => {
+    addEventListener: (type: string, handler: (event: Event | MessageEvent<string>) => void) => void;
+    close: () => void;
+  } | null;
   readonly shouldQueue?: (
     input: ReactivePushDecision<SourceKey, TargetKey>,
   ) => boolean;
 }) => {
-  const defaultIgnoreSseMessage = (event: MessageEvent<string>) => event.data === "init";
+  const defaultIgnoreLiveMessage = (event: MessageEvent<string>) => event.data === "init";
   const connectedSources = new Map<SourceKey, ConnectedReactiveSource>();
   const bodyHandlers = new Map<string, (event: Event) => void>();
 
@@ -174,7 +184,7 @@ export const createReactivePushRouter = <
   const closeSource = (sourceKey: SourceKey) => {
     const current = connectedSources.get(sourceKey);
     if (!current) return;
-    if (typeof current.eventSource.close === "function") current.eventSource.close();
+    if (typeof current.liveSource.close === "function") current.liveSource.close();
     connectedSources.delete(sourceKey);
   };
 
@@ -247,14 +257,15 @@ export const createReactivePushRouter = <
     }
   };
 
-  const syncEventSources = () => {
-    if (typeof window.EventSource !== "function") {
+  const syncLiveSources = () => {
+    const connectLiveSource = options.connectLiveSource;
+    if (!connectLiveSource) {
       for (const sourceKey of Array.from(connectedSources.keys())) closeSource(sourceKey);
       return;
     }
     for (const sourceKey of options.sources) {
       const path = options.eventPath(sourceKey);
-      const events = [...declaredEvents(sourceKey, "sse")].sort();
+      const events = [...declaredEvents(sourceKey, "live")].sort();
       if (!path || events.length === 0) {
         closeSource(sourceKey);
         continue;
@@ -263,30 +274,31 @@ export const createReactivePushRouter = <
       const current = connectedSources.get(sourceKey);
       if (current && current.signature === signature) continue;
       closeSource(sourceKey);
-      const eventSource = new window.EventSource(path);
-      const ignoreSseMessage = options.ignoreSseMessage ?? defaultIgnoreSseMessage;
+      const liveSource = connectLiveSource(path);
+      if (!liveSource) continue;
+      const ignoreLiveMessage = options.ignoreLiveMessage ?? defaultIgnoreLiveMessage;
       for (const eventName of events) {
-        eventSource.addEventListener(eventName, (event) => {
+        liveSource.addEventListener(eventName, (event) => {
           const message = event as MessageEvent<string>;
-          if (ignoreSseMessage(message)) return;
+          if (ignoreLiveMessage(message)) return;
           const scopeKey = options.getScopeKey?.();
-          options.onSseEvent?.({
+          options.onLiveEvent?.({
             sourceKey,
             eventName,
             event: message,
             scopeKey,
           });
-          queueMatching(sourceKey, eventName, "sse", message, scopeKey);
+          queueMatching(sourceKey, eventName, "live", message, scopeKey);
         });
       }
-      connectedSources.set(sourceKey, { signature, eventSource });
-      options.onEventSourceConnected?.({ sourceKey, eventSource, path });
+      connectedSources.set(sourceKey, { signature, liveSource });
+      options.onLiveSourceConnected?.({ sourceKey, liveSource, path });
     }
   };
 
   const sync = () => {
     syncBodyListeners();
-    syncEventSources();
+    syncLiveSources();
   };
 
   const close = () => {
@@ -301,7 +313,7 @@ export const createReactivePushRouter = <
   return {
     sync,
     syncBodyListeners,
-    syncEventSources,
+    syncLiveSources,
     close,
   };
 };

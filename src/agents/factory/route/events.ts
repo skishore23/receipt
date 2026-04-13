@@ -5,6 +5,24 @@ import { collectRunLineageIds, jobMatchesRunIds } from "../live-jobs";
 import { resolveChatViewStream } from "../links";
 import type { QueueJob } from "../../../adapters/sqlite-queue";
 import type { FactoryService } from "../../../services/factory-service";
+import type { LiveSubscription } from "@receipt/live";
+
+export type FactoryChatEventSubscriptionSet = {
+  readonly profileId: string;
+  readonly stream?: string;
+  readonly objectiveId?: string;
+  readonly jobIds: ReadonlyArray<string>;
+};
+
+export const liveSubscriptionsForFactoryChatEvents = (
+  body: FactoryChatEventSubscriptionSet,
+): ReadonlyArray<LiveSubscription> => [
+  ...(body.stream ? [{ topic: "agent" as const, stream: body.stream }] : []),
+  { topic: "profile-board" as const, stream: body.profileId },
+  ...(body.objectiveId ? [{ topic: "factory" as const, stream: body.objectiveId }] : []),
+  ...(body.objectiveId ? [{ topic: "objective-runtime" as const, stream: body.objectiveId }] : []),
+  ...body.jobIds.map((jobId) => ({ topic: "jobs" as const, stream: jobId })),
+];
 
 export const createFactoryRouteEvents = (input: {
   readonly ctx: AgentLoaderContext;
@@ -26,12 +44,7 @@ export const createFactoryRouteEvents = (input: {
     readonly objectiveId?: string;
     readonly runId?: string;
     readonly jobId?: string;
-  }): Promise<{
-    readonly profileId: string;
-    readonly stream?: string;
-    readonly objectiveId?: string;
-    readonly jobIds: ReadonlyArray<string>;
-  }> => {
+  }): Promise<FactoryChatEventSubscriptionSet> => {
     const profile = await resolveFactoryChatProfile({
       repoRoot: input.service.git.repoRoot,
       profileRoot: input.profileRoot,
@@ -81,24 +94,7 @@ export const createFactoryRouteEvents = (input: {
     };
   };
 
-  const subscribeChatEventStream = (
-    body: {
-      readonly profileId: string;
-      readonly stream?: string;
-      readonly objectiveId?: string;
-      readonly jobIds: ReadonlyArray<string>;
-    },
-    signal: AbortSignal,
-  ): Response => input.ctx.sse.subscribeMany([
-    ...(body.stream ? [{ topic: "agent" as const, stream: body.stream }] : []),
-    { topic: "profile-board" as const, stream: body.profileId },
-    ...(body.objectiveId ? [{ topic: "factory" as const, stream: body.objectiveId }] : []),
-    ...(body.objectiveId ? [{ topic: "objective-runtime" as const, stream: body.objectiveId }] : []),
-    ...body.jobIds.map((jobId) => ({ topic: "jobs" as const, stream: jobId })),
-  ], signal);
-
   return {
     resolveChatEventSubscriptions,
-    subscribeChatEventStream,
   };
 };

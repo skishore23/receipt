@@ -39,6 +39,7 @@ import {
   composeObjectiveMutation,
   createObjectiveMutation,
   followUpJobMutation,
+  noteObjectiveMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
   steerJobMutation,
@@ -89,6 +90,7 @@ import {
   loadFactoryHelperCatalog,
   runFactoryHelper,
 } from "../../services/factory-helper-catalog";
+import { buildFactoryObjectiveLoadingState } from "../../services/factory/live-status";
 import { resolveFactoryChatProfile } from "../../services/factory-chat-profiles";
 import type { FactoryCloudProvider } from "../../services/factory-cloud-context";
 import { readObjectiveReplaySnapshot } from "../../services/factory/objective-replay";
@@ -205,9 +207,6 @@ const formatDurationMs = (durationMs: number): string => {
   return `${minutes}m ${seconds}s`;
 };
 
-const normalizeInline = (value: string | undefined): string | undefined =>
-  value?.replace(/\s+/g, " ").trim() || undefined;
-
 const renderObjectiveWaitLine = (opts: {
   readonly objectiveId: string;
   readonly detail: Awaited<
@@ -224,54 +223,32 @@ const renderObjectiveWaitLine = (opts: {
   >;
   readonly auditStatus: "idle" | "queued" | "running" | "completed" | "failed";
 }): { readonly key: string; readonly line: string } => {
-  const activeTask =
-    opts.live?.activeTasks[0] ??
-    opts.detail.tasks.find(
-      (task) => task.status === "running" || task.status === "reviewing",
-    );
-  const nextTask = opts.detail.tasks.find(
-    (task) =>
-      task.taskId !== activeTask?.taskId &&
-      (task.status === "ready" || task.status === "pending"),
-  );
-  const signal = normalizeInline(
-    activeTask?.lastMessage ??
-      activeTask?.stderrTail ??
-      activeTask?.stdoutTail ??
-      opts.detail.nextAction ??
-      opts.detail.latestSummary,
-  );
-  const taskLabel = activeTask
-    ? `${activeTask.taskId.slice(-2)}(${(activeTask.jobStatus ?? activeTask.status).slice(0, 3)})`
-    : opts.detail.tasks.length > 0
-      ? opts.detail.tasks
-          .map((task) => `${task.taskId.slice(-2)}(${task.status.slice(0, 3)})`)
-          .join(",")
-      : "none";
-  const nextLabel =
-    activeTask && nextTask
-      ? `${nextTask.taskId.slice(-2)}(${nextTask.status.slice(0, 3)})`
-      : undefined;
-  const line = [
-    `obj=${opts.objectiveId.slice(-6)}`,
-    `phase=${opts.detail.phase}`,
-    `int=${opts.detail.integration.status}`,
-    `audit=${opts.auditStatus}`,
-    `task=${taskLabel}`,
-    nextLabel ? `next=${nextLabel}` : undefined,
-    signal ? `live=${truncate(signal, 84)}` : undefined,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const loading = buildFactoryObjectiveLoadingState({
+    detail: opts.detail,
+    live: opts.live,
+  });
+  const auditLabel = opts.auditStatus === "queued" || opts.auditStatus === "running"
+    ? `audit ${opts.auditStatus}`
+    : undefined;
+  const segments = [
+    `[${opts.objectiveId.slice(-6)}] ${loading.label}`,
+    loading.summary,
+    loading.detail,
+    ...(loading.highlights?.slice(0, 2) ?? []),
+    auditLabel,
+    loading.nextAction ? `Next: ${truncate(loading.nextAction, 96)}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const line = segments.join(" · ");
   const key = JSON.stringify([
     opts.detail.status,
     opts.detail.phase,
     opts.detail.integration.status,
     opts.auditStatus,
-    activeTask?.taskId,
-    activeTask?.jobStatus ?? activeTask?.status,
-    nextTask?.taskId,
-    signal,
+    loading.label,
+    loading.summary,
+    loading.detail,
+    ...(loading.highlights ?? []),
+    loading.nextAction,
     opts.detail.updatedAt,
   ]);
   return { key, line };
@@ -573,6 +550,7 @@ const printFactoryUsage = (subcommand?: string): void => {
           "  receipt factory codex-probe [--mode direct|queue|both] [--reply <text>] [--prompt <text>] [--json]",
           "  receipt factory create --prompt <text> [--objective-mode delivery|investigation] [--severity 1|2|3|4|5]",
           "  receipt factory compose [--objective <id>] --prompt <text>",
+          "  receipt factory note <objective-id> [--message <text>]",
           "  receipt factory react <objective-id> [--message <text>]",
           "  receipt factory promote <objective-id>",
           "  receipt factory cancel <objective-id> [--reason <text>]",
@@ -904,7 +882,7 @@ const printMutationResult = async (
   if (result.kind === "objective") {
     const verb =
       result.action === "compose" && result.note ? "reacted" : result.action;
-    console.log(`${verb} ${result.objectiveId}`);
+    console.log(`${verb === "note" ? "noted" : verb} ${result.objectiveId}`);
     return;
   }
   console.log(`${result.action} queued for ${result.jobId}`);
@@ -1778,6 +1756,25 @@ export const handleFactoryCommand = async (
         const message =
           asString(flags, "message") ?? (trailingMessage || undefined);
         const result = await reactObjectiveMutation(runtime, {
+          objectiveId,
+          message,
+        });
+        await printMutationResult(result, json);
+        return;
+      }
+      case "note": {
+        const objectiveId = args[1];
+        if (!objectiveId)
+          throw new Error("factory note requires <objective-id>");
+        const trailingMessage = args.slice(2).join(" ").trim();
+        const message =
+          asString(flags, "message") ?? (trailingMessage || undefined);
+        if (!message) {
+          throw new Error(
+            "factory note requires --message or trailing note text",
+          );
+        }
+        const result = await noteObjectiveMutation(runtime, {
           objectiveId,
           message,
         });

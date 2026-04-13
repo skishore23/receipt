@@ -25,6 +25,7 @@ import { renderFactoryRunSteps } from "../../factory-live-steps";
 import {
   displayStateTone,
 } from "../supervision";
+import { renderObjectiveSelfImprovementSnapshot as renderSharedObjectiveSelfImprovementSnapshot } from "../shared/self-improvement";
 import { renderMarkdown } from "../shared/markdown";
 import { COMPOSER_COMMANDS } from "../../../factory-cli/composer";
 import { DEFAULT_FACTORY_WORKBENCH_FILTER } from "../../factory-models";
@@ -32,6 +33,7 @@ import {
   buildFactoryWorkbenchRouteKey,
   buildFactoryWorkbenchSearch,
   buildFactoryWorkbenchSearchParams,
+  type FactoryWorkbenchShellBase,
 } from "./route";
 import type {
   FactoryChatIslandModel,
@@ -51,7 +53,7 @@ import type {
 } from "../../factory-models";
 
 export type FactoryWorkbenchRouteContext = {
-  readonly shellBase: "/factory" | "/factory-new";
+  readonly shellBase: FactoryWorkbenchShellBase;
   readonly profileId: string;
   readonly chatId: string;
   readonly objectiveId?: string;
@@ -69,8 +71,7 @@ export type FactoryWorkbenchShellSnapshot = {
   readonly route: FactoryWorkbenchRouteContext;
   readonly envelope?: WorkbenchVersionEnvelope;
   readonly location?: string;
-  readonly backgroundEventsPath: string;
-  readonly chatEventsPath: string;
+  readonly livePath: string;
   readonly backgroundRootPath: string;
   readonly workbenchIslandPath: string;
   readonly chatIslandPath: string;
@@ -126,7 +127,7 @@ const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMANDS.map(
 
 const routeBase = (input: Pick<FactoryWorkbenchRouteContext, "shellBase">): string => input.shellBase;
 
-const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "shellBase" | "profileId" | "chatId" | "objectiveId" | "focusKind" | "focusId">): string => {
+const livePath = (input: Pick<FactoryWorkbenchRouteContext, "shellBase" | "profileId" | "chatId" | "objectiveId" | "focusKind" | "focusId">): string => {
   const params = buildFactoryWorkbenchSearchParams({
     profileId: input.profileId,
     chatId: input.chatId,
@@ -135,11 +136,8 @@ const chatEventsPath = (input: Pick<FactoryWorkbenchRouteContext, "shellBase" | 
   });
   if (input.focusKind === "job" && input.focusId) params.set("job", input.focusId);
   const query = params.toString();
-  return `${routeBase(input)}/chat/events${query ? `?${query}` : ""}`;
+  return `${routeBase(input)}/live${query ? `?${query}` : ""}`;
 };
-
-const backgroundEventsPath = (input: FactoryWorkbenchRouteContext): string =>
-  `${routeBase(input)}/background/events${buildFactoryWorkbenchSearch(input)}`;
 
 const workbenchBackgroundRootPath = (input: FactoryWorkbenchRouteContext): string =>
   `${routeBase(input)}/island/workbench/background-root${buildFactoryWorkbenchSearch(input)}`;
@@ -226,7 +224,7 @@ const workbenchBlockProjections = (
 };
 
 const workbenchComposerPlaceholder = (objectiveId?: string): string => objectiveId
-  ? "Chat with Factory, use /obj to create a new objective, or use /react to update the selected objective."
+  ? "Chat with Factory, use /note to add context, /obj to create new work, or /react to update the selected objective."
   : "Ask a new question, or use /obj to create an objective directly.";
 
 const isTerminalObjectiveStatusValue = (status?: string): boolean =>
@@ -272,7 +270,7 @@ const workbenchComposerHelperText = (input: {
     const label = displayLabel(selected?.status) || "terminal";
     return `Selected objective is ${label.toLowerCase()}. Use /obj to start follow-up work, or plain text to discuss next steps.`;
   }
-  return "Plain text stays chat-first. Use /react <guidance> to update the selected objective.";
+  return "Plain text stays chat-first. Use /note <context> to attach context, or /react <guidance> to mutate the selected objective.";
 };
 
 const renderComposerPrefillButton = (
@@ -291,6 +289,7 @@ const renderWorkbenchComposerQuickActions = (input: {
   }
   const selected = input.selectedObjective;
   const buttons = [
+    renderComposerPrefillButton("Note", "/note ", ghostButtonClass),
     renderComposerPrefillButton("React", "/react ", ghostButtonClass),
     renderComposerPrefillButton("New Objective", "/obj ", ghostButtonClass),
   ];
@@ -863,104 +862,17 @@ const renderObjectiveSelfImprovementSnapshot = (
   options?: {
     readonly compact?: boolean;
   },
-): string => {
-  const selfImprovement = objective?.selfImprovement;
-  if (!selfImprovement) return "";
-  const compact = options?.compact ?? false;
-  const recommendations = selfImprovement.recommendations.slice(0, compact ? 1 : 3);
-  const hiddenRecommendationCount = Math.max(0, selfImprovement.recommendations.length - recommendations.length);
-  const recurringPatterns = selfImprovement.recurringPatterns.slice(0, compact ? 2 : 4);
-  const canApplyRecommendations = !compact
-    && selfImprovement.recommendationStatus === "ready"
-    && !selfImprovement.autoFixObjectiveId;
-  const autoFixHref = selfImprovement.autoFixObjectiveId
-    ? objectiveHref(routeContext, selfImprovement.autoFixObjectiveId)
-    : undefined;
-  const statusLabel = selfImprovement.auditStatus === "failed"
-    ? "Audit failed"
-    : selfImprovement.auditStatus === "running"
-      ? "Audit running"
-      : selfImprovement.auditStatus === "pending"
-        ? "Audit queued"
-        : selfImprovement.stale
-          ? "Audit stale"
-          : selfImprovement.auditStatus === "missing"
-            ? "Audit missing"
-            : selfImprovement.recommendationStatus === "failed"
-              ? "Recommendations unavailable"
-              : selfImprovement.autoFixObjectiveId
-                ? "Auto-fix linked"
-                : selfImprovement.recommendations.length > 0
-                  ? "Recommendations ready"
-                  : "Audit recorded";
-  const statusTone = selfImprovement.auditStatus === "failed"
-    ? "danger"
-    : selfImprovement.auditStatus === "running"
-      ? "info"
-      : selfImprovement.auditStatus === "pending"
-        ? "warning"
-        : selfImprovement.stale || selfImprovement.auditStatus === "missing" || selfImprovement.recommendationStatus === "failed"
-          ? "warning"
-          : selfImprovement.autoFixObjectiveId
-            ? "info"
-            : selfImprovement.recommendations.length > 0
-              ? "success"
-              : "neutral";
-  const meta = [
-    selfImprovement.auditedAt ? `Audited ${formatTs(selfImprovement.auditedAt)}` : undefined,
-    selfImprovement.stale ? "snapshot stale" : undefined,
-    `${selfImprovement.recommendations.length} recommendation${selfImprovement.recommendations.length === 1 ? "" : "s"}`,
-  ].filter((value): value is string => Boolean(value)).join(" · ");
-  return `<section class="border border-border bg-muted/25 px-4 py-3">
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Self Improvement</div>
-      ${badge(statusLabel, statusTone)}
-    </div>
-    ${meta ? `<div class="mt-2 text-xs leading-5 text-muted-foreground">${esc(meta)}</div>` : ""}
-    ${selfImprovement.auditStatusMessage ? `<div class="mt-3 border border-border bg-background px-3 py-2 text-sm leading-6 text-muted-foreground">${esc(selfImprovement.auditStatusMessage)}</div>` : ""}
-    ${selfImprovement.recommendationStatus === "failed" ? `<div class="mt-3 border border-warning/20 bg-warning/10 px-3 py-2 text-sm leading-6 text-warning">
-      Recommendation generation failed${selfImprovement.recommendationError ? `: ${esc(selfImprovement.recommendationError)}` : "."}
-    </div>` : ""}
-    ${recommendations.length > 0 ? `<div class="mt-3 space-y-2">
-      ${recommendations.map((recommendation, index) => `<div class="border border-border bg-background px-3 py-3">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-semibold leading-6 text-foreground">${esc(recommendation.summary)}</div>
-            <div class="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">${esc(recommendation.scope)}</div>
-          </div>
-          ${badge(displayLabel(recommendation.confidence) ?? recommendation.confidence, recommendationConfidenceTone(recommendation.confidence))}
-        </div>
-        ${compact ? "" : `<div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(recommendation.suggestedFix)}</div>`}
-        ${recommendation.anomalyPatterns.length > 0 ? `<div class="mt-2 flex flex-wrap gap-2">
-          ${recommendation.anomalyPatterns.slice(0, compact ? 2 : 4).map((pattern) => `<span class="inline-flex items-center border border-border bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground">${esc(pattern)}</span>`).join("")}
-        </div>` : ""}
-        ${canApplyRecommendations ? `<form class="mt-3" data-factory-inline-submit="true" data-factory-inline-pending-label="Applying..." data-factory-inline-pending-status="Applying self-improvement recommendation..." action="${esc(`${routeContext.shellBase}/api/objectives/${encodeURIComponent(objective.objectiveId)}/self-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`)}" method="post">
-          <input type="hidden" name="recommendationIndex" value="${esc(String(index))}" />
-          <button type="submit" class="${workbenchPrimaryActionClass}">Apply</button>
-          <div data-factory-inline-status="true" class="mt-2 hidden border border-border bg-muted px-3 py-2 text-xs leading-5 text-card-foreground" aria-live="polite"></div>
-        </form>` : ""}
-      </div>`).join("")}
-    </div>` : `<div class="mt-3 text-sm leading-6 text-muted-foreground">${esc(
-      selfImprovement.recommendationStatus === "failed"
-        ? "Audit completed, but recommendation generation failed."
-        : selfImprovement.auditStatus === "pending" || selfImprovement.auditStatus === "running"
-          ? "Audit has not produced a fresh recommendation snapshot yet."
-          : selfImprovement.auditStatus === "missing"
-            ? "No fresh audit snapshot is available for this objective yet."
-            : "Latest audit captured no actionable self-improvement to promote.",
-    )}</div>`}
-    ${hiddenRecommendationCount > 0 ? `<div class="mt-2 text-xs leading-5 text-muted-foreground">+${esc(String(hiddenRecommendationCount))} more recommendation${hiddenRecommendationCount === 1 ? "" : "s"} in the latest audit.</div>` : ""}
-    ${recurringPatterns.length > 0 ? `<div class="mt-3 flex flex-wrap gap-2">
-      ${recurringPatterns.map((pattern) => `<span class="inline-flex items-center border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground">${esc(`${pattern.pattern} ×${pattern.count}`)}</span>`).join("")}
-    </div>` : ""}
-    ${selfImprovement.autoFixObjectiveId ? `<div class="mt-3 border border-info/20 bg-info/10 px-3 py-2 text-sm leading-6 text-foreground">
-      Auto-fix objective:
-      ${autoFixHref
-        ? `<a href="${esc(autoFixHref)}" data-factory-href="${esc(autoFixHref)}" class="font-semibold text-primary underline-offset-2 hover:underline">${esc(selfImprovement.autoFixObjectiveId)}</a>`
-        : `<span class="font-semibold">${esc(selfImprovement.autoFixObjectiveId)}</span>`}
-    </div>` : ""}
-  </section>`;
-};
+): string => objective
+  ? renderSharedObjectiveSelfImprovementSnapshot({
+      objectiveId: objective.objectiveId,
+      selfImprovement: objective.selfImprovement,
+      compact: options?.compact,
+      actionButtonClass: workbenchPrimaryActionClass,
+      buildObjectiveHref: (objectiveId, profileId) => objectiveHref(routeContext, objectiveId, undefined, profileId),
+      buildApplyAction: (objectiveId) =>
+        `${routeContext.shellBase}/api/objectives/${encodeURIComponent(objectiveId)}/self-improvement/apply${buildFactoryWorkbenchSearch(routeContext)}`,
+    })
+  : "";
 
 const normalizeSummaryCardValue = (value?: string): string =>
   (value ?? "")
@@ -973,6 +885,42 @@ const renderSummaryTextCard = (label: string, body: string): string => `<section
   <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(label)}</div>
   <div class="mt-2 text-sm leading-6 text-foreground">${esc(body)}</div>
 </section>`;
+
+const renderWorkbenchLoadingPlaceholder = (): string => `<div class="factory-ephemeral-placeholder mt-3" aria-hidden="true">
+  <div class="factory-ephemeral-placeholder-line factory-ephemeral-placeholder-line--long"></div>
+  <div class="factory-ephemeral-placeholder-line factory-ephemeral-placeholder-line--medium"></div>
+  <div class="factory-ephemeral-placeholder-line factory-ephemeral-placeholder-line--short"></div>
+</div>`;
+
+const renderWorkbenchLoadingCard = (input: {
+  readonly label: string;
+  readonly title: string;
+  readonly status: string;
+  readonly summary: string;
+  readonly tone?: "neutral" | "info" | "success" | "warning" | "danger";
+  readonly detail?: string;
+  readonly highlights?: ReadonlyArray<string>;
+  readonly nextAction?: string;
+  readonly shimmer?: boolean;
+}): string => `<div class="factory-running-card border border-border bg-muted/25 px-4 py-4" data-factory-loading-card="true">
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="min-w-0 flex-1">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(input.label)}</div>
+      <div class="mt-2 text-sm font-semibold leading-6 text-foreground">${esc(input.title)}</div>
+    </div>
+    ${badge(input.status, input.tone ?? toneForValue(input.status))}
+  </div>
+  <div class="mt-2 text-sm leading-6 text-muted-foreground">${esc(input.summary)}</div>
+  ${input.detail ? `<div class="mt-3 inline-flex items-center  border border-border bg-background px-3 py-1 text-[11px] font-medium text-muted-foreground">${esc(input.detail)}</div>` : ""}
+  ${input.highlights?.length ? `<div class="mt-3 space-y-1.5">
+    ${input.highlights.map((line) => `<div class="text-xs leading-5 text-muted-foreground">${esc(line)}</div>`).join("")}
+  </div>` : ""}
+  ${input.shimmer ? `<div class="factory-running-activity text-[11px] text-muted-foreground">
+    <span class="factory-running-activity-orb"></span>
+    <span>Streaming live execution updates.</span>
+  </div>${renderWorkbenchLoadingPlaceholder()}` : ""}
+  ${input.nextAction ? `<div class="mt-3 border border-border bg-background px-3 py-2 text-xs leading-5 text-card-foreground">${esc(input.nextAction)}</div>` : ""}
+</div>`;
 
 const renderObjectiveHandoffOutputCard = (output?: string): string => {
   const body = output?.trim();
@@ -996,7 +944,8 @@ const renderSummarySection = (
     ?? section.currentRun?.summary
     ?? (section.currentRun ? `Run ${section.currentRun.runId}` : "No background run in flight");
   const currentRunSummary = truncate(
-    section.focus?.summary
+    section.focus?.loading?.summary
+      ?? section.focus?.summary
       ?? section.focus?.lastMessage
       ?? section.currentRun?.lastToolSummary
       ?? section.currentRun?.summary
@@ -1033,6 +982,17 @@ const renderSummarySection = (
     ${currentRunMeta.length > 0 ? `<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
       ${currentRunMeta.map((value) => `<span class="border border-border bg-background px-2 py-1">${esc(value)}</span>`).join("")}
     </div>` : ""}
+    ${section.focus?.loading ? `<div class="mt-3">${renderWorkbenchLoadingCard({
+      label: "Live Objective",
+      title: section.focus.title,
+      status: section.focus.loading.label,
+      tone: section.focus.loading.tone,
+      summary: section.focus.loading.summary,
+      detail: section.focus.loading.detail,
+      highlights: section.focus.loading.highlights,
+      nextAction: section.focus.loading.nextAction,
+      shimmer: section.focus.active || section.focus.status === "running" || section.focus.status === "queued",
+    })}</div>` : ""}
     ${section.focus ? renderLiveFocusControls(routeContext, section.focus) : ""}
   </section>`;
   if (section.empty || !objective) {
@@ -1251,14 +1211,26 @@ const renderActivitySection = (
           <div class="border-b border-destructive/20 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-destructive">Error Output</div>
           <pre class="factory-scrollbar min-w-0 max-h-80 overflow-x-hidden overflow-y-auto whitespace-pre-wrap px-4 py-4 text-[12px] leading-6 text-foreground [overflow-wrap:anywhere]">${esc(section.focus.stderrTail)}</pre>
         </section>` : ""}
-      </div>` : `<div class="border border-border bg-muted/25 px-4 py-3">
+      </div>` : (section.focus.loading
+        ? `${renderWorkbenchLoadingCard({
+          label: "Current Execution",
+          title: section.focus.title,
+          status: section.focus.loading.label,
+          tone: section.focus.loading.tone,
+          summary: section.focus.loading.summary,
+          detail: section.focus.loading.detail,
+          highlights: section.focus.loading.highlights,
+          nextAction: section.focus.loading.nextAction,
+          shimmer: section.focus.active || section.focus.status === "running" || section.focus.status === "queued",
+        })}${renderLiveFocusControls(routeContext, section.focus)}`
+        : `<div class="border border-border bg-muted/25 px-4 py-3">
         <div class="flex items-center justify-between gap-3">
           <span class="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Current Execution</span>
           ${badge(titleCaseLabel(section.focus.status), toneForValue(section.focus.status))}
         </div>
         <div class="mt-1 text-sm leading-6 text-muted-foreground">${esc(truncate(section.focus.summary, 120))}</div>
         ${renderLiveFocusControls(routeContext, section.focus)}
-      </div>`}`
+      </div>`)}`
     : "";
   const escalationCallout = section.callout
     ? `<div class="border border-warning/25 bg-warning/10 px-3 py-2 text-xs leading-5 text-foreground">
@@ -1672,7 +1644,7 @@ export const factoryWorkbenchChatBody = (
   swap: "outerHTML",
   clientOnly: true,
 })} ${workbenchEnvelopeAttrs(envelope)}>
-  <div id="factory-workbench-chat-root" data-events-path="${esc(chatEventsPath(routeContext))}" class="flex flex-1 flex-col lg:min-h-0">
+  <div id="factory-workbench-chat-root" class="flex flex-1 flex-col lg:min-h-0">
     <section id="factory-workbench-chat-scroll" class="bg-background factory-scrollbar flex-1 overflow-x-hidden overflow-y-auto px-4 py-4 lg:min-h-0">
       <div id="factory-workbench-chat" ${passiveRefreshAttrs(chatIslandPath(routeContext))}>
         ${factoryWorkbenchChatIsland(chat, routeContext)}
@@ -1767,7 +1739,7 @@ export const factoryWorkbenchBackgroundRootIsland = (input: {
   readonly workspace: FactoryWorkbenchWorkspaceModel;
   readonly routeContext: FactoryWorkbenchRouteContext;
   readonly envelope?: WorkbenchVersionEnvelope;
-}): string => `<div id="factory-workbench-background-root" class="flex min-h-0 min-w-0 flex-col bg-background lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:border-r lg:border-border" data-events-path="${esc(backgroundEventsPath(input.routeContext))}" ${liveIslandAttrs({
+}): string => `<div id="factory-workbench-background-root" class="flex min-h-0 min-w-0 flex-col bg-background lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:border-r lg:border-border" ${liveIslandAttrs({
   path: workbenchBackgroundRootPath(input.routeContext),
   refreshOn: workbenchBackgroundRefreshOn,
   clientOnly: true,
@@ -1802,7 +1774,7 @@ export const factoryWorkbenchSelectionResponse = (input: {
 
 export const buildFactoryWorkbenchShellSnapshot = (
   model: FactoryWorkbenchPageModel,
-  shellBase: "/factory" | "/factory-new" = "/factory",
+  shellBase: FactoryWorkbenchShellBase = "/factory",
   envelope?: WorkbenchVersionEnvelope,
 ): FactoryWorkbenchShellSnapshot => {
   const routeContext: FactoryWorkbenchRouteContext = {
@@ -1825,8 +1797,7 @@ export const buildFactoryWorkbenchShellSnapshot = (
     routeKey: buildFactoryWorkbenchRouteKey(routeContext),
     route: routeContext,
     envelope,
-    backgroundEventsPath: backgroundEventsPath(routeContext),
-    chatEventsPath: chatEventsPath(routeContext),
+    livePath: livePath(routeContext),
     backgroundRootPath: workbenchBackgroundRootPath(routeContext),
     workbenchIslandPath: workbenchIslandPath(routeContext),
     chatIslandPath: chatIslandPath(routeContext),
@@ -1845,7 +1816,7 @@ export const buildFactoryWorkbenchShellSnapshot = (
 
 export const factoryWorkbenchShell = (
   model: FactoryWorkbenchPageModel,
-  shellBase: "/factory" | "/factory-new" = "/factory",
+  shellBase: FactoryWorkbenchShellBase = "/factory",
   envelope?: WorkbenchVersionEnvelope,
 ): string => {
   const shell = buildFactoryWorkbenchShellSnapshot(model, shellBase, envelope);

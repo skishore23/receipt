@@ -5,11 +5,29 @@ import type {
   FactoryLiveProjection,
   FactoryObjectiveDetail,
 } from "../services/factory-service";
+import {
+  buildFactoryObjectiveLoadingState,
+  summarizeFactoryTaskSignal,
+} from "../services/factory/live-status";
 import { buildInvestigationReportSections } from "./investigation-report";
 import { BOARD_SECTION_META, type FactoryObjectivePanel, formatList, formatTime, shortHash, truncate } from "./view-model";
 
 const section = (title: string, lines: ReadonlyArray<string>): string =>
   [`== ${title} ==`, ...lines].join("\n");
+
+const looksLikeMarkdownTable = (value: string | undefined): boolean => {
+  const text = value?.trim() ?? "";
+  if (!text) return false;
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const header = lines[index]?.trim() ?? "";
+    const separator = lines[index + 1]?.trim() ?? "";
+    if (!header.includes("|")) continue;
+    if (!/^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(separator)) continue;
+    return true;
+  }
+  return false;
+};
 
 const objectiveStateSummary = (objective: {
   readonly displayState?: string;
@@ -112,6 +130,9 @@ export const renderObjectivePanelText = (
         `prompt=${truncate(detail.prompt, 240)}`,
         `checks=${formatList(detail.checks)}`,
         `policy=maxActiveTasks:${detail.policy.concurrency.maxActiveTasks} autoPromote:${String(detail.policy.promotion.autoPromote)}`,
+        ...(looksLikeMarkdownTable(detail.latestHandoff?.renderedBody)
+          ? ["", "latest_handoff:", ...detail.latestHandoff!.renderedBody!.split("\n")]
+          : []),
       ]);
     case "report":
       return buildInvestigationReportSections(detail)
@@ -154,20 +175,26 @@ export const renderObjectivePanelText = (
           `${formatTime(entry.at)} [${entry.kind}] ${entry.title} | ${truncate(entry.summary, 180)}`,
         )
         : ["(no activity)"]);
-    case "live":
+    case "live": {
+      const loading = buildFactoryObjectiveLoadingState({ detail, live });
       return section("Live", [
-        `focus=${live.activeTasks[0] ? `${live.activeTasks[0].taskId} [${live.activeTasks[0].jobStatus ?? live.activeTasks[0].status}] ${truncate(live.activeTasks[0].title, 80)}` : "none"}`,
-        `signal=${truncate(live.activeTasks[0]?.lastMessage ?? live.activeTasks[0]?.stderrTail ?? live.activeTasks[0]?.stdoutTail ?? detail.nextAction ?? "none", 180)}`,
+        `status=${loading.label}`,
+        `summary=${truncate(loading.summary, 180)}`,
+        loading.detail ? `detail=${loading.detail}` : undefined,
+        ...(loading.highlights?.map((line) => `signal=${truncate(line, 180)}`) ?? []),
+        loading.nextAction ? `next=${truncate(loading.nextAction, 180)}` : undefined,
         ...(live.activeTasks.length > 0 ? [""] : []),
         ...(live.activeTasks.length
           ? live.activeTasks.map((task) => [
           `${task.taskId} [${task.jobStatus ?? task.status}] ${task.title}`,
+          `  signal=${truncate(summarizeFactoryTaskSignal(task), 180)}`,
           task.lastMessage ? `  last=${truncate(task.lastMessage, 180)}` : undefined,
           task.stdoutTail ? `  stdout=${truncate(task.stdoutTail, 180)}` : undefined,
           task.stderrTail ? `  stderr=${truncate(task.stderrTail, 180)}` : undefined,
         ].filter((line): line is string => Boolean(line)).join("\n"))
           : ["(no active task output)"]),
       ]);
+    }
     case "debug":
       return section("Debug", [
         `state=${objectiveStateSummary(debug) || debug.phase}`,

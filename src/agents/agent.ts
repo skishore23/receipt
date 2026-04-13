@@ -113,6 +113,7 @@ export type AgentRunInput = {
   }) => Promise<Readonly<Record<string, string>> | undefined>;
   readonly startupEvents?: ReadonlyArray<AgentEvent>;
   readonly finalizer?: AgentFinalizer;
+  readonly failureFinalizer?: AgentFailureFinalizer;
   readonly onIterationBudgetExhausted?: AgentIterationBudgetHandler;
   readonly onStructuredActionParsed?: (input: {
     readonly runId: string;
@@ -148,6 +149,17 @@ export type AgentFinalizer = (input: {
   readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
   readonly now: () => number;
 }) => Promise<AgentFinalizerResult>;
+
+export type AgentFailureFinalizer = (input: {
+  readonly runId: string;
+  readonly runStream: string;
+  readonly problem: string;
+  readonly workspaceRoot: string;
+  readonly emit: (event: AgentEvent, index?: boolean) => Promise<void>;
+  readonly runtime: Runtime<AgentCmd, AgentEvent, AgentState>;
+  readonly now: () => number;
+  readonly failure: FailureRecord;
+}) => Promise<string | undefined>;
 
 export type AgentRunProgress = {
   readonly iterationsUsed: number;
@@ -493,11 +505,11 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
     return true;
   };
 
+  let problem = input.problem.trim();
+  let finalized = false;
   try {
-    let problem = input.problem.trim();
     let maxIterations = input.config.maxIterations;
     let memoryScope = input.config.memoryScope;
-    let finalized = false;
     const finalizeWithText = async (opts: {
       readonly iteration: number;
       readonly text: string;
@@ -1146,6 +1158,26 @@ export const runAgent = async (input: AgentRunInput): Promise<AgentRunResult> =>
       agentId: "orchestrator",
       note: failure.message,
     }, true);
+    if (!finalized && input.failureFinalizer) {
+      const failureText = await input.failureFinalizer({
+        runId: input.runId,
+        runStream,
+        problem,
+        workspaceRoot: resolvedWorkspaceRoot,
+        emit,
+        runtime: input.runtime,
+        now,
+        failure,
+      });
+      if (failureText?.trim()) {
+        await emit({
+          type: "response.finalized",
+          runId: input.runId,
+          agentId: "orchestrator",
+          content: failureText.trim(),
+        }, true);
+      }
+    }
   }
   return finalizeResult();
 };

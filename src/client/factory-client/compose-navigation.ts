@@ -54,14 +54,16 @@ export const resolveFactoryUrl = (value: string | undefined): URL | null => {
   }
 };
 
-export const currentWorkbenchShellPath = (): "/factory" | "/factory-new" => {
+export const currentWorkbenchShellPath = (): "/factory" | "/factory-new" | "/factory-preview" => {
   const bodyBase = typeof document !== "undefined"
     ? document.body?.getAttribute("data-shell-base")
     : null;
   if (bodyBase === "/factory-new") return "/factory-new";
+  if (bodyBase === "/factory-preview") return "/factory-preview";
   const pathname = typeof window !== "undefined" && window.location
     ? window.location.pathname
     : "";
+  if (pathname.startsWith("/factory-preview")) return "/factory-preview";
   return pathname.startsWith("/factory-new") ? "/factory-new" : "/factory";
 };
 export const shellPath = () => currentWorkbenchShellPath();
@@ -119,8 +121,10 @@ export const composerFeedback = (
     && (
       formAction.indexOf("/factory/compose") >= 0
       || formAction.indexOf("/factory-new/compose") >= 0
+      || formAction.indexOf("/factory-preview/compose") >= 0
       || formAction.indexOf("/factory/workbench") >= 0
       || formAction.indexOf("/factory-new/workbench") >= 0
+      || formAction.indexOf("/factory-preview") >= 0
     ),
   );
   const hasThread = Boolean(

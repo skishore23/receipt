@@ -173,7 +173,10 @@ import {
   writeFactoryExecutionEvidenceState,
   type FactoryExecutionEvidenceState,
 } from "./evidence-state";
-import { renderFactoryObjectiveHandoff } from "./objective-handoff-renderer";
+import {
+  FACTORY_OBJECTIVE_HANDOFF_RENDER_VERSION,
+  renderFactoryObjectiveHandoff,
+} from "./objective-handoff-renderer";
 import { inferObjectiveLiveOutputFocusFromDetail } from "../live-output";
 import {
   processObjectiveReconcileControl,
@@ -564,9 +567,10 @@ const resolveHandoffPhase = (
 };
 
 const boardSectionForObjective = (
-  objective: Pick<FactoryObjectiveCard, "displayState">,
+  objective: Pick<FactoryObjectiveCard, "displayState" | "archivedAt">,
 ): FactoryBoardSection => {
-  if (objective.displayState === "Completed" || objective.displayState === "Canceled" || objective.displayState === "Archived") {
+  if (objective.archivedAt || objective.displayState === "Archived") return "archived";
+  if (objective.displayState === "Completed" || objective.displayState === "Canceled") {
     return "completed";
   }
   if (objective.displayState === "Blocked" || objective.displayState === "Failed" || objective.displayState === "Stalled") {
@@ -1844,7 +1848,6 @@ export class FactoryService {
       readPersistedSystemImprovementReport(this.dataDir).catch(() => undefined),
     ]);
     const sectionedObjectives = objectives
-      .filter((objective) => !objective.archivedAt)
       .map((objective) => ({
         ...objective,
         section: boardSectionForObjective(objective),
@@ -1857,6 +1860,7 @@ export class FactoryService {
         active: sectionedObjectives.filter((objective) => objective.section === "active"),
         queued: sectionedObjectives.filter((objective) => objective.section === "queued"),
         completed: sectionedObjectives.filter((objective) => objective.section === "completed"),
+        archived: sectionedObjectives.filter((objective) => objective.section === "archived"),
       },
       selectedObjectiveId: resolvedSelectedObjectiveId,
       systemImprovement: systemImprovement as FactorySystemImprovementReport | undefined,
@@ -2265,8 +2269,9 @@ export class FactoryService {
     state: FactoryState,
     auditMetadata: FactoryObjectiveAuditMetadata | undefined,
     auditJob: QueueJob | undefined,
+    autoFixObjectiveState?: Pick<FactoryState, "objectiveId" | "status" | "profile">,
   ): FactoryObjectiveDetail["selfImprovement"] {
-    return buildObjectiveControlSelfImprovement(state, auditMetadata, auditJob);
+    return buildObjectiveControlSelfImprovement(state, auditMetadata, auditJob, autoFixObjectiveState);
   }
 
   private async reconcileQueuedObjectiveControlJobs(): Promise<void> {
@@ -4736,7 +4741,8 @@ export class FactoryService {
           ?? this.investigationReports(input.state).at(-1)
         )
       : undefined;
-    const presentation = candidate?.presentation
+    const handoff = candidate?.handoff ?? investigationTask?.handoff;
+    const rawPresentation = candidate?.presentation
       ?? investigationTask?.presentation;
     const artifactRefs = input.state.objectiveMode === "investigation"
       ? this.mergeArtifactRefs(
@@ -4745,6 +4751,17 @@ export class FactoryService {
           : [investigationTask?.artifactRefs],
       )
       : candidate?.artifactRefs ?? {};
+    const presentation = normalizeTaskPresentationRecord({
+      value: rawPresentation,
+      handoff,
+      summary: candidate?.summary ?? investigationTask?.summary ?? input.summary,
+      workerArtifacts: Object.values(artifactRefs).map((ref) => ({
+        label: ref.label ?? path.basename(ref.ref),
+        path: ref.ref,
+        summary: null,
+      })),
+      report: investigationReport,
+    });
     const artifacts = await this.loadTerminalRenderArtifacts({
       artifactRefs,
       presentation,
@@ -4773,7 +4790,7 @@ export class FactoryService {
               taskId: candidate?.taskId ?? investigationTask?.taskId ?? input.state.objectiveId,
               candidateId: candidate?.candidateId ?? investigationTask?.candidateId,
               summary: candidate?.summary ?? investigationTask?.summary,
-              handoff: candidate?.handoff ?? investigationTask?.handoff,
+              handoff,
               presentation,
             },
           }
@@ -4795,7 +4812,7 @@ export class FactoryService {
                 taskId: candidate?.taskId ?? investigationTask?.taskId ?? input.state.objectiveId,
                 candidateId: candidate?.candidateId ?? investigationTask?.candidateId,
                 summary: candidate?.summary ?? investigationTask?.summary,
-                handoff: candidate?.handoff ?? investigationTask?.handoff,
+                handoff,
                 presentation,
               },
             }
@@ -4805,7 +4822,10 @@ export class FactoryService {
       }),
     };
     const renderSourceHash = createHash("sha1")
-      .update(JSON.stringify(renderInput))
+      .update(JSON.stringify({
+        version: FACTORY_OBJECTIVE_HANDOFF_RENDER_VERSION,
+        renderInput,
+      }))
       .digest("hex")
       .slice(0, 16);
     if (
@@ -4833,6 +4853,37 @@ export class FactoryService {
       renderedAt: Date.now(),
       output: renderedBody,
     });
+  }
+
+  private async latestHandoffForDisplay(
+    state: FactoryState,
+  ): Promise<FactoryState["latestHandoff"]> {
+    const current = state.latestHandoff;
+    if (!current) return undefined;
+    try {
+      const refreshed = await this.buildRenderedObjectiveHandoffEvent({
+        state,
+        status: current.status,
+        summary: current.summary,
+        sourceUpdatedAt: current.sourceUpdatedAt,
+        blocker: current.blocker,
+        nextAction: current.nextAction,
+      });
+      return {
+        status: refreshed.status,
+        summary: refreshed.summary,
+        renderedBody: refreshed.renderedBody ?? refreshed.output ?? refreshed.summary,
+        renderSourceHash: refreshed.renderSourceHash,
+        renderedAt: refreshed.renderedAt ?? current.renderedAt ?? refreshed.sourceUpdatedAt,
+        output: refreshed.output,
+        blocker: refreshed.blocker,
+        nextAction: refreshed.nextAction,
+        handoffKey: refreshed.handoffKey,
+        sourceUpdatedAt: refreshed.sourceUpdatedAt,
+      };
+    } catch {
+      return current;
+    }
   }
 
   async runChecks(commands: ReadonlyArray<string>, workspacePath: string): Promise<ReadonlyArray<FactoryCheckResult>> {
@@ -6086,6 +6137,13 @@ export class FactoryService {
     executionStalled = false,
     objectiveJobs: ReadonlyArray<QueueJob> = [],
   ): Promise<FactoryObjectiveCard> {
+    const displayLatestHandoff = await this.latestHandoffForDisplay(state);
+    const displayState = displayLatestHandoff && displayLatestHandoff !== state.latestHandoff
+      ? {
+          ...state,
+          latestHandoff: displayLatestHandoff,
+        }
+      : state;
     const slotState = (this.isTerminalObjectiveStatus(state.status) || this.releasesObjectiveSlot(state) || state.scheduler.releasedAt)
       ? "released"
       : (state.scheduler.slotState ?? "active");
@@ -6093,30 +6151,30 @@ export class FactoryService {
     const cacheKey = `${state.updatedAt}:${slotState}:${effectiveQueuePosition ?? ""}:${executionStalled ? "stalled" : "live"}:${objectiveJobCacheKey(objectiveJobs)}`;
     const cached = this.objectiveCardCache.get(state.objectiveId);
     if (cached?.key === cacheKey) return cached.card;
-    const projection = buildFactoryProjection(state);
+    const projection = buildFactoryProjection(displayState);
     const latestCandidate = projection.candidates.at(-1);
-    const needsBlockedReceipts = Boolean(state.blockedReason)
-      || state.status === "blocked"
-      || state.integration.status === "conflicted";
+    const needsBlockedReceipts = Boolean(displayState.blockedReason)
+      || displayState.status === "blocked"
+      || displayState.integration.status === "conflicted";
     const resolvedReceipts = receipts
       ?? (needsBlockedReceipts
-        ? summarizeObjectiveReceipts(await this.runtime.chain(objectiveStream(state.objectiveId)), {
+        ? summarizeObjectiveReceipts(await this.runtime.chain(objectiveStream(displayState.objectiveId)), {
           limit: 60,
           summarizeReceipt: (event) => this.summarizeReceipt(event),
           receiptTaskOrCandidateId: (event) => this.receiptTaskOrCandidateId(event),
         })
         : []);
-    const tokensUsed = Object.values(state.candidates).reduce((sum, c) => sum + (c.tokensUsed ?? 0), 0);
-    const contract = this.objectiveContractForState(state);
-    const alignment = this.objectiveAlignmentForState(state);
+    const tokensUsed = Object.values(displayState.candidates).reduce((sum, c) => sum + (c.tokensUsed ?? 0), 0);
+    const contract = this.objectiveContractForState(displayState);
+    const alignment = this.objectiveAlignmentForState(displayState);
     const operationalState = deriveObjectiveOperationalState({
-      state,
+      state: displayState,
       taskCount: projection.tasks.length,
       executionStalled,
       objectiveJobs,
     });
     const card = buildObjectiveCardRecord({
-      state,
+      state: displayState,
       queuePosition: effectiveQueuePosition,
       slotState,
       displayState: operationalState.displayState,
@@ -6139,17 +6197,17 @@ export class FactoryService {
       activeTaskCount: projection.activeTasks.length,
       readyTaskCount: projection.readyTasks.length,
       taskCount: projection.tasks.length,
-      latestCommitHash: state.integration.promotedCommit ?? state.integration.headCommit ?? latestCandidate?.headCommit,
+      latestCommitHash: displayState.integration.promotedCommit ?? displayState.integration.headCommit ?? latestCandidate?.headCommit,
       contract,
       alignment,
       tokensUsed: tokensUsed > 0 ? tokensUsed : undefined,
-      profile: this.objectiveProfileForState(state),
-      phase: this.deriveObjectivePhase(state, {
+      profile: this.objectiveProfileForState(displayState),
+      phase: this.deriveObjectivePhase(displayState, {
         activeTasks: projection.activeTasks.length,
         readyTasks: projection.readyTasks.length,
       }),
     });
-    this.objectiveCardCache.set(state.objectiveId, {
+    this.objectiveCardCache.set(displayState.objectiveId, {
       key: cacheKey,
       card,
     });
@@ -6169,6 +6227,9 @@ export class FactoryService {
       this.latestObjectiveAuditJob(state.objectiveId).catch(() => undefined),
       objectiveJobsInput ? Promise.resolve(objectiveJobsInput) : this.listObjectiveScopedJobs(state.objectiveId, 40),
     ]);
+    const autoFixObjectiveState = auditMetadata?.autoFixObjectiveId
+      ? await this.getObjectiveState(auditMetadata.autoFixObjectiveId).catch(() => undefined)
+      : undefined;
     const receipts = summarizeObjectiveReceipts(chain, {
       limit: 60,
       summarizeReceipt: (event) => this.summarizeReceipt(event),
@@ -6237,7 +6298,7 @@ export class FactoryService {
       sourceWarnings: state.sourceWarnings,
       checks: state.checks,
       profile: this.objectiveProfileForState(state),
-      selfImprovement: this.buildObjectiveSelfImprovement(state, auditMetadata, latestAuditJob),
+      selfImprovement: this.buildObjectiveSelfImprovement(state, auditMetadata, latestAuditJob, autoFixObjectiveState),
       policy: state.policy,
       contextSources: this.buildContextSources(state, repoSkillPaths, sharedArtifactRefs),
       budgetState: this.buildBudgetState(state),
@@ -7757,6 +7818,9 @@ export class FactoryService {
         telemetry,
       });
     const helperArtifacts = helperEvidence.artifacts;
+    const rawSemanticConclusion = trimmedString(
+      typeof rawResult.conclusion === "string" ? rawResult.conclusion : undefined,
+    );
     const artifactIssues = await this.detectArtifactIssues(payload.workspacePath, helperArtifacts);
     let outcome: FactoryTaskResultOutcome = semantic.status === "blocked"
       ? "blocked"
@@ -7903,8 +7967,9 @@ export class FactoryService {
       evidenceBundle: fileRef(canonicalEvidenceBundlePath, "task evidence bundle"),
       ...(committed ? { commit: commitRef(committed.hash, "evidence commit") } : {}),
     } satisfies Readonly<Record<string, GraphRef>>;
+    const handoffConclusion = rawSemanticConclusion ?? semantic.conclusion;
     const handoffLines = [
-      semantic.conclusion,
+      handoffConclusion,
       ...(semantic.findings.length > 0
         ? ["Findings:", ...semantic.findings.map((item) =>
           `- ${item.title}: ${item.summary}${item.evidenceRefLabels.length > 0 ? ` [${item.evidenceRefLabels.join(", ")}]` : ""}`)]

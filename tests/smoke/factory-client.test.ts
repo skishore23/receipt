@@ -8,6 +8,7 @@ const ROOT = process.cwd();
 const CLIENT_PATH = path.join(ROOT, "src", "client", "factory-client.ts");
 const COMMANDS = JSON.stringify([
   { name: "help", label: "/help", usage: "/help or /?", description: "Show slash command help." },
+  { name: "note", label: "/note", usage: "/note [message]", description: "Add a note to the selected objective without mutating it." },
   { name: "react", label: "/react", usage: "/react [message]", description: "React to the selected objective." },
   { name: "abort-job", label: "/abort-job", usage: "/abort-job [reason]", description: "Abort the active job." },
 ]);
@@ -143,6 +144,51 @@ class MockForm extends MockElement {
   requestSubmit() { this.dispatchEvent(new MockEvent({ type: "submit", target: this })); }
 }
 
+const normalizeSocketUrl = (value: string): string => {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return value;
+  }
+};
+
+class MockWebSocket {
+  static readonly instances: MockWebSocket[] = [];
+  readonly listeners = new Map<string, Array<(event: MockEvent) => void>>();
+  readonly url: string;
+  closed = false;
+  constructor(url: string) {
+    this.url = normalizeSocketUrl(url);
+    MockWebSocket.instances.push(this);
+  }
+  addEventListener(type: string, handler: (event: MockEvent) => void) {
+    const handlers = this.listeners.get(type) ?? [];
+    handlers.push(handler);
+    this.listeners.set(type, handlers);
+  }
+  emit(type: string, data = "") {
+    if (this.closed) return;
+    const event = type === "message"
+      ? new MockEvent({ type, data })
+      : type === "open" || type === "error" || type === "close"
+        ? new MockEvent({ type })
+        : new MockEvent({
+          type: "message",
+          data: JSON.stringify({
+            kind: "event",
+            topic: "agent",
+            event: type,
+            data,
+          }),
+        });
+    for (const handler of this.listeners.get(event.type as string) ?? []) handler(event);
+  }
+  close() {
+    this.closed = true;
+  }
+}
+
 class MockEventSource {
   static readonly instances: MockEventSource[] = [];
   readonly listeners = new Map<string, Array<(event: MockEvent) => void>>();
@@ -218,18 +264,18 @@ const chatMarkup = (input: {
 } = {}) =>
   `<div data-active-profile="generalist" data-active-profile-label="${input.profileLabel ?? "Generalist"}" data-chat-id="${input.chatId ?? ""}" data-objective-id="${input.objectiveId ?? ""}" data-active-run-id="${input.activeRunId ?? ""}" data-known-run-ids="${(input.knownRunIds ?? []).join(",")}" data-terminal-run-ids="${(input.terminalRunIds ?? []).join(",")}" data-transcript-signature="${input.transcriptSignature ?? "0:empty"}" data-last-item-kind="${input.lastItemKind ?? ""}"></div>`;
 
-const WORKBENCH_CHAT_DESCRIPTOR = "sse:agent-refresh@180,sse:job-refresh@180";
-const WORKBENCH_BACKGROUND_DESCRIPTOR = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
+const WORKBENCH_CHAT_DESCRIPTOR = "live:agent-refresh@180,live:job-refresh@180";
+const WORKBENCH_BACKGROUND_DESCRIPTOR = "live:profile-board-refresh@320,live:objective-runtime-refresh@320";
 
 const workbenchChatDescriptor = (inspectorTab: string, objectiveId?: string) =>
   inspectorTab === "chat"
     ? [
         WORKBENCH_CHAT_DESCRIPTOR,
-        ...(objectiveId ? ["sse:objective-runtime-refresh@180"] : []),
+        ...(objectiveId ? ["live:objective-runtime-refresh@180"] : []),
       ].join(",")
     : [
-        "sse:profile-board-refresh@300",
-        ...(objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
+        "live:profile-board-refresh@300",
+        ...(objectiveId ? ["live:objective-runtime-refresh@300"] : []),
       ].join(",");
 
 const workbenchBackgroundRootPath = (search: string) => `/factory/island/workbench/background-root${search}`;
@@ -296,25 +342,20 @@ const workbenchShellMarkup = (input: {
   const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
   const focusKind = parsed.searchParams.get("focusKind") || "";
   const focusId = parsed.searchParams.get("focusId") || "";
-  const chatEvents = new URLSearchParams();
-  chatEvents.set("profile", profileId);
-  if (chatId) chatEvents.set("chat", chatId);
-  if (objectiveId) chatEvents.set("objective", objectiveId);
-  if (focusKind === "job" && focusId) chatEvents.set("job", focusId);
   return `<!doctype html>
 <html>
 <head>
   <title>Receipt Factory Workbench</title>
 </head>
 <body data-factory-workbench="true" data-route-key="/factory${search}" data-profile-id="${profileId}" data-chat-id="${chatId}" data-objective-id="${objectiveId ?? ""}" data-inspector-tab="${inspectorTab}" data-focus-kind="${focusKind}" data-focus-id="${focusId}">
-  <div id="factory-workbench-background-root" data-events-path="/factory/background/events${search}" data-refresh-path="${workbenchBackgroundRootPath(search)}" data-refresh-on="${WORKBENCH_BACKGROUND_DESCRIPTOR}">
+  <div id="factory-workbench-background-root" data-refresh-path="${workbenchBackgroundRootPath(search)}" data-refresh-on="${WORKBENCH_BACKGROUND_DESCRIPTOR}">
     ${workbenchBackgroundRootMarkup(search, objectiveId, profileId, profileLabel, chatId || "chat_demo", "workbench panel", input.workbenchHtml)}
   </div>
   <aside id="factory-workbench-chat-pane" data-refresh-path="/factory/island/workbench/chat-pane${search}">
     <div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${search}">
       <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${search}"><span>${profileLabel}</span></div>
       <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
-        <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+        <div id="factory-workbench-chat-root">
           <div id="factory-workbench-chat-scroll">
             <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${search}">${input.chatHtml ?? chatMarkup({ profileLabel, chatId: chatId || undefined, objectiveId })}</div>
             <div id="factory-chat-ephemeral"></div>
@@ -351,11 +392,11 @@ const workbenchShellSnapshot = (input: {
   const focusKind = parsed.searchParams.get("focusKind");
   const focusId = parsed.searchParams.get("focusId");
   const filter = parsed.searchParams.get("filter") || "objective.running";
-  const chatEvents = new URLSearchParams();
-  chatEvents.set("profile", profileId);
-  if (chatId) chatEvents.set("chat", chatId);
-  if (objectiveId) chatEvents.set("objective", objectiveId);
-  if (focusKind === "job" && focusId) chatEvents.set("job", focusId);
+  const liveEvents = new URLSearchParams();
+  liveEvents.set("profile", profileId);
+  if (chatId) liveEvents.set("chat", chatId);
+  if (objectiveId) liveEvents.set("objective", objectiveId);
+  if (focusKind === "job" && focusId) liveEvents.set("job", focusId);
   return {
     pageTitle: "Receipt Factory Workbench",
     routeKey: `/factory${search}`,
@@ -369,8 +410,7 @@ const workbenchShellSnapshot = (input: {
       ...(focusId ? { focusId } : {}),
       filter,
     },
-    backgroundEventsPath: `/factory/background/events${search}`,
-    chatEventsPath: `/factory/chat/events?${chatEvents.toString()}`,
+    livePath: `/factory/live?${liveEvents.toString()}`,
     backgroundRootPath: workbenchBackgroundRootPath(search),
     workbenchIslandPath: `/factory/island/workbench${search}`,
     chatIslandPath: `/factory/island/chat${search}`,
@@ -505,6 +545,7 @@ const createWorkbenchHarness = async (options: {
     readonly text: () => Promise<string>;
   }>;
 } = {}) => {
+  MockWebSocket.instances.length = 0;
   MockEventSource.instances.length = 0;
 
   const textarea = new MockTextArea();
@@ -637,7 +678,6 @@ const createWorkbenchHarness = async (options: {
   body.setAttribute("data-focus-kind", canonicalSearchParams.get("focusKind") || "");
   body.setAttribute("data-focus-id", canonicalSearchParams.get("focusId") || "");
   const initialInspectorTab = canonicalSearchParams.get("inspectorTab") || "overview";
-  backgroundRoot.setAttribute("data-events-path", `/factory/background/events${canonicalSearch}`);
   backgroundRoot.setAttribute("data-refresh-path", workbenchBackgroundRootPath(canonicalSearch));
   backgroundRoot.setAttribute("data-refresh-on", WORKBENCH_BACKGROUND_DESCRIPTOR);
   workbenchPanel.setAttribute("data-refresh-path", `/factory/island/workbench${canonicalSearch}`);
@@ -647,14 +687,6 @@ const createWorkbenchHarness = async (options: {
   workbenchActivity.setAttribute("data-refresh-path", workbenchBlockPath(canonicalSearch, "activity"));
   workbenchObjectives.setAttribute("data-refresh-path", workbenchBlockPath(canonicalSearch, "objectives"));
   workbenchHistory.setAttribute("data-refresh-path", workbenchBlockPath(canonicalSearch, "history"));
-  const chatEvents = new URLSearchParams();
-  chatEvents.set("profile", canonicalSearchParams.get("profile") || "generalist");
-  if (canonicalSearchParams.get("chat")) chatEvents.set("chat", canonicalSearchParams.get("chat")!);
-  if (canonicalSearchParams.get("objective")) chatEvents.set("objective", canonicalSearchParams.get("objective")!);
-  if (canonicalSearchParams.get("focusKind") === "job" && canonicalSearchParams.get("focusId")) {
-    chatEvents.set("job", canonicalSearchParams.get("focusId")!);
-  }
-  chatRoot.setAttribute("data-events-path", `/factory/chat/events?${chatEvents.toString()}`);
   chatPane.setAttribute("data-refresh-path", `/factory/island/workbench/chat-pane${canonicalSearch}`);
   chatRegion.setAttribute("data-refresh-path", `/factory/island/workbench/chat-shell${canonicalSearch}`);
   chatBody.setAttribute("data-refresh-path", `/factory/island/workbench/chat-body${canonicalSearch}`);
@@ -848,6 +880,7 @@ const createWorkbenchHarness = async (options: {
     URL,
     URLSearchParams,
     AbortController,
+    WebSocket: MockWebSocket,
     EventSource: MockEventSource,
     DOMParser: class {
       parseFromString(markup: string) {
@@ -856,6 +889,7 @@ const createWorkbenchHarness = async (options: {
     },
     CustomEvent: class { constructor(public readonly type: string, public readonly detail?: unknown) {} },
     Event: class extends MockEvent { constructor(type: string, init: Partial<MockEvent> = {}) { super({ ...init, type }); } },
+    MessageEvent: class extends MockEvent { constructor(type: string, init: Partial<MockEvent> = {}) { super({ ...init, type }); } },
     FormData: class {
       constructor(public readonly form: MockForm) {}
     },
@@ -975,10 +1009,6 @@ const createWorkbenchHarness = async (options: {
         const chatId = parsed.searchParams.get("chat") || undefined;
         const objectiveId = parsed.searchParams.get("objective") || undefined;
         const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
-        const chatEvents = new URLSearchParams();
-        chatEvents.set("profile", parsed.searchParams.get("profile") || "generalist");
-        if (chatId) chatEvents.set("chat", chatId);
-        if (objectiveId) chatEvents.set("objective", objectiveId);
         return {
           ok: true,
           headers: { get: () => "text/html" },
@@ -986,7 +1016,7 @@ const createWorkbenchHarness = async (options: {
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>${profileLabel}</span></div>
             <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
-              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+              <div id="factory-workbench-chat-root">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
                   <div id="factory-chat-ephemeral"></div>
@@ -1001,10 +1031,6 @@ const createWorkbenchHarness = async (options: {
         const chatId = parsed.searchParams.get("chat") || undefined;
         const objectiveId = parsed.searchParams.get("objective") || undefined;
         const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
-        const chatEvents = new URLSearchParams();
-        chatEvents.set("profile", parsed.searchParams.get("profile") || "generalist");
-        if (chatId) chatEvents.set("chat", chatId);
-        if (objectiveId) chatEvents.set("objective", objectiveId);
         return {
           ok: true,
           headers: { get: () => "text/html" },
@@ -1012,7 +1038,7 @@ const createWorkbenchHarness = async (options: {
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>${profileLabel}</span></div>
             <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
-              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+              <div id="factory-workbench-chat-root">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
                   <div id="factory-chat-ephemeral"></div>
@@ -1033,16 +1059,12 @@ const createWorkbenchHarness = async (options: {
         const chatId = parsed.searchParams.get("chat") || undefined;
         const objectiveId = parsed.searchParams.get("objective") || undefined;
         const inspectorTab = parsed.searchParams.get("inspectorTab") || "overview";
-        const chatEvents = new URLSearchParams();
-        chatEvents.set("profile", parsed.searchParams.get("profile") || "generalist");
-        if (chatId) chatEvents.set("chat", chatId);
-        if (objectiveId) chatEvents.set("objective", objectiveId);
         return {
           ok: true,
           headers: { get: () => "text/html" },
           json: async () => ({}),
           text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(inspectorTab, objectiveId)}">
-            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?${chatEvents.toString()}">
+            <div id="factory-workbench-chat-root">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
                 <div id="factory-chat-ephemeral"></div>
@@ -1113,11 +1135,10 @@ const createWorkbenchHarness = async (options: {
   };
   sandbox.window = sandbox;
   vm.runInNewContext(await loadClient(), sandbox);
-  const latestSourceFor = (fragment: string, eventType?: string) =>
-    [...MockEventSource.instances].reverse().find((source) =>
+  const latestSourceFor = (fragment: string, _eventType?: string) =>
+    [...MockWebSocket.instances].reverse().find((source) =>
       !source.closed
       && source.url.indexOf(fragment) >= 0
-      && (!eventType || (source.listeners.get(eventType)?.length ?? 0) > 0),
     ) ?? null;
   return {
     document,
@@ -1136,8 +1157,8 @@ const createWorkbenchHarness = async (options: {
     locationState,
     historyState,
     sessionStorageState,
-    backgroundSource: () => latestSourceFor("/factory/background/events"),
-    chatSource: () => latestSourceFor("/factory/chat/events", "agent-token"),
+    backgroundSource: () => latestSourceFor("/factory/live"),
+    chatSource: () => latestSourceFor("/factory/live", "agent-token"),
     dispatchWindowEvent: (type: string) => {
       for (const handler of windowListeners.get(type) ?? []) handler(new MockEvent({ type }));
     },
@@ -1150,10 +1171,9 @@ test("factory workbench client: profile-board and objective-runtime events refre
   });
   document.body.scrollTop = 220;
 
-  expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action");
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_demo");
+  expect(backgroundSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_demo");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_demo");
 
-  backgroundSource()?.emit("profile-board-refresh", "generalist");
   chatSource()?.emit("profile-board-refresh", "generalist");
   await flushAsync(380);
 
@@ -1161,7 +1181,6 @@ test("factory workbench client: profile-board and objective-runtime events refre
   expect(fetchCalls.filter((call) => call.url === "/factory/island/workbench/chat-body?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action")).toHaveLength(1);
   expect(document.body.scrollTop).toBe(220);
 
-  backgroundSource()?.emit("objective-runtime-refresh", "objective_demo");
   chatSource()?.emit("objective-runtime-refresh", "objective_demo");
   await flushAsync(380);
 
@@ -1199,7 +1218,7 @@ test("factory workbench client: objective navigation updates the background root
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_demo&objective=objective_b&detailTab=action")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_b");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_b");
 });
 
 test("factory workbench client: page-only navigation preserves the requested pagination state", async () => {
@@ -1274,7 +1293,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
             ? `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
                 <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>${profileLabel}</span></div>
                 <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(parsed.searchParams.get("inspectorTab") || "overview", objectiveId)}">
-                  <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=${profileId}&chat=${chatId}${objectiveId ? `&objective=${objectiveId}` : ""}">
+                  <div id="factory-workbench-chat-root">
                     <div id="factory-workbench-chat-scroll">
                       <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({ profileLabel, chatId, objectiveId })}</div>
                       <div id="factory-chat-ephemeral"></div>
@@ -1309,7 +1328,7 @@ test("factory workbench client: profile dropdown updates the page route and stre
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=software&chat=chat_demo&detailTab=action")).toBe(true);
   expect(fetchCalls.filter((call) => call.url.startsWith("/factory/island/")).every((call) => call.headers?.["HX-Request"] === "true")).toBe(true);
   expect(backgroundSource()).not.toBeNull();
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=software&chat=chat_demo");
+  expect(chatSource()?.url).toBe("/factory/live?profile=software&chat=chat_demo");
 });
 
 test("factory workbench client: New Chat resolves the server redirect and swaps to the new chat session", async () => {
@@ -1372,7 +1391,7 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header"><span>Generalist</span></div>
             <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
-              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_new">
+              <div id="factory-workbench-chat-root">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
                     profileLabel: "Generalist",
@@ -1405,8 +1424,8 @@ test("factory workbench client: New Chat resolves the server redirect and swaps 
   expect(locationState.search).toBe("?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/background-root?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-shell?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action")).toBe(true);
-  expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_new&inspectorTab=chat&detailTab=action");
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_new");
+  expect(backgroundSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_new");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_new");
 });
 
 test("factory workbench client: chat events stream tokens and refresh the transcript", async () => {
@@ -1422,7 +1441,7 @@ test("factory workbench client: chat events stream tokens and refresh the transc
           headers: { get: () => "text/html" },
           json: async () => ({}),
           text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
-            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
+            <div id="factory-workbench-chat-root">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
                   profileLabel: "Generalist",
@@ -1633,7 +1652,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
           headers: { get: () => "text/html" },
           json: async () => ({}),
           text: async () => `<div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
-            <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo">
+            <div id="factory-workbench-chat-root">
               <div id="factory-workbench-chat-scroll">
                 <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
                   profileLabel: "Generalist",
@@ -1658,7 +1677,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>Generalist</span></div>
             <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor("chat", parsed.searchParams.get("objective") || undefined)}">
-              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo${parsed.searchParams.get("objective") ? `&objective=${parsed.searchParams.get("objective")}` : ""}">
+              <div id="factory-workbench-chat-root">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
                     profileLabel: "Generalist",
@@ -1728,8 +1747,8 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
 
   expect(historyState.pushed).toEqual([]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&inspectorTab=chat");
-  expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action");
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo");
+  expect(backgroundSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo");
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench/chat-pane?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
   expect(fetchCalls.some((call) => call.url === "/factory/island/workbench?profile=generalist&chat=chat_demo&inspectorTab=chat&detailTab=action")).toBe(false);
   expect(stripHtml(ephemeral.innerHTML)).toContain("Thinking");
@@ -1749,7 +1768,7 @@ test("factory workbench client: plain prompts stay chat-first and /obj selects t
   expect(historyState.pushed).toContain("/factory?profile=generalist&chat=chat_demo&objective=objective_created&inspectorTab=chat&detailTab=action");
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_created&inspectorTab=chat&detailTab=action");
   expect(backgroundSource()).not.toBeNull();
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_created");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_created");
 });
 
 test("factory workbench client: inspector tab changes replace history and refresh chat content", async () => {
@@ -1811,8 +1830,8 @@ test("factory workbench client: window focus and pageshow resync live sources an
     initialLocation: "http://receipt.test/factory?profile=generalist&chat=chat_demo&objective=objective_demo",
   });
 
-  expect(backgroundSource()?.url).toBe("/factory/background/events?profile=generalist&chat=chat_demo&objective=objective_demo&detailTab=action");
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_demo");
+  expect(backgroundSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_demo");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_demo");
 
   dispatchWindowEvent("focus");
   dispatchWindowEvent("pageshow");
@@ -1834,7 +1853,7 @@ test("factory workbench client: focused jobs narrow the chat event stream", asyn
 
   expect(historyState.replaced).toEqual(["/factory?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action&focusKind=job&focusId=job_1"]);
   expect(locationState.search).toBe("?profile=generalist&chat=chat_demo&objective=objective_demo&inspectorTab=chat&detailTab=action&focusKind=job&focusId=job_1");
-  expect(chatSource()?.url).toBe("/factory/chat/events?profile=generalist&chat=chat_demo&objective=objective_demo&job=job_1");
+  expect(chatSource()?.url).toBe("/factory/live?profile=generalist&chat=chat_demo&objective=objective_demo&job=job_1");
 });
 
 test("factory workbench client: full shell refresh preserves pane and document scroll positions", async () => {
@@ -2001,7 +2020,7 @@ test("factory workbench client: superseded scope refreshes abort stale scope fet
           text: async () => `<div id="factory-workbench-chat-region" data-refresh-path="/factory/island/workbench/chat-shell${parsed.search}">
             <div id="factory-workbench-chat-header" data-refresh-path="/factory/island/chat/header${parsed.search}"><span>Generalist</span></div>
             <div id="factory-workbench-chat-body" data-refresh-path="/factory/island/workbench/chat-body${parsed.search}" data-refresh-on="${workbenchChatDescriptor(parsed.searchParams.get("inspectorTab") || "overview", parsed.searchParams.get("objective") || undefined)}">
-              <div id="factory-workbench-chat-root" data-events-path="/factory/chat/events?profile=generalist&chat=chat_demo${parsed.searchParams.get("objective") ? `&objective=${parsed.searchParams.get("objective")}` : ""}">
+              <div id="factory-workbench-chat-root">
                 <div id="factory-workbench-chat-scroll">
                   <div id="factory-workbench-chat" data-refresh-path="/factory/island/chat${parsed.search}">${chatMarkup({
                     profileLabel: "Generalist",

@@ -209,7 +209,6 @@ export const reduceFactory: Reducer<FactoryState, FactoryEvent> = (state, event)
     case "objective.operator.noted":
       return {
         ...state,
-        latestSummary: event.message,
         updatedAt: event.notedAt,
       };
     case "planning.receipt":

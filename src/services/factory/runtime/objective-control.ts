@@ -12,6 +12,7 @@ export const buildObjectiveSelfImprovement = (
   state: FactoryState,
   auditMetadata: FactoryObjectiveAuditMetadata | undefined,
   auditJob: QueueJob | undefined,
+  autoFixObjectiveState?: Pick<FactoryState, "objectiveId" | "status" | "profile">,
 ): FactoryObjectiveDetail["selfImprovement"] => {
   const hasAuditSnapshot = Boolean(auditMetadata);
   const auditEligible = isAuditEligibleObjectiveStatus(state.status);
@@ -54,6 +55,12 @@ export const buildObjectiveSelfImprovement = (
     recommendationError: auditMetadata?.recommendationError,
     recommendations: auditMetadata?.recommendations ?? [],
     autoFixObjectiveId: auditMetadata?.autoFixObjectiveId,
+    ...(autoFixObjectiveState
+      ? {
+          autoFixObjectiveStatus: autoFixObjectiveState.status,
+          autoFixObjectiveProfileId: autoFixObjectiveState.profile.rootProfileId,
+        }
+      : {}),
     recurringPatterns: auditMetadata?.recurringPatterns ?? [],
   };
 };

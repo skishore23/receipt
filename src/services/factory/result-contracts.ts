@@ -302,6 +302,37 @@ export type FactoryInvestigationSemanticResult = {
 
 const normalizeArtifactLabels = (value: unknown): ReadonlyArray<string> => asReadonlyStringArray(value);
 
+const looksLikeMarkdownTable = (value: string | undefined): boolean => {
+  const trimmed = trimmedString(value);
+  if (!trimmed) return false;
+  const lines = trimmed.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const header = lines[index]?.trim() ?? "";
+    const separator = lines[index + 1]?.trim() ?? "";
+    if (!header.includes("|")) continue;
+    if (!/^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(separator)) continue;
+    return true;
+  }
+  return false;
+};
+
+const looksLikeTabularArtifact = (artifact: {
+  readonly label: string;
+  readonly path: string | null | undefined;
+  readonly summary: string | null | undefined;
+}): boolean => {
+  const pathText = clipText(artifact.path ?? undefined, 240)?.toLowerCase();
+  const label = artifact.label.toLowerCase();
+  const summary = clipText(artifact.summary ?? undefined, 240)?.toLowerCase();
+  return Boolean(
+    (pathText && /\.(md|markdown|csv|tsv)$/i.test(pathText))
+    || label.includes("markdown")
+    || label.includes("table")
+    || summary?.includes("table")
+    || summary?.includes("markdown"),
+  );
+};
+
 export const normalizeTaskPresentationRecord = (input: {
   readonly value: unknown;
   readonly handoff?: string;
@@ -314,6 +345,21 @@ export const normalizeTaskPresentationRecord = (input: {
   readonly report?: FactoryInvestigationReport;
 }): FactoryTaskPresentationRecord => {
   const record = isRecord(input.value) ? input.value : undefined;
+  const handoff = trimmedString(input.handoff);
+  const tabularArtifacts = (input.workerArtifacts ?? []).filter((artifact) => looksLikeTabularArtifact(artifact));
+  const orderedArtifactLabels = [
+    ...tabularArtifacts.map((artifact) => artifact.label),
+    ...(input.workerArtifacts ?? [])
+      .map((artifact) => artifact.label)
+      .filter((label) => !tabularArtifacts.some((artifact) => artifact.label === label)),
+  ];
+  const inferredRenderHint = looksLikeMarkdownTable(handoff)
+    ? "table"
+    : tabularArtifacts.length > 0
+      ? "table"
+    : input.report
+      ? "report"
+      : "generic";
   if (record) {
     const kind = record.kind === "inline"
       || record.kind === "artifacts"
@@ -322,14 +368,19 @@ export const normalizeTaskPresentationRecord = (input: {
       ? record.kind
       : undefined;
     if (kind) {
-      const renderHint = record.renderHint === "table"
+      const explicitRenderHint = record.renderHint === "table"
         || record.renderHint === "report"
         || record.renderHint === "list"
         || record.renderHint === "generic"
         ? record.renderHint
-        : "generic";
-      const inlineBody = clipText(typeof record.inlineBody === "string" ? record.inlineBody : undefined, 4000);
-      const primaryArtifactLabels = normalizeArtifactLabels(record.primaryArtifactLabels);
+        : undefined;
+      const renderHint = inferredRenderHint === "table"
+        ? "table"
+        : explicitRenderHint ?? inferredRenderHint;
+      const inlineBody = trimmedString(typeof record.inlineBody === "string" ? record.inlineBody : undefined);
+      const primaryArtifactLabels = inferredRenderHint === "table" && orderedArtifactLabels.length > 0
+        ? orderedArtifactLabels
+        : normalizeArtifactLabels(record.primaryArtifactLabels);
       return {
         kind,
         renderHint,
@@ -338,21 +389,20 @@ export const normalizeTaskPresentationRecord = (input: {
       };
     }
   }
-  const handoff = clipText(input.handoff, 4000);
   if (input.report) {
     return {
       kind: "investigation_report",
-      renderHint: "report",
+      renderHint: inferredRenderHint,
       ...(handoff ? { inlineBody: handoff } : {}),
-      ...(input.workerArtifacts?.length
-        ? { primaryArtifactLabels: input.workerArtifacts.map((item) => item.label) }
+      ...(orderedArtifactLabels.length > 0
+        ? { primaryArtifactLabels: orderedArtifactLabels }
         : {}),
     };
   }
   if (handoff) {
     return {
       kind: "inline",
-      renderHint: "generic",
+      renderHint: inferredRenderHint,
       inlineBody: handoff,
     };
   }
@@ -360,7 +410,7 @@ export const normalizeTaskPresentationRecord = (input: {
     return {
       kind: "artifacts",
       renderHint: "generic",
-      primaryArtifactLabels: input.workerArtifacts!.map((item) => item.label),
+      primaryArtifactLabels: orderedArtifactLabels,
     };
   }
   return {
@@ -437,9 +487,9 @@ export const normalizeInvestigationReport = (
     ? record.evidence
       .filter((item): item is Record<string, unknown> => isRecord(item))
       .map((item) => ({
-        title: clipText(typeof item.title === "string" ? item.title : undefined, 140) ?? "Evidence",
-        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280) ?? "Evidence captured.",
-        detail: clipText(typeof item.detail === "string" ? item.detail : undefined, 600),
+        title: trimmedString(typeof item.title === "string" ? item.title : undefined) ?? "Evidence",
+        summary: trimmedString(typeof item.summary === "string" ? item.summary : undefined) ?? "Evidence captured.",
+        detail: trimmedString(typeof item.detail === "string" ? item.detail : undefined),
       }))
     : [];
   const evidenceRecords: ReadonlyArray<FactoryEvidenceRecord> = Array.isArray(record.evidenceRecords)
@@ -475,12 +525,12 @@ export const normalizeInvestigationReport = (
     : [];
   const scriptsRun = normalizeExecutionScriptsRun(record.scriptsRun);
   return {
-    conclusion: clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400) ?? summary,
+    conclusion: trimmedString(typeof record.conclusion === "string" ? record.conclusion : undefined) ?? summary,
     evidence,
     ...(evidenceRecords.length > 0 ? { evidenceRecords } : {}),
     scriptsRun,
-    disagreements: asReadonlyStringArray(record.disagreements).map((item) => clipText(item, 280) ?? item),
-    nextSteps: asReadonlyStringArray(record.nextSteps).map((item) => clipText(item, 280) ?? item),
+    disagreements: asReadonlyStringArray(record.disagreements),
+    nextSteps: asReadonlyStringArray(record.nextSteps),
   };
 };
 
@@ -492,30 +542,29 @@ export const normalizeInvestigationSemanticResult = (
   const status = record.status === "answered" || record.status === "partial" || record.status === "blocked"
     ? record.status
     : undefined;
-  const conclusion = clipText(typeof record.conclusion === "string" ? record.conclusion : undefined, 400);
+  const conclusion = trimmedString(typeof record.conclusion === "string" ? record.conclusion : undefined);
   if (!status || !conclusion) return undefined;
   const findings = Array.isArray(record.findings)
     ? record.findings
       .filter((item): item is Record<string, unknown> => isRecord(item))
       .map((item) => ({
-        title: clipText(typeof item.title === "string" ? item.title : undefined, 140) ?? "Finding",
-        summary: clipText(typeof item.summary === "string" ? item.summary : undefined, 280) ?? "Evidence-backed finding.",
+        title: trimmedString(typeof item.title === "string" ? item.title : undefined) ?? "Finding",
+        summary: trimmedString(typeof item.summary === "string" ? item.summary : undefined) ?? "Evidence-backed finding.",
         confidence: item.confidence === "inferred" || item.confidence === "uncertain"
           ? item.confidence
           : "confirmed",
         evidenceRefLabels: asReadonlyStringArray(item.evidenceRefLabels)
-          .map((label) => clipText(label, 140) ?? label),
+          .map((label) => trimmedString(label) ?? label),
       } satisfies FactoryInvestigationSemanticFinding))
     : [];
-  const uncertainties = asReadonlyStringArray(record.uncertainties)
-    .map((item) => clipText(item, 280) ?? item);
+  const uncertainties = asReadonlyStringArray(record.uncertainties);
   return {
     status,
     conclusion,
     findings,
     uncertainties,
-    ...(clipText(typeof record.nextAction === "string" ? record.nextAction : undefined, 280)
-      ? { nextAction: clipText(typeof record.nextAction === "string" ? record.nextAction : undefined, 280) }
+    ...(trimmedString(typeof record.nextAction === "string" ? record.nextAction : undefined)
+      ? { nextAction: trimmedString(typeof record.nextAction === "string" ? record.nextAction : undefined) }
       : {}),
   };
 };

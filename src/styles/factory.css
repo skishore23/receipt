@@ -4,6 +4,13 @@
 @source "../views/factory-live-steps.ts";
 @source "../views/factory/shared/index.ts";
 @source "../views/factory/transcript/index.ts";
+@source "../views/factory/preview.ts";
+@source "../views/factory/preview/rendering.ts";
+@source "../views/factory/preview/preview-shell.ts";
+@source "../views/factory/preview/preview-rail.ts";
+@source "../views/factory/preview/preview-thread.ts";
+@source "../views/factory/preview/preview-composer.ts";
+@source "../views/factory/preview/preview-drawer.ts";
 @source "../views/factory/workbench/page.ts";
 @source "../views/factory/workbench/page-linear.ts";
 @source "../views/receipt.ts";
@@ -340,6 +347,23 @@
     animation: factory-stream-rail 2.2s linear infinite;
   }
 
+  .factory-preview-loader-indicator {
+    width: 0.6rem;
+    height: 0.6rem;
+    flex: 0 0 auto;
+    margin-top: 0.45rem;
+    border: 1px solid color-mix(in srgb, hsl(var(--primary)) 24%, transparent);
+    background: color-mix(in srgb, hsl(var(--primary)) 70%, hsl(var(--background)));
+    animation: factory-stream-orb 1.6s ease-in-out infinite;
+  }
+
+  .factory-preview-loader-indicator--stalled {
+    border-color: color-mix(in srgb, hsl(var(--warning)) 28%, transparent);
+    background: color-mix(in srgb, hsl(var(--warning)) 82%, hsl(var(--background)));
+    animation: none;
+    opacity: 0.9;
+  }
+
   .factory-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
@@ -375,6 +399,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .factory-ephemeral-placeholder-line,
+    .factory-preview-loader-indicator,
     .factory-running-activity-orb,
     .factory-running-activity-rail,
     .factory-stream-cursor,

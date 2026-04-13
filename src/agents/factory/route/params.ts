@@ -1,7 +1,7 @@
 import { optionalTrimmedString } from "../../../framework/http";
 import { inferObjectiveProfileHint } from "../../../factory-cli/composer";
 import { DEFAULT_FACTORY_WORKBENCH_FILTER, type FactoryInspectorTab, type FactoryWorkbenchDetailTab, type FactoryWorkbenchFilterKey } from "../../../views/factory-models";
-import { inferFactoryWorkbenchBasePath } from "../../../views/factory/workbench/route";
+import { inferFactoryWorkbenchBasePath, type FactoryWorkbenchShellBase } from "../../../views/factory/workbench/route";
 import type { FactoryChatProfile } from "../../../services/factory-chat-profiles";
 
 export const isInspectorTab = (value: string | undefined): value is FactoryInspectorTab =>
@@ -78,7 +78,7 @@ export const requestedWorkbenchPage = (req: Request): number => {
   return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
 };
 
-export const requestedWorkbenchShellBase = (req: Request): "/factory" | "/factory-new" =>
+export const requestedWorkbenchShellBase = (req: Request): FactoryWorkbenchShellBase =>
   inferFactoryWorkbenchBasePath(new URL(req.url).pathname);
 
 export const requestedWorkbenchDetailTab = (req: Request): FactoryWorkbenchDetailTab | undefined => {

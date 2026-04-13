@@ -95,7 +95,7 @@ export const composerCommandsJson = (): string => JSON.stringify(COMPOSER_COMMAN
 })));
 
 export const composerTextareaClass = "min-h-[88px] w-full flex-[1_1_0%] resize-none  border border-border bg-background px-4 py-3 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary/30 focus:bg-background focus-visible:ring-2 focus-visible:ring-ring/40";
-export const composerShellClass = "mx-auto w-full max-w-6xl";
+export const composerShellClass = "mx-auto w-full";
 export const composerPanelClass = "relative flex flex-col gap-2";
 export const assistantResponseCardClass = "overflow-hidden border border-border/80 bg-card/90";
 export const assistantResponseBodyClass = "max-w-[72ch] px-4 py-3 sm:px-5 sm:py-4";

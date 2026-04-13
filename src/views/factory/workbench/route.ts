@@ -16,6 +16,11 @@ export type FactoryWorkbenchRouteInput = {
   readonly basePath?: string;
 };
 
+export type FactoryWorkbenchShellBase =
+  | "/factory"
+  | "/factory-new"
+  | "/factory-preview";
+
 type SearchParamsWriter = {
   set: (key: string, value: string) => void;
   toString: () => string;
@@ -69,11 +74,19 @@ export const buildFactoryWorkbenchSearch = (
 
 export const normalizeFactoryWorkbenchBasePath = (
   value?: string,
-): "/factory" | "/factory-new" => value === "/factory-new" ? "/factory-new" : "/factory";
+): FactoryWorkbenchShellBase => {
+  if (value === "/factory-new") return "/factory-new";
+  if (value === "/factory-preview") return "/factory-preview";
+  return "/factory";
+};
 
 export const inferFactoryWorkbenchBasePath = (
   pathname?: string,
-): "/factory" | "/factory-new" => pathname?.startsWith("/factory-new") ? "/factory-new" : "/factory";
+): FactoryWorkbenchShellBase => {
+  if (pathname?.startsWith("/factory-new")) return "/factory-new";
+  if (pathname?.startsWith("/factory-preview")) return "/factory-preview";
+  return "/factory";
+};
 
 export const buildFactoryWorkbenchRouteKey = (
   input: FactoryWorkbenchRouteInput,
