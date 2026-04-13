@@ -90,18 +90,15 @@ export const renderPreviewRailIsland = (
   const attentionObjectives = sortByUpdatedAtDesc(workspace.board.sections.needs_attention);
   const completedObjectives = sortByUpdatedAtDesc(workspace.board.sections.completed);
   const archivedObjectives = sortByUpdatedAtDesc(workspace.board.sections.archived);
-  const sectionDivider = '<div class="mx-1 h-px bg-border/70"></div>';
   return `<aside id="factory-preview-rail" class="min-w-[200px] space-y-2 overflow-hidden px-1.5 py-1 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-border xl:pr-3" ${previewIslandAttrs(
     previewRailPath(context.routeContext, context.expandedRailSections),
     railRefreshOn,
     `${envelope.boardVersion}:${context.expandedRailSections.join(",")}`,
   )}>
     <div class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">${iconProject("h-3.5 w-3.5")}<span>Objectives</span></div>
-    ${[
-      renderRailSection(context, "active", "Active", activeObjectives, "No active or queued objectives for this profile yet."),
-      renderRailSection(context, "needs_attention", "Needs Attention", attentionObjectives, "No blocked or needs-input objectives right now."),
-      renderRailSection(context, "completed", "Completed", completedObjectives, "Completed objectives will appear here."),
-      renderRailSection(context, "archived", "Archived", archivedObjectives, "Archived objectives stay quiet here."),
-    ].join(sectionDivider)}
+    ${renderRailSection(context, "active", "Active", activeObjectives, "No active or queued objectives for this profile yet.")}
+    ${renderRailSection(context, "needs_attention", "Needs Attention", attentionObjectives, "No blocked or needs-input objectives right now.")}
+    ${renderRailSection(context, "completed", "Completed", completedObjectives, "Completed objectives will appear here.")}
+    ${renderRailSection(context, "archived", "Archived", archivedObjectives, "Archived objectives stay quiet here.")}
   </aside>`;
 };
