@@ -8,6 +8,8 @@ import {
   ghostButtonClass,
   iconCheckCircle,
   iconFactory,
+  iconNext,
+  iconQueue,
   iconSpark,
   iconWorker,
   liveIslandAttrs,
@@ -254,13 +256,20 @@ const renderFilterPill = (
   filter: FactoryWorkbenchWorkspaceModel["filters"][number],
 ): string => {
   const href = routeHref(routeContext, { filter: filter.key, page: 1 });
+  const icon = filter.key === "objective.running"
+    ? iconSpark("h-3 w-3")
+    : filter.key === "objective.needs_attention"
+      ? iconQueue("h-3 w-3")
+      : filter.key === "objective.completed"
+        ? iconCheckCircle("h-3 w-3")
+        : iconNext("h-3 w-3");
   return `<a href="${esc(href)}" ${htmxNavAttrs(workbenchBackgroundRootPath({
     ...routeContext,
     filter: filter.key,
     page: 1,
   }), "#factory-workbench-background-root")} ${filter.selected ? 'aria-current="page"' : ""} class="inline-flex items-center  px-3 py-1.5 text-[11px] font-medium transition ${filter.selected
     ? "bg-white/10 text-foreground"
-    : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground"}">${esc(filter.label)} <span class="ml-1 text-muted-foreground">${esc(String(filter.count))}</span></a>`;
+    : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground"}">${icon}<span>${esc(filter.label)}</span> <span class="ml-1 text-muted-foreground">${esc(String(filter.count))}</span></a>`;
 };
 
 const renderObjectiveCard = (
@@ -303,7 +312,10 @@ const renderObjectiveSection = (
   routeContext: FactoryWorkbenchRouteContext,
 ): string => `<section class="border-t border-white/6 pt-4 first:border-t-0 first:pt-0">
   <div class="mb-2 flex items-center justify-between gap-2 px-1">
-    <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">${esc(section.title)}</div>
+    <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+      ${section.key === "active" ? iconSpark("h-3 w-3") : iconQueue("h-3 w-3")}
+      <span>${esc(section.title)}</span>
+    </div>
     <div class="text-[11px] text-muted-foreground">${esc(String(section.count))}</div>
   </div>
   <div class="space-y-1">
@@ -326,7 +338,10 @@ const renderLinearRail = (
   </div>
   <div id="factory-workbench-rail-scroll" data-preserve-scroll-key="rail" class="factory-scrollbar min-h-0 max-h-[70vh] overflow-x-hidden overflow-y-auto px-4 py-4 lg:h-full lg:max-h-none">
     <div class="space-y-5">
-      ${objectiveSections(workspace).map((section) => renderObjectiveSection(section, routeContext)).join("")}
+      ${objectiveSections(workspace).map((section, index) => [
+        index > 0 ? `<div class="border-t border-white/10"></div>` : "",
+        renderObjectiveSection(section, routeContext),
+      ].join("")).join("")}
     </div>
   </div>
 </aside>`;
