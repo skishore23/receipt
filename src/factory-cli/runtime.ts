@@ -186,6 +186,12 @@ export const createFactoryCliRuntime = (
     ),
     leaseMs: Math.max(120_000, Number(process.env.JOB_LEASE_MS ?? 120_000)),
     concurrency: Math.max(1, Number(process.env.JOB_CONCURRENCY ?? 12)),
+    onLeaseRenewal: (event) => {
+      console.error(JSON.stringify({ type: "job.lease_renewed", scope: "factory-cli", ...event }));
+    },
+    onLeaseLifecycle: (event) => {
+      console.error(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "factory-cli", ...event }));
+    },
     scope: "factory-cli",
     onError: (error) => {
       notify({

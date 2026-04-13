@@ -1217,6 +1217,9 @@ const chatWorker = new JobWorker({
   onLeaseRenewal: (event) => {
     console.info(JSON.stringify({ type: "job.lease_renewed", scope: "chat", ...event }));
   },
+  onLeaseLifecycle: (event) => {
+    console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "chat", ...event }));
+  },
 });
 
 const agentWorker = new JobWorker({
@@ -1237,6 +1240,9 @@ const agentWorker = new JobWorker({
   onLeaseRenewal: (event) => {
     console.info(JSON.stringify({ type: "job.lease_renewed", scope: "agent", ...event }));
   },
+  onLeaseLifecycle: (event) => {
+    console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "agent", ...event }));
+  },
 });
 
 const factoryWorker = createFactoryLocalWorker({
@@ -1253,6 +1259,9 @@ const factoryWorker = createFactoryLocalWorker({
   onError: (error) => {
     markLocalWorkerError("factory", error);
     console.error(`[job-worker ${jobWorkerId}:factory]`, error);
+  },
+  onLeaseLifecycle: (event) => {
+    console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "factory", ...event }));
   },
 });
 const workers = [chatWorker, agentWorker, factoryWorker] as const;

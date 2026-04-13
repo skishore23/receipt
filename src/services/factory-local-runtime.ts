@@ -73,6 +73,23 @@ export const createFactoryLocalWorker = (input: {
   readonly leaseAgentIds?: ReadonlyArray<string>;
   readonly scope: string;
   readonly onTick?: () => void;
+  readonly onLeaseRenewal?: (event: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+    readonly lagMs: number;
+    readonly remainingMs: number;
+    readonly startup: boolean;
+  }) => void;
+  readonly onLeaseLifecycle?: (event: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+    readonly kind: "acquired" | "renewed" | "missed" | "grace_expired" | "reconciled";
+    readonly startup?: boolean;
+    readonly lagMs?: number;
+    readonly remainingMs?: number;
+  }) => void;
   readonly onError?: (error: Error) => void;
 }): JobWorker =>
   new JobWorker({
@@ -86,6 +103,7 @@ export const createFactoryLocalWorker = (input: {
     onTick: input.onTick,
     onError: input.onError,
     onLeaseRenewal: (event) => {
+      input.onLeaseRenewal?.(event);
       console.error(
         JSON.stringify({
           type: "job.lease_renewed",
@@ -93,6 +111,9 @@ export const createFactoryLocalWorker = (input: {
           ...event,
         }),
       );
+    },
+    onLeaseLifecycle: (event) => {
+      input.onLeaseLifecycle?.(event);
     },
   });
 

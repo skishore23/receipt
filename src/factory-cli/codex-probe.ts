@@ -280,6 +280,9 @@ const runQueueProbe = async (
     onLeaseRenewal: (event) => {
       console.error(JSON.stringify({ type: "job.lease_renewed", scope: "codex-probe", ...event }));
     },
+    onLeaseLifecycle: (event) => {
+      console.error(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "codex-probe", ...event }));
+    },
   });
   const snapshots: CodexProbeSnapshot[] = [];
   const seen = new Set<string>();
