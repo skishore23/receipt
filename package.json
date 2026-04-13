@@ -48,7 +48,8 @@
     "typecheck:root": "bun x tsc --noEmit",
     "typecheck:core": "bun x tsc --noEmit -p packages/core/tsconfig.json",
     "typecheck:durable": "bun x tsc --noEmit -p packages/durable/tsconfig.json",
-    "typecheck": "bun run typecheck:root && bun run typecheck:core && bun run typecheck:durable",
+    "typecheck:live": "bun x tsc --noEmit -p packages/live/tsconfig.json",
+    "typecheck": "bun run typecheck:root && bun run typecheck:core && bun run typecheck:durable && bun run typecheck:live",
     "new:agent": "bun src/cli.ts new",
     "test:smoke": "bun test ./tests/smoke",
     "test:perf": "bun test ./tests/perf",
@@ -58,6 +59,7 @@
   },
   "dependencies": {
     "@receipt/durable": "workspace:*",
+    "@receipt/live": "workspace:*",
     "@clack/prompts": "^1.1.0",
     "@hono/zod-validator": "^0.7.6",
     "@inkjs/ui": "^2.0.0",

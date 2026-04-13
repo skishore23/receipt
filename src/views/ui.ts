@@ -243,7 +243,7 @@ export type LiveRefreshSpec =
       readonly event: string;
     }
   | {
-      readonly kind?: "sse";
+      readonly kind?: "live" | "sse";
       readonly event: string;
       readonly throttleMs?: number;
     };
@@ -257,7 +257,7 @@ const liveRefreshTriggerPart = (spec: LiveRefreshSpec): string => {
 const liveRefreshDescriptorPart = (spec: LiveRefreshSpec): string => {
   if (spec.kind === "load") return "load";
   if (spec.kind === "body") return `body:${spec.event}`;
-  return `sse:${spec.event}${typeof spec.throttleMs === "number" ? `@${spec.throttleMs}` : ""}`;
+  return `live:${spec.event}${typeof spec.throttleMs === "number" ? `@${spec.throttleMs}` : ""}`;
 };
 
 export const liveRefreshTrigger = (refreshOn: ReadonlyArray<LiveRefreshSpec>): string =>

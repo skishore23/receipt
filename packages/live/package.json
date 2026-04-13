@@ -1,0 +1,11 @@
+{
+  "name": "@receipt/live",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./bun": "./src/bun.ts",
+    "./protocol": "./src/protocol.ts"
+  }
+}

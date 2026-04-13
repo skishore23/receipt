@@ -211,6 +211,8 @@ export type FactoryObjectiveSelfImprovement = {
   readonly recommendationError?: string;
   readonly recommendations: ReadonlyArray<AuditRecommendation>;
   readonly autoFixObjectiveId?: string;
+  readonly autoFixObjectiveStatus?: string;
+  readonly autoFixObjectiveProfileId?: string;
   readonly recurringPatterns: ReadonlyArray<{
     readonly pattern: string;
     readonly count: number;
@@ -424,7 +426,8 @@ export type FactoryBoardSection =
   | "needs_attention"
   | "active"
   | "queued"
-  | "completed";
+  | "completed"
+  | "archived";
 
 export type FactoryBoardProjection = {
   readonly objectives: ReadonlyArray<

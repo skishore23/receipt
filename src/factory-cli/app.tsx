@@ -9,6 +9,7 @@ import {
   cleanupObjectiveMutation,
   createObjectiveMutation,
   followUpJobMutation,
+  noteObjectiveMutation,
   promoteObjectiveMutation,
   reactObjectiveMutation,
   requireActiveObjectiveJob,
@@ -45,6 +46,7 @@ import type {
   FactoryTaskView,
 } from "../services/factory-service";
 import { DEFAULT_FACTORY_OBJECTIVE_POLICY } from "../modules/factory";
+import { buildFactoryObjectiveLoadingState, summarizeFactoryTaskSignal } from "../services/factory/live-status";
 import { buildFactoryWorkbench } from "../views/factory-workbench";
 
 export type FactoryAppExit = {
@@ -145,7 +147,7 @@ const EmptyState = ({ title, message }: { readonly title: string; readonly messa
 );
 
 const renderTaskSignal = (task: FactoryTaskView): string =>
-  truncate(task.lastMessage ?? task.stdoutTail ?? task.stderrTail ?? task.latestSummary ?? "No output yet.", 140);
+  truncate(summarizeFactoryTaskSignal(task), 140);
 
 const LiveTaskCard = ({ task }: { readonly task: FactoryTaskView }): React.ReactElement => (
   <Box
@@ -229,7 +231,7 @@ const ObjectiveRail = ({
   readonly compact: boolean;
 }): React.ReactElement => (
   <Box flexDirection="column">
-    {(["needs_attention", "active", "queued", "completed"] as const).map((section) => (
+    {(["needs_attention", "active", "queued", "completed", "archived"] as const).map((section) => (
       <Box key={section} flexDirection="column" marginBottom={1}>
         <Box justifyContent="space-between">
           <Text bold color={tone("text")}>{BOARD_SECTION_META[section].title}</Text>
@@ -355,10 +357,32 @@ const WorkbenchPane = ({
   );
 };
 
-const OverviewPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }): React.ReactElement => (
+const OverviewPanel = ({
+  detail,
+  live,
+}: {
+  readonly detail: FactoryObjectiveDetail;
+  readonly live?: FactoryLiveProjection;
+}): React.ReactElement => {
+  const loading = buildFactoryObjectiveLoadingState({ detail, live });
+  const showLoading = detail.phaseDetail === "collecting_evidence"
+    || detail.phaseDetail === "synthesizing"
+    || detail.phaseDetail === "integrating"
+    || detail.phaseDetail === "promoting";
+  return (
   <Box flexDirection="column">
     <Text bold color={tone("text")}>Objective prompt</Text>
     <Text color={tone("text")}>{truncate(detail.prompt, 520)}</Text>
+    {showLoading ? (
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={tone("text")}>Current signal</Text>
+        <Text color={tone("text")}>{truncate(loading.summary, 220)}</Text>
+        {loading.detail ? <Text color={tone("muted")}>{truncate(loading.detail, 220)}</Text> : null}
+        {loading.highlights?.length ? loading.highlights.map((line, index) => (
+          <Text key={`loading:${index}`} color={tone("muted")}>{truncate(`- ${line}`, 220)}</Text>
+        )) : null}
+      </Box>
+    ) : null}
     <Box marginTop={1} flexWrap="wrap">
       <MetricCell label="Mode" value={labelize(detail.objectiveMode)} />
       <MetricCell label="Severity" value={String(detail.severity)} />
@@ -431,7 +455,8 @@ const OverviewPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }):
       <MetricCell label="Checks" value={formatList(detail.checks, "none")} />
     </Box>
   </Box>
-);
+  );
+};
 
 const TasksPanel = ({ detail }: { readonly detail: FactoryObjectiveDetail }): React.ReactElement => (
   <Box flexDirection="column">
@@ -681,7 +706,7 @@ const ObjectivePanelContent = ({
 }): React.ReactElement => {
   switch (panel) {
     case "overview":
-      return <OverviewPanel detail={detail} />;
+      return <OverviewPanel detail={detail} live={live} />;
     case "report":
       return <ReportPanel detail={detail} />;
     case "tasks":
@@ -701,7 +726,7 @@ const ObjectivePanelContent = ({
     case "analysis":
       return <AnalysisPanel analysis={analysis} />;
     default:
-      return <OverviewPanel detail={detail} />;
+      return <OverviewPanel detail={detail} live={live} />;
   }
 };
 
@@ -838,7 +863,7 @@ const HelpOverlay = (): React.ReactElement => (
   <Surface
     kicker="Command Help"
     title="Slash commands"
-    subtitle="Plain text creates a new objective when nothing is selected, otherwise it reacts to the selected objective. Active-job commands target the latest running or queued job for the selected objective."
+    subtitle="Plain text creates a new objective when nothing is selected, otherwise it reacts to the selected objective. Use /note for a passive note. Active-job commands target the latest running or queued job for the selected objective."
     marginBottom={1}
   >
     {COMPOSER_COMMANDS.map((command) => (
@@ -1186,6 +1211,15 @@ export const FactoryTerminalApp = ({
       return;
     }
     switch (command.type) {
+      case "note":
+        await runAction("Noting objective", async () => {
+          await noteObjectiveMutation(runtime, {
+            objectiveId,
+            message: command.message,
+          });
+        });
+        setDraft("");
+        return;
       case "react":
         await runAction("Reacting objective", async () => {
           await reactObjectiveMutation(runtime, {
@@ -1405,6 +1439,7 @@ export const FactoryTerminalApp = ({
           active: [],
           queued: [],
           completed: [],
+          archived: [],
         },
         selectedObjectiveId: undefined,
       },

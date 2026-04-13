@@ -52,6 +52,7 @@ test("smoke: project builds", async () => {
   expect(fs.existsSync(path.join(ROOT, "src", "client", "factory-client.js"))).toBe(false);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "factory.css"))).toBe(true);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "factory-client.js"))).toBe(true);
+  expect(fs.existsSync(path.join(ROOT, "dist", "assets", "factory-preview.js"))).toBe(true);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "htmx.min.js"))).toBe(true);
   expect(fs.existsSync(path.join(ROOT, "dist", "assets", "htmx-ext-sse.js"))).toBe(true);
 }, 180_000);

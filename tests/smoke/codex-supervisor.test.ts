@@ -484,6 +484,8 @@ test("codex supervisor can recover from a dirty-repo factory dispatch failure by
     expect(createdPayloads).toHaveLength(2);
     expect(createdPayloads[0]?.baseHash).toBeUndefined();
     expect(createdPayloads[1]?.baseHash).toBeTruthy();
+    expect(createdPayloads[0]).not.toHaveProperty("startImmediately");
+    expect(createdPayloads[1]).not.toHaveProperty("startImmediately");
     expect(repoStatusObservation?.body.output ?? "").toContain("\"dirty\": true");
     expect(repoStatusObservation?.body.output ?? "").toContain("\"baseHash\":");
     expect((await queue.listJobs({ limit: 10 })).filter((job) => job.agentId === "codex")).toHaveLength(0);

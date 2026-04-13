@@ -7,6 +7,20 @@ const clip = (value: string | undefined, max = 220): string => {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
 };
 
+const looksLikeMarkdownTable = (value: string | undefined): boolean => {
+  const text = value?.trim() ?? "";
+  if (!text) return false;
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const header = lines[index]?.trim() ?? "";
+    const separator = lines[index + 1]?.trim() ?? "";
+    if (!header.includes("|")) continue;
+    if (!/^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(separator)) continue;
+    return true;
+  }
+  return false;
+};
+
 const artifactLines = (detail: FactoryObjectiveDetail): ReadonlyArray<string> => {
   const seen = new Set<string>();
   const lines: string[] = [];
@@ -26,7 +40,11 @@ export const investigationReportAvailable = (detail: FactoryObjectiveDetail): bo
   && (Boolean(detail.investigation.synthesized) || (detail.status === "completed" && detail.investigation.reports.length > 0));
 
 export const defaultObjectivePanelForDetail = (detail: FactoryObjectiveDetail): FactoryObjectivePanel =>
-  investigationReportAvailable(detail) ? "report" : "overview";
+  looksLikeMarkdownTable(detail.latestHandoff?.renderedBody)
+    ? "overview"
+    : investigationReportAvailable(detail)
+      ? "report"
+      : "overview";
 
 export const buildInvestigationReportPanelValue = (detail: FactoryObjectiveDetail) => ({
   objectiveId: detail.objectiveId,

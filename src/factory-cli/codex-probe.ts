@@ -278,10 +278,10 @@ const runQueueProbe = async (
     leaseAgentIds: Object.keys(handlers),
     handlers,
     onLeaseRenewal: (event) => {
-      console.info(JSON.stringify({ type: "job.lease_renewed", scope: "codex-probe", ...event }));
+      console.error(JSON.stringify({ type: "job.lease_renewed", scope: "codex-probe", ...event }));
     },
     onLeaseLifecycle: (event) => {
-      console.info(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "codex-probe", ...event }));
+      console.error(JSON.stringify({ type: `job.lease_${event.kind}`, scope: "codex-probe", ...event }));
     },
   });
   const snapshots: CodexProbeSnapshot[] = [];

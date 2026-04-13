@@ -1,3 +1,4 @@
+import { createLiveEventSource } from "@receipt/live/browser";
 import {
   composerFeedback,
   parseComposeResponse,
@@ -38,7 +39,7 @@ import {
   type FactoryWorkbenchUiState,
 } from "./workbench-state";
 
-type LiveRefreshSourceKey = "background" | "chat";
+type LiveRefreshSourceKey = "live";
 type WorkbenchRefreshTargetKey = "background" | "chat";
 type WorkbenchEnvelopeTargetKey = "background" | "chat";
 
@@ -196,15 +197,19 @@ export const initFactoryWorkbenchBrowser = () => {
   const currentUrl = () =>
     resolveFactoryUrl(String(window.location && window.location.href ? window.location.href : "/factory"));
 
-  const documentShellBase = (): "/factory" | "/factory-new" => {
+  const documentShellBase = (): "/factory" | "/factory-new" | "/factory-preview" => {
     const value = document.body?.getAttribute("data-shell-base");
-    return value === "/factory-new" ? "/factory-new" : "/factory";
+    if (value === "/factory-new") return "/factory-new";
+    if (value === "/factory-preview") return "/factory-preview";
+    return "/factory";
   };
 
-  const routeBasePath = (route: FactoryWorkbenchRouteState): "/factory" | "/factory-new" => {
+  const routeBasePath = (route: FactoryWorkbenchRouteState): "/factory" | "/factory-new" | "/factory-preview" => {
     const url = resolveFactoryUrl(route.routeKey);
     if (!url) return documentShellBase();
-    return url.pathname.startsWith("/factory-new") ? "/factory-new" : "/factory";
+    if (url.pathname.startsWith("/factory-new")) return "/factory-new";
+    if (url.pathname.startsWith("/factory-preview")) return "/factory-preview";
+    return "/factory";
   };
 
   const bodyRouteValue = (name: string): string | undefined => {
@@ -948,29 +953,26 @@ export const initFactoryWorkbenchBrowser = () => {
   const chatIslandPathForRoute = (route: FactoryWorkbenchRouteState): string =>
     `${routeBasePath(route)}/island/chat${routeSearch(route)}`;
 
-  const backgroundEventsPathForRoute = (route: FactoryWorkbenchRouteState): string =>
-    `${routeBasePath(route)}/background/events${routeSearch(route)}`;
-
-  const chatEventsPathForRoute = (route: FactoryWorkbenchRouteState): string => {
+  const liveEventsPathForRoute = (route: FactoryWorkbenchRouteState): string => {
     const params = new URLSearchParams();
     params.set("profile", route.profileId);
     if (route.chatId) params.set("chat", route.chatId);
     if (route.objectiveId) params.set("objective", route.objectiveId);
     if (route.focusKind === "job" && route.focusId) params.set("job", route.focusId);
-    return `${routeBasePath(route)}/chat/events?${params.toString()}`;
+    return `${routeBasePath(route)}/live?${params.toString()}`;
   };
 
-  const workbenchBackgroundDescriptor = "sse:profile-board-refresh@320,sse:objective-runtime-refresh@320";
+  const workbenchBackgroundDescriptor = "live:profile-board-refresh@320,live:objective-runtime-refresh@320";
 
   const workbenchChatDescriptorForRoute = (route: FactoryWorkbenchRouteState): string => route.inspectorTab === "chat"
     ? [
-        "sse:agent-refresh@180",
-        "sse:job-refresh@180",
-        ...(route.objectiveId ? ["sse:objective-runtime-refresh@180"] : []),
+        "live:agent-refresh@180",
+        "live:job-refresh@180",
+        ...(route.objectiveId ? ["live:objective-runtime-refresh@180"] : []),
       ].join(",")
     : [
-        "sse:profile-board-refresh@300",
-        ...(route.objectiveId ? ["sse:objective-runtime-refresh@300"] : []),
+        "live:profile-board-refresh@300",
+        ...(route.objectiveId ? ["live:objective-runtime-refresh@300"] : []),
       ].join(",");
 
   const syncWorkbenchRouteData = (route: FactoryWorkbenchRouteState) => {
@@ -1041,7 +1043,6 @@ export const initFactoryWorkbenchBrowser = () => {
     const currentBackgroundRoot = backgroundRoot();
     setRefreshPath(currentBackgroundRoot, workbenchBackgroundRootPathForRoute(route));
     setRefreshDescriptor(currentBackgroundRoot, workbenchBackgroundDescriptor);
-    if (currentBackgroundRoot) currentBackgroundRoot.setAttribute("data-events-path", backgroundEventsPathForRoute(route));
     const currentFocusShell = workbenchFocusShell();
     setRefreshPath(currentFocusShell, `${routeBasePath(route)}/island/workbench/focus${routeSearch(route)}`);
     clearRefreshDescriptor(currentFocusShell);
@@ -1059,8 +1060,6 @@ export const initFactoryWorkbenchBrowser = () => {
     setRefreshDescriptor(currentChatBody, workbenchChatDescriptorForRoute(route));
     const currentChat = chatContainer();
     setRefreshPath(currentChat, chatIslandPathForRoute(route));
-    const currentChatRoot = chatRoot();
-    if (currentChatRoot) currentChatRoot.setAttribute("data-events-path", chatEventsPathForRoute(route));
     const form = composerForm();
     if (form) form.action = `${routeBasePath(route)}/compose${routeSearch(route)}`;
   };
@@ -1073,7 +1072,7 @@ export const initFactoryWorkbenchBrowser = () => {
     syncRouteBindings(route);
     syncInspectorTabVisibility(route.inspectorTab);
     syncInspectorTabControls(route.inspectorTab);
-    syncWorkbenchEventSources();
+    syncWorkbenchLiveSources();
     const historyUrl = resolveFactoryUrl(route.routeKey);
     if (historyUrl) setHistory(historyUrl, historyMode);
   };
@@ -1224,16 +1223,6 @@ export const initFactoryWorkbenchBrowser = () => {
     return ["background", "chat"];
   };
 
-  const backgroundEventsPath = () => {
-    const node = backgroundRoot();
-    return node?.getAttribute("data-events-path") || null;
-  };
-
-  const chatEventsPath = () => {
-    const node = chatRoot();
-    return node?.getAttribute("data-events-path") || null;
-  };
-
   const liveRefreshRunner = createQueuedRefreshRunner<WorkbenchRefreshTargetKey, string>((targetKey, scopeKey) => {
     const expectedRouteKey = scopeKey ?? currentRouteKey();
     switch (targetKey) {
@@ -1246,40 +1235,36 @@ export const initFactoryWorkbenchBrowser = () => {
   });
 
   const liveRefreshRouter = createReactivePushRouter<LiveRefreshSourceKey, WorkbenchRefreshTargetKey, string>({
-    sources: ["background", "chat"],
+    sources: ["live"],
     targets: () => [
       {
         key: "background",
-        source: "background",
+        source: "live",
         element: backgroundRoot,
         queue: (delayMs, scopeKey) => liveRefreshRunner.queue("background", delayMs, scopeKey),
       },
       {
         key: "chat",
-        source: "chat",
+        source: "live",
         element: chatBody,
         queue: (delayMs, scopeKey) => liveRefreshRunner.queue("chat", delayMs, scopeKey),
       },
     ],
-    eventPath: (sourceKey) => sourceKey === "background"
-      ? backgroundEventsPath()
-      : chatEventsPath(),
+    eventPath: () => liveEventsPathForRoute(workbenchState.desiredRoute),
     getScopeKey: currentRouteKey,
-    onSseEvent: ({ sourceKey, eventName }) => {
-      if (sourceKey !== "chat") return;
+    onLiveEvent: ({ eventName }) => {
       if (eventName !== "agent-refresh" && eventName !== "job-refresh") return;
       const nextTurn = reduceEphemeralTurnOnComposeRefresh(ephemeralTurn, eventName);
       if (nextTurn !== ephemeralTurn) updateEphemeralTurn(nextTurn);
     },
-    onEventSourceConnected: ({ sourceKey, eventSource }) => {
-      if (sourceKey !== "chat") return;
-      eventSource.addEventListener("agent-phase", (event) => {
+    onLiveSourceConnected: ({ liveSource }) => {
+      liveSource.addEventListener("agent-phase", (event) => {
         const payload = parseAgentPhasePayload((event as MessageEvent<string>).data || "");
         if (!payload) return;
         const nextTurn = reduceEphemeralTurnOnPhase(ephemeralTurn, payload);
         if (nextTurn !== ephemeralTurn) updateEphemeralTurn(nextTurn);
       });
-      eventSource.addEventListener("agent-token", (event) => {
+      liveSource.addEventListener("agent-token", (event) => {
         const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
         if (!payload) return;
         const runId = payload.runId || currentChatState().activeRunId || ephemeralTurn?.runId;
@@ -1287,18 +1272,19 @@ export const initFactoryWorkbenchBrowser = () => {
         ephemeralTurn = reduceEphemeralTurnOnToken(ephemeralTurn, payload);
         scheduleOverlayRender();
       });
-      eventSource.addEventListener("factory-stream-reset", () => {
+      liveSource.addEventListener("factory-stream-reset", () => {
         reconcileEphemeralTurn();
       });
     },
+    connectLiveSource: (path) => createLiveEventSource(path),
   });
 
-  const syncWorkbenchEventSources = () => {
+  const syncWorkbenchLiveSources = () => {
     liveRefreshRouter.sync();
   };
 
   const refreshVisibleWorkbench = () => {
-    syncWorkbenchEventSources();
+    syncWorkbenchLiveSources();
     return refreshRouteTargetsNow(["background", "chat"]).catch(() => undefined);
   };
 
@@ -1816,6 +1802,6 @@ export const initFactoryWorkbenchBrowser = () => {
   appliedEnvelope = readDocumentEnvelope();
   processHtmx(document.body);
   scheduleOverlayRender();
-  syncWorkbenchEventSources();
+  syncWorkbenchLiveSources();
   consumeComposeCommandFromLocation(String(window.location && window.location.href ? window.location.href : shellPath()));
 };

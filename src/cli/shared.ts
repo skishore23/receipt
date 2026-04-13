@@ -19,7 +19,7 @@ In this repo, prefer:
 Agent-friendly defaults:
   use --json for machine-readable reads
   use --output-file <path> on large read commands
-  keep mutations explicit: receipt abort, receipt factory react|promote|cancel|cleanup|archive|steer|follow-up|abort-job
+  keep mutations explicit: receipt abort, receipt factory note|react|promote|cancel|cleanup|archive|steer|follow-up|abort-job
 
 Commands:
   receipt new <agent-id> [--template basic|assistant-tool|human-loop|merge]
@@ -41,7 +41,7 @@ Commands:
   receipt memory prefs <list|add|remove> [options]
   receipt sessions <search|read> [args] [options]
   receipt doctor [--json] [--output-file <path>] [--repo-root <path>]
-  receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|analyze|parse|investigate|audit|resume|react|promote|cancel|cleanup|archive|abort-job|steer|follow-up|experiment|codex-probe]`);
+  receipt factory [init|run|create|compose|watch|inspect|replay|replay-chat|analyze|parse|investigate|audit|resume|note|react|promote|cancel|cleanup|archive|abort-job|steer|follow-up|experiment|codex-probe]`);
 };
 
 export const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {

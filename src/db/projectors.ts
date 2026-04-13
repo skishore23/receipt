@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createRuntime, type Runtime } from "@receipt/core/runtime";
-import { desc, eq, like, max, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, like, lt, max, or, sql } from "drizzle-orm";
 
 import { getProjectionOffset, getReceiptDb, latestGlobalSeq, listChangedStreams, listStreamsByPrefix, setProjectionOffset } from "./client";
 import { jsonParse, jsonParseOptional, jsonStringify } from "./json";
@@ -96,6 +96,8 @@ const scopeFromMemoryStream = (stream: string): string | undefined =>
 
 const sessionStreamFromChangedStream = (stream: string): string | undefined =>
   isFactoryChatSessionStream(stream) ? stream : chatSessionStreamFromStream(stream);
+
+const prefixUpperBound = (prefix: string): string => `${prefix}\uffff`;
 
 export type StoredJobProjection = {
   readonly id: string;
@@ -626,6 +628,7 @@ export const syncChatContextProjectionStream = async (
 ): Promise<FactoryChatContextProjection | undefined> => {
   if (!isFactoryChatSessionStream(sessionStream)) return undefined;
   const db = getReceiptDb(dataDir);
+  const runStreamPrefix = `${sessionStream}/runs/`;
   const rows = db.read(() => db.orm.select({
     globalSeq: schema.receipts.globalSeq,
     stream: schema.receipts.stream,
@@ -638,7 +641,10 @@ export const syncChatContextProjectionStream = async (
     .from(schema.receipts)
     .where(or(
       eq(schema.receipts.stream, sessionStream),
-      like(schema.receipts.stream, `${sessionStream}/runs/%`),
+      and(
+        gte(schema.receipts.stream, runStreamPrefix),
+        lt(schema.receipts.stream, prefixUpperBound(runStreamPrefix)),
+      ),
     ))
     .orderBy(schema.receipts.globalSeq)
     .all());

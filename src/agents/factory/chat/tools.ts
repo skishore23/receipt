@@ -448,7 +448,6 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
         checks: normalized.checks,
         channel: normalized.channel,
         profileId: input.profile.root.id,
-        startImmediately: true,
       };
       detail = await input.factoryService.createObjective(payload);
       bindingReason = "dispatch_create";
@@ -472,7 +471,6 @@ const createFactoryDispatchTool = (input: FactoryChatToolsInput): AgentToolExecu
           checks: normalized.checks,
           channel: normalized.channel,
           profileId: input.profile.root.id,
-          startImmediately: true,
         });
         action = "create";
         bindingReason = "dispatch_create";

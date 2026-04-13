@@ -54,6 +54,7 @@ export const changeLog = sqliteTable("change_log", {
   changedAt: integer("changed_at", { mode: "number" }).notNull(),
 }, (table) => [
   index("change_log_global_seq_idx").on(table.globalSeq),
+  index("change_log_global_seq_stream_idx").on(table.globalSeq, table.stream),
   index("change_log_stream_idx").on(table.stream),
   index("change_log_changed_at_idx").on(table.changedAt),
 ]);
@@ -137,6 +138,12 @@ export const chatContextProjection = sqliteTable("chat_context_projection", {
   index("chat_context_projection_chat_idx").on(table.chatId, table.updatedAt),
   index("chat_context_projection_profile_idx").on(table.profileId, table.updatedAt),
   index("chat_context_projection_objective_idx").on(table.boundObjectiveId, table.updatedAt),
+  index("chat_context_projection_objective_profile_updated_idx").on(
+    table.boundObjectiveId,
+    table.profileId,
+    table.updatedAt,
+    table.stream,
+  ),
 ]);
 
 export const sessionMessages = sqliteTable("session_messages", {

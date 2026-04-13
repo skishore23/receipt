@@ -60,7 +60,11 @@ export const BOARD_SECTION_META = {
   },
   completed: {
     title: "Completed",
-    description: "Recently finished, canceled, or archived objectives.",
+    description: "Recently finished or canceled objectives.",
+  },
+  archived: {
+    title: "Archived",
+    description: "Retired objectives kept out of the active operator queue.",
   },
 } satisfies Readonly<Record<keyof FactoryBoardProjection["sections"], { readonly title: string; readonly description: string }>>;
 
@@ -105,6 +109,7 @@ export const flattenObjectives = (
   ...board.sections.active,
   ...board.sections.queued,
   ...board.sections.completed,
+  ...board.sections.archived,
 ];
 
 export const budgetPercent = (used: number | undefined, max: number | undefined): number => {
@@ -267,7 +272,7 @@ export const buildFactoryWorkbenchViewModel = (opts: {
     },
     composer: {
       title: selected ? `React to ${selected.objectiveId}` : "Create a new objective",
-      subtitle: selected ? "Plain text reacts to the selected objective. Use /help for commands." : "Plain text creates a new objective.",
+      subtitle: selected ? "Plain text reacts to the selected objective. Use /note for a passive note or /help for commands." : "Plain text creates a new objective.",
       placeholder: selected
         ? "Write guidance for the selected objective or type /help"
         : "Describe the change you want Factory to make",
