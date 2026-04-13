@@ -132,11 +132,6 @@ export const initFactoryPreviewBrowser = () => {
     return node instanceof HTMLElement ? node : null;
   };
 
-  const liveFeedContainer = () => {
-    const node = document.getElementById("factory-preview-live-feed");
-    return node instanceof HTMLElement ? node : null;
-  };
-
   const timelineRoot = () => {
     const node = document.getElementById("factory-preview-timeline-root");
     return node instanceof HTMLElement ? node : null;
@@ -219,22 +214,6 @@ export const initFactoryPreviewBrowser = () => {
     const container = ephemeralContainer();
     if (!container) return;
     container.innerHTML = renderFactoryPreviewLiveState(liveState);
-  };
-
-  const renderLiveFeedEvent = (eventName: string, payload?: string) => {
-    const container = liveFeedContainer();
-    if (!container) return;
-    const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const summary = payload?.trim() ? payload.trim() : "received";
-    const chip = `<span class="inline-flex items-center gap-1.5 border border-border bg-background px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">${eventName}</span>`;
-    const body = `<span class="min-w-0 truncate text-[11px] leading-5 text-muted-foreground">${summary}</span>`;
-    container.insertAdjacentHTML(
-      "afterbegin",
-      `<div class="flex flex-wrap items-center justify-between gap-2 border border-border bg-muted/20 px-3 py-2">${chip}<div class="flex min-w-0 items-center gap-2">${body}<span class="shrink-0 text-[10px] text-muted-foreground">${time}</span></div></div>`,
-    );
-    while (container.childElementCount > 8) {
-      container.lastElementChild?.remove();
-    }
   };
 
   const syncStallTimer = () => {
@@ -408,7 +387,6 @@ export const initFactoryPreviewBrowser = () => {
   };
 
   const handleLiveEvent = (eventName: string) => {
-    renderLiveFeedEvent(eventName);
     for (const island of islands()) {
       if (!shouldRefreshIsland(island.element)) continue;
       const match = readReactiveRefreshSpecs(island.element)
@@ -453,17 +431,14 @@ export const initFactoryPreviewBrowser = () => {
     liveSource.addEventListener("agent-phase", (event) => {
       const payload = parseAgentPhasePayload((event as MessageEvent<string>).data || "");
       if (!payload || !acceptsStreamingRun(payload.runId)) return;
-      renderLiveFeedEvent("agent-phase", payload.summary || payload.phase);
       setLiveState(applyFactoryPreviewPhase(liveState, payload, Date.now()));
     });
     liveSource.addEventListener("agent-token", (event) => {
       const payload = parseTokenEventPayload((event as MessageEvent<string>).data || "");
       if (!payload || !acceptsStreamingRun(payload.runId)) return;
-      renderLiveFeedEvent("agent-token", payload.delta.slice(0, 80));
       setLiveState(appendFactoryPreviewToken(liveState, payload, Date.now()));
     });
     liveSource.addEventListener("factory-stream-reset", () => {
-      renderLiveFeedEvent("factory-stream-reset");
       setLiveState(resetFactoryPreviewStream(liveState));
     });
     syncLiveSourceListeners();
