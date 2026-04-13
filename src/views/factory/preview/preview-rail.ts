@@ -1,5 +1,5 @@
 import type { FactoryWorkbenchWorkspaceModel, WorkbenchVersionEnvelope } from "../../factory-models";
-import { badge, esc, sectionLabelClass, statusDot } from "../../ui";
+import { badge, esc, iconCheckCircle, iconNext, iconProject, iconQueue, sectionLabelClass, statusDot } from "../../ui";
 import {
   objectiveHref,
   objectiveRowSummary,
@@ -56,7 +56,7 @@ const renderRailSection = (
     : [...context.expandedRailSections, sectionKey];
   return `<section class="min-w-0 space-y-1 overflow-hidden">
     <div class="flex items-center justify-between gap-2">
-      <div class="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">${esc(title)}</div>
+      <div class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">${sectionIcon(sectionKey)}<span>${esc(title)}</span></div>
       <div class="text-[10px] text-muted-foreground">${esc(String(objectives.length))}</div>
     </div>
     ${objectives.length > 0
@@ -71,6 +71,13 @@ const renderRailSection = (
   </section>`;
 };
 
+const sectionIcon = (sectionKey: "active" | "needs_attention" | "completed" | "archived"): string => {
+  if (sectionKey === "active") return iconQueue("h-3.5 w-3.5");
+  if (sectionKey === "needs_attention") return iconProject("h-3.5 w-3.5");
+  if (sectionKey === "completed") return iconCheckCircle("h-3.5 w-3.5");
+  return iconNext("h-3.5 w-3.5");
+};
+
 export const renderPreviewRailIsland = (
   workspace: FactoryWorkbenchWorkspaceModel,
   envelope: WorkbenchVersionEnvelope,
@@ -83,7 +90,7 @@ export const renderPreviewRailIsland = (
   const attentionObjectives = sortByUpdatedAtDesc(workspace.board.sections.needs_attention);
   const completedObjectives = sortByUpdatedAtDesc(workspace.board.sections.completed);
   const archivedObjectives = sortByUpdatedAtDesc(workspace.board.sections.archived);
-  return `<aside id="factory-preview-rail" class="min-w-0 space-y-3 overflow-hidden px-1 py-1 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-border xl:pr-3" ${previewIslandAttrs(
+  return `<aside id="factory-preview-rail" class="min-w-[220px] space-y-3 overflow-hidden px-2 py-1 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-border xl:pr-4" ${previewIslandAttrs(
     previewRailPath(context.routeContext, context.expandedRailSections),
     railRefreshOn,
     `${envelope.boardVersion}:${context.expandedRailSections.join(",")}`,
