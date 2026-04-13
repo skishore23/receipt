@@ -1,5 +1,5 @@
 import type { FactoryWorkbenchWorkspaceModel, WorkbenchVersionEnvelope } from "../../factory-models";
-import { CSS_VERSION, esc, ghostButtonClass, iconFactory } from "../../ui";
+import { CSS_VERSION, esc, ghostButtonClass } from "../../ui";
 import { headerRefreshOn, previewHeaderPath, type PreviewRouteModel } from "../preview-model";
 import { renderHeaderProfileSelect } from "../shared";
 import type { FactoryWorkbenchHeaderIslandModel } from "../workbench/page";
@@ -16,21 +16,12 @@ export const renderPreviewHeaderIsland = (
   context: PreviewRenderContext,
 ): string => {
   const detailsLabel = workspace.selectedObjective ? "Inspector" : "Inspector unavailable";
-  return `<header id="factory-preview-header" class="border-b border-border px-1 py-1.5" ${previewIslandAttrs(
+  return `<header id="factory-preview-header" class="border-b border-border px-1 py-1" ${previewIslandAttrs(
     previewHeaderPath(context.routeContext, context.expandedRailSections),
     headerRefreshOn,
     `${envelope.boardVersion}:${envelope.focusVersion}`,
   )}>
     <div class="flex flex-wrap items-center gap-2">
-      <div class="mr-auto flex min-w-0 items-center gap-2.5">
-        <span class="flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground/85">
-          ${iconFactory("h-4 w-4")}
-        </span>
-        <div class="flex min-w-0 items-baseline gap-2">
-          <span class="shrink-0 text-[12px] font-semibold uppercase tracking-[0.22em] text-foreground">Receipt</span>
-          <span class="shrink-0 text-[9px] font-medium uppercase tracking-[0.34em] text-muted-foreground">Factory</span>
-        </div>
-      </div>
       <div class="ml-auto flex flex-wrap items-center gap-2">
         ${renderHeaderProfileSelect({
           id: "factory-preview-profile-select",
