@@ -1,5 +1,5 @@
 import type { FactoryWorkbenchWorkspaceModel, WorkbenchVersionEnvelope } from "../../factory-models";
-import { badge, esc, iconCheckCircle, iconNext, iconProject, iconQueue, sectionLabelClass, statusDot } from "../../ui";
+import { badge, esc, iconCheckCircle, iconNext, iconProject, iconQueue, iconSpark, sectionLabelClass, statusDot } from "../../ui";
 import {
   objectiveHref,
   objectiveRowSummary,
@@ -72,8 +72,8 @@ const renderRailSection = (
 };
 
 const sectionIcon = (sectionKey: "active" | "needs_attention" | "completed" | "archived"): string => {
-  if (sectionKey === "active") return iconQueue("h-3.5 w-3.5");
-  if (sectionKey === "needs_attention") return iconProject("h-3.5 w-3.5");
+  if (sectionKey === "active") return iconSpark("h-3.5 w-3.5");
+  if (sectionKey === "needs_attention") return iconQueue("h-3.5 w-3.5");
   if (sectionKey === "completed") return iconCheckCircle("h-3.5 w-3.5");
   return iconNext("h-3.5 w-3.5");
 };
@@ -90,12 +90,12 @@ export const renderPreviewRailIsland = (
   const attentionObjectives = sortByUpdatedAtDesc(workspace.board.sections.needs_attention);
   const completedObjectives = sortByUpdatedAtDesc(workspace.board.sections.completed);
   const archivedObjectives = sortByUpdatedAtDesc(workspace.board.sections.archived);
-  return `<aside id="factory-preview-rail" class="min-w-[220px] space-y-3 overflow-hidden px-2 py-1 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-border xl:pr-4" ${previewIslandAttrs(
+  return `<aside id="factory-preview-rail" class="min-w-[200px] space-y-2 overflow-hidden px-1.5 py-1 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-border xl:pr-3" ${previewIslandAttrs(
     previewRailPath(context.routeContext, context.expandedRailSections),
     railRefreshOn,
     `${envelope.boardVersion}:${context.expandedRailSections.join(",")}`,
   )}>
-    <div class="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">Objectives</div>
+    <div class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">${iconProject("h-3.5 w-3.5")}<span>Objectives</span></div>
     ${renderRailSection(context, "active", "Active", activeObjectives, "No active or queued objectives for this profile yet.")}
     ${renderRailSection(context, "needs_attention", "Needs Attention", attentionObjectives, "No blocked or needs-input objectives right now.")}
     ${renderRailSection(context, "completed", "Completed", completedObjectives, "Completed objectives will appear here.")}

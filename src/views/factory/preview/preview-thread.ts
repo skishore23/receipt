@@ -4,7 +4,7 @@ import type {
   FactoryWorkbenchWorkspaceModel,
   WorkbenchVersionEnvelope,
 } from "../../factory-models";
-import { badge, esc, ghostButtonClass, iconChat } from "../../ui";
+import { badge, esc, ghostButtonClass, iconChat, iconReceipt, iconSpark } from "../../ui";
 import type { FactoryWorkbenchHeaderIslandModel } from "../workbench/page";
 import {
   activeJobCount,
@@ -85,6 +85,11 @@ export const renderPreviewFocusIsland = (
           : ""}
         <button type="button" data-preview-drawer-toggle="true" data-preview-drawer-toggle-label="Inspector" data-preview-drawer-toggle-open-label="Hide inspector" class="${ghostButtonClass} text-xs">Inspector</button>
       </div>
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+        <span class="inline-flex items-center gap-1.5 border border-border bg-background px-2 py-1">${iconSpark("h-3 w-3")}objective-created</span>
+        <span class="inline-flex items-center gap-1.5 border border-border bg-background px-2 py-1">${iconReceipt("h-3 w-3")}objective-updated</span>
+        <span class="inline-flex items-center gap-1.5 border border-border bg-background px-2 py-1">${iconChat("h-3 w-3")}event streams</span>
+      </div>
       ${focusStatusLine(workspace, selectedObjective)}
     </div>
   </section>`;
@@ -110,9 +115,9 @@ export const renderPreviewTimelineIsland = (
   const transcript = renderTranscriptContent(chat, {
     objectiveHref: (objectiveId) => objectiveHref(context.routeContext, objectiveId),
     emptyState: {
-      title: workspace.selectedObjective ? "Waiting for the next update." : "Start a new objective conversation.",
+      title: workspace.selectedObjective ? "Live updates stream here." : "Start a new objective conversation.",
       message: workspace.selectedObjective
-        ? "Meaningful handoffs, progress updates, needs-input prompts, and completion summaries land here."
+        ? "Objective creates, handoffs, progress updates, and stream names land here as they arrive."
         : "Pick an objective from the rail or start one with /obj to make the chat pane the center of gravity.",
     },
   });
@@ -125,6 +130,7 @@ export const renderPreviewTimelineIsland = (
     <div id="factory-preview-timeline-root" class="factory-scrollbar px-1 py-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto" data-active-profile-label="${esc(chat.activeProfileLabel)}" data-active-run-id="${esc(chat.runId ?? "")}" data-known-run-ids="${esc((chat.knownRunIds ?? []).join(","))}" data-terminal-run-ids="${esc((chat.terminalRunIds ?? []).join(","))}" data-transcript-signature="${esc(transcriptState.signature)}" data-last-item-kind="${esc(transcriptState.lastItemKind ?? "")}">
       <div class="mx-auto w-full max-w-[880px] space-y-4">
         ${transcript.body}
+        <div id="factory-preview-live-feed" class="space-y-2" aria-live="polite"></div>
         <div id="factory-preview-ephemeral" class="space-y-4 pb-1" aria-live="polite"></div>
       </div>
     </div>
