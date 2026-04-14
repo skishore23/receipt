@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shlex
+import hashlib
 import subprocess
 import sys
 import time
@@ -150,6 +151,44 @@ def attach_execution_records(
     }
 
 
+def truncate_text(value: str, limit: int = 4096) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 20] + "...<truncated>"
+
+
+def build_evidence_record(
+    *,
+    command: str,
+    argv: list[str],
+    cwd: str,
+    start_time: float,
+    end_time: float,
+    stdout: str,
+    stderr: str,
+    returncode: int | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "command": command,
+        "argv": argv,
+        "cwd": cwd,
+        "start_time": start_time,
+        "end_time": end_time,
+        "exit_code": returncode,
+        "signal": None,
+        "stdout_path": None,
+        "stderr_path": None,
+        "stdout": truncate_text(stdout),
+        "stderr": truncate_text(stderr),
+    }
+    if error is not None:
+        payload["error"] = error
+    record_id_source = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload["record_id"] = hashlib.sha256(record_id_source.encode("utf-8")).hexdigest()
+    return payload
+
+
 def load_manifest(manifest_path: Path, domain: str) -> dict[str, Any] | None:
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -244,9 +283,15 @@ def command_run(args: argparse.Namespace) -> int:
         default_output_dir = factory_helper_output_dir()
         if default_output_dir and helper_supports_flag(entry["entrypointPath"], "--output-dir"):
             passthrough = [*passthrough, "--output-dir", default_output_dir]
+    command = ["python3", entry["entrypointPath"], *passthrough]
+    command_text = shlex.join(command)
+    start_time = time.time()
+    completed: subprocess.CompletedProcess[str] | None = None
+    helper_error: Exception | None = None
+    result: dict[str, Any] | None = None
     try:
         completed = subprocess.run(
-            ["python3", entry["entrypointPath"], *passthrough],
+            command,
             capture_output=True,
             text=True,
             check=False,
@@ -261,6 +306,7 @@ def command_run(args: argparse.Namespace) -> int:
             returncode=completed.returncode,
         )
     except Exception as error:
+        helper_error = error
         payload = {
             "status": "error",
             "summary": f"Helper {args.helper_id} failed before emitting runtime-validated output",
@@ -272,13 +318,52 @@ def command_run(args: argparse.Namespace) -> int:
             "capturedAt": "",
             "errors": [str(error)],
         }
-        print(json.dumps(payload, indent=2))
+        result = payload
+    finally:
+        end_time = time.time()
+        stdout_text = completed.stdout if completed is not None else ""
+        stderr_text = completed.stderr if completed is not None else ""
+        evidence_record = build_evidence_record(
+            command=command_text,
+            argv=command,
+            cwd=str(Path.cwd()),
+            start_time=start_time,
+            end_time=end_time,
+            stdout=stdout_text,
+            stderr=stderr_text,
+            returncode=completed.returncode if completed is not None else None,
+            error=str(helper_error) if helper_error is not None else None,
+        )
+        if result is not None:
+            existing_records = result.get("evidenceRecords") if isinstance(result.get("evidenceRecords"), list) else []
+            result["evidenceRecords"] = [*existing_records, evidence_record]
+    if result is None:
+        result = {
+            "status": "error",
+            "summary": f"Helper {args.helper_id} failed before emitting runtime-validated output",
+            "artifacts": [],
+            "data": {},
+            "capturedAt": "",
+            "errors": ["runner produced no result"],
+            "evidenceRecords": [build_evidence_record(
+                command=command_text,
+                argv=command,
+                cwd=str(Path.cwd()),
+                start_time=start_time,
+                end_time=time.time(),
+                stdout="",
+                stderr="",
+                returncode=None,
+                error="runner produced no result",
+            )],
+        }
+        print(json.dumps(result, indent=2))
         return 1
     if args.json:
         print(json.dumps(result, indent=2))
     else:
         print(result.get("summary", ""))
-    return completed.returncode
+    return completed.returncode if completed is not None else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
