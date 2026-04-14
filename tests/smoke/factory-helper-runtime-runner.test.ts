@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-test("factory helper runner: attaches scriptsRun and evidenceRecords to helper output", async () => {
+test("factory helper runner: emits evidenceRecords for successful helper runs", async () => {
   const runnerPath = path.resolve("skills/factory-helper-runtime/runner.py");
   const domainRoot = path.resolve("skills/factory-helper-runtime/catalog/test-runtime");
   const helperRoot = path.join(domainRoot, "emit_evidence");
@@ -61,35 +61,46 @@ test("factory helper runner: attaches scriptsRun and evidenceRecords to helper o
     const parsed = JSON.parse(stdout) as {
       readonly scriptsRun?: ReadonlyArray<{ readonly command: string; readonly status?: string }>;
       readonly evidenceRecords?: ReadonlyArray<{
-        readonly objective_id: string;
-        readonly task_id: string;
-        readonly tool_name: string;
-        readonly inputs: Record<string, unknown>;
-        readonly summary_metrics: Record<string, unknown>;
+        readonly command: string;
+        readonly argv: ReadonlyArray<string>;
+        readonly cwd: string;
+        readonly start_time: number;
+        readonly end_time: number;
+        readonly exit_code: number | null;
+        readonly signal?: number | null;
+        readonly stdout_path?: string | null;
+        readonly stderr_path?: string | null;
+        readonly record_id: string;
       }>;
     };
 
     expect(parsed.scriptsRun?.[0]?.command).toContain("emit_evidence");
     expect(parsed.scriptsRun?.[0]?.status).toBe("ok");
-    expect(parsed.evidenceRecords?.[0]?.objective_id).toBe("objective_demo");
-    expect(parsed.evidenceRecords?.[0]?.task_id).toBe("task_01");
-    expect(parsed.evidenceRecords?.[0]?.tool_name).toBe("factory_helper_runner");
-    expect(parsed.evidenceRecords?.[0]?.inputs.helper_id).toBe("emit_evidence");
-    expect(parsed.evidenceRecords?.[0]?.summary_metrics.instances).toBe(2);
+    expect(parsed.evidenceRecords?.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.evidenceRecords?.[0]).toMatchObject({
+      command: expect.stringContaining("runner.py"),
+      cwd: path.resolve("."),
+      exit_code: 0,
+      signal: null,
+      stdout_path: null,
+      stderr_path: null,
+    });
+    expect(parsed.evidenceRecords?.[0]?.argv?.[0]).toBe("python3");
+    expect(parsed.evidenceRecords?.[0]?.record_id).toHaveLength(64);
   } finally {
     await fs.rm(domainRoot, { recursive: true, force: true });
   }
 });
 
-test("factory helper runner: fails without runtime identity", async () => {
+test("factory helper runner: emits evidenceRecords for failing helper runs", async () => {
   const runnerPath = path.resolve("skills/factory-helper-runtime/runner.py");
   const domainRoot = path.resolve("skills/factory-helper-runtime/catalog/test-runtime");
-  const helperRoot = path.join(domainRoot, "emit_evidence");
+  const helperRoot = path.join(domainRoot, "fail_evidence");
 
   await fs.rm(domainRoot, { recursive: true, force: true });
   await fs.mkdir(helperRoot, { recursive: true });
   await fs.writeFile(path.join(helperRoot, "manifest.json"), JSON.stringify({
-    id: "emit_evidence",
+    id: "fail_evidence",
     version: "1.0.0",
     provider: "test",
     tags: ["test"],
@@ -100,33 +111,63 @@ test("factory helper runner: fails without runtime identity", async () => {
     "#!/usr/bin/env python3",
     "import json",
     "print(json.dumps({",
-    '  "status": "ok",',
-    '  "summary": "Collected deterministic helper evidence.",',
+    '  "status": "error",',
+    '  "summary": "Helper failed after spawn.",',
     '  "artifacts": [],',
     '  "data": {},',
     '  "capturedAt": "2026-04-11T00:00:00Z",',
     '  "errors": []',
     "}))",
+    "raise SystemExit(2)",
     "",
   ].join("\n"), "utf-8");
 
   try {
-    await expect(execFileAsync("python3", [
-      runnerPath,
-      "run",
-      "--domain",
-      "test-runtime",
-      "--provider",
-      "test",
-      "--json",
-      "emit_evidence",
-    ], {
+    let stdout = "";
+    try {
+      await execFileAsync("python3", [
+        runnerPath,
+        "run",
+        "--domain",
+        "test-runtime",
+        "--provider",
+        "test",
+        "--json",
+        "fail_evidence",
+      ], {
+        cwd: path.resolve("."),
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          RECEIPT_FACTORY_OBJECTIVE_ID: "objective_demo",
+          RECEIPT_FACTORY_TASK_ID: "task_01",
+        },
+      });
+    } catch (error) {
+      stdout = (error as { stdout?: string }).stdout ?? "";
+    }
+
+    const parsed = JSON.parse(stdout) as {
+      readonly evidenceRecords?: ReadonlyArray<{
+        readonly command: string;
+        readonly argv: ReadonlyArray<string>;
+        readonly cwd: string;
+        readonly start_time: number;
+        readonly end_time: number;
+        readonly exit_code: number | null;
+        readonly error?: string;
+        readonly record_id: string;
+      }>;
+    };
+
+    expect(parsed.evidenceRecords?.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.evidenceRecords?.[0]).toMatchObject({
       cwd: path.resolve("."),
-      encoding: "utf-8",
-      env: { ...process.env },
-    })).rejects.toMatchObject({
-      stdout: expect.stringContaining("missing required runtime identity"),
+      exit_code: 2,
     });
+    expect(parsed.evidenceRecords?.[0]?.command).toContain("runner.py");
+    expect(parsed.evidenceRecords?.[0]?.error).toBeUndefined();
+    expect(parsed.evidenceRecords?.[0]?.record_id).toHaveLength(64);
   } finally {
     await fs.rm(domainRoot, { recursive: true, force: true });
   }
